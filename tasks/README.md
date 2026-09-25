@@ -6,7 +6,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first. Update 
 |---|---|---|---|
 | [T01](T01-toolchain-probes.md) | Pin toolchain, prove features | done | - |
 | [T02](T02-workspace-scaffold.md) | Workspace scaffold | done | T01 |
-| [T03](T03-frontend.md) | Frontend: oxc parse + semantic | todo | T02 |
+| [T03](T03-frontend.md) | Frontend: oxc parse + semantic | done | T02 |
 | [T04](T04-ir-v0.md) | IR v0 design | todo | T02 |
 | [T05](T05-lower-numeric.md) | Lower numeric subset | todo | T03, T04 |
 | [T06](T06-backend-v0.md) | Backend v0: IR → core Wasm | todo | T04 |
