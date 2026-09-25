@@ -8,10 +8,13 @@ Compiler: JavaScript → a WASI 0.3 Wasm component (WasmGC, native EH, P3 async)
 3. Run `scripts/check-tools.sh`. If tools changed, rerun `probes/run.sh` and update `TOOLS.md`.
 
 ## Rules
-- Stay inside the task's scope. List follow-ups in the task file under "Notes" and don't implement them.
+- Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.
 - Tests per iteration: the task's own tests plus `wasm-tools validate` plus one `wasmtime` smoke run. Never the whole suite.
-- At the end of a task: tick its checklist, set its status in `tasks/README.md`, and write a short
-  "Result" section (what changed, commands run, what's unsupported, the next smallest step).
+- At the end of a task:
+  1. tick the task file's checklist and write its "Notes / Result" (what changed, commands run, what's unsupported, the next smallest step);
+  2. set the status in the table in `tasks/README.md`;
+  3. add every deferred item to the **Follow-ups** table in `tasks/README.md` (next free `F<n>`, found in, pick up in),
+     and tick any follow-up this task resolved.
 - The only test host is wasmtime 49.0.1. The JS oracle is `node`.
 
 ## Layout

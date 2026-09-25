@@ -1,13 +1,18 @@
 # Tasks
 
-One task per session. Read `../CLAUDE.md` and `../docs/design.md` first. Update a task's status here when it finishes.
+One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
+
+**How to read this file**
+- **Status table**: every task and where it stands (`todo` / `in progress` / `done` / `needs approval`).
+- **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
+- Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
 | [T01](T01-toolchain-probes.md) | Pin toolchain, prove features | done | - |
 | [T02](T02-workspace-scaffold.md) | Workspace scaffold | done | T01 |
 | [T03](T03-frontend.md) | Frontend: oxc parse + semantic | done | T02 |
-| [T04](T04-ir-v0.md) | IR v0 design | todo | T02 |
+| [T04](T04-ir-v0.md) | IR v0 design | done | T02 |
 | [T05](T05-lower-numeric.md) | Lower numeric subset | todo | T03, T04 |
 | [T06](T06-backend-v0.md) | Backend v0: IR → core Wasm | todo | T04 |
 | [T07](T07-component-lib.md) | Component v0: library world | todo | T06 |
@@ -29,3 +34,17 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first. Update 
 | [T23](T23-test262-subset.md) | test262 subset runner | needs approval | T12+ |
 
 The first milestone is T03 → T07: `add.js` runs as a component. The second is T08 → T11: `hello.js` runs as a WASI 0.3 command with differential tests.
+
+## Follow-ups (deferred work)
+
+Each open item names where it came from and which task should pick it up. When it's done, tick it and say where.
+
+| # | Item | Found in | Pick up in | Done |
+|---|---|---|---|---|
+| F1 | IR validator: label scoping, `Continue` only to a `Loop`, id ranges, type agreement | T04 | start of T06 | [ ] |
+| F2 | Source positions per statement in the IR (only `Function.pos` today) | T04 | T05 (when diagnostics need it) | [ ] |
+| F3 | Static data segments (string literals) in the IR | T04 | T09 | [ ] |
+| F4 | Reject imports / re-exports of other files with a clear "unsupported" diagnostic | T03 | T05 | [ ] |
+| F5 | Show secondary diagnostic labels (e.g. "first declared here") as notes | T03 | any, when useful | [ ] |
+| F6 | TypeScript input (`.ts`): today it's parsed as `.mjs` | T03 | not planned yet, needs a task | [ ] |
+| F7 | Multi-file ES modules (resolve and link imports) | T03 | not planned yet, needs a task | [ ] |

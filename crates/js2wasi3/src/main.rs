@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Build { entry, out } => {
             let source = read(&entry)?;
             let _program = frontend::parse(&alloc, &entry, &source)?;
-            let ir = js2wasi3_ir::Module;
+            let ir = js2wasi3_ir::Module::default();
             let core = js2wasi3_backend::emit(&ir)?;
             let component = js2wasi3_component::package(&core)?;
             std::fs::write(&out, component).with_context(|| format!("writing {out}"))?;
