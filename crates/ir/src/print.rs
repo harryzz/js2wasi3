@@ -214,6 +214,12 @@ impl Printer<'_> {
                     crate::Intrinsic::NewError(k) => format!("new_{}", k.name()),
                     crate::Intrinsic::InstanceOf(b) => format!("instanceof_{}", b.name()),
                     crate::Intrinsic::Prototype(b) => format!("{}_prototype", b.name()),
+                    crate::Intrinsic::NewCell(t)
+                    | crate::Intrinsic::CellGet(t)
+                    | crate::Intrinsic::CellSet(t) => format!("{}.{t}", op.name()),
+                    crate::Intrinsic::EnvGet(i) | crate::Intrinsic::ArgGet(i) => {
+                        format!("{}.{i}", op.name())
+                    }
                     _ => op.name().to_string(),
                 };
                 format!("${name}({})", args.join(", "))
@@ -231,6 +237,29 @@ impl Printer<'_> {
                 let mut parts: Vec<String> = p.out.lines().map(|l| l.trim().to_string()).collect();
                 parts.push(self.expr(func, value));
                 format!("seq {{ {} }}", parts.join("; "))
+            }
+            Expr::Closure(c) => {
+                let env: Vec<String> = c.env.iter().map(|a| self.expr(func, a)).collect();
+                format!(
+                    "{}closure {}({:?}, {}{})[{}]",
+                    if c.shared { "shared " } else { "" },
+                    self.func_name(c.code.0),
+                    c.name,
+                    c.length,
+                    if c.constructor { ", ctor" } else { "" },
+                    env.join(", ")
+                )
+            }
+            Expr::CallRef {
+                callee, this, args, ..
+            } => {
+                let args: Vec<String> = args.iter().map(|a| self.expr(func, a)).collect();
+                format!(
+                    "call_ref {}[this = {}]({})",
+                    self.expr(func, callee),
+                    self.expr(func, this),
+                    args.join(", ")
+                )
             }
             Expr::Suspend { kind, arg } => {
                 let k = match kind {

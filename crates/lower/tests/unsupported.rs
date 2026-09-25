@@ -51,13 +51,11 @@ fn primitive_values_lower() {
 
 #[test]
 fn arity_and_callee() {
-    assert_eq!(
-        one("function g(a) { return a; }\nexport function f() { return g(1, 2); }"),
-        "2:30 unsupported: call with 2 argument(s) to a function with 1 parameter(s) (planned: later)"
-    );
+    // T14 (F16): extra arguments are evaluated and dropped.
+    lowers("function g(a) { return a; }\nexport function f() { return g(1, 2); }");
     assert_eq!(
         one("export function f() { return Math.abs(1); }"),
-        "1:30 unsupported: call of something other than a named function (planned: T14)"
+        "1:30 unsupported: global `Math` (planned: T21)"
     );
 }
 
@@ -91,10 +89,7 @@ fn declarations_and_functions() {
         one("export function f(a) { a ||= 1; return a; }"),
         "1:24 unsupported: operator `||=` (planned: later)"
     );
-    assert_eq!(
-        one("export function f() { function g() {} return 0; }"),
-        "1:23 unsupported: nested function (closures) (planned: T14)"
-    );
+    lowers("export function f() { function g() {} return 0; }");
     assert_eq!(
         one("export async function f() { }"),
         "1:8 unsupported: async function (planned: T19)"
@@ -180,7 +175,7 @@ fn command_rules() {
     );
     assert_eq!(
         one("console.table(1);"),
-        "1:1 unsupported: call of something other than a named function (planned: T14)"
+        "1:1 unsupported: global `console` (planned: T21)"
     );
 }
 
@@ -234,16 +229,8 @@ fn objects() {
         "1:32 unsupported: getter or setter (planned: T16)"
     );
     assert_eq!(
-        one("export function f() { return { m() {} }; }"),
-        "1:32 unsupported: method (functions as values) (planned: T14)"
-    );
-    assert_eq!(
         one("export function f(o) { return o instanceof Map; }"),
-        "1:44 unsupported: `instanceof` with something other than `Object` or a native constructor (planned: T14/T16)"
-    );
-    assert_eq!(
-        one("export function f(o) { return o?.m(); }"),
-        "1:31 unsupported: optional call `?.()` (planned: T14)"
+        "1:44 unsupported: `instanceof` with something other than `Object` or a native constructor (planned: T16)"
     );
     assert_eq!(
         one("export function f(o) { return Object.create(o, {}); }"),
@@ -253,8 +240,34 @@ fn objects() {
         one("export function f(o) { for (o.k in o) {} }"),
         "1:29 unsupported: `for-in` target other than a variable (planned: later)"
     );
+}
+
+/// T14: closures, function values and calls lower; what's left for later is rejected.
+#[test]
+fn closures() {
+    for src in [
+        "export function f() { return { m() {} }; }",
+        "export function f(o) { return o?.m() ?? o.m?.(); }",
+        "export function f(o) { return o.m(1, 2); }",
+        "export function f(n) { let c = 0; const inc = () => (c += n); inc(); return c; }",
+        "export function f() { const fs = {}; for (let i = 0; i < 3; i++) fs[i] = () => i; return fs[1](); }",
+        "export function f() { return (function g(n) { return n ? n * g(n - 1) : 1; })(5); }",
+        "export function f() { function a(n) { return n ? b(n - 1) : 0; } function b(n) { return a(n); } return a(3); }",
+        "export function f() { return this; }",
+        "export function f(o) { return f.call(o) === f; }",
+    ] {
+        lowers(src);
+    }
     assert_eq!(
-        one("export function f(o) { return o.m(); }"),
-        "1:31 unsupported: call of something other than a named function (planned: T14)"
+        one("export function f() { return arguments; }"),
+        "1:30 unsupported: `arguments` (planned: T15)"
+    );
+    assert_eq!(
+        one("export function f() { function g() {} g = 1; return 0; }"),
+        "1:39 unsupported: assignment to function `g` (planned: later)"
+    );
+    assert_eq!(
+        one("export function f(k) { return { [k]: () => 1 }; }"),
+        "1:33 unsupported: function with a computed key (its `name` comes from the key at run time) (planned: later)"
     );
 }

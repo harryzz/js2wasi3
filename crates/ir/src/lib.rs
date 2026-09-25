@@ -44,6 +44,13 @@
 //!   (T08: primitives only; strings and objects extend the runtime helpers.)
 //! - `Cond { cond, then, els, ty }`: conditional expression (`?:`, `&&`, `||` after lowering).
 //! - `Call { func, args }`: direct call.
+//! - `Closure(c)` (T14): a new function object ([`Closure`]), a `jsval`.
+//! - `CallRef { callee, this, args, what }` (T14): call the JS value `callee` with `this` and the
+//!   arguments (all `jsval`), a `jsval`. A TypeError "`what` is not a function" if it isn't one.
+//! - Cells (T14): a captured variable lives in a cell, an internal `jsval` made by
+//!   `Intrinsic::NewCell` and used by `CellGet`/`CellSet`. A function object's captured cells and
+//!   values are its environment (`EnvGet`), and a function called through a value gets its
+//!   arguments as an internal array (`ArgGet`).
 //! - `Suspend { kind, arg }` *(placeholder, T18/T19)*: `await` / `yield` point.
 
 use std::fmt;
@@ -198,11 +205,12 @@ pub enum Builtin {
     Number,
     Boolean,
     Error(ErrorKind),
+    Function,
 }
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 11] = [
+    pub const ALL: [Builtin; 12] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -214,6 +222,7 @@ impl Builtin {
         Builtin::Error(ErrorKind::SyntaxError),
         Builtin::Error(ErrorKind::EvalError),
         Builtin::Error(ErrorKind::UriError),
+        Builtin::Function,
     ];
 
     pub fn name(self) -> &'static str {
@@ -223,6 +232,7 @@ impl Builtin {
             Builtin::Number => "Number",
             Builtin::Boolean => "Boolean",
             Builtin::Error(k) => k.name(),
+            Builtin::Function => "Function",
         }
     }
 
@@ -292,6 +302,20 @@ pub enum Intrinsic {
     InstanceOf(Builtin),
     /// `B.prototype`.
     Prototype(Builtin),
+    /// A new cell holding its argument (of the given type, `F64` or `JsVal`).
+    NewCell(Type),
+    /// A new `JsVal` cell that isn't initialized yet (a `let` in its TDZ).
+    NewCellUninit,
+    /// The value in a cell of the given type.
+    CellGet(Type),
+    /// Store into a cell of the given type (no result).
+    CellSet(Type),
+    /// Is the (`JsVal`) cell still uninitialized? (`bool`)
+    CellIsUninit,
+    /// Entry `i` of a function object's environment.
+    EnvGet(u32),
+    /// Argument `i` of an argument array (`undefined` past its end).
+    ArgGet(u32),
 }
 
 impl Intrinsic {
@@ -320,6 +344,14 @@ impl Intrinsic {
             Intrinsic::NumberToString => (&[F64], Some(JsVal)),
             Intrinsic::StringLength => (&[JsVal], Some(F64)),
             Intrinsic::ConsoleWrite { .. } => (&[JsVal], None),
+            Intrinsic::NewCell(F64) => (&[F64], Some(JsVal)),
+            Intrinsic::NewCell(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::NewCellUninit => (&[], Some(JsVal)),
+            Intrinsic::CellGet(t) => (&[JsVal], Some(t)),
+            Intrinsic::CellSet(F64) => (&[JsVal, F64], None),
+            Intrinsic::CellSet(_) => (&[JsVal, JsVal], None),
+            Intrinsic::CellIsUninit => (&[JsVal], Some(Bool)),
+            Intrinsic::EnvGet(_) | Intrinsic::ArgGet(_) => (&[JsVal], Some(JsVal)),
         }
     }
 
@@ -352,6 +384,13 @@ impl Intrinsic {
             Intrinsic::HasOwn => "has_own",
             Intrinsic::InstanceOf(_) => "instanceof",
             Intrinsic::Prototype(_) => "prototype",
+            Intrinsic::NewCell(_) => "new_cell",
+            Intrinsic::NewCellUninit => "new_cell_uninit",
+            Intrinsic::CellGet(_) => "cell_get",
+            Intrinsic::CellSet(_) => "cell_set",
+            Intrinsic::CellIsUninit => "cell_is_uninit",
+            Intrinsic::EnvGet(_) => "env_get",
+            Intrinsic::ArgGet(_) => "arg_get",
         }
     }
 
@@ -602,6 +641,32 @@ pub enum Expr {
         body: Vec<Stmt>,
         value: Box<Expr>,
     },
+    Closure(Box<Closure>),
+    CallRef {
+        callee: Box<Expr>,
+        this: Box<Expr>,
+        args: Vec<Expr>,
+        /// How the callee is shown in the TypeError when it isn't a function (node's text).
+        what: String,
+    },
+}
+
+/// A new function object (T14).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Closure {
+    /// What calls through the value run: a function `(self, this, args: jsval) -> jsval`
+    /// (the function object, `this`, the argument array).
+    pub code: FuncId,
+    /// The `name` property.
+    pub name: String,
+    /// The `length` property.
+    pub length: u32,
+    /// Has an own `prototype` object (a `function`, not an arrow function or a method).
+    pub constructor: bool,
+    /// The environment: captured cells and values (`jsval`s), read back with `Intrinsic::EnvGet`.
+    pub env: Vec<Expr>,
+    /// One object per module, made on first use (a top-level function declaration): `env` is empty.
+    pub shared: bool,
 }
 
 impl Expr {
@@ -672,6 +737,7 @@ impl Expr {
             Expr::Str(_) => Type::JsVal,
             Expr::Intrinsic { op, .. } => return op.signature().1,
             Expr::Seq { value, .. } => return value.ty(func, module),
+            Expr::Closure(_) | Expr::CallRef { .. } => Type::JsVal,
         })
     }
 }

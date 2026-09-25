@@ -228,6 +228,26 @@ fn throwing_exports_return_results() {
     }
 }
 
+/// T14: closures inside exports; `this` is `undefined` for a call from the boundary. Calls through
+/// values may throw, so those exports return `result` (conservative, F34).
+#[test]
+fn closures_in_a_library() {
+    let out = out_dir("closures").join("lib.wasm");
+    let b = build(&fixture("closures/lib.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    for (call, want) in [
+        ("sum-squares(3)", "ok(14)"),
+        ("via-value(4)", "ok(42)"),
+        ("self()", "\"undefined this\""),
+        (
+            "not-a-function(1)",
+            "err({name: \"TypeError\", message: \"x is not a function\"})",
+        ),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+}
+
 /// T12 acceptance: a Wasm trap (here the unimplemented `%` format string) is not a JS exception:
 /// neither `catch` nor `finally` runs, and the command fails with the trap.
 #[test]

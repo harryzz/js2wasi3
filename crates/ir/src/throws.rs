@@ -2,7 +2,7 @@
 //! exactly those exports a `result<T, js-error>` WIT result.
 //!
 //! A function may throw if it contains, outside the body of a `Try`, a `Throw`, a call of a
-//! function that may throw, or an intrinsic that may throw ([`Intrinsic::may_throw`]). A catch
+//! function that may throw, a call through a value, or an intrinsic that may throw ([`Intrinsic::may_throw`]). A catch
 //! body is outside its `Try`'s protection. Recursion is handled by iterating to a fixpoint.
 
 use crate::{Expr, Module, Stmt};
@@ -57,5 +57,8 @@ fn expr(e: &Expr, throws: &[bool]) -> bool {
         }
         Expr::Intrinsic { op, args } => op.may_throw() || args.iter().any(|a| expr(a, throws)),
         Expr::Seq { body, value } => stmts(body, throws) || expr(value, throws),
+        Expr::Closure(c) => c.env.iter().any(|a| expr(a, throws)),
+        // Unknown callee (T14).
+        Expr::CallRef { .. } => true,
     }
 }

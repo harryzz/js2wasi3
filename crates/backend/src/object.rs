@@ -28,11 +28,11 @@
 use js2wasi3_ir::{Builtin, ErrorKind};
 use wasm_encoder::{BlockType, Function, InstructionSink, ValType};
 
-use crate::numstr;
 use crate::runtime::{
     self, Cx, G_BUILTIN, G_NULL, G_PROTOS, G_UNDEFINED, T_BYTES, T_I32S, T_KEYS, T_OBJECT,
     T_STRING, T_VALS, TAG, jsval, object, rt, string, string_ref,
 };
+use crate::{func, numstr};
 
 const F_CLASS: u32 = 0;
 const F_PROTO: u32 = 1;
@@ -46,7 +46,7 @@ pub const CLASS_PLAIN: i32 = 0;
 pub const CLASS_ERROR: i32 = 1;
 
 /// Attribute bit: not enumerable.
-const HIDDEN: i32 = 1;
+pub const HIDDEN: i32 = 1;
 
 /// Objects with more entries than this get a hash index.
 const SMALL: i32 = 8;
@@ -131,6 +131,8 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         Builtin::Boolean => &["toString", "valueOf"],
         Builtin::Error(ErrorKind::Error) => &["toString"],
         Builtin::Error(_) => &[],
+        // `call` is replaced by a real function (`crate::func`).
+        Builtin::Function => &["apply", "bind", "call", "toString"],
     }
 }
 
@@ -236,6 +238,7 @@ impl Helper {
                 Builtin::Error(ErrorKind::SyntaxError) => "SyntaxError.prototype",
                 Builtin::Error(ErrorKind::EvalError) => "EvalError.prototype",
                 Builtin::Error(ErrorKind::UriError) => "URIError.prototype",
+                Builtin::Function => "Function.prototype",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -878,6 +881,20 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         props.push((cx.str("name"), Some(cx.str(k.name()))));
         props.push((cx.str("message"), Some(cx.str(""))));
     }
+    if b == Builtin::Function {
+        props.push((cx.str("name"), Some(cx.str(""))));
+    }
+    // Function.prototype: `length: 0` and a real `call`.
+    let function = (b == Builtin::Function).then(|| {
+        let code = cx.helper(runtime::Helper::Func(func::Helper::Call));
+        cx.declare_func(code);
+        (
+            cx.str("length"),
+            cx.str("call"),
+            code,
+            cx.helper(runtime::Helper::Func(func::Helper::New)),
+        )
+    });
     const O: u32 = 0;
     let mut f = Function::new([(1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
@@ -897,6 +914,16 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             Some(v) => s.global_get(v),
             None => s.global_get(G_BUILTIN),
         };
+        s.i32_const(HIDDEN).call(define);
+    }
+    if let Some((length, call, code, new)) = function {
+        s.local_get(O).ref_as_non_null().global_get(length);
+        s.i32_const(0).ref_i31();
+        s.i32_const(HIDDEN).call(define);
+        s.local_get(O).ref_as_non_null().global_get(call);
+        s.ref_func(code);
+        s.ref_null(func::vals());
+        s.global_get(call).i32_const(1).i32_const(0).call(new);
         s.i32_const(HIDDEN).call(define);
     }
     s.local_get(O).ref_as_non_null();

@@ -12,8 +12,10 @@
 //!   `error`. See [`crate::object`] for the layout, the built-in prototypes and the helpers.
 //!   `console.log` shows an error as `[name: message]` (node's format for an error without a stack).
 //! - Types: one `rec` group `[$number, $oddball, $string, $i64s, $object, $keys, $vals, $bytes,
-//!   $i32s]` at type indices 0–8 (`$i64s` holds the number → string tables, see [`crate::numstr`];
-//!   the last four are an object's arrays).
+//!   $i32s, $code, $function, $cell_f64, $cell]` at type indices 0–12 (`$i64s` holds the number → string
+//!   tables, see [`crate::numstr`]; `$keys`…`$i32s` are an object's arrays).
+//! - Functions (T14): `$function` is a subtype of `$object` (so every object helper takes it) with
+//!   the code to run and the environment (captured cells and values). See [`crate::func`].
 //! - Exceptions (design D2): one tag, [`TAG`], `(param (ref null eq))`: `throw` throws the JS value.
 //!   Runtime errors (reading a property of `null`) throw a TypeError the same way.
 //!
@@ -26,7 +28,7 @@ use wasm_encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, host, numstr, object};
+use crate::{abi, func, host, numstr, object};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
@@ -41,8 +43,17 @@ pub const T_VALS: u32 = 6;
 pub const T_BYTES: u32 = 7;
 /// `(array (mut i32))`: an object's hash index.
 pub const T_I32S: u32 = 8;
+/// `(func (param eqref eqref eqref) (result eqref))`: what calls through a function value run
+/// (the function object, `this`, the argument array as a `$vals`).
+pub const T_CODE: u32 = 9;
+/// `$function`: a subtype of `$object` with `code: (ref $code)` and `env: (ref null $vals)` (T14).
+pub const T_FUNCTION: u32 = 10;
+/// `(struct (mut f64))`: a captured `f64` variable.
+pub const T_CELL_F64: u32 = 11;
+/// `(struct (mut (ref null eq)))`: a captured `jsval` variable (Wasm null: not initialized yet).
+pub const T_CELL: u32 = 12;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 9;
+pub const TYPES: u32 = 13;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -85,6 +96,8 @@ pub trait Cx {
     fn host_globals(&mut self) -> u32;
     /// Function index of the command's `main`.
     fn main_func(&mut self) -> u32;
+    /// `ref.func` will be used on function `index` (it goes into a declarative element segment).
+    fn declare_func(&mut self, index: u32);
 
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -138,9 +151,9 @@ pub fn typeof_code(tag: TypeofTag) -> i32 {
 
 /// Emit the `rec` group. Must be the first entries of the type section.
 pub fn types(types: &mut TypeSection) {
-    let sub = |inner| SubType {
-        is_final: true,
-        supertype_idx: None,
+    let sub_of = |inner, is_final, supertype_idx| SubType {
+        is_final,
+        supertype_idx,
         composite_type: CompositeType {
             inner,
             shared: false,
@@ -148,6 +161,7 @@ pub fn types(types: &mut TypeSection) {
             describes: None,
         },
     };
+    let sub = |inner| sub_of(inner, true, None);
     let field = |ty: StorageType, mutable| FieldType {
         element_type: ty,
         mutable,
@@ -157,6 +171,18 @@ pub fn types(types: &mut TypeSection) {
             fields: Box::new([field(StorageType::Val(ty), false)]),
         }))
     };
+    let object_fields = vec![
+        field(StorageType::Val(ValType::I32), false),
+        field(StorageType::Val(rt(true, T_OBJECT)), true),
+        field(StorageType::Val(rt(false, T_KEYS)), true),
+        field(StorageType::Val(rt(false, T_VALS)), true),
+        field(StorageType::Val(rt(false, T_BYTES)), true),
+        field(StorageType::Val(ValType::I32), true),
+        field(StorageType::Val(rt(true, T_I32S)), true),
+    ];
+    let mut function_fields = object_fields.clone();
+    function_fields.push(field(StorageType::Val(rt(false, T_CODE)), false));
+    function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
     types.ty().rec([
         st(ValType::F64),
         st(ValType::I32),
@@ -168,18 +194,15 @@ pub fn types(types: &mut TypeSection) {
             StorageType::Val(ValType::I64),
             false,
         )))),
-        // $object: class, proto, keys, vals, attrs, count, index (see `object.rs`).
-        sub(CompositeInnerType::Struct(StructType {
-            fields: Box::new([
-                field(StorageType::Val(ValType::I32), false),
-                field(StorageType::Val(rt(true, T_OBJECT)), true),
-                field(StorageType::Val(rt(false, T_KEYS)), true),
-                field(StorageType::Val(rt(false, T_VALS)), true),
-                field(StorageType::Val(rt(false, T_BYTES)), true),
-                field(StorageType::Val(ValType::I32), true),
-                field(StorageType::Val(rt(true, T_I32S)), true),
-            ]),
-        })),
+        // $object: class, proto, keys, vals, attrs, count, index (see `object.rs`). Not final:
+        // `$function` extends it.
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: object_fields.clone().into_boxed_slice(),
+            }),
+            false,
+            None,
+        ),
         sub(CompositeInnerType::Array(ArrayType(field(
             StorageType::Val(rt(true, T_STRING)),
             true,
@@ -196,6 +219,23 @@ pub fn types(types: &mut TypeSection) {
             StorageType::Val(ValType::I32),
             true,
         )))),
+        sub(CompositeInnerType::Func(wasm_encoder::FuncType::new(
+            [jsval(), jsval(), jsval()],
+            [jsval()],
+        ))),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: function_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([field(StorageType::Val(ValType::F64), true)]),
+        })),
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([field(StorageType::Val(jsval()), true)]),
+        })),
     ]);
 }
 
@@ -328,6 +368,7 @@ pub enum Helper {
     Describe,
     Num(numstr::Helper),
     Obj(object::Helper),
+    Func(func::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
 }
@@ -354,6 +395,7 @@ impl Helper {
             Helper::Describe => "describe",
             Helper::Num(h) => h.name(),
             Helper::Obj(h) => h.name(),
+            Helper::Func(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
         }
@@ -378,6 +420,7 @@ impl Helper {
             Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
             Helper::Obj(h) => h.signature(),
+            Helper::Func(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
         }
@@ -404,6 +447,7 @@ impl Helper {
             Helper::Describe => describe(cx),
             Helper::Num(h) => h.body(cx),
             Helper::Obj(h) => h.body(cx),
+            Helper::Func(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());
                 h.body(cx, base, main)
@@ -672,6 +716,10 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::String));
     s.else_();
+    s.local_get(V).ref_test_non_null(func::function());
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(typeof_code(TypeofTag::Function));
+    s.else_();
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Object));
@@ -682,6 +730,7 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.local_tee(K);
     s.local_get(K).i32_const(K_TRUE).i32_eq();
     s.i32_sub();
+    s.end();
     s.end();
     s.end();
     s.end();
@@ -866,6 +915,7 @@ fn js_add(cx: &mut dyn Cx) -> Function {
 
 /// `$inspect(v) -> (ref $string)`: how `console.log` shows a primitive: ToString, except
 /// that `-0` shows as `-0`. An error shows as `[<ToString>]` (node, for an error without a stack).
+/// A function shows as `[Function: name]` or `[Function (anonymous)]`.
 /// Other objects trap (`inspect_object`): node's `util.inspect` format isn't implemented (F24).
 fn inspect(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
@@ -873,9 +923,39 @@ fn inspect(cx: &mut dyn Cx) -> Function {
     let trap = cx.helper(Helper::Obj(object::Helper::InspectTrap));
     let minus_zero = cx.str("-0");
     let (open, close) = (cx.str("["), cx.str("]"));
+    let get = cx.helper(Helper::Obj(object::Helper::Get));
+    let own_keys = cx.helper(Helper::Obj(object::Helper::OwnKeys));
+    let (name, named, anonymous) = (
+        cx.str("name"),
+        cx.str("[Function: "),
+        cx.str("[Function (anonymous)]"),
+    );
     const V: u32 = 0;
-    let mut f = Function::new([]);
+    const N: u32 = 1;
+    let mut f = Function::new([(1, jsval())]);
     let mut s = f.instructions();
+    // A function: `[Function: name]` (T14); with own enumerable properties node shows them too (F24).
+    s.local_get(V).ref_test_non_null(func::function());
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .ref_cast_non_null(object())
+        .call(own_keys)
+        .array_len();
+    s.if_(BlockType::Empty);
+    s.call(trap);
+    s.end();
+    s.local_get(V).global_get(name).call(get).local_tee(N);
+    s.ref_test_non_null(string());
+    s.if_(BlockType::Empty);
+    s.local_get(N).ref_cast_non_null(string()).array_len();
+    s.if_(BlockType::Empty);
+    s.global_get(named);
+    s.local_get(N).ref_cast_non_null(string()).call(concat);
+    s.global_get(close).call(concat).return_();
+    s.end();
+    s.end();
+    s.global_get(anonymous).return_();
+    s.end();
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     object::is_error(&mut s, V);

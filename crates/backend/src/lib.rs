@@ -10,6 +10,13 @@
 //! - `Throw e` → `throw $js`. `Try { body, catch_local, catch_body }` →
 //!   `block (block (result jsval) (try_table (catch $js 0) body) (br 1)) (local.set catch_local) catch_body`:
 //!   no `catch_all`, so Wasm traps are never caught (design D2).
+//! - (T14) `Closure` → `ref.func` of its code, the environment as an `array.new_fixed $vals`, then
+//!   `$new_function` (see [`func`]); a shared closure (a top-level function) is made once into its
+//!   own global (after the module's globals, before the strings). `CallRef` → the arguments in a
+//!   `$vals` array and `$call_value` (`call_ref $code`). Cells are `$cell_f64`/`$cell` structs; the
+//!   IR carries them as `jsval`, so cell and environment accesses start with a `ref.cast`. Functions
+//!   with the `$code` signature get the runtime's `$code` type, and every `ref.func` target is in a
+//!   declarative element segment.
 //! - A function with a result ends in `unreachable`: the lowering guarantees every path returns,
 //!   but Wasm validation can't see through an `if/else` whose two arms both `return`.
 //! - Runtime helpers are emitted after the user functions, and only when used:
@@ -26,6 +33,7 @@
 //! its source position before any bytes are emitted.
 
 mod abi;
+mod func;
 mod host;
 mod numstr;
 mod object;
@@ -36,10 +44,10 @@ use std::collections::HashMap;
 use anyhow::{Context, bail};
 use js2wasi3_ir::{self as ir, AbiType, BinOp, Const, Expr, Intrinsic, LabelId, Stmt, Type, UnOp};
 use wasm_encoder::{
-    BlockType, Catch, CodeSection, ConstExpr, DataCountSection, DataSection, ExportKind,
-    ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
-    IndirectNameMap, InstructionSink, MemorySection, MemoryType, NameMap, NameSection, TagKind,
-    TagSection, TagType, TypeSection, ValType,
+    BlockType, Catch, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
+    Elements, ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType,
+    ImportSection, IndirectNameMap, InstructionSink, MemorySection, MemoryType, NameMap,
+    NameSection, TagKind, TagSection, TagType, TypeSection, ValType,
 };
 
 /// Emit a core Wasm module for `module`.
@@ -90,10 +98,23 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let host_base = runtime::GLOBALS + abi as u32;
     let host_globals = if command.is_some() { host::GLOBALS } else { 0 };
+    // Top-level function objects (shared closures): one global each, after the module's globals.
+    let mut shared = Vec::new();
+    for f in &module.functions {
+        visit_exprs(&f.body, &mut |x| {
+            if let Expr::Closure(c) = x
+                && c.shared
+                && !shared.contains(&c.code)
+            {
+                shared.push(c.code);
+            }
+        });
+    }
+    let type_base = if js { runtime::TYPES } else { 0 };
     let mut e = Emitter {
         m: module,
         types,
-        type_base: if js { runtime::TYPES } else { 0 },
+        next_type: type_base,
         global_base: if js { host_base + host_globals } else { 0 },
         bump: runtime::GLOBALS,
         host_base,
@@ -104,7 +125,14 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         strings: Vec::new(),
         string_ids: HashMap::new(),
         tables: false,
+        shared,
+        declared: Vec::new(),
     };
+    if js {
+        // Functions with the `$code` signature use the runtime's type (`call_ref` needs it).
+        let v = runtime::jsval();
+        e.type_ids.insert((vec![v, v, v], vec![v]), runtime::T_CODE);
+    }
 
     let mut imports = ImportSection::new();
     if command.is_some() {
@@ -205,6 +233,19 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         );
     }
 
+    for _ in &e.shared {
+        globals.global(
+            GlobalType {
+                val_type: runtime::jsval(),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(wasm_encoder::HeapType::Abstract {
+                shared: false,
+                ty: wasm_encoder::AbstractHeapType::Eq,
+            }),
+        );
+    }
     for units in &e.strings {
         runtime::string_global(&mut globals, units);
     }
@@ -283,6 +324,11 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         out.section(&globals);
     }
     out.section(&exports);
+    if !e.declared.is_empty() {
+        let mut elems = ElementSection::new();
+        elems.declared(Elements::Functions(e.declared.clone().into()));
+        out.section(&elems);
+    }
     if e.tables {
         out.section(&DataCountSection { count: 1 });
     }
@@ -294,6 +340,14 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     out.section(&names);
     Ok(out.finish())
+}
+
+/// The cell struct for a variable of type `t`.
+fn cell_type(t: Type) -> u32 {
+    match t {
+        Type::F64 => runtime::T_CELL_F64,
+        _ => runtime::T_CELL,
+    }
 }
 
 fn val_type(t: Type) -> ValType {
@@ -326,6 +380,7 @@ fn uses_jsval(m: &ir::Module) -> bool {
             Expr::Tee(_, a) | Expr::Unary { arg: a, .. } => expr(a),
             Expr::Call { args, .. } => args.iter().any(expr),
             Expr::Seq { body, value } => stmts(body) || expr(value),
+            Expr::Closure(_) | Expr::CallRef { .. } => true,
         }
     }
     fn stmts(list: &[Stmt]) -> bool {
@@ -432,6 +487,77 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
             unsupported_expr(els, out);
         }
         Expr::Call { args, .. } => args.iter().for_each(|a| unsupported_expr(a, out)),
+        Expr::Closure(c) => c.env.iter().for_each(|a| unsupported_expr(a, out)),
+        Expr::CallRef {
+            callee, this, args, ..
+        } => {
+            unsupported_expr(callee, out);
+            unsupported_expr(this, out);
+            args.iter().for_each(|a| unsupported_expr(a, out));
+        }
+    }
+}
+
+/// Call `f` on every expression in `list`, outer ones first.
+fn visit_exprs(list: &[Stmt], f: &mut dyn FnMut(&Expr)) {
+    fn expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+        f(e);
+        match e {
+            Expr::Const(_) | Expr::Local(_) | Expr::Global(_) | Expr::Str(_) => {}
+            Expr::Tee(_, a)
+            | Expr::Unary { arg: a, .. }
+            | Expr::Convert { arg: a, .. }
+            | Expr::TypeofIs { arg: a, .. }
+            | Expr::Suspend { arg: a, .. } => expr(a, f),
+            Expr::Binary { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            Expr::Cond {
+                cond, then, els, ..
+            } => {
+                expr(cond, f);
+                expr(then, f);
+                expr(els, f);
+            }
+            Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {
+                args.iter().for_each(|a| expr(a, f))
+            }
+            Expr::Seq { body, value } => {
+                visit_exprs(body, f);
+                expr(value, f);
+            }
+            Expr::Closure(c) => c.env.iter().for_each(|a| expr(a, f)),
+            Expr::CallRef {
+                callee, this, args, ..
+            } => {
+                expr(callee, f);
+                expr(this, f);
+                args.iter().for_each(|a| expr(a, f));
+            }
+        }
+    }
+    for s in list {
+        match s {
+            Stmt::Expr(e)
+            | Stmt::Set(_, e)
+            | Stmt::SetGlobal(_, e)
+            | Stmt::Return(Some(e))
+            | Stmt::Throw(e) => expr(e, f),
+            Stmt::Block { body, .. } | Stmt::Loop { body, .. } => visit_exprs(body, f),
+            Stmt::If { cond, then, els } => {
+                expr(cond, f);
+                visit_exprs(then, f);
+                visit_exprs(els, f);
+            }
+            Stmt::Try {
+                body, catch_body, ..
+            } => {
+                visit_exprs(body, f);
+                visit_exprs(catch_body, f);
+            }
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None) => {}
+        }
     }
 }
 
@@ -474,8 +600,9 @@ enum Frame {
 struct Emitter<'m> {
     m: &'m ir::Module,
     types: TypeSection,
-    /// Runtime types / globals that come before the module's own.
-    type_base: u32,
+    /// Runtime globals that come before the module's own (see `global_base`).
+    /// Index of the next function type.
+    next_type: u32,
     global_base: u32,
     /// Global index of the ABI bump pointer (when there are string exports).
     bump: u32,
@@ -493,6 +620,10 @@ struct Emitter<'m> {
     string_ids: HashMap<Vec<u16>, u32>,
     /// The number → string tables (data segment 0) are needed.
     tables: bool,
+    /// The code of each shared closure: its object is global `shared_base + k`.
+    shared: Vec<ir::FuncId>,
+    /// Functions used by `ref.func` (a declarative element segment).
+    declared: Vec<u32>,
 }
 
 impl runtime::Cx for Emitter<'_> {
@@ -501,7 +632,7 @@ impl runtime::Cx for Emitter<'_> {
     }
 
     fn string(&mut self, units: &[u16]) -> u32 {
-        let base = self.global_base + self.m.globals.len() as u32;
+        let base = self.global_base + (self.m.globals.len() + self.shared.len()) as u32;
         if let Some(k) = self.string_ids.get(units) {
             return base + k;
         }
@@ -524,6 +655,12 @@ impl runtime::Cx for Emitter<'_> {
         self.host_base
     }
 
+    fn declare_func(&mut self, index: u32) {
+        if !self.declared.contains(&index) {
+            self.declared.push(index);
+        }
+    }
+
     fn main_func(&mut self) -> u32 {
         self.func_base
             + self
@@ -536,14 +673,14 @@ impl runtime::Cx for Emitter<'_> {
 
 impl Emitter<'_> {
     fn type_id(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
-        let next = self.type_base + self.type_ids.len() as u32;
-        *self
-            .type_ids
-            .entry((params.clone(), results.clone()))
-            .or_insert_with(|| {
-                self.types.ty().function(params, results);
-                next
-            })
+        if let Some(t) = self.type_ids.get(&(params.clone(), results.clone())) {
+            return *t;
+        }
+        let t = self.next_type;
+        self.next_type += 1;
+        self.types.ty().function(params.clone(), results.clone());
+        self.type_ids.insert((params, results), t);
+        t
     }
 
     fn helper_index(&mut self, h: Helper) -> u32 {
@@ -886,6 +1023,24 @@ impl Emitter<'_> {
                     if matches!(op, Intrinsic::KeysLen | Intrinsic::KeysGet) && i == 0 {
                         s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_KEYS));
                     }
+                    if i == 0 {
+                        match op {
+                            Intrinsic::CellGet(t) | Intrinsic::CellSet(t) => {
+                                s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(cell_type(
+                                    *t,
+                                )));
+                            }
+                            Intrinsic::CellIsUninit => {
+                                s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(
+                                    runtime::T_CELL,
+                                ));
+                            }
+                            Intrinsic::EnvGet(_) => {
+                                s.ref_cast_non_null(func::function());
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 // Inline.
                 match op {
@@ -905,6 +1060,41 @@ impl Emitter<'_> {
                         s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::Proto(*b)))));
                         return Ok(true);
                     }
+                    Intrinsic::NewCell(t) => {
+                        s.struct_new(cell_type(*t));
+                        return Ok(true);
+                    }
+                    Intrinsic::NewCellUninit => {
+                        s.ref_null(wasm_encoder::HeapType::Abstract {
+                            shared: false,
+                            ty: wasm_encoder::AbstractHeapType::Eq,
+                        })
+                        .struct_new(runtime::T_CELL);
+                        return Ok(true);
+                    }
+                    Intrinsic::CellGet(t) => {
+                        s.struct_get(cell_type(*t), 0);
+                        return Ok(true);
+                    }
+                    Intrinsic::CellSet(t) => {
+                        s.struct_set(cell_type(*t), 0);
+                        return Ok(false);
+                    }
+                    Intrinsic::CellIsUninit => {
+                        s.struct_get(runtime::T_CELL, 0).ref_is_null();
+                        return Ok(true);
+                    }
+                    Intrinsic::EnvGet(i) => {
+                        s.struct_get(runtime::T_FUNCTION, func::F_ENV)
+                            .i32_const(*i as i32)
+                            .array_get(runtime::T_VALS);
+                        return Ok(true);
+                    }
+                    Intrinsic::ArgGet(i) => {
+                        s.i32_const(*i as i32);
+                        s.call(self.helper_index(Helper::Js(H::Func(func::Helper::ArgGet))));
+                        return Ok(true);
+                    }
                     _ => {}
                 }
                 let h = match op {
@@ -915,7 +1105,14 @@ impl Emitter<'_> {
                     Intrinsic::StringLength
                     | Intrinsic::KeysLen
                     | Intrinsic::KeysGet
-                    | Intrinsic::Prototype(_) => unreachable!("inline"),
+                    | Intrinsic::Prototype(_)
+                    | Intrinsic::NewCell(_)
+                    | Intrinsic::NewCellUninit
+                    | Intrinsic::CellGet(_)
+                    | Intrinsic::CellSet(_)
+                    | Intrinsic::CellIsUninit
+                    | Intrinsic::EnvGet(_)
+                    | Intrinsic::ArgGet(_) => unreachable!("inline"),
                     Intrinsic::TypeofString => H::TypeofString,
                     Intrinsic::Inspect => H::Inspect,
                     Intrinsic::NoFormat => H::NoFormat,
@@ -963,6 +1160,56 @@ impl Emitter<'_> {
                 return Ok(self.m.function(*func).result.is_some());
             }
             Expr::Suspend { .. } => unreachable!("rejected by check_supported"),
+            Expr::Closure(c) => {
+                let shared = c
+                    .shared
+                    .then(|| self.shared.iter().position(|x| *x == c.code).unwrap() as u32)
+                    .map(|k| self.global_base + self.m.globals.len() as u32 + k);
+                if let Some(g) = shared {
+                    s.global_get(g).ref_is_null();
+                    s.if_(BlockType::Empty);
+                    frames.push(Frame::Anon);
+                }
+                let code = self.func_base + c.code.0;
+                runtime::Cx::declare_func(self, code);
+                s.ref_func(code);
+                if c.env.is_empty() {
+                    s.ref_null(func::vals());
+                } else {
+                    for x in &c.env {
+                        self.expr(s, frames, x)?;
+                    }
+                    s.array_new_fixed(runtime::T_VALS, c.env.len() as u32);
+                }
+                let name = runtime::Cx::str(self, &c.name);
+                s.global_get(name);
+                s.i32_const(c.length as i32).i32_const(c.constructor as i32);
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::New))));
+                if let Some(g) = shared {
+                    s.global_set(g);
+                    frames.pop();
+                    s.end();
+                    s.global_get(g);
+                }
+            }
+            Expr::CallRef {
+                callee,
+                this,
+                args,
+                what,
+            } => {
+                self.expr(s, frames, callee)?;
+                self.expr(s, frames, this)?;
+                for a in args {
+                    self.expr(s, frames, a)?;
+                }
+                s.array_new_fixed(runtime::T_VALS, args.len() as u32);
+                let what = runtime::Cx::str(self, what);
+                s.global_get(what);
+                s.call(
+                    self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::CallValue))),
+                );
+            }
         }
         Ok(true)
     }

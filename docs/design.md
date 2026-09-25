@@ -33,6 +33,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   (T13: objects are `$object` dictionaries: entries in insertion order in GC arrays, a hash index past 8 entries, a
   prototype. Built-in prototypes are created lazily; their methods are sentinels that trap when read until functions
   exist (T14/T21). Errors are objects of class `error`. See `crates/backend/src/object.rs`.)
+  (T14: functions are `$function` structs, a subtype of `$object` holding a `$code` funcref
+  `(self, this, args) -> jsval` and an environment array. Captured variables are boxed in cells, one per
+  variable (flat closures); direct calls stay typed, calls through values use one uniform `call_ref`.
+  See `crates/backend/src/func.rs` and `crates/lower/src/closures.rs`.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.

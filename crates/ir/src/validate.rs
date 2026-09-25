@@ -334,6 +334,39 @@ impl V<'_> {
                 self.expect("typeof operand", t, Type::JsVal);
                 Some(Type::Bool)
             }
+            Expr::Closure(c) => {
+                match self.m.functions.get(c.code.0 as usize) {
+                    Some(f) => {
+                        let ok = f.params == 3
+                            && f.locals[..3].iter().all(|l| l.ty == Type::JsVal)
+                            && f.result == Some(Type::JsVal);
+                        if !ok {
+                            self.err(format!(
+                                "closure code {} doesn't have the (jsval, jsval, jsval) -> jsval signature",
+                                f.name
+                            ));
+                        }
+                    }
+                    None => self.err(format!("closure of missing function #{}", c.code.0)),
+                }
+                if c.shared && !c.env.is_empty() {
+                    self.err("a shared closure with an environment".to_string());
+                }
+                for a in &c.env {
+                    let t = self.value("closure environment", a);
+                    self.expect("closure environment", t, Type::JsVal);
+                }
+                Some(Type::JsVal)
+            }
+            Expr::CallRef {
+                callee, this, args, ..
+            } => {
+                for a in [&**callee, &**this].into_iter().chain(args) {
+                    let t = self.value("call_ref operand", a);
+                    self.expect("call_ref operand", t, Type::JsVal);
+                }
+                Some(Type::JsVal)
+            }
             Expr::Seq { body, value } => {
                 // Labels outside the `Seq` aren't branch targets from inside it.
                 let outer = std::mem::take(&mut self.labels);

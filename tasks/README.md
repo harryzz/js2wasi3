@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T14.** Start with the *Handoff* section in [T14-closures.md](T14-closures.md). T13 is done: plain objects with prototypes (literals, get/set/delete/`in`, `for-in`, `Object.create`), errors are objects (see T13's Notes / Result). T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T15.** T14 is done: functions are values (closures with captured variables in cells, arrows, methods, `this`, calls through values, `Function.prototype.call`; see T14's Notes / Result). T13: plain objects with prototypes (literals, get/set/delete/`in`, `for-in`, `Object.create`), errors are objects. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -24,7 +24,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T11](T11-diff-harness.md) | Differential harness node vs wasmtime | done | T10 |
 | [T12](T12-exceptions.md) | Exceptions (native EH) | done | T11 |
 | [T13](T13-objects.md) | Objects and prototypes | done | T12 |
-| [T14](T14-closures.md) | Closures, function values, `this` | todo | T13 |
+| [T14](T14-closures.md) | Closures, function values, `this` | done | T13 |
 | [T15](T15-arrays-iteration.md) | Arrays and iteration | todo | T14 |
 | [T16](T16-classes.md) | Classes | todo | T15 |
 | [T17](T17-promises-microtasks.md) | Promises + microtask queue | todo | T16 |
@@ -58,7 +58,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F13 | Export signatures beyond `f64`: map `JsVal`/`Bool` params and results to WIT types at the boundary. T08: `$export` wrappers convert jsval ↔ f64 (ToNumber). T09: `string` done (JSDoc + usage); `bool`, `option`, records etc. remain | T07 | T20 (user WIT) | [ ] |
 | F14 | Inference: `bool`-typed slots (booleans stored in variables are boxed today), int32 ranges | T08 | optimisation pass, after T11 | [ ] |
 | F15 | wasmtime 49 `--invoke` can't call exports whose WIT name is a keyword (`bool`, `use`, `type`…), even as `%bool`. Valid components, CLI-only limit. Avoid such names in tests; maybe warn at build | T08 | T20 (not a harness concern: it runs commands, T11) | [ ] |
-| F16 | Calls with more arguments than parameters (evaluate the extras, then drop them) | T08 | T14 | [ ] |
+| F16 | Calls with more arguments than parameters (evaluate the extras, then drop them) | T08 | T14 | [x] T14 (`direct_call`; calls through values pass them all) |
 | F17 | `typeof x` as a value (a string) | T08 | T09 | [x] T09 (`$typeof_string`, folded when the kind is known) |
 | F18 | Logical assignment `&&=`, `\|\|=`, `??=` | T08 | T13 or any | [ ] |
 | F19 | String literals as `array.new_fixed` globals cost ~3 bytes per code unit; long ones should come from a data segment (`array.new_data`, lazily) | T09 | optimisation pass, after T11 | [ ] |
@@ -70,7 +70,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F25 | Uncaught exception in a command: print it to stderr, flush, `task.return(err)` (`run` in `backend/src/host.rs` must catch `$js`) | T10 | T12 | [x] T12 |
 | F26 | Event loop: the callback ignores `TASK_CANCELLED`; output is only pumped while JS runs if the host takes writes at once (otherwise buffered until `main` returns) | T10 | T19 | [ ] |
 | F27 | When stdout's reader goes away (`\| head`) `run` returns `err` (exit 1); node exits 0. Decide which the harness expects | T10 | T11 | [x] T11 (keep `err`: the write failed; not covered by the harness) |
-| F28 | `var` in a nested top-level block (`{ var z }`, `for (var i …)`) is a local of `main`: functions using it are rejected | T10 | T14 | [ ] |
+| F28 | `var` in a nested top-level block (`{ var z }`, `for (var i …)`) is a local of `main`: functions using it are rejected | T10 | T14 | [x] T14 (they're globals: `nested_vars`) |
 | F29 | Harness: uncaught exceptions print differently from node (stack traces), so stderr needs a comparison mode for them (e.g. first line only, via a sidecar) | T11 | T12 | [x] T12 (`x.uncaught`, `scripts/node-uncaught.mjs`) |
 | F30 | `scripts/diff.sh` isn't run by `cargo test` (it needs node); wire it into CI once there is one | T11 | not scheduled | [ ] |
 | F31 | Stack traces: `err.stack`, `console.log(err)` printing the stack like node (today `[TypeError: msg]`), `js-error.stack` (always `none`) | T12 | not scheduled | [ ] |
@@ -79,8 +79,15 @@ Each open item names where it came from and which task should pick it up. When i
 | F34 | `ir::may_throw` is conservative (e.g. `.length` of a value not known to be a string), so some exports get `result<T, js-error>` needlessly | T12 | T20 (user WIT decides) | [ ] |
 | F35 | When the event-loop callback runs JS (T19), it must catch `$js` like `run` does (print `Uncaught …`, return `err`) | T12 | T19 | [ ] |
 | F36 | Getters/setters, `Object.defineProperty`, property attributes beyond enumerable (read-only, non-configurable), `Object.freeze`/`seal` | T13 | T16 (with class `get`/`set`; needs T14) | [ ] |
-| F37 | Built-in methods (`Object.prototype.toString`, `String.prototype.slice`, …) are sentinels that trap when read; a user-replaced `toString`/`valueOf` traps in ToPrimitive | T13 | T14 (callable values) / T21 (the methods) | [ ] |
+| F37 | Built-in methods (`Object.prototype.toString`, `String.prototype.slice`, …) are sentinels that trap when read; a user-replaced `toString`/`valueOf` traps in ToPrimitive. T14: values are callable now (`Function.prototype.call` is real); ToPrimitive still returns a string only, so calling a user `valueOf` needs it to return any primitive | T13 | T16 (user methods) / T21 (the methods) | [ ] |
 | F38 | Symbols as property keys (`Symbol.iterator` is needed by T15) | T13 | T15 | [ ] |
 | F39 | `Object.keys`/`values`/`entries`/`assign`/`fromEntries`, `JSON.stringify` | T13 | T15 (arrays) / T21 | [ ] |
 | F40 | Hidden classes / inline caches for property access (dictionary mode only today) | T13 | after a benchmark | [ ] |
-| F41 | Method calls `o.m()` and optional calls `o?.m()` | T13 | T14 | [ ] |
+| F41 | Method calls `o.m()` and optional calls `o?.m()` | T13 | T14 | [x] T14 (`CallRef`, `chain_call`) |
+| F42 | `arguments` (an array-like object) | T14 | T15 | [ ] |
+| F43 | `Function.prototype.apply` (needs arrays), `bind`, `toString` (source text): sentinels that trap when read | T14 | T15 (`apply`) / T21 | [ ] |
+| F44 | `new` of user functions, `instanceof` with a user function (the `prototype` objects already exist) | T14 | T16 | [ ] |
+| F45 | Rejected for now: assigning to a function declaration's binding (calls to it are direct), a function with a computed key in a literal (its `name` comes from the key at run time), a closure in a `for (let …)` head reading a head variable before its declaration | T14 | later | [ ] |
+| F46 | Function objects get `length`/`name` (and `prototype` for `function`s) when made: 1–2 extra allocations per closure; could be lazy. Cell and environment reads `ref.cast` every time; a self-recursive nested function reads its own binding's cell for `self` | T14 | after a benchmark | [ ] |
+| F47 | `Function.prototype` is a plain object (spec: a function, so `typeof` is `"function"`); functions' `name`/`length` are writable (read-only attributes, F36) | T14 | T21 | [ ] |
+| F48 | `console.log` of a function with own enumerable properties traps (node prints them after `[Function: f]`, F24) | T14 | T21 | [ ] |
