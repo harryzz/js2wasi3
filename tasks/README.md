@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T10.** The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T10.** Start with the *Handoff* section in [T10-command-console.md](T10-command-console.md). The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
