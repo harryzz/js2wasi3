@@ -7,6 +7,7 @@
 //! }
 //! export "add" = add#0
 //! ```
+//! A command ends with `main = <func>`.
 //! Locals print as `name.index`, functions as `name#index`, globals as `@name`, labels as `L<n>`.
 //! `f64` constants always carry a decimal point (`1.0`, `NaN`, `inf`), `i32` constants a `_i32` suffix.
 //! `Seq` prints on one line: `seq { stmt; stmt; value }`. Intrinsics print as `$name(args)`.
@@ -53,6 +54,10 @@ impl Printer<'_> {
         }
         for e in &self.m.exports {
             let s = format!("export {:?} = {}", e.name, self.func_name(e.func.0));
+            self.line(&s);
+        }
+        if let Some(main) = self.m.main {
+            let s = format!("main = {}", self.func_name(main.0));
             self.line(&s);
         }
     }

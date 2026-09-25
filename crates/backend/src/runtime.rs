@@ -20,7 +20,7 @@ use wasm_encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, numstr};
+use crate::{abi, host, numstr};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
@@ -58,6 +58,10 @@ pub trait Cx {
     fn tables_data(&mut self) -> u32;
     /// Global index of the ABI bump pointer (only in modules with string exports).
     fn bump_global(&mut self) -> u32;
+    /// Global index of the first host global (commands only, see [`crate::host`]).
+    fn host_globals(&mut self) -> u32;
+    /// Function index of the command's `main`.
+    fn main_func(&mut self) -> u32;
 
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -229,8 +233,11 @@ pub enum Helper {
     ToString,
     JsAdd,
     Length,
+    Inspect,
+    NoFormat,
     Num(numstr::Helper),
     Abi(abi::Helper),
+    Host(host::Helper),
 }
 
 impl Helper {
@@ -250,8 +257,11 @@ impl Helper {
             Helper::ToString => "to_string",
             Helper::JsAdd => "js_add",
             Helper::Length => "length",
+            Helper::Inspect => "inspect",
+            Helper::NoFormat => "no_format",
             Helper::Num(h) => h.name(),
             Helper::Abi(h) => h.name(),
+            Helper::Host(h) => h.name(),
         }
     }
 
@@ -269,9 +279,11 @@ impl Helper {
             Helper::StrEq => (vec![s, s], vec![ValType::I32]),
             Helper::Concat => (vec![s, s], vec![s]),
             Helper::JsAdd => (vec![v, v], vec![v]),
-            Helper::Length => (vec![v], vec![v]),
+            Helper::Length | Helper::NoFormat => (vec![v], vec![v]),
+            Helper::Inspect => (vec![v], vec![s]),
             Helper::Num(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
+            Helper::Host(h) => h.signature(),
         }
     }
 
@@ -291,7 +303,13 @@ impl Helper {
             Helper::ToString => to_string(cx),
             Helper::JsAdd => js_add(cx),
             Helper::Length => length(cx),
+            Helper::Inspect => inspect(cx),
+            Helper::NoFormat => no_format(),
             Helper::Num(h) => h.body(cx),
+            Helper::Host(h) => {
+                let (base, main) = (cx.host_globals(), cx.main_func());
+                h.body(cx, base, main)
+            }
             Helper::Abi(h) => {
                 let bump = cx.bump_global();
                 h.body(cx, bump)
@@ -718,6 +736,61 @@ fn length(cx: &mut dyn Cx) -> Function {
     s.unreachable();
     s.end();
     s.global_get(G_UNDEFINED);
+    s.end();
+    f
+}
+
+/// `$inspect(v) -> (ref $string)`: how `console.log` shows a primitive: ToString, except
+/// that `-0` shows as `-0`.
+fn inspect(cx: &mut dyn Cx) -> Function {
+    let to_string = cx.helper(Helper::ToString);
+    let minus_zero = cx.str("-0");
+    const V: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    // -0 is never an i31.
+    s.local_get(V).ref_test_non_null(number());
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .ref_cast_non_null(number())
+        .struct_get(T_NUMBER, 0)
+        .i64_reinterpret_f64()
+        .i64_const(i64::MIN)
+        .i64_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(minus_zero).return_();
+    s.end();
+    s.end();
+    s.local_get(V).call(to_string);
+    s.end();
+    f
+}
+
+/// `$no_format(v) -> jsval`: `v`, trapping if it's a string containing `%` (a `console.log`
+/// format string, not implemented).
+fn no_format() -> Function {
+    const V: u32 = 0;
+    const I: u32 = 1;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(string());
+    s.if_(BlockType::Empty);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I);
+    as_string(&mut s, V);
+    s.array_len().i32_ge_u().br_if(1);
+    as_string(&mut s, V);
+    s.local_get(I)
+        .array_get_u(T_STRING)
+        .i32_const('%' as i32)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.unreachable();
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.end();
+    s.local_get(V);
     s.end();
     f
 }

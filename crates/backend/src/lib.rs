@@ -23,6 +23,7 @@
 //! its source position before any bytes are emitted.
 
 mod abi;
+mod host;
 mod numstr;
 mod runtime;
 
@@ -32,8 +33,8 @@ use anyhow::{Context, bail};
 use js2wasi3_ir::{self as ir, AbiType, BinOp, Const, Expr, Intrinsic, LabelId, Stmt, Type, UnOp};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataCountSection, DataSection, ExportKind, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, IndirectNameMap, InstructionSink,
-    MemorySection, MemoryType, NameMap, NameSection, TypeSection, ValType,
+    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, IndirectNameMap,
+    InstructionSink, MemorySection, MemoryType, NameMap, NameSection, TypeSection, ValType,
 };
 
 /// Emit a core Wasm module for `module`.
@@ -46,7 +47,9 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     check_supported(module)?;
 
-    let js = uses_jsval(module);
+    // A command (`wasi:cli/run`) always has the JS runtime and memory (for output buffers).
+    let command = module.main;
+    let js = uses_jsval(module) || command.is_some();
     // Exports with a string at the boundary go through an ABI adapter (and need memory).
     let adapted: Vec<&ir::Export> = module
         .exports
@@ -55,7 +58,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             x.sig.params.contains(&AbiType::String) || x.sig.result == Some(AbiType::String)
         })
         .collect();
-    let abi = !adapted.is_empty();
+    let abi = !adapted.is_empty() || command.is_some();
     for x in &adapted {
         // More flat params than this are passed through memory: not implemented (F21).
         if abi::flat_params(&x.sig.params).len() > abi::MAX_FLAT_PARAMS {
@@ -71,20 +74,35 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         runtime::types(&mut types);
     }
     let n = module.functions.len() as u32;
+    // Imported functions come first in the function index space.
+    let func_base = if command.is_some() {
+        host::IMPORTS.len() as u32
+    } else {
+        0
+    };
+    // Globals: runtime, ABI bump pointer, host globals, then the module's own.
+    let host_base = runtime::GLOBALS + abi as u32;
+    let host_globals = if command.is_some() { host::GLOBALS } else { 0 };
     let mut e = Emitter {
         m: module,
         types,
         type_base: if js { runtime::TYPES } else { 0 },
-        global_base: if js { runtime::GLOBALS + abi as u32 } else { 0 },
+        global_base: if js { host_base + host_globals } else { 0 },
         bump: runtime::GLOBALS,
+        host_base,
+        func_base,
         type_ids: HashMap::new(),
-        helper_base: n + adapted.len() as u32,
+        helper_base: func_base + n + adapted.len() as u32,
         helpers: Vec::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
         tables: false,
     };
 
+    let mut imports = ImportSection::new();
+    if command.is_some() {
+        host::imports(&mut imports, &mut |p, r| e.type_id(p, r));
+    }
     let mut funcs = FunctionSection::new();
     let mut code = CodeSection::new();
     for f in &module.functions {
@@ -108,7 +126,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         code.function(&abi::adapter(
             &mut e,
             bump,
-            x.func.0,
+            func_base + x.func.0,
             &x.sig.params,
             x.sig.result,
         ));
@@ -116,6 +134,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     let realloc =
         abi.then(|| e.helper_index(Helper::Js(runtime::Helper::Abi(abi::Helper::Realloc))));
+    let run = command.map(|_| {
+        (
+            e.helper_index(Helper::Js(runtime::Helper::Host(host::Helper::Run))),
+            e.helper_index(Helper::Js(runtime::Helper::Host(host::Helper::Callback))),
+        )
+    });
     // Helpers can request other helpers, so iterate until the list stops growing.
     let mut i = 0;
     while i < e.helpers.len() {
@@ -138,6 +162,16 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
                 shared: false,
             },
             &ConstExpr::i32_const(abi::HEAP_BASE),
+        );
+    }
+    for _ in 0..host_globals {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
         );
     }
     for g in &module.globals {
@@ -167,15 +201,23 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
 
     let mut exports = ExportSection::new();
-    let mut next_adapter = n;
+    let mut next_adapter = func_base + n;
     for x in &module.exports {
         let index = if adapted.iter().any(|a| std::ptr::eq(*a, x)) {
             next_adapter += 1;
             next_adapter - 1
         } else {
-            x.func.0
+            func_base + x.func.0
         };
         exports.export(&x.name, ExportKind::Func, index);
+    }
+    if let Some((run, callback)) = run {
+        exports.export("[async-lift]wasi:cli/run@0.3.1#run", ExportKind::Func, run);
+        exports.export(
+            "[callback][async-lift]wasi:cli/run@0.3.1#run",
+            ExportKind::Func,
+            callback,
+        );
     }
     let mut memory = MemorySection::new();
     if let Some(realloc) = realloc {
@@ -193,16 +235,22 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut names = NameSection::new();
     let mut fnames = NameMap::new();
     let mut lnames = IndirectNameMap::new();
+    if command.is_some() {
+        for (i, imp) in host::IMPORTS.iter().enumerate() {
+            let (module, field) = imp.names();
+            fnames.append(i as u32, &format!("{module}#{field}"));
+        }
+    }
     for (i, f) in module.functions.iter().enumerate() {
-        fnames.append(i as u32, &f.name);
+        fnames.append(func_base + i as u32, &f.name);
         let mut locals = NameMap::new();
         for (j, l) in f.locals.iter().enumerate() {
             locals.append(j as u32, &l.name);
         }
-        lnames.append(i as u32, &locals);
+        lnames.append(func_base + i as u32, &locals);
     }
     for (k, name) in adapter_names.iter().enumerate() {
-        fnames.append(n + k as u32, name);
+        fnames.append(func_base + n + k as u32, name);
     }
     for (k, h) in e.helpers.iter().enumerate() {
         fnames.append(e.helper_base + k as u32, h.name());
@@ -211,7 +259,11 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     names.locals(&lnames);
 
     let mut out = wasm_encoder::Module::new();
-    out.section(&e.types).section(&funcs);
+    out.section(&e.types);
+    if command.is_some() {
+        out.section(&imports);
+    }
+    out.section(&funcs);
     if abi {
         out.section(&memory);
     }
@@ -420,6 +472,10 @@ struct Emitter<'m> {
     global_base: u32,
     /// Global index of the ABI bump pointer (when there are string exports).
     bump: u32,
+    /// Global index of the first host global (commands).
+    host_base: u32,
+    /// Number of imported functions: the IR function `i` has index `func_base + i`.
+    func_base: u32,
     type_ids: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
     /// Function index of the first helper (after the user functions and ABI adapters).
     helper_base: u32,
@@ -455,6 +511,19 @@ impl runtime::Cx for Emitter<'_> {
 
     fn bump_global(&mut self) -> u32 {
         self.bump
+    }
+
+    fn host_globals(&mut self) -> u32 {
+        self.host_base
+    }
+
+    fn main_func(&mut self) -> u32 {
+        self.func_base
+            + self
+                .m
+                .main
+                .expect("host helpers are only used by commands")
+                .0
     }
 }
 
@@ -753,9 +822,14 @@ impl Emitter<'_> {
             }
             Expr::Intrinsic { op, args } => {
                 use runtime::Helper as H;
+                if let Intrinsic::ConsoleWrite { .. } = op
+                    && self.m.main.is_none()
+                {
+                    bail!("internal error: console output in a module that isn't a command");
+                }
                 for a in args {
                     self.expr(s, frames, a)?;
-                    if *op == Intrinsic::Concat {
+                    if matches!(op, Intrinsic::Concat | Intrinsic::ConsoleWrite { .. }) {
                         s.ref_cast_non_null(runtime::string());
                     }
                 }
@@ -766,8 +840,14 @@ impl Emitter<'_> {
                     Intrinsic::NumberToString => H::Num(numstr::Helper::NumberToString),
                     Intrinsic::Length => H::Length,
                     Intrinsic::TypeofString => H::TypeofString,
+                    Intrinsic::Inspect => H::Inspect,
+                    Intrinsic::NoFormat => H::NoFormat,
+                    Intrinsic::ConsoleWrite { stderr } => {
+                        H::Host(host::Helper::Append(*stderr as u32))
+                    }
                 };
                 s.call(self.helper_index(Helper::Js(h)));
+                return Ok(op.signature().1.is_some());
             }
             Expr::Cond {
                 cond,
@@ -788,7 +868,7 @@ impl Emitter<'_> {
                 for a in args {
                     self.expr(s, frames, a)?;
                 }
-                s.call(func.0);
+                s.call(self.func_base + func.0);
                 return Ok(self.m.function(*func).result.is_some());
             }
             Expr::Suspend { .. } => unreachable!("rejected by check_supported"),

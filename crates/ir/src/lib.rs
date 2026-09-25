@@ -34,7 +34,7 @@
 //! - `TypeofIs { arg, tag }`: `typeof arg === "<tag>"`, as `Bool` (`arg` is `JsVal`).
 //! - `Str(units)`: a string literal (UTF-16 code units), type `JsVal`.
 //! - `Intrinsic { op, args }`: a runtime operation with a fixed signature ([`Intrinsic::signature`]),
-//!   e.g. JS `+` on JS values or ToString.
+//!   e.g. JS `+` on JS values or ToString. Some have no result (writing to stdout), like a void call.
 //! - `Seq { body, value }`: run `body`, then evaluate `value`. `body` must not `Break`/`Continue` out.
 //! - `Convert { from, to, arg }`: `F64 → I32` is JS `ToInt32` (modulo 2^32, NaN/±inf → 0),
 //!   not a saturating truncation. `I32 → F64` is signed. `F64 → JsVal` boxes a number, `JsVal → F64` is
@@ -84,6 +84,9 @@ pub struct Module {
     pub functions: Vec<Function>,
     pub globals: Vec<Global>,
     pub exports: Vec<Export>,
+    /// The command entry point (a `wasi:cli/run` command runs it), for a module without exports.
+    /// Takes no params and has no result.
+    pub main: Option<FuncId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,15 +158,28 @@ pub enum Intrinsic {
     Length,
     /// `typeof v` (a string).
     TypeofString,
+    /// `console.log` formatting of one primitive: ToString, except `-0` gives `"-0"` (a string).
+    Inspect,
+    /// Returns its argument, and traps if it's a string containing `%`: the first of several
+    /// `console.log` arguments is a format string, which isn't implemented yet (F-item in T10).
+    NoFormat,
+    /// Append a JS string to stdout (`stderr: false`) or stderr. No result. Commands only.
+    ConsoleWrite { stderr: bool },
 }
 
 impl Intrinsic {
-    pub fn signature(self) -> (&'static [Type], Type) {
+    /// Parameter types and result type (`None`: no result).
+    pub fn signature(self) -> (&'static [Type], Option<Type>) {
         use Type::*;
         match self {
-            Intrinsic::JsAdd | Intrinsic::Concat => (&[JsVal, JsVal], JsVal),
-            Intrinsic::ToString | Intrinsic::Length | Intrinsic::TypeofString => (&[JsVal], JsVal),
-            Intrinsic::NumberToString => (&[F64], JsVal),
+            Intrinsic::JsAdd | Intrinsic::Concat => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::ToString
+            | Intrinsic::Length
+            | Intrinsic::TypeofString
+            | Intrinsic::Inspect
+            | Intrinsic::NoFormat => (&[JsVal], Some(JsVal)),
+            Intrinsic::NumberToString => (&[F64], Some(JsVal)),
+            Intrinsic::ConsoleWrite { .. } => (&[JsVal], None),
         }
     }
 
@@ -175,6 +191,10 @@ impl Intrinsic {
             Intrinsic::NumberToString => "number_to_string",
             Intrinsic::Length => "length",
             Intrinsic::TypeofString => "typeof",
+            Intrinsic::Inspect => "inspect",
+            Intrinsic::NoFormat => "no_format",
+            Intrinsic::ConsoleWrite { stderr: false } => "write_stdout",
+            Intrinsic::ConsoleWrite { stderr: true } => "write_stderr",
         }
     }
 }
@@ -479,7 +499,7 @@ impl Expr {
             Expr::Suspend { .. } => Type::JsVal,
             Expr::TypeofIs { .. } => Type::Bool,
             Expr::Str(_) => Type::JsVal,
-            Expr::Intrinsic { op, .. } => op.signature().1,
+            Expr::Intrinsic { op, .. } => return op.signature().1,
             Expr::Seq { value, .. } => return value.ty(func, module),
         })
     }

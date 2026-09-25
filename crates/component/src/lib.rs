@@ -219,14 +219,62 @@ fn ty(t: ValType) -> &'static str {
     }
 }
 
+/// The vendored WASI 0.3.1 packages, dependencies first (`wit/README.md`).
+const WASI: [(&str, &str); 5] = [
+    (
+        "wasi-clocks-0.3.1.wit",
+        include_str!("../wit/wasi-clocks-0.3.1.wit"),
+    ),
+    (
+        "wasi-random-0.3.1.wit",
+        include_str!("../wit/wasi-random-0.3.1.wit"),
+    ),
+    (
+        "wasi-filesystem-0.3.1.wit",
+        include_str!("../wit/wasi-filesystem-0.3.1.wit"),
+    ),
+    (
+        "wasi-sockets-0.3.1.wit",
+        include_str!("../wit/wasi-sockets-0.3.1.wit"),
+    ),
+    (
+        "wasi-cli-0.3.1.wit",
+        include_str!("../wit/wasi-cli-0.3.1.wit"),
+    ),
+];
+
+/// The world of a command: it exports `wasi:cli/run` and imports stdout and stderr (the core
+/// module's imports are fixed, see the backend's `host` module).
+pub fn command_world(name: WorldName) -> World {
+    let wit = format!(
+        "package %{}:%{};\n\nworld %{} {{\n  \
+         import wasi:cli/stdout@0.3.1;\n  \
+         import wasi:cli/stderr@0.3.1;\n  \
+         export wasi:cli/run@0.3.1;\n}}\n",
+        name.namespace, name.package, name.world
+    );
+    World {
+        name,
+        export_names: Vec::new(),
+        wit,
+    }
+}
+
 /// Embed `world` into the core module and encode a component. The core module must export
 /// each function under its WIT name ([`World::export_names`]).
 pub fn package(core: &[u8], world: &World) -> anyhow::Result<Vec<u8>> {
     let mut resolve = Resolve::default();
+    // Only a command world uses them; unused packages cost nothing in the component.
+    for (path, text) in WASI {
+        resolve
+            .push_source(path, text)
+            .with_context(|| format!("vendored WIT {path}"))?;
+    }
     let pkg = resolve
         .push_source("generated.wit", &world.wit)
         .with_context(|| format!("generated WIT is invalid:\n{}", world.wit))?;
-    let world_id = resolve.select_world(&[pkg], Some(&world.name.world))?;
+    // `%` escapes names that are WIT keywords (e.g. an entry file `stream.js`).
+    let world_id = resolve.select_world(&[pkg], Some(&format!("%{}", world.name.world)))?;
     let mut bytes = core.to_vec();
     embed_component_metadata(&mut bytes, &resolve, world_id, StringEncoding::UTF8)?;
     ComponentEncoder::default()

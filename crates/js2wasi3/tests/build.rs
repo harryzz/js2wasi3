@@ -135,3 +135,71 @@ fn greet_takes_and_returns_a_string() {
     assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
     assert_eq!(invoke(&out, "greet(\"x\")"), "\"hi x\"");
 }
+
+/// Run a command component: (exit ok, stdout, stderr).
+fn run_command(component: &Path) -> (bool, Vec<u8>, Vec<u8>) {
+    let out = Command::new("wasmtime")
+        .args(["run", "-Sp3"])
+        .arg(component)
+        .output()
+        .expect("wasmtime is installed (TOOLS.md)");
+    (out.status.success(), out.stdout, out.stderr)
+}
+
+/// T10 acceptance: a file without exports is a `wasi:cli/run` command.
+#[test]
+fn hello_command_runs() {
+    let out = out_dir("hello").join("hello.wasm");
+    let b = build(&fixture("hello.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let (ok, stdout, stderr) = run_command(&out);
+    assert!(ok, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(String::from_utf8(stdout).unwrap(), "hello from js2wasi3\n");
+    assert!(stderr.is_empty());
+}
+
+/// T10: `console.js` (top-level code, globals, `var` hoisting, every `console` method, number
+/// formatting, UTF-8) prints exactly what node prints, on stdout and stderr.
+#[test]
+fn console_matches_node() {
+    let out = out_dir("console").join("console.wasm");
+    let b = build(&fixture("console.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let (ok, stdout, stderr) = run_command(&out);
+    assert!(ok, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(
+        String::from_utf8(stdout).unwrap(),
+        std::fs::read_to_string(fixture("console.out")).unwrap()
+    );
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        std::fs::read_to_string(fixture("console.err")).unwrap()
+    );
+}
+
+/// T10: output larger than any buffer, written while the program runs (a later trap doesn't
+/// lose it), and the `%` format-string trap.
+#[test]
+fn command_output_is_streamed() {
+    let dir = out_dir("stream");
+    let src = dir.join("stream.js");
+    std::fs::write(
+        &src,
+        "let s = \"0123456789\";\n\
+         for (let i = 0; i < 6; i++) s = s + s;\n\
+         for (let i = 0; i < 5000; i++) console.log(i, s);\n\
+         function fmt() { return \"%s\"; }\n\
+         console.log(fmt(), 1);\n",
+    )
+    .unwrap();
+    let out = dir.join("stream.wasm");
+    let b = build(&src, &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let (ok, stdout, stderr) = run_command(&out);
+    assert!(!ok, "the format string traps");
+    assert!(String::from_utf8_lossy(&stderr).contains("no_format"));
+    let stdout = String::from_utf8(stdout).unwrap();
+    let line = "0123456789".repeat(64);
+    assert_eq!(stdout.lines().count(), 5000);
+    assert_eq!(stdout.lines().last().unwrap(), format!("4999 {line}"));
+}

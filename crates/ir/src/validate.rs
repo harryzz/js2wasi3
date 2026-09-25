@@ -41,6 +41,19 @@ pub fn validate(m: &Module) -> Result<(), Vec<String>> {
                 .map(|e| format!("func {}#{i}: {e}", f.name)),
         );
     }
+    if let Some(main) = m.main {
+        match m.functions.get(main.0 as usize) {
+            Some(f) if f.params == 0 && f.result.is_none() => {}
+            Some(f) => errs.push(format!(
+                "main {}: must take no params and return nothing",
+                f.name
+            )),
+            None => errs.push(format!("main: no function #{}", main.0)),
+        }
+        if !m.exports.is_empty() {
+            errs.push("a module with `main` (a command) has no exports".into());
+        }
+    }
     for e in &m.exports {
         let Some(f) = m.functions.get(e.func.0 as usize) else {
             errs.push(format!("export {:?}: no function #{}", e.name, e.func.0));
@@ -311,7 +324,7 @@ impl V<'_> {
                     let t = self.value("intrinsic argument", a);
                     self.expect(&format!("${} argument", op.name()), t, *p);
                 }
-                Some(result)
+                result
             }
             Expr::TypeofIs { arg, .. } => {
                 let t = self.value("typeof operand", arg);

@@ -48,7 +48,8 @@ fn invoke(bytes: &[u8], func: &str, args: &[&str]) -> String {
 
 #[test]
 fn fixtures_emit_valid_modules() {
-    for name in ["add", "fib", "loops"] {
+    // `hello` and `console` are commands (T10): they import WASI and export `run`.
+    for name in ["add", "fib", "loops", "hello", "console"] {
         let src = std::fs::read_to_string(fixtures().join(format!("{name}.js"))).unwrap();
         validate(&compile(name, &src));
     }

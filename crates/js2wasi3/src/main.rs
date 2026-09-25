@@ -136,7 +136,11 @@ fn main() -> anyhow::Result<()> {
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?
             } else {
-                let world = plan_world(&entry, &ir, world)?;
+                let world = if ir.main.is_some() {
+                    component::command_world(world)
+                } else {
+                    plan_world(&entry, &ir, world)?
+                };
                 // The core module must export each function under its WIT name.
                 for (e, name) in ir.exports.iter_mut().zip(&world.export_names) {
                     e.name = name.clone();

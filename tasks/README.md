@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T10.** Start with the *Handoff* section in [T10-command-console.md](T10-command-console.md). The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T11.** T10 is done: a file without exports is a `wasi:cli/run` command and `console.log` works (see its Notes / Result). The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -20,7 +20,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T07](T07-component-lib.md) | Component v0: library world | done | T06 |
 | [T08](T08-jsval.md) | JS values on WasmGC | done | T07 |
 | [T09](T09-strings.md) | Strings + string boundary | done | T08 |
-| [T10](T10-command-console.md) | Command world + console.log (P3 stdout) | todo | T09 |
+| [T10](T10-command-console.md) | Command world + console.log (P3 stdout) | done | T09 |
 | [T11](T11-diff-harness.md) | Differential harness node vs wasmtime | todo | T10 |
 | [T12](T12-exceptions.md) | Exceptions (native EH) | todo | T11 |
 | [T13](T13-objects.md) | Objects and prototypes | todo | T12 |
@@ -53,7 +53,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F8 | Peephole: drop `f64->i32(i32->f64(x))` round trips between chained bitwise ops (correct, only wasteful; in Wasm each is a `$to_int32` call) | T05 | an optimisation pass, after T11 | [ ] |
 | F9 | `>>>` / `>>>=`: needs an unsigned `I32 → F64` convert in the IR | T05 | T08 | [x] T08 (signed convert + 2^32 if negative, no IR change) |
 | F10 | Implicit `undefined`: declarations without init, `return;` mixed with values, falling off the end, missing args, void results as values, postfix `++` as value, booleans as values | T05 | T08 | [x] T08 |
-| F11 | Top-level code and non-literal top-level initializers (module init) | T05 | T10 | [ ] |
+| F11 | Top-level code and non-literal top-level initializers (module init). Commands: done in T10 (`main`). Libraries (files with exports) still reject it: needs init code run before the first export call | T05 | T20 | [ ] |
 | F12 | `--emit-wit <file>`: write the generated WIT next to the component (component binaries don't keep the world/package name, `wasm-tools component wit` shows `root:component`) | T07 | any, when useful (latest T20) | [ ] |
 | F13 | Export signatures beyond `f64`: map `JsVal`/`Bool` params and results to WIT types at the boundary. T08: `$export` wrappers convert jsval ↔ f64 (ToNumber). T09: `string` done (JSDoc + usage); `bool`, `option`, records etc. remain | T07 | T20 (user WIT) | [ ] |
 | F14 | Inference: `bool`-typed slots (booleans stored in variables are boxed today), int32 ranges | T08 | optimisation pass, after T11 | [ ] |
@@ -64,3 +64,10 @@ Each open item names where it came from and which task should pick it up. When i
 | F19 | String literals as `array.new_fixed` globals cost ~3 bytes per code unit; long ones should come from a data segment (`array.new_data`, lazily) | T09 | optimisation pass, after T11 | [ ] |
 | F20 | String → number (ToNumber of a string: `"5" * 2`, `"1" == 1`) and `<`/`>` on two strings. Rejected when known to be a string, a trap at run time otherwise | T09 | T21 | [ ] |
 | F21 | Canonical ABI: more than 16 flat params (passed in memory) are rejected today | T09 | T20 | [ ] |
+| F22 | TDZ: a function reading a top-level `let`/`const` before `main` initialized it gets a placeholder value (only direct reads in `main` are rejected) | T10 | T12 (throw ReferenceError) | [ ] |
+| F23 | `console.log` format strings (`%s %d %i %f %j %o %O %c %%`, first of ≥2 args): rejected for literals, a trap otherwise | T10 | T21 | [ ] |
+| F24 | `console.log` of objects, arrays, functions (node's `util.inspect` format) | T10 | T13/T15 | [ ] |
+| F25 | Uncaught exception in a command: print it to stderr, flush, `task.return(err)` (`run` in `backend/src/host.rs` must catch `$js`) | T10 | T12 | [ ] |
+| F26 | Event loop: the callback ignores `TASK_CANCELLED`; output is only pumped while JS runs if the host takes writes at once (otherwise buffered until `main` returns) | T10 | T19 | [ ] |
+| F27 | When stdout's reader goes away (`\| head`) `run` returns `err` (exit 1); node exits 0. Decide which the harness expects | T10 | T11 | [ ] |
+| F28 | `var` in a nested top-level block (`{ var z }`, `for (var i …)`) is a local of `main`: functions using it are rejected | T10 | T14 | [ ] |

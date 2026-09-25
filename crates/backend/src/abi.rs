@@ -28,6 +28,8 @@ pub enum Helper {
     Realloc,
     Utf8ToString,
     StringToUtf8,
+    Utf8Len,
+    Utf8Encode,
 }
 
 impl Helper {
@@ -36,6 +38,8 @@ impl Helper {
             Helper::Realloc => "cabi_realloc",
             Helper::Utf8ToString => "utf8_to_string",
             Helper::StringToUtf8 => "string_to_utf8",
+            Helper::Utf8Len => "utf8_len",
+            Helper::Utf8Encode => "utf8_encode",
         }
     }
 
@@ -45,6 +49,8 @@ impl Helper {
             Helper::Realloc => (vec![I32; 4], vec![I32]),
             Helper::Utf8ToString => (vec![I32, I32], vec![runtime::string_ref()]),
             Helper::StringToUtf8 => (vec![runtime::string_ref()], vec![I32, I32]),
+            Helper::Utf8Len => (vec![runtime::string_ref()], vec![I32]),
+            Helper::Utf8Encode => (vec![runtime::string_ref(), I32], vec![]),
         }
     }
 
@@ -54,8 +60,12 @@ impl Helper {
             Helper::Utf8ToString => utf8_to_string(),
             Helper::StringToUtf8 => {
                 let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
-                string_to_utf8(realloc)
+                let len = cx.helper(runtime::Helper::Abi(Helper::Utf8Len));
+                let encode = cx.helper(runtime::Helper::Abi(Helper::Utf8Encode));
+                string_to_utf8(realloc, len, encode)
             }
+            Helper::Utf8Len => utf8_len(),
+            Helper::Utf8Encode => utf8_encode(),
         }
     }
 }
@@ -337,55 +347,70 @@ fn utf8_to_string() -> Function {
 
 /// `$string_to_utf8(s) -> (ptr, len)`: encode into freshly allocated memory. Lone surrogates
 /// become U+FFFD.
-fn string_to_utf8(realloc: u32) -> Function {
+fn string_to_utf8(realloc: u32, utf8_len: u32, utf8_encode: u32) -> Function {
+    const S: u32 = 0;
+    const LEN: u32 = 1;
+    const PTR: u32 = 2;
+    let mut f = Function::new([(2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(S).call(utf8_len).local_set(LEN);
+    s.i32_const(0)
+        .i32_const(0)
+        .i32_const(1)
+        .local_get(LEN)
+        .call(realloc)
+        .local_set(PTR);
+    s.local_get(S).local_get(PTR).call(utf8_encode);
+    s.local_get(PTR).local_get(LEN);
+    s.end();
+    f
+}
+
+/// Push "unit I is a high surrogate followed by a low surrogate" (reads U = s[I]).
+fn surrogate_pair(s: &mut InstructionSink, str_: u32, i: u32, n: u32, u: u32) {
+    s.local_get(u)
+        .i32_const(0xfc00)
+        .i32_and()
+        .i32_const(0xd800)
+        .i32_eq();
+    s.local_get(i)
+        .i32_const(1)
+        .i32_add()
+        .local_get(n)
+        .i32_lt_u();
+    s.i32_and();
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(str_)
+        .local_get(i)
+        .i32_const(1)
+        .i32_add()
+        .array_get_u(T_STRING);
+    s.i32_const(0xfc00).i32_and().i32_const(0xdc00).i32_eq();
+    s.else_();
+    s.i32_const(0);
+    s.end();
+}
+
+fn inc(s: &mut InstructionSink, l: u32, by: i32) {
+    s.local_get(l).i32_const(by).i32_add().local_set(l);
+}
+
+/// `$utf8_len(s) -> i32`: the UTF-8 byte length of `s` (lone surrogates count as U+FFFD).
+fn utf8_len() -> Function {
     const S: u32 = 0;
     const I: u32 = 1;
     const N: u32 = 2;
     const U: u32 = 3;
     const LEN: u32 = 4;
-    const PTR: u32 = 5;
-    const P: u32 = 6;
-    const CP: u32 = 7;
-    let mut f = Function::new([(7, ValType::I32)]);
+    let mut f = Function::new([(4, ValType::I32)]);
     let mut s = f.instructions();
     s.local_get(S).array_len().local_set(N);
-    // Push "unit I is a high surrogate followed by a low surrogate" (reads U = s[I]).
-    let pair = |s: &mut InstructionSink| {
-        s.local_get(U)
-            .i32_const(0xfc00)
-            .i32_and()
-            .i32_const(0xd800)
-            .i32_eq();
-        s.local_get(I)
-            .i32_const(1)
-            .i32_add()
-            .local_get(N)
-            .i32_lt_u();
-        s.i32_and();
-        s.if_(BlockType::Result(ValType::I32));
-        s.local_get(S)
-            .local_get(I)
-            .i32_const(1)
-            .i32_add()
-            .array_get_u(T_STRING);
-        s.i32_const(0xfc00).i32_and().i32_const(0xdc00).i32_eq();
-        s.else_();
-        s.i32_const(0);
-        s.end();
-    };
-    let load_unit = |s: &mut InstructionSink| {
-        s.local_get(S)
-            .local_get(I)
-            .array_get_u(T_STRING)
-            .local_set(U);
-    };
-    let inc = |s: &mut InstructionSink, l: u32, by: i32| {
-        s.local_get(l).i32_const(by).i32_add().local_set(l);
-    };
-    // Pass 1: byte length.
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).local_get(N).i32_ge_u().br_if(1);
-    load_unit(&mut s);
+    s.local_get(S)
+        .local_get(I)
+        .array_get_u(T_STRING)
+        .local_set(U);
     s.local_get(U).i32_const(0x80).i32_lt_u();
     s.if_(BlockType::Empty);
     inc(&mut s, LEN, 1);
@@ -394,7 +419,7 @@ fn string_to_utf8(realloc: u32) -> Function {
     s.if_(BlockType::Empty);
     inc(&mut s, LEN, 2);
     s.else_();
-    pair(&mut s);
+    surrogate_pair(&mut s, S, I, N, U);
     s.if_(BlockType::Empty);
     inc(&mut s, LEN, 4);
     inc(&mut s, I, 1);
@@ -406,25 +431,35 @@ fn string_to_utf8(realloc: u32) -> Function {
     s.end();
     inc(&mut s, I, 1);
     s.br(0).end().end();
-    // Allocate.
-    s.i32_const(0)
-        .i32_const(0)
-        .i32_const(1)
-        .local_get(LEN)
-        .call(realloc)
-        .local_tee(PTR)
-        .local_set(P);
-    // Pass 2: encode.
+    s.local_get(LEN);
+    s.end();
+    f
+}
+
+/// `$utf8_encode(s, p)`: write the UTF-8 of `s` at `p` (`$utf8_len(s)` bytes). Lone
+/// surrogates become U+FFFD.
+fn utf8_encode() -> Function {
+    const S: u32 = 0;
+    const P: u32 = 1;
+    const I: u32 = 2;
+    const N: u32 = 3;
+    const U: u32 = 4;
+    const CP: u32 = 5;
+    let mut f = Function::new([(4, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(S).array_len().local_set(N);
     let store = |s: &mut InstructionSink, value: &dyn Fn(&mut InstructionSink)| {
         s.local_get(P);
         value(s);
         s.i32_store8(mem(0, 0));
         s.local_get(P).i32_const(1).i32_add().local_set(P);
     };
-    s.i32_const(0).local_set(I);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).local_get(N).i32_ge_u().br_if(1);
-    load_unit(&mut s);
+    s.local_get(S)
+        .local_get(I)
+        .array_get_u(T_STRING)
+        .local_set(U);
     s.local_get(U).i32_const(0x80).i32_lt_u();
     s.if_(BlockType::Empty);
     store(&mut s, &|s| {
@@ -448,7 +483,7 @@ fn string_to_utf8(realloc: u32) -> Function {
             .i32_or();
     });
     s.else_();
-    pair(&mut s);
+    surrogate_pair(&mut s, S, I, N, U);
     s.if_(BlockType::Empty);
     {
         // cp = 0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
@@ -538,7 +573,6 @@ fn string_to_utf8(realloc: u32) -> Function {
     s.end();
     inc(&mut s, I, 1);
     s.br(0).end().end();
-    s.local_get(PTR).local_get(LEN);
     s.end();
     f
 }

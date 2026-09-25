@@ -68,12 +68,12 @@ fn module_level_rules() {
         "1:1 unsupported: import of another module (multi-file modules, F7) (planned: not scheduled)"
     );
     assert_eq!(
-        one("let a = 1;\na = 2;"),
-        "2:1 unsupported: top-level ExpressionStatement (top-level code runs in the command world) (planned: T10)"
+        one("export function f() {}\nlet a = 1;\na = 2;"),
+        "3:1 unsupported: top-level ExpressionStatement in a module with exports (library init code, F11; a file without exports is a command and may have top-level code) (planned: T20)"
     );
     assert_eq!(
-        one("let a = 1 + 2;"),
-        "1:5 unsupported: top-level variable whose initializer isn't a literal (needs module init code) (planned: T10)"
+        one("export function f() {}\nlet a = 1 + 2;"),
+        "2:5 unsupported: top-level variable whose initializer isn't a literal in a module with exports (library init code, F11) (planned: T20)"
     );
     assert_eq!(
         one("export let a = 1;"),
@@ -119,5 +119,71 @@ fn all_errors_are_reported() {
             "3:3 unsupported: operator `delete` (planned: T13)",
             "4:10 unsupported: operator `**` (planned: T21 (Math.pow))",
         ]
+    );
+}
+
+fn lowers(src: &str) -> String {
+    let alloc = Allocator::default();
+    let program = frontend::parse(&alloc, "t.js", src).unwrap();
+    match js2wasi3_lower::lower(&program) {
+        Ok(m) => m.to_string(),
+        Err(e) => panic!("{src}\n{e}"),
+    }
+}
+
+/// T10: a file without exports is a command; its top-level code runs in `main`.
+#[test]
+fn commands_lower() {
+    for src in [
+        "",
+        "console.log();",
+        "let a = 1;\na = 2;\nconsole.log(a);",
+        "let a = 1 + 2; const s = `a${a}`; console.error(s, a, -0, null);",
+        "function f() { return n; }\nlet n = 5;\nconsole.log(f());",
+        "for (let i = 0; i < 3; i++) { if (i) console.info(i); }",
+        "let u = console.log('x'); console.log(u === undefined);",
+        "console.log('100%'); console.log(1, '%s'); console.log('a b', 1);",
+        "import {} from './x.js';",
+    ] {
+        if src.starts_with("import") {
+            assert!(errors(src)[0].contains("import of another module"));
+            continue;
+        }
+        let ir = lowers(src);
+        assert!(ir.contains("main = main#"), "{ir}");
+    }
+}
+
+#[test]
+fn command_globals() {
+    // A literal initializer with no code before it is the initial value.
+    let ir = lowers("let a = 1;\nconsole.log(a);");
+    assert!(ir.contains("global @a: f64 mut = 1.0"), "{ir}");
+    // A `var` that code before it could read starts as `undefined` (hoisting).
+    let ir = lowers("console.log(v);\nvar v = 1;");
+    assert!(ir.contains("global @v: jsval mut = undefined"), "{ir}");
+    assert!(ir.contains("@v = f64->jsval(1.0)"), "{ir}");
+    // A non-literal `var` initializer could call a function that reads it.
+    let ir = lowers("var w = f();\nfunction f() { return w; }");
+    assert!(ir.contains("global @w: jsval mut = undefined"), "{ir}");
+}
+
+#[test]
+fn command_rules() {
+    assert_eq!(
+        one("console.log(x);\nlet x = 1;"),
+        "1:13 unsupported: `x` used before its `let`/`const` declaration (a ReferenceError at run time) (planned: T12)"
+    );
+    assert_eq!(
+        one("console.log('%d items', 3);"),
+        "1:13 unsupported: `console.log` format string (a first argument containing `%`, followed by more arguments) (planned: T21)"
+    );
+    assert_eq!(
+        one("export function f() { console.log(1); }"),
+        "1:23 unsupported: `console` in a module with exports (a library can't write to stdout yet) (planned: T20)"
+    );
+    assert_eq!(
+        one("console.table(1);"),
+        "1:1 unsupported: call of something other than a named function (planned: T14)"
     );
 }

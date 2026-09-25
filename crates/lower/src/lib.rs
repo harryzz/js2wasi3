@@ -30,6 +30,16 @@
 //! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
 //! that converts (box an `f64`, ToNumber / ToString of the result).
 //!
+//! **Commands** (T10): a file without exports is a `wasi:cli/run` command. Its top-level
+//! statements (all but function declarations) become a synthetic `main` ([`ir::Module::main`]).
+//! Top-level variables stay globals: `main` assigns them where they're declared, and a literal
+//! initializer is the global's initial value when no code can run first (a `var` that could be
+//! read before its declaration starts as `undefined`). `main` reading a `let`/`const` before its
+//! declaration is rejected (TDZ); a function doing so isn't detected yet (F-item, T12).
+//! `console.log`/`info`/`debug` (stdout) and `console.error`/`warn` (stderr) take primitives:
+//! each is shown like node (`-0` as `-0`), joined by spaces, plus a newline. A library (a file
+//! with exports) can't have top-level code or `console` yet (T20).
+//!
 //! Anything else produces `unsupported: <construct> (planned: <task>)` at its source
 //! position. The lowering never guesses: a construct it can't lower exactly is rejected.
 //! All diagnostics of a file are collected, not just the first.
@@ -69,6 +79,9 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             new_string_params: HashSet::new(),
             exported: HashSet::new(),
             jsdoc: HashMap::new(),
+            command: program.exports.is_empty(),
+            main: None,
+            lexical_end: HashMap::new(),
         };
         l.run();
         if let Some(next) = l.next_facts() {
@@ -172,6 +185,12 @@ struct Lowerer<'p, 'a> {
     /// Functions with an export.
     exported: HashSet<FuncId>,
     jsdoc: HashMap<FuncId, JsDoc>,
+    /// No ES exports: a `wasi:cli/run` command whose top-level code runs in `main`.
+    command: bool,
+    main: Option<FuncId>,
+    /// Top-level `let`/`const` of a command: where the declaration ends. `main` reading one
+    /// before that is a TDZ error.
+    lexical_end: HashMap<SymbolId, u32>,
 }
 
 /// A value being built: an IR expression, its type (`F64`, `Bool` or `JsVal`) and its kind.
@@ -374,8 +393,27 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let body = &self.p.ast.body;
         // Pass 1: declare every top-level function and global so bodies can refer to them in any order.
         let mut fns: Vec<(&'a Function<'a>, FuncId)> = Vec::new();
+        // A command's top-level code, in order (everything but function declarations).
+        let mut top: Vec<&'a Statement<'a>> = Vec::new();
         for stmt in body.iter() {
+            if self.command
+                && !matches!(stmt, Statement::FunctionDeclaration(_))
+                && stmt.as_module_declaration().is_none()
+            {
+                if let Statement::VariableDeclaration(d) = stmt {
+                    let _ = self.declare_command_globals(d, &top);
+                }
+                top.push(stmt);
+                continue;
+            }
             let _ = self.declare_top(stmt, &mut fns);
+        }
+        if self.command {
+            let mut f = ir::Function::new("main", &[], None);
+            f.pos = Some(Pos { line: 1, col: 1 });
+            self.main = Some(self.module.add_function(f));
+            self.module.main = self.main;
+            self.func_params.insert(self.main.unwrap(), Vec::new());
         }
         for e in &self.p.exports {
             if e.from.is_none()
@@ -418,6 +456,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         // Pass 2: lower bodies.
         for (f, id) in fns {
             let _ = self.lower_function(f, id);
+        }
+        if let Some(main) = self.main {
+            self.lower_main(main, &top);
         }
         // Pass 3: exports.
         for e in &self.p.exports {
@@ -480,10 +521,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             other => Err(self.unsupported(
                 other.span(),
                 &format!(
-                    "top-level {} (top-level code runs in the command world)",
+                    "top-level {} in a module with exports (library init code, F11; a file without exports is a command and may have top-level code)",
                     statement_kind(other)
                 ),
-                "T10",
+                "T20",
             )),
         }
     }
@@ -557,6 +598,134 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Ok(())
     }
 
+    /// A command's top-level variables are globals, assigned by `main` where they're declared.
+    /// A literal initializer becomes the global's initial value when no code can run before the
+    /// declaration. A `var` read before its declaration is `undefined`, so it starts as
+    /// `undefined` when any code comes before it or its initializer isn't a literal.
+    fn declare_command_globals(
+        &mut self,
+        d: &'a VariableDeclaration<'a>,
+        before: &[&'a Statement<'a>],
+    ) -> R<()> {
+        if matches!(
+            d.kind,
+            VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing
+        ) {
+            return Err(self.unsupported(d.span, "`using` declaration", "not scheduled"));
+        }
+        let is_var = d.kind == VariableDeclarationKind::Var;
+        let mut result = Ok(());
+        for decl in &d.declarations {
+            let BindingPattern::BindingIdentifier(b) = &decl.id else {
+                result = Err(self.unsupported(decl.span, "destructuring declaration", "T15"));
+                continue;
+            };
+            let sym = b
+                .symbol_id
+                .get()
+                .expect("semantic analysis assigns symbols");
+            let slot = Slot::Var(sym);
+            let literal = decl.init.as_ref().and_then(|e| self.literal(e));
+            // (A non-literal initializer may call a function that reads the variable.)
+            let undefined_first = is_var && (!before.is_empty() || literal.is_none());
+            let init = match literal {
+                _ if decl.init.is_none() || undefined_first => Some(Const::Undefined),
+                Some(c) => Some(c),
+                // Non-literal: `main` sets it before any (non-TDZ) read.
+                None => None,
+            };
+            if let Some(c) = &init {
+                self.observe(slot, Kind::of_const(c));
+            }
+            let ty = self.slot_ty(slot);
+            // A placeholder of the slot's type when there's no initial value.
+            let init = init.unwrap_or(if ty == Type::F64 {
+                Const::F64(0.0)
+            } else {
+                Const::Undefined
+            });
+            self.module.globals.push(ir::Global {
+                name: b.name.to_string(),
+                ty,
+                mutable: true,
+                init,
+            });
+            let id = GlobalId(self.module.globals.len() as u32 - 1);
+            self.globals.insert(sym, id);
+            self.names.insert(b.name.to_string(), Binding::Global);
+            if !is_var {
+                self.lexical_end.insert(sym, decl.span.end);
+            }
+        }
+        result
+    }
+
+    /// `main`: a command's top-level code. Top-level variables are globals set in place.
+    fn lower_main(&mut self, id: FuncId, top: &[&'a Statement<'a>]) {
+        let func = self.module.functions[id.0 as usize].clone();
+        let mut cx = FnCx {
+            id,
+            func,
+            locals: HashMap::new(),
+            next_label: 0,
+            targets: Vec::new(),
+            var_undefined: Vec::new(),
+        };
+        let mut stmts = Vec::new();
+        for s in top {
+            let _ = match s {
+                Statement::VariableDeclaration(d) => self.global_inits(&mut cx, d, &mut stmts),
+                _ => self.stmt(&mut cx, s, &mut stmts),
+            };
+        }
+        let mut body: Vec<Stmt> = cx
+            .var_undefined
+            .iter()
+            .map(|l| Stmt::Set(*l, Expr::undefined()))
+            .collect();
+        body.extend(stmts);
+        cx.func.body = body;
+        self.module.functions[id.0 as usize] = cx.func;
+    }
+
+    /// The assignments of a top-level declaration in `main` (see [`Self::declare_command_globals`]).
+    fn global_inits(
+        &mut self,
+        cx: &mut FnCx,
+        d: &'a VariableDeclaration<'a>,
+        out: &mut Vec<Stmt>,
+    ) -> R<()> {
+        let mut result = Ok(());
+        for decl in &d.declarations {
+            let BindingPattern::BindingIdentifier(b) = &decl.id else {
+                continue; // reported when declared
+            };
+            let sym = b
+                .symbol_id
+                .get()
+                .expect("semantic analysis assigns symbols");
+            let g = self.globals[&sym];
+            let global = &self.module.globals[g.0 as usize];
+            let (ty, init) = (global.ty, global.init);
+            let Some(e) = &decl.init else {
+                continue; // `undefined` from the start
+            };
+            if init != Const::Undefined && self.literal(e).is_some() {
+                continue; // the literal is the initial value
+            }
+            let v = match self.expr(cx, e) {
+                Ok(v) => v,
+                Err(e) => {
+                    result = Err(e);
+                    continue;
+                }
+            };
+            let e = self.store(Slot::Var(sym), ty, v);
+            out.push(Stmt::SetGlobal(g, e));
+        }
+        result
+    }
+
     fn declare_globals(&mut self, d: &'a VariableDeclaration<'a>) -> R<()> {
         let mut result = Ok(());
         for decl in &d.declarations {
@@ -571,8 +740,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let Some(init) = init else {
                 result = Err(self.unsupported(
                     decl.span,
-                    "top-level variable whose initializer isn't a literal (needs module init code)",
-                    "T10",
+                    "top-level variable whose initializer isn't a literal in a module with exports (library init code, F11)",
+                    "T20",
                 ));
                 continue;
             };
@@ -1218,7 +1387,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Expression::CallExpression(c) => {
                 let call = self.call(cx, c)?;
                 let &Expr::Call { func, .. } = &call else {
-                    unreachable!()
+                    // `console.log(…)` as a value: `undefined`.
+                    return Ok(Val::js(
+                        Expr::Seq {
+                            body: vec![Stmt::Expr(call)],
+                            value: Box::new(Expr::undefined()),
+                        },
+                        Kind::Any,
+                    ));
                 };
                 match self.module.function(func).result {
                     Some(Type::F64) => Ok(Val {
@@ -1508,6 +1684,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if c.optional {
             return Err(self.unsupported(span, "optional call `?.()`", "T14"));
         }
+        if let Some(stderr) = self.console_method(&c.callee) {
+            return self.console(cx, c, stderr);
+        }
         let Expression::Identifier(id) = &c.callee else {
             return Err(self.unsupported(
                 c.callee.span(),
@@ -1561,6 +1740,101 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         result?;
         Ok(Expr::Call { func, args })
+    }
+
+    /// `console.log`/`info`/`debug` (`Some(false)`: stdout) or `console.error`/`warn`
+    /// (`Some(true)`: stderr), when `console` is the global.
+    fn console_method(&self, callee: &Expression<'a>) -> Option<bool> {
+        let Expression::StaticMemberExpression(m) = callee else {
+            return None;
+        };
+        let Expression::Identifier(obj) = &m.object else {
+            return None;
+        };
+        if obj.name != "console"
+            || m.optional
+            || self
+                .scoping
+                .get_reference(obj.reference_id())
+                .symbol_id()
+                .is_some()
+        {
+            return None;
+        }
+        match m.property.name.as_str() {
+            "log" | "info" | "debug" => Some(false),
+            "error" | "warn" => Some(true),
+            _ => None,
+        }
+    }
+
+    /// `console.log(a, b, …)` on primitives: each argument formatted (`-0` prints as `-0`),
+    /// joined by spaces, plus a newline. With several arguments a string first argument is a
+    /// format string (`%s`, `%d`, `%%`…), which isn't implemented: rejected for a literal with
+    /// `%`, a trap at run time for other strings containing `%`.
+    fn console(&mut self, cx: &mut FnCx, c: &'a CallExpression<'a>, stderr: bool) -> R<Expr> {
+        if !self.command {
+            return Err(self.unsupported(
+                c.span,
+                "`console` in a module with exports (a library can't write to stdout yet)",
+                "T20",
+            ));
+        }
+        let several = c.arguments.len() > 1;
+        let mut parts = Vec::new();
+        let mut result = Ok(());
+        for (i, a) in c.arguments.iter().enumerate() {
+            let Some(e) = a.as_expression() else {
+                result = Err(self.unsupported(a.span(), "spread argument", "T15"));
+                continue;
+            };
+            let v = match self.expr(cx, e) {
+                Ok(v) => v,
+                Err(e) => {
+                    result = Err(e);
+                    continue;
+                }
+            };
+            if i == 0 && several && matches!(v.kind, Kind::Str | Kind::Any) {
+                match static_string(e) {
+                    Some(text) if text.contains('%') => {
+                        result = Err(self.unsupported(
+                            e.span(),
+                            "`console.log` format string (a first argument containing `%`, followed by more arguments)",
+                            "T21",
+                        ));
+                        continue;
+                    }
+                    Some(_) => parts.push(v.e),
+                    None => parts.push(Expr::intrinsic(
+                        Intrinsic::Inspect,
+                        vec![Expr::intrinsic(Intrinsic::NoFormat, vec![jsval_of(v)])],
+                    )),
+                }
+                continue;
+            }
+            parts.push(match v.kind {
+                Kind::Str => v.e,
+                _ => Expr::intrinsic(Intrinsic::Inspect, vec![jsval_of(v)]),
+            });
+        }
+        result?;
+        let mut line = Vec::new();
+        for (i, p) in parts.into_iter().enumerate() {
+            if i > 0 {
+                line.push(Expr::str(" "));
+            }
+            line.push(p);
+        }
+        line.push(Expr::str("\n"));
+        let text = line
+            .into_iter()
+            .reduce(|a, b| Expr::intrinsic(Intrinsic::Concat, vec![a, b]))
+            .expect("the newline");
+        Ok(Expr::intrinsic(
+            Intrinsic::ConsoleWrite { stderr },
+            vec![text],
+        ))
     }
 
     /// `x = e` / `x op= e`: the variable and the converted value to store.
@@ -1655,6 +1929,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 .get(&sym)
                 .map(|g| (Place::Global(*g), self.module.globals[g.0 as usize].ty))
         };
+        if cx.id == self.main.unwrap_or(FuncId(u32::MAX))
+            && self
+                .lexical_end
+                .get(&sym)
+                .is_some_and(|end| span.start < *end)
+        {
+            return Err(self.unsupported(
+                span,
+                &format!(
+                    "`{}` used before its `let`/`const` declaration (a ReferenceError at run time)",
+                    id.name
+                ),
+                "T12",
+            ));
+        }
         if let Some((place, ty)) = place {
             // f64 slots are `Num` or `Bottom`, matching their type.
             let kind = self.slot_kind(Slot::Var(sym));
@@ -1722,6 +2011,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 }
 
 // ---- conversions -----------------------------------------------------------------------
+
+/// The text of a string literal or a template literal without substitutions.
+fn static_string<'x>(e: &'x Expression) -> Option<&'x str> {
+    match e.without_parentheses() {
+        Expression::StringLiteral(s) => Some(s.value.as_str()),
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
+            t.quasis[0].value.cooked.as_ref().map(|c| c.as_str())
+        }
+        _ => None,
+    }
+}
 
 /// JS ToNumber.
 fn number_of(v: Val) -> Expr {

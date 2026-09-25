@@ -65,6 +65,10 @@ The event loop is the **async callback lift**. The export runs JS until no micro
 then returns `WAIT` on one waitable set (or `EXIT` after `task.return`). The callback settles the
 Promise for the finished handle, drains microtasks again, and repeats.
 Probes 2 and 5 in `probes/` show this loop working with Wasmtime 49.
+(T10: a file without exports is a command: its top-level code is a synthetic `main`. `crates/backend/src/host.rs` holds
+every WASI call (fixed imports) and the `run` export + callback; `console.*` output goes to per-stream buffers that are
+written as soon as the host takes them, and the callback finishes blocked writes, closes the streams and awaits their
+futures before `task.return`. The WASI 0.3.1 WIT is vendored in `crates/component/wit/`.)
 
 ### D4. The WIT boundary follows jco/componentize-js conventions
 The entry module's ES exports become the world's exports. WIT types map to JS:
