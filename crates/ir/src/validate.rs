@@ -3,16 +3,17 @@
 //! Checks id ranges, label scoping (`Break` to an enclosing `Block`/`Loop`, `Continue`
 //! only to an enclosing `Loop`, no label defined twice on one path), and types: assignments,
 //! returns, conditions, operand types allowed for each op, call arity/argument types, and
-//! no value-less call used as a value. Placeholder kinds (`Try`, `Throw`, `Suspend`) are
-//! checked structurally only.
+//! no value-less call used as a value, `Break`/`Continue` never leaving a `Seq`.
+//! Placeholder kinds (`Try`, `Throw`, `Suspend`) are checked structurally only.
 
-use crate::{BinOp, Const, Expr, Function, Module, Stmt, Type, UnOp};
+use crate::{BinOp, Expr, Function, Module, Stmt, Type, UnOp};
 
 /// Validate a whole module. Each error names the function it's in.
 pub fn validate(m: &Module) -> Result<(), Vec<String>> {
     let mut errs = Vec::new();
     for g in &m.globals {
-        if const_ty(&g.init) != g.ty {
+        // A `jsval` global may start as any constant; the backend converts it.
+        if g.init.ty() != g.ty && g.ty != Type::JsVal {
             errs.push(format!(
                 "global @{}: init {:?} is not {}",
                 g.name, g.init, g.ty
@@ -46,14 +47,6 @@ pub fn validate(m: &Module) -> Result<(), Vec<String>> {
         }
     }
     if errs.is_empty() { Ok(()) } else { Err(errs) }
-}
-
-fn const_ty(c: &Const) -> Type {
-    match c {
-        Const::F64(_) => Type::F64,
-        Const::I32(_) => Type::I32,
-        Const::Bool(_) => Type::Bool,
-    }
 }
 
 struct V<'m> {
@@ -192,7 +185,7 @@ impl V<'_> {
 
     fn expr(&mut self, e: &Expr) -> Option<Type> {
         match e {
-            Expr::Const(c) => Some(const_ty(c)),
+            Expr::Const(c) => Some(c.ty()),
             Expr::Local(l) => self.local_ty(*l),
             Expr::Global(g) => match self.m.globals.get(g.0 as usize) {
                 Some(gl) => Some(gl.ty),
@@ -232,9 +225,12 @@ impl V<'_> {
                         BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr | BinOp::ShrU
                     ),
                     Type::Bool => matches!(op, BinOp::Eq | BinOp::Ne),
-                    Type::JsVal => false,
+                    Type::JsVal => {
+                        matches!(op, BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe)
+                    }
                 };
-                if !ok {
+                let loose_ok = *ty == Type::JsVal || !matches!(op, BinOp::LooseEq | BinOp::LooseNe);
+                if !ok || !loose_ok {
                     self.err(format!("{op:?} is not defined on {ty}"));
                 }
                 Some(if op.is_comparison() { Type::Bool } else { *ty })
@@ -242,7 +238,13 @@ impl V<'_> {
             Expr::Convert { from, to, arg } => {
                 let t = self.value("convert operand", arg);
                 self.expect("convert operand", t, *from);
-                if !matches!((from, to), (Type::F64, Type::I32) | (Type::I32, Type::F64)) {
+                if !matches!(
+                    (from, to),
+                    (Type::F64, Type::I32)
+                        | (Type::I32, Type::F64)
+                        | (Type::F64 | Type::Bool, Type::JsVal)
+                        | (Type::JsVal, Type::F64 | Type::Bool)
+                ) {
                     self.err(format!("conversion {from} -> {to} is not defined"));
                 }
                 Some(*to)
@@ -284,6 +286,18 @@ impl V<'_> {
             Expr::Suspend { arg, .. } => {
                 self.value("suspend operand", arg);
                 Some(Type::JsVal)
+            }
+            Expr::TypeofIs { arg, .. } => {
+                let t = self.value("typeof operand", arg);
+                self.expect("typeof operand", t, Type::JsVal);
+                Some(Type::Bool)
+            }
+            Expr::Seq { body, value } => {
+                // Labels outside the `Seq` aren't branch targets from inside it.
+                let outer = std::mem::take(&mut self.labels);
+                self.stmts(body);
+                self.labels = outer;
+                self.expr(value)
             }
         }
     }
@@ -354,6 +368,56 @@ mod tests {
             "func f#0: Shl is not defined on f64",
             "func f#0: call f: 0 args for 1 params",
             "func f#0: return without a value in a function returning f64",
+        ];
+        assert_eq!(errs, want);
+    }
+
+    #[test]
+    fn checks_jsval_nodes() {
+        use crate::{BinOp, Const, TypeofTag};
+        let mut f = Function::new("f", &[("a", Type::F64)], None);
+        let js = Expr::Const(Const::Null);
+        f.body = vec![
+            // ok: === on jsval, typeof of a jsval, bool -> jsval
+            Stmt::Expr(Expr::binary(BinOp::Eq, Type::JsVal, js.clone(), js.clone())),
+            Stmt::Expr(Expr::TypeofIs {
+                arg: Box::new(js.clone()),
+                tag: TypeofTag::Number,
+            }),
+            Stmt::Expr(Expr::convert(Type::Bool, Type::JsVal, Expr::bool(true))),
+            // errors
+            Stmt::Expr(Expr::binary(
+                BinOp::LooseEq,
+                Type::F64,
+                Expr::f64(1.0),
+                Expr::f64(1.0),
+            )),
+            Stmt::Expr(Expr::binary(
+                BinOp::Add,
+                Type::JsVal,
+                js.clone(),
+                js.clone(),
+            )),
+            Stmt::Expr(Expr::TypeofIs {
+                arg: Box::new(Expr::f64(1.0)),
+                tag: TypeofTag::Number,
+            }),
+            Stmt::Expr(Expr::convert(Type::Bool, Type::I32, Expr::bool(true))),
+            Stmt::Loop {
+                label: LabelId(0),
+                body: vec![Stmt::Expr(Expr::Seq {
+                    body: vec![Stmt::Break(LabelId(0))],
+                    value: Box::new(js),
+                })],
+            },
+        ];
+        let errs = validate(&module(f)).unwrap_err();
+        let want = [
+            "func f#0: LooseEq is not defined on f64",
+            "func f#0: Add is not defined on jsval",
+            "func f#0: typeof operand: expected jsval, got f64",
+            "func f#0: conversion bool -> i32 is not defined",
+            "func f#0: break L0: no enclosing block or loop with that label",
         ];
         assert_eq!(errs, want);
     }

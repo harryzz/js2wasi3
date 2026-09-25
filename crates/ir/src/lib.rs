@@ -24,14 +24,19 @@
 //! - `Throw(e)` *(placeholder, T12)*: throw a JS value.
 //!
 //! Expressions ([`Expr`]):
-//! - `Const(c)`: `f64`, `i32` or `bool` literal.
+//! - `Const(c)`: `f64`, `i32` or `bool` literal, or `undefined` / `null` (type `jsval`).
 //! - `Local(l)` / `Global(g)`: read.
 //! - `Tee(l, e)`: assign to a local and yield the value (JS assignment expressions).
 //! - `Unary { op, ty, arg }` / `Binary { op, ty, lhs, rhs }`: machine ops on operands of type
 //!   `ty` (`F64` or `I32`, `Bool` for logical `Not`/`Eq`/`Ne`). Comparisons yield `Bool`.
-//!   These are *not* JS operators. JS `+` on dynamic values arrives in T08 as its own node.
-//! - `Convert { from, to, arg }`: numeric conversion. `F64 → I32` is JS `ToInt32` (modulo 2^32, NaN/±inf → 0),
-//!   not a saturating truncation. `I32 → F64` is signed.
+//!   These are machine ops, except on `JsVal`: `Eq`/`Ne` are JS `===`/`!==` and `LooseEq`/`LooseNe`
+//!   are JS `==`/`!=` (both only on `JsVal`). Arithmetic on JS values goes through `JsVal → F64` first.
+//! - `TypeofIs { arg, tag }`: `typeof arg === "<tag>"`, as `Bool` (`arg` is `JsVal`).
+//! - `Seq { body, value }`: run `body`, then evaluate `value`. `body` must not `Break`/`Continue` out.
+//! - `Convert { from, to, arg }`: `F64 → I32` is JS `ToInt32` (modulo 2^32, NaN/±inf → 0),
+//!   not a saturating truncation. `I32 → F64` is signed. `F64 → JsVal` boxes a number, `JsVal → F64` is
+//!   JS `ToNumber`, `Bool → JsVal` picks the `true`/`false` value, `JsVal → Bool` is JS `ToBoolean`.
+//!   (T08: primitives only; strings and objects extend the runtime helpers.)
 //! - `Cond { cond, then, els, ty }`: conditional expression (`?:`, `&&`, `||` after lowering).
 //! - `Call { func, args }`: direct call.
 //! - `Suspend { kind, arg }` *(placeholder, T18/T19)*: `await` / `yield` point.
@@ -126,6 +131,65 @@ pub enum Const {
     F64(f64),
     I32(i32),
     Bool(bool),
+    /// `jsval`.
+    Undefined,
+    /// `jsval`.
+    Null,
+}
+
+impl Const {
+    pub fn ty(&self) -> Type {
+        match self {
+            Const::F64(_) => Type::F64,
+            Const::I32(_) => Type::I32,
+            Const::Bool(_) => Type::Bool,
+            Const::Undefined | Const::Null => Type::JsVal,
+        }
+    }
+}
+
+/// A result of JS `typeof`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeofTag {
+    Undefined,
+    Object,
+    Boolean,
+    Number,
+    String,
+    Symbol,
+    Function,
+    BigInt,
+}
+
+impl TypeofTag {
+    pub const ALL: [TypeofTag; 8] = [
+        TypeofTag::Undefined,
+        TypeofTag::Object,
+        TypeofTag::Boolean,
+        TypeofTag::Number,
+        TypeofTag::String,
+        TypeofTag::Symbol,
+        TypeofTag::Function,
+        TypeofTag::BigInt,
+    ];
+
+    /// The string `typeof` returns.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TypeofTag::Undefined => "undefined",
+            TypeofTag::Object => "object",
+            TypeofTag::Boolean => "boolean",
+            TypeofTag::Number => "number",
+            TypeofTag::String => "string",
+            TypeofTag::Symbol => "symbol",
+            TypeofTag::Function => "function",
+            TypeofTag::BigInt => "bigint",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<TypeofTag> {
+        TypeofTag::ALL.into_iter().find(|t| t.as_str() == s)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -163,13 +227,24 @@ pub enum BinOp {
     Shr,
     /// Logical shift right: JS `>>>`.
     ShrU,
+    /// `JsVal` only: JS `==`.
+    LooseEq,
+    /// `JsVal` only: JS `!=`.
+    LooseNe,
 }
 
 impl BinOp {
     pub fn is_comparison(self) -> bool {
         matches!(
             self,
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::LooseEq
+                | BinOp::LooseNe
         )
     }
 }
@@ -245,6 +320,14 @@ pub enum Expr {
         kind: SuspendKind,
         arg: Box<Expr>,
     },
+    TypeofIs {
+        arg: Box<Expr>,
+        tag: TypeofTag,
+    },
+    Seq {
+        body: Vec<Stmt>,
+        value: Box<Expr>,
+    },
 }
 
 impl Expr {
@@ -259,6 +342,16 @@ impl Expr {
     }
     pub fn local(l: LocalId) -> Expr {
         Expr::Local(l)
+    }
+    pub fn undefined() -> Expr {
+        Expr::Const(Const::Undefined)
+    }
+    pub fn convert(from: Type, to: Type, arg: Expr) -> Expr {
+        Expr::Convert {
+            from,
+            to,
+            arg: Box::new(arg),
+        }
     }
     pub fn unary(op: UnOp, ty: Type, arg: Expr) -> Expr {
         Expr::Unary {
@@ -280,9 +373,7 @@ impl Expr {
     /// Assumes well-formed IR (ids in range).
     pub fn ty(&self, func: &Function, module: &Module) -> Option<Type> {
         Some(match self {
-            Expr::Const(Const::F64(_)) => Type::F64,
-            Expr::Const(Const::I32(_)) => Type::I32,
-            Expr::Const(Const::Bool(_)) => Type::Bool,
+            Expr::Const(c) => c.ty(),
             Expr::Local(l) | Expr::Tee(l, _) => func.local(*l).ty,
             Expr::Global(g) => module.globals[g.0 as usize].ty,
             Expr::Unary { ty, .. } => *ty,
@@ -297,6 +388,8 @@ impl Expr {
             Expr::Cond { ty, .. } => *ty,
             Expr::Call { func: f, .. } => return module.functions[f.0 as usize].result,
             Expr::Suspend { .. } => Type::JsVal,
+            Expr::TypeofIs { .. } => Type::Bool,
+            Expr::Seq { value, .. } => return value.ty(func, module),
         })
     }
 }

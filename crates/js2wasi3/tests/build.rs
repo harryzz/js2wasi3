@@ -81,3 +81,24 @@ fn bad_world_option() {
     assert!(!b.status.success());
     assert!(String::from_utf8_lossy(&b.stderr).contains("is not a WIT identifier"));
 }
+
+/// T08 acceptance: `values.js` (typeof, equality and truthiness tables, ToNumber, implicit
+/// `undefined`, `>>>`, ...) matches node's results in `values.out` (`jsName(args) result` per line).
+#[test]
+fn values_match_node() {
+    let out = out_dir("values").join("values.wasm");
+    let b = build(&fixture("values.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let expected = std::fs::read_to_string(fixture("values.out")).unwrap();
+    for line in expected.lines() {
+        let (call, want) = line.rsplit_once(' ').unwrap();
+        let (name, args) = call.split_once('(').unwrap();
+        let wit = js2wasi3_component::names::to_wit(name).unwrap();
+        let got = invoke(&out, &format!("{wit}({args}"));
+        assert_eq!(
+            got.parse::<f64>().unwrap(),
+            want.parse::<f64>().unwrap(),
+            "{call}"
+        );
+    }
+}

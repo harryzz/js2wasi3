@@ -1,26 +1,36 @@
 //! Lowering: checked JS AST ([`js2wasi3_frontend::Program`]) → [`js2wasi3_ir::Module`].
 //!
-//! # T05 subset: numbers only
-//! Every JS value is an `f64`. Comparisons, `!`, `&&`/`||` over booleans and boolean
-//! literals produce IR `Bool`, which may **only** be used as a condition: nothing in this
-//! subset can observe a boolean as a value, so no boolean representation is needed yet.
+//! # Subset (T05 numbers + T08 primitive values)
+//! Values are numbers, booleans, `undefined` and `null`. Expressions have one of three IR types:
+//! `f64`, `bool` (comparisons, `!`, boolean literals) or `jsval` (anything else); see [`Val`].
 //!
-//! Supported: top-level `function` declarations (exported or not), simple parameters,
-//! `var`/`let`/`const` with an initializer, top-level variables with a numeric-literal
-//! initializer (they become globals), number literals, `+ - * / %`, unary `- + ! ~`,
-//! `| & ^ << >>`, comparisons, `&& || ??`, `?:`, assignment and compound assignment,
-//! `++`/`--` (postfix only as a statement), direct calls with exact arity, `if`,
-//! `while`, `do/while`, `for`, labels, `break`, `continue`, `return`.
+//! **Type inference** is optimistic and driven by the lowering itself: every variable, parameter
+//! and function result starts as `f64`. When the lowering would store a non-`f64` value into an
+//! `f64` slot, it records the slot as *demoted* to `jsval`, and [`lower`] runs again with that
+//! knowledge until no new slot is demoted. So a slot is `f64` exactly when every value stored
+//! into it is a number, and the inference can't disagree with the code it produces.
+//!
+//! Supported: top-level `function` declarations (exported or not), simple parameters (missing
+//! arguments are `undefined`), `var`/`let`/`const`, top-level variables with a literal
+//! initializer (they become globals), number/boolean/`null` literals, `undefined`, `NaN`,
+//! `Infinity`, `+ - * / %` (on primitives: ToNumber), unary `- + ! ~ void`,
+//! `| & ^ << >> >>>`, comparisons, `=== !== == !=`, `typeof x === "..."`, `&& || ??`, `?:`,
+//! comma, assignment and compound assignment, `++`/`--`, direct calls, `if`, `while`,
+//! `do/while`, `for`, labels, `break`, `continue`, `return`.
+//!
+//! An export whose parameters or result aren't all `f64` gets a wrapper `<name>$export`
+//! with `f64` parameters (boxed into JS values) and an `f64` result (ToNumber).
 //!
 //! Anything else produces `unsupported: <construct> (planned: <task>)` at its source
 //! position. The lowering never guesses: a construct it can't lower exactly is rejected.
 //! All diagnostics of a file are collected, not just the first.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use js2wasi3_frontend::{Diagnostic, Diagnostics, Program, line_col, statement_kind};
 use js2wasi3_ir::{
-    self as ir, BinOp, Const, Expr, FuncId, GlobalId, LabelId, LocalId, Pos, Stmt, Type, UnOp,
+    self as ir, BinOp, Const, Expr, FuncId, GlobalId, LabelId, LocalId, Pos, Stmt, Type, TypeofTag,
+    UnOp,
 };
 use oxc_ast::ast::*;
 use oxc_semantic::Scoping;
@@ -34,22 +44,43 @@ use oxc_syntax::{
 
 /// Lower a whole module. Returns every unsupported construct as a diagnostic.
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
-    let mut l = Lowerer {
-        p: program,
-        scoping: program.semantic.scoping(),
-        module: ir::Module::default(),
-        funcs: HashMap::new(),
-        globals: HashMap::new(),
-        names: HashMap::new(),
-        diags: Vec::new(),
-    };
-    l.run();
-    if l.diags.is_empty() {
-        Ok(l.module)
-    } else {
-        l.diags.sort_by_key(|d| (d.line, d.col));
-        Err(Diagnostics(l.diags))
+    let mut demoted = HashSet::new();
+    loop {
+        let mut l = Lowerer {
+            p: program,
+            scoping: program.semantic.scoping(),
+            module: ir::Module::default(),
+            funcs: HashMap::new(),
+            func_params: HashMap::new(),
+            globals: HashMap::new(),
+            names: HashMap::new(),
+            diags: Vec::new(),
+            demoted: &demoted,
+            newly_demoted: HashSet::new(),
+        };
+        l.run();
+        if !l.newly_demoted.is_empty() {
+            // Each round demotes at least one more slot, so this terminates.
+            let new = std::mem::take(&mut l.newly_demoted);
+            drop(l);
+            demoted.extend(new);
+            continue;
+        }
+        return if l.diags.is_empty() {
+            l.wrap_exports();
+            Ok(l.module)
+        } else {
+            l.diags.sort_by_key(|d| (d.line, d.col));
+            Err(Diagnostics(l.diags))
+        };
     }
+}
+
+/// Something whose type is inferred: a variable or parameter (by symbol) or a function result.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Slot {
+    Var(SymbolId),
+    Result(FuncId),
 }
 
 /// Marker: a diagnostic has been recorded, abandon the current construct.
@@ -67,17 +98,22 @@ struct Lowerer<'p, 'a> {
     scoping: &'p Scoping,
     module: ir::Module,
     funcs: HashMap<SymbolId, FuncId>,
+    /// Parameter symbols of each function, for typing arguments.
+    func_params: HashMap<FuncId, Vec<Option<SymbolId>>>,
     globals: HashMap<SymbolId, GlobalId>,
     /// Top-level names, for resolving the export list.
     names: HashMap<String, Binding>,
     diags: Vec<Diagnostic>,
+    /// Slots known to hold non-numbers (from earlier rounds).
+    demoted: &'p HashSet<Slot>,
+    /// Slots found to hold non-numbers in this round.
+    newly_demoted: HashSet<Slot>,
 }
 
-/// A value being built: an IR expression and its type (`F64` or `Bool`).
+/// A value being built: an IR expression and its type (`F64`, `Bool` or `JsVal`).
 struct Val {
     e: Expr,
     ty: Type,
-    span: Span,
 }
 
 /// A `break`/`continue` target.
@@ -98,10 +134,13 @@ enum TargetKind {
 }
 
 struct FnCx {
+    id: FuncId,
     func: ir::Function,
     locals: HashMap<SymbolId, LocalId>,
     next_label: u32,
     targets: Vec<Target>,
+    /// `var` declarations without an initializer: set to `undefined` on entry.
+    var_undefined: Vec<LocalId>,
 }
 
 impl FnCx {
@@ -111,9 +150,18 @@ impl FnCx {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Place {
     Local(LocalId),
     Global(GlobalId),
+}
+
+/// A resolved variable: where it lives, its slot and its type.
+#[derive(Clone, Copy)]
+struct Var {
+    place: Place,
+    sym: SymbolId,
+    ty: Type,
 }
 
 impl<'p, 'a> Lowerer<'p, 'a> {
@@ -134,6 +182,35 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     fn pos(&self, span: Span) -> Pos {
         let (line, col) = line_col(self.p.source, span.start);
         Pos { line, col }
+    }
+
+    // ---- inferred types ----------------------------------------------------------------
+
+    fn slot_ty(&self, s: Slot) -> Type {
+        if self.demoted.contains(&s) || self.newly_demoted.contains(&s) {
+            Type::JsVal
+        } else {
+            Type::F64
+        }
+    }
+
+    /// Record that `s` holds non-numbers. Its current `f64` code is discarded by a new round.
+    fn demote(&mut self, s: Slot) {
+        if !self.demoted.contains(&s) {
+            self.newly_demoted.insert(s);
+        }
+    }
+
+    /// `v` converted for storing into `slot` of type `ty` (demoting the slot if needed).
+    fn store(&mut self, slot: Slot, ty: Type, v: Val) -> Expr {
+        match ty {
+            Type::JsVal => jsval_of(v),
+            _ if v.ty == Type::F64 => v.e,
+            _ => {
+                self.demote(slot);
+                Expr::f64(0.0) // placeholder: this round's module is thrown away
+            }
+        }
     }
 
     // ---- module ------------------------------------------------------------------------
@@ -248,15 +325,27 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             bad = true;
         }
         let body = f.body.as_ref().expect("function declarations have a body");
-        let returns_value = body.statements.iter().any(has_value_return);
-        let sig: Vec<(&str, Type)> = params.iter().map(|(n, _)| (*n, Type::F64)).collect();
+        let id = FuncId(self.module.functions.len() as u32);
+        let result = Slot::Result(id);
+        // A function has a result if it returns a value, or if its (undefined) result is used.
+        let returns_value =
+            body.statements.iter().any(has_value_return) || self.slot_ty(result) == Type::JsVal;
+        let sig: Vec<(&str, Type)> = params
+            .iter()
+            .map(|(n, sym)| {
+                let ty = sym.map_or(Type::F64, |s| self.slot_ty(Slot::Var(s)));
+                (*n, ty)
+            })
+            .collect();
         let mut func = ir::Function::new(
             id_node.name.as_str(),
             &sig,
-            returns_value.then_some(Type::F64),
+            returns_value.then(|| self.slot_ty(result)),
         );
         func.pos = Some(self.pos(f.span));
-        let id = self.module.add_function(func);
+        self.module.add_function(func);
+        self.func_params
+            .insert(id, params.iter().map(|(_, s)| *s).collect());
         if let Some(sym) = id_node.symbol_id.get() {
             self.funcs.insert(sym, id);
         }
@@ -276,24 +365,34 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 result = Err(self.unsupported(decl.span, "destructuring declaration", "T15"));
                 continue;
             };
-            let Some(init) = decl.init.as_ref().and_then(literal_number) else {
+            let init = match &decl.init {
+                None => Some(Const::Undefined),
+                Some(e) => self.literal(e),
+            };
+            let Some(init) = init else {
                 result = Err(self.unsupported(
                     decl.span,
-                    "top-level variable without a numeric-literal initializer (needs module init code)",
+                    "top-level variable whose initializer isn't a literal (needs module init code)",
                     "T10",
                 ));
                 continue;
             };
+            let sym = b
+                .symbol_id
+                .get()
+                .expect("semantic analysis assigns symbols");
+            let slot = Slot::Var(sym);
+            if init.ty() != Type::F64 {
+                self.demote(slot);
+            }
             self.module.globals.push(ir::Global {
                 name: b.name.to_string(),
-                ty: Type::F64,
+                ty: self.slot_ty(slot),
                 mutable: d.kind != VariableDeclarationKind::Const,
-                init: Const::F64(init),
+                init,
             });
             let id = GlobalId(self.module.globals.len() as u32 - 1);
-            if let Some(sym) = b.symbol_id.get() {
-                self.globals.insert(sym, id);
-            }
+            self.globals.insert(sym, id);
             self.names.insert(b.name.to_string(), Binding::Global);
         }
         result
@@ -320,15 +419,60 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// Give every export whose signature isn't all `f64` an `f64` wrapper (the WIT boundary is `f64`).
+    fn wrap_exports(&mut self) {
+        let mut wrappers: HashMap<FuncId, FuncId> = HashMap::new();
+        for i in 0..self.module.exports.len() {
+            let func = self.module.exports[i].func;
+            let f = self.module.function(func).clone();
+            let params = &f.locals[..f.params as usize];
+            if params.iter().all(|l| l.ty == Type::F64) && f.result != Some(Type::JsVal) {
+                continue;
+            }
+            let wrapper = *wrappers.entry(func).or_insert_with(|| {
+                let sig: Vec<(&str, Type)> = params
+                    .iter()
+                    .map(|l| (l.name.as_str(), Type::F64))
+                    .collect();
+                let result = f.result.map(|_| Type::F64);
+                let mut w = ir::Function::new(format!("{}$export", f.name), &sig, result);
+                w.pos = f.pos;
+                let args = params
+                    .iter()
+                    .enumerate()
+                    .map(|(j, l)| {
+                        let p = Expr::local(LocalId(j as u32));
+                        match l.ty {
+                            Type::JsVal => Expr::convert(Type::F64, Type::JsVal, p),
+                            _ => p,
+                        }
+                    })
+                    .collect();
+                let call = Expr::Call { func, args };
+                w.body = vec![match f.result {
+                    None => Stmt::Expr(call),
+                    Some(Type::JsVal) => {
+                        Stmt::Return(Some(Expr::convert(Type::JsVal, Type::F64, call)))
+                    }
+                    Some(_) => Stmt::Return(Some(call)),
+                }];
+                self.module.add_function(w)
+            });
+            self.module.exports[i].func = wrapper;
+        }
+    }
+
     // ---- functions ---------------------------------------------------------------------
 
     fn lower_function(&mut self, f: &'a Function<'a>, id: FuncId) -> R<()> {
         let func = self.module.functions[id.0 as usize].clone();
         let mut cx = FnCx {
+            id,
             func,
             locals: HashMap::new(),
             next_label: 0,
             targets: Vec::new(),
+            var_undefined: Vec::new(),
         };
         for (i, p) in f.params.items.iter().enumerate() {
             if let BindingPattern::BindingIdentifier(b) = &p.pattern
@@ -339,19 +483,25 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let body = f.body.as_ref().expect("function declarations have a body");
         let before = self.diags.len();
-        let stmts = self.stmts(&mut cx, &body.statements);
-        if cx.func.result.is_some() && !always_returns(&body.statements) {
-            let span = Span::new(body.span.end.saturating_sub(1), body.span.end);
-            self.unsupported(
-                span,
-                "function may reach its end without returning a value (implicit `undefined`)",
-                "T08",
-            );
+        let mut stmts = self.stmts(&mut cx, &body.statements);
+        if let Some(ty) = cx.func.result
+            && !always_returns(&body.statements)
+        {
+            // Falling off the end returns `undefined`.
+            let v = self.undefined_val();
+            let e = self.store(Slot::Result(id), ty, v);
+            stmts.push(Stmt::Return(Some(e)));
         }
         if self.diags.len() > before {
             return Err(Unsupported);
         }
-        cx.func.body = stmts;
+        let mut body: Vec<Stmt> = cx
+            .var_undefined
+            .iter()
+            .map(|l| Stmt::Set(*l, Expr::undefined()))
+            .collect();
+        body.extend(stmts);
+        cx.func.body = body;
         self.module.functions[id.0 as usize] = cx.func;
         Ok(())
     }
@@ -383,31 +533,35 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Statement::VariableDeclaration(d) => self.var_decl(cx, d, out),
             Statement::ReturnStatement(r) => {
-                let v = match &r.argument {
-                    Some(a) => {
-                        let v = self.expr(cx, a)?;
-                        Some(self.number_of(v)?)
+                let v = match (&r.argument, cx.func.result) {
+                    (None, None) => None,
+                    (Some(a), None) => {
+                        // `has_value_return` gives such functions a result.
+                        unreachable!(
+                            "return value at {:?} in a function without a result",
+                            a.span()
+                        )
                     }
-                    None if cx.func.result.is_some() => {
-                        return Err(self.unsupported(
-                            r.span,
-                            "`return;` in a function that also returns a value (implicit `undefined`)",
-                            "T08",
-                        ));
+                    (a, Some(ty)) => {
+                        // `return;` next to value returns returns `undefined`.
+                        let v = match a {
+                            Some(a) => self.expr(cx, a)?,
+                            None => self.undefined_val(),
+                        };
+                        Some(self.store(Slot::Result(cx.id), ty, v))
                     }
-                    None => None,
                 };
                 out.push(Stmt::Return(v));
                 Ok(())
             }
             Statement::IfStatement(i) => {
-                let c = self.expr(cx, &i.test);
+                let c = self.cond_expr(cx, &i.test);
                 let then = self.stmt_body(cx, &i.consequent);
                 let els = match &i.alternate {
                     Some(a) => self.stmt_body(cx, a),
                     None => Vec::new(),
                 };
-                let cond = self.cond_of(c?);
+                let cond = c?;
                 out.push(Stmt::If { cond, then, els });
                 Ok(())
             }
@@ -495,33 +649,40 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 result = Err(self.unsupported(decl.span, "destructuring declaration", "T15"));
                 continue;
             };
-            let Some(init) = &decl.init else {
-                result = Err(self.unsupported(
-                    decl.span,
-                    "declaration without an initializer (its value is `undefined`)",
-                    "T08",
-                ));
-                continue;
+            let sym = b
+                .symbol_id
+                .get()
+                .expect("semantic analysis assigns symbols");
+            let slot = Slot::Var(sym);
+            let v = match &decl.init {
+                Some(init) => self.expr(cx, init),
+                None => Ok(self.undefined_val()),
             };
-            let v = match self.expr(cx, init).and_then(|v| self.number_of(v)) {
+            let ty = self.slot_ty(slot);
+            // Declared even if the initializer failed, so later uses don't report more errors.
+            let local = match cx.locals.get(&sym) {
+                Some(l) => *l,
+                None => {
+                    let l = cx.func.add_local(b.name.as_str(), ty);
+                    cx.locals.insert(sym, l);
+                    l
+                }
+            };
+            let v = match v {
                 Ok(v) => v,
                 Err(e) => {
                     result = Err(e);
                     continue;
                 }
             };
-            let sym = b
-                .symbol_id
-                .get()
-                .expect("semantic analysis assigns symbols");
-            let local = match cx.locals.get(&sym) {
-                Some(l) => *l,
-                None => {
-                    let l = cx.func.add_local(b.name.as_str(), Type::F64);
-                    cx.locals.insert(sym, l);
-                    l
+            let v = self.store(slot, ty, v);
+            if decl.init.is_none() && d.kind == VariableDeclarationKind::Var {
+                // `var x;` doesn't reset `x`: it's `undefined` from function entry on.
+                if !cx.var_undefined.contains(&local) {
+                    cx.var_undefined.push(local);
                 }
-            };
+                continue;
+            }
             out.push(Stmt::Set(local, v));
         }
         result
@@ -535,7 +696,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         out: &mut Vec<Stmt>,
     ) -> R<()> {
         let brk = cx.label();
-        let test = self.expr(cx, &w.test);
+        let test = self.cond_expr(cx, &w.test);
         cx.targets.push(Target {
             js_label: name,
             brk,
@@ -543,7 +704,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         });
         let body = self.stmt_body(cx, &w.body);
         cx.targets.pop();
-        let test = self.cond_of(test?);
+        let test = test?;
         let mut inner = exit_unless(test, brk);
         inner.extend(body);
         inner.push(Stmt::Continue(brk));
@@ -569,9 +730,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         });
         let body = self.stmt_body(cx, &w.body);
         let t = cx.targets.pop().expect("pushed above");
-        let test = self.expr(cx, &w.test);
+        let test = self.cond_expr(cx, &w.test);
         let mut inner = wrap_continue(t.kind, body);
-        let test = self.cond_of(test?);
+        let test = test?;
         inner.push(Stmt::If {
             cond: test,
             then: vec![Stmt::Continue(brk)],
@@ -603,7 +764,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
         }
         let brk = cx.label();
-        let test = f.test.as_ref().map(|t| self.expr(cx, t));
+        let test = f.test.as_ref().map(|t| self.cond_expr(cx, t));
         cx.targets.push(Target {
             js_label: name,
             brk,
@@ -616,7 +777,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             result = result.and(self.expr_stmt(cx, u, &mut update));
         }
         let mut inner = match test {
-            Some(t) => exit_unless(self.cond_of(t?), brk),
+            Some(t) => exit_unless(t?, brk),
             None => Vec::new(),
         };
         inner.extend(wrap_continue(t.kind, body));
@@ -641,19 +802,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 result
             }
             Expression::AssignmentExpression(a) => {
-                let (place, value) = self.assignment(cx, a)?;
-                out.push(set(place, value));
+                let (var, value) = self.assignment(cx, a)?;
+                out.push(set(var.place, value));
                 Ok(())
             }
             Expression::UpdateExpression(u) => {
-                let (place, value) = self.update(cx, u)?;
-                out.push(set(place, value));
+                let (var, value) = self.update(cx, u)?;
+                out.push(set(var.place, value));
                 Ok(())
             }
             Expression::CallExpression(c) => {
                 let call = self.call(cx, c)?;
                 out.push(Stmt::Expr(call));
                 Ok(())
+            }
+            Expression::UnaryExpression(u) if u.operator == UnaryOperator::Void => {
+                self.expr_stmt(cx, &u.argument, out)
             }
             _ => {
                 let v = self.expr(cx, e)?;
@@ -663,123 +827,156 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// An expression used only for its truthiness (`if`, loop tests, `!`, `?:` tests).
+    /// `&&`, `||`, `!` and `?:` combine truthiness directly, so their operands are never boxed.
+    fn cond_expr(&mut self, cx: &mut FnCx, e: &'a Expression<'a>) -> R<Expr> {
+        match e {
+            Expression::ParenthesizedExpression(p) => self.cond_expr(cx, &p.expression),
+            Expression::LogicalExpression(l) if l.operator != LogicalOperator::Coalesce => {
+                let a = self.cond_expr(cx, &l.left);
+                let b = self.cond_expr(cx, &l.right);
+                let (a, b) = (a?, b?);
+                Ok(if l.operator == LogicalOperator::And {
+                    bool_cond(a, b, Expr::bool(false))
+                } else {
+                    bool_cond(a, Expr::bool(true), b)
+                })
+            }
+            Expression::UnaryExpression(u) if u.operator == UnaryOperator::LogicalNot => {
+                let c = self.cond_expr(cx, &u.argument)?;
+                Ok(Expr::unary(UnOp::Not, Type::Bool, c))
+            }
+            Expression::ConditionalExpression(c) => {
+                let t = self.cond_expr(cx, &c.test);
+                let a = self.cond_expr(cx, &c.consequent);
+                let b = self.cond_expr(cx, &c.alternate);
+                Ok(bool_cond(t?, a?, b?))
+            }
+            _ => Ok(cond_of(self.expr(cx, e)?)),
+        }
+    }
+
     // ---- expressions -------------------------------------------------------------------
 
     fn expr(&mut self, cx: &mut FnCx, e: &'a Expression<'a>) -> R<Val> {
         let span = e.span();
-        let num = |e: Expr| Val {
-            e,
-            ty: Type::F64,
-            span,
-        };
-        let boolean = |e: Expr| Val {
-            e,
-            ty: Type::Bool,
-            span,
-        };
+        let val = |e: Expr, ty: Type| Val { e, ty };
         match e {
-            Expression::NumericLiteral(n) => Ok(num(Expr::f64(n.value))),
-            Expression::BooleanLiteral(b) => Ok(boolean(Expr::bool(b.value))),
+            Expression::NumericLiteral(n) => Ok(val(Expr::f64(n.value), Type::F64)),
+            Expression::BooleanLiteral(b) => Ok(val(Expr::bool(b.value), Type::Bool)),
+            Expression::NullLiteral(_) => Ok(val(Expr::Const(Const::Null), Type::JsVal)),
             Expression::ParenthesizedExpression(p) => {
                 let v = self.expr(cx, &p.expression)?;
-                Ok(Val { span, ..v })
+                Ok(v)
             }
-            Expression::Identifier(id) => match self.resolve(cx, id)? {
-                Place::Local(l) => Ok(num(Expr::Local(l))),
-                Place::Global(g) => Ok(num(Expr::Global(g))),
-            },
+            Expression::Identifier(id) => {
+                if let Some(c) = self.global_constant(id) {
+                    return Ok(val(Expr::Const(c), c.ty()));
+                }
+                let var = self.resolve(cx, id)?;
+                Ok(val(read(var.place), var.ty))
+            }
             Expression::BinaryExpression(b) => self.binary(cx, b),
             Expression::LogicalExpression(l) => self.logical(cx, l),
-            Expression::UnaryExpression(u) => {
-                let v = self.expr(cx, &u.argument)?;
-                match u.operator {
-                    UnaryOperator::UnaryNegation => {
-                        Ok(num(Expr::unary(UnOp::Neg, Type::F64, self.number_of(v)?)))
-                    }
-                    UnaryOperator::UnaryPlus => Ok(num(self.number_of(v)?)),
-                    UnaryOperator::LogicalNot => {
-                        Ok(boolean(Expr::unary(UnOp::Not, Type::Bool, self.cond_of(v))))
-                    }
-                    UnaryOperator::BitwiseNot => {
-                        let x = to_i32(self.number_of(v)?);
-                        Ok(num(from_i32(Expr::unary(UnOp::BitNot, Type::I32, x))))
-                    }
-                    op => {
-                        Err(self.unsupported(span, &format!("operator `{}`", op.as_str()), "T08"))
-                    }
+            Expression::UnaryExpression(u) => match u.operator {
+                UnaryOperator::LogicalNot => {
+                    let c = self.cond_expr(cx, &u.argument)?;
+                    Ok(val(Expr::unary(UnOp::Not, Type::Bool, c), Type::Bool))
                 }
-            }
+                UnaryOperator::Void => {
+                    let mut body = Vec::new();
+                    self.expr_stmt(cx, &u.argument, &mut body)?;
+                    let value = Box::new(Expr::undefined());
+                    Ok(val(Expr::Seq { body, value }, Type::JsVal))
+                }
+                UnaryOperator::Typeof => Err(self.unsupported(
+                    span,
+                    "`typeof` used as a value (it's a string); only `typeof x === \"...\"` works so far",
+                    "T09",
+                )),
+                UnaryOperator::Delete => Err(self.unsupported(span, "operator `delete`", "T13")),
+                op => {
+                    let v = number_of(self.expr(cx, &u.argument)?);
+                    let e = match op {
+                        UnaryOperator::UnaryNegation => Expr::unary(UnOp::Neg, Type::F64, v),
+                        UnaryOperator::UnaryPlus => v,
+                        UnaryOperator::BitwiseNot => {
+                            from_i32(Expr::unary(UnOp::BitNot, Type::I32, to_i32(v)))
+                        }
+                        _ => unreachable!("all unary operators are handled"),
+                    };
+                    Ok(val(e, Type::F64))
+                }
+            },
             Expression::ConditionalExpression(c) => {
-                let test = self.expr(cx, &c.test);
+                let test = self.cond_expr(cx, &c.test);
                 let then = self.expr(cx, &c.consequent);
                 let els = self.expr(cx, &c.alternate);
-                let (test, then, els) = (test?, then?, els?);
-                let cond = Box::new(self.cond_of(test));
-                if then.ty == Type::Bool || els.ty == Type::Bool {
-                    // Only usable as a condition, so truthiness is all that matters.
-                    let (then, els) = (self.cond_of(then), self.cond_of(els));
-                    Ok(boolean(Expr::Cond {
-                        cond,
-                        then: Box::new(then),
-                        els: Box::new(els),
-                        ty: Type::Bool,
-                    }))
-                } else {
-                    Ok(num(Expr::Cond {
-                        cond,
-                        then: Box::new(then.e),
-                        els: Box::new(els.e),
-                        ty: Type::F64,
-                    }))
-                }
+                let (cond, then, els) = (test?, then?, els?);
+                let (then, els, ty) = unify(then, els);
+                let e = Expr::Cond {
+                    cond: Box::new(cond),
+                    then: Box::new(then),
+                    els: Box::new(els),
+                    ty,
+                };
+                Ok(val(e, ty))
             }
             Expression::AssignmentExpression(a) => {
-                let (place, value) = self.assignment(cx, a)?;
-                match place {
-                    Place::Local(l) => Ok(num(Expr::Tee(l, Box::new(value)))),
-                    Place::Global(_) => Err(self.unsupported(
-                        span,
-                        "assignment to a module variable used as a value",
-                        "T08",
-                    )),
-                }
+                let (var, value) = self.assignment(cx, a)?;
+                Ok(val(assign_value(var, value), var.ty))
+            }
+            Expression::UpdateExpression(u) if u.prefix => {
+                let (var, value) = self.update(cx, u)?;
+                Ok(val(assign_value(var, value), var.ty))
             }
             Expression::UpdateExpression(u) => {
-                if !u.prefix {
-                    return Err(self.unsupported(span, "postfix `++`/`--` used as a value", "T08"));
-                }
-                let (place, value) = self.update(cx, u)?;
-                match place {
-                    Place::Local(l) => Ok(num(Expr::Tee(l, Box::new(value)))),
-                    Place::Global(_) => Err(self.unsupported(
-                        span,
-                        "update of a module variable used as a value",
-                        "T08",
-                    )),
-                }
+                // Postfix: the value is the old value as a number.
+                let (var, op) = self.update_target(cx, u)?;
+                let old = cx.func.add_local("old", Type::F64);
+                let new = Val {
+                    e: Expr::binary(op, Type::F64, Expr::Local(old), Expr::f64(1.0)),
+                    ty: Type::F64,
+                };
+                let new = self.store(Slot::Var(var.sym), var.ty, new);
+                let body = vec![
+                    Stmt::Set(old, number_of(val(read(var.place), var.ty))),
+                    set(var.place, new),
+                ];
+                let value = Box::new(Expr::Local(old));
+                Ok(val(Expr::Seq { body, value }, Type::F64))
             }
             Expression::CallExpression(c) => {
                 let call = self.call(cx, c)?;
                 let Expr::Call { func, .. } = &call else {
                     unreachable!()
                 };
-                if self.module.function(*func).result.is_none() {
-                    return Err(self.unsupported(
-                        span,
-                        "using the result of a function that returns nothing (`undefined`)",
-                        "T08",
-                    ));
+                match self.module.function(*func).result {
+                    Some(ty) => Ok(val(call, ty)),
+                    None => {
+                        // Its `undefined` result is used, so the function gets a result.
+                        self.demote(Slot::Result(*func));
+                        Ok(self.undefined_val())
+                    }
                 }
-                Ok(num(call))
+            }
+            Expression::SequenceExpression(s) => {
+                let (last, init) = s.expressions.split_last().expect("non-empty sequence");
+                let mut body = Vec::new();
+                let mut result = Ok(());
+                for x in init {
+                    result = result.and(self.expr_stmt(cx, x, &mut body));
+                }
+                let v = self.expr(cx, last);
+                result?;
+                let v = v?;
+                let value = Box::new(v.e);
+                Ok(val(Expr::Seq { body, value }, v.ty))
             }
             Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
                 Err(self.unsupported(span, "string", "T09"))
             }
-            Expression::NullLiteral(_) => Err(self.unsupported(span, "`null`", "T08")),
             Expression::BigIntLiteral(_) => Err(self.unsupported(span, "BigInt", "not scheduled")),
-            Expression::SequenceExpression(_) => {
-                Err(self.unsupported(span, "comma operator used as a value", "later"))
-            }
             Expression::ObjectExpression(_) => Err(self.unsupported(span, "object literal", "T13")),
             Expression::ArrayExpression(_) => Err(self.unsupported(span, "array literal", "T15")),
             Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
@@ -798,12 +995,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     fn binary(&mut self, cx: &mut FnCx, b: &'a BinaryExpression<'a>) -> R<Val> {
         let span = b.span;
+        use BinaryOperator as B;
+        if b.operator.is_equality()
+            && let Some(v) = self.typeof_compare(cx, b)?
+        {
+            return Ok(v);
+        }
         let l = self.expr(cx, &b.left);
         let r = self.expr(cx, &b.right);
         let (l, r) = (l?, r?);
-        use BinaryOperator as B;
-        let arith = |op| Some((op, false));
-        let cmp = |op| Some((op, true));
+        let num = |e| Val { e, ty: Type::F64 };
         let bitwise = match b.operator {
             B::BitwiseOR => Some(BinOp::Or),
             B::BitwiseAnd => Some(BinOp::And),
@@ -813,99 +1014,161 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             _ => None,
         };
         if let Some(op) = bitwise {
-            let (l, r) = (self.number_of(l)?, self.number_of(r)?);
-            let e = from_i32(Expr::binary(op, Type::I32, to_i32(l), to_i32(r)));
-            return Ok(Val {
-                e,
-                ty: Type::F64,
-                span,
-            });
+            let (l, r) = (to_i32(number_of(l)), to_i32(number_of(r)));
+            return Ok(num(from_i32(Expr::binary(op, Type::I32, l, r))));
         }
-        let op = match b.operator {
-            B::Addition => arith(BinOp::Add),
-            B::Subtraction => arith(BinOp::Sub),
-            B::Multiplication => arith(BinOp::Mul),
-            B::Division => arith(BinOp::Div),
-            B::Remainder => arith(BinOp::Rem),
-            // With numbers only, loose and strict equality coincide.
-            B::StrictEquality | B::Equality => cmp(BinOp::Eq),
-            B::StrictInequality | B::Inequality => cmp(BinOp::Ne),
-            B::LessThan => cmp(BinOp::Lt),
-            B::LessEqualThan => cmp(BinOp::Le),
-            B::GreaterThan => cmp(BinOp::Gt),
-            B::GreaterEqualThan => cmp(BinOp::Ge),
+        if b.operator == B::ShiftRightZeroFill {
+            return Ok(num(ushr(cx, number_of(l), number_of(r))));
+        }
+        let eq = match b.operator {
+            B::StrictEquality => Some((BinOp::Eq, true)),
+            B::StrictInequality => Some((BinOp::Ne, true)),
+            B::Equality => Some((BinOp::Eq, false)),
+            B::Inequality => Some((BinOp::Ne, false)),
             _ => None,
         };
-        let Some((op, is_cmp)) = op else {
-            let planned = match b.operator {
-                B::ShiftRightZeroFill => "T08 (needs unsigned i32 → f64)",
-                B::Exponential => "T21 (Math.pow)",
-                _ => "T13",
-            };
-            return Err(self.unsupported(
-                span,
-                &format!("operator `{}`", b.operator.as_str()),
-                planned,
-            ));
+        if let Some((op, strict)) = eq {
+            return Ok(Val {
+                e: equality(l, r, op, strict),
+                ty: Type::Bool,
+            });
+        }
+        // Arithmetic and relational operators on primitives: ToNumber on both operands.
+        // (`+` and `<` on two strings arrive with T09.)
+        let op = match b.operator {
+            B::Addition => BinOp::Add,
+            B::Subtraction => BinOp::Sub,
+            B::Multiplication => BinOp::Mul,
+            B::Division => BinOp::Div,
+            B::Remainder => BinOp::Rem,
+            B::LessThan => BinOp::Lt,
+            B::LessEqualThan => BinOp::Le,
+            B::GreaterThan => BinOp::Gt,
+            B::GreaterEqualThan => BinOp::Ge,
+            _ => {
+                let planned = match b.operator {
+                    B::Exponential => "T21 (Math.pow)",
+                    _ => "T13",
+                };
+                return Err(self.unsupported(
+                    span,
+                    &format!("operator `{}`", b.operator.as_str()),
+                    planned,
+                ));
+            }
         };
-        let (l, r) = (self.number_of(l)?, self.number_of(r)?);
-        let ty = if is_cmp { Type::Bool } else { Type::F64 };
-        Ok(Val {
-            e: Expr::binary(op, Type::F64, l, r),
-            ty,
-            span,
-        })
+        let e = Expr::binary(op, Type::F64, number_of(l), number_of(r));
+        let ty = if op.is_comparison() {
+            Type::Bool
+        } else {
+            Type::F64
+        };
+        Ok(Val { e, ty })
+    }
+
+    /// `typeof x === "tag"` (also `==`, `!==`, `!=`, either side). `None` if `b` isn't one.
+    fn typeof_compare(&mut self, cx: &mut FnCx, b: &'a BinaryExpression<'a>) -> R<Option<Val>> {
+        let (u, s) = match (b.left.without_parentheses(), b.right.without_parentheses()) {
+            (Expression::UnaryExpression(u), Expression::StringLiteral(s))
+            | (Expression::StringLiteral(s), Expression::UnaryExpression(u))
+                if u.operator == UnaryOperator::Typeof =>
+            {
+                (u, s)
+            }
+            _ => return Ok(None),
+        };
+        let v = self.expr(cx, &u.argument)?;
+        let tag = TypeofTag::parse(s.value.as_str());
+        let e = match v.ty {
+            Type::JsVal => match tag {
+                Some(tag) => Expr::TypeofIs {
+                    arg: Box::new(v.e),
+                    tag,
+                },
+                // No value has that typeof.
+                None => Expr::Seq {
+                    body: vec![Stmt::Expr(v.e)],
+                    value: Box::new(Expr::bool(false)),
+                },
+            },
+            // Known statically.
+            ty => {
+                let known = if ty == Type::F64 {
+                    TypeofTag::Number
+                } else {
+                    TypeofTag::Boolean
+                };
+                Expr::Seq {
+                    body: vec![Stmt::Expr(v.e)],
+                    value: Box::new(Expr::bool(tag == Some(known))),
+                }
+            }
+        };
+        let negate = matches!(
+            b.operator,
+            BinaryOperator::StrictInequality | BinaryOperator::Inequality
+        );
+        let e = if negate {
+            Expr::unary(UnOp::Not, Type::Bool, e)
+        } else {
+            e
+        };
+        Ok(Some(Val { e, ty: Type::Bool }))
     }
 
     fn logical(&mut self, cx: &mut FnCx, l: &'a LogicalExpression<'a>) -> R<Val> {
-        let span = l.span;
         let a = self.expr(cx, &l.left);
         let b = self.expr(cx, &l.right);
         let (a, b) = (a?, b?);
         if l.operator == LogicalOperator::Coalesce {
-            // A number is never null/undefined: `a ?? b` is `a` and `b` is not evaluated.
-            return Ok(Val { span, ..a });
+            if a.ty != Type::JsVal {
+                // A number or boolean is never null/undefined: `a ?? b` is `a`, `b` isn't evaluated.
+                return Ok(a);
+            }
+            let tmp = cx.func.add_local("tmp", Type::JsVal);
+            let nullish = Expr::binary(
+                BinOp::LooseEq,
+                Type::JsVal,
+                Expr::Tee(tmp, Box::new(a.e)),
+                Expr::Const(Const::Null),
+            );
+            let e = Expr::Cond {
+                cond: Box::new(nullish),
+                then: Box::new(jsval_of(b)),
+                els: Box::new(Expr::Local(tmp)),
+                ty: Type::JsVal,
+            };
+            return Ok(Val { e, ty: Type::JsVal });
         }
         let and = l.operator == LogicalOperator::And;
-        if a.ty == Type::Bool || b.ty == Type::Bool {
-            // The result is only usable as a condition: combine truthiness.
-            let (a, b) = (self.cond_of(a), self.cond_of(b));
-            let (then, els) = if and {
-                (b, Expr::bool(false))
+        // The result is one of the operands, so they get a common type.
+        let (a, b, ty) = unify(a, b);
+        let e = if ty == Type::Bool {
+            if and {
+                bool_cond(a, b, Expr::bool(false))
             } else {
-                (Expr::bool(true), b)
+                bool_cond(a, Expr::bool(true), b)
+            }
+        } else {
+            // Evaluate `a` once into a temp.
+            let tmp = cx.func.add_local("tmp", ty);
+            let cond = cond_of(Val {
+                e: Expr::Tee(tmp, Box::new(a)),
+                ty,
+            });
+            let (then, els) = if and {
+                (b, Expr::Local(tmp))
+            } else {
+                (Expr::Local(tmp), b)
             };
-            let e = Expr::Cond {
-                cond: Box::new(a),
+            Expr::Cond {
+                cond: Box::new(cond),
                 then: Box::new(then),
                 els: Box::new(els),
-                ty: Type::Bool,
-            };
-            return Ok(Val {
-                e,
-                ty: Type::Bool,
-                span,
-            });
-        }
-        // Numbers: the result is one of the operands. Evaluate `a` once into a temp.
-        let tmp = cx.func.add_local("tmp", Type::F64);
-        let cond = truthy(Expr::Tee(tmp, Box::new(a.e)));
-        let (then, els) = if and {
-            (b.e, Expr::Local(tmp))
-        } else {
-            (Expr::Local(tmp), b.e)
+                ty,
+            }
         };
-        let e = Expr::Cond {
-            cond: Box::new(cond),
-            then: Box::new(then),
-            els: Box::new(els),
-            ty: Type::F64,
-        };
-        Ok(Val {
-            e,
-            ty: Type::F64,
-            span,
-        })
+        Ok(Val { e, ty })
     }
 
     fn call(&mut self, cx: &mut FnCx, c: &'a CallExpression<'a>) -> R<Expr> {
@@ -928,34 +1191,48 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             };
             return Err(self.unsupported(span, &what, "T14/T21"));
         };
-        let params = self.module.function(func).params as usize;
-        if c.arguments.len() != params {
+        let params = self.func_params[&func].clone();
+        if c.arguments.len() > params.len() {
             return Err(self.unsupported(
                 span,
                 &format!(
-                    "call with {} argument(s) to a function with {params} parameter(s)",
-                    c.arguments.len()
+                    "call with {} argument(s) to a function with {} parameter(s)",
+                    c.arguments.len(),
+                    params.len()
                 ),
-                "T08",
+                "later",
             ));
         }
         let mut args = Vec::new();
         let mut result = Ok(());
-        for a in &c.arguments {
-            let Some(e) = a.as_expression() else {
-                result = Err(self.unsupported(a.span(), "spread argument", "T15"));
-                continue;
+        for (i, sym) in params.iter().enumerate() {
+            // A missing argument is `undefined`.
+            let v = match c.arguments.get(i) {
+                None => self.undefined_val(),
+                Some(a) => {
+                    let Some(e) = a.as_expression() else {
+                        result = Err(self.unsupported(a.span(), "spread argument", "T15"));
+                        continue;
+                    };
+                    match self.expr(cx, e) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            result = Err(e);
+                            continue;
+                        }
+                    }
+                }
             };
-            match self.expr(cx, e).and_then(|v| self.number_of(v)) {
-                Ok(v) => args.push(v),
-                Err(e) => result = Err(e),
-            }
+            let ty = self.module.function(func).locals[i].ty;
+            let sym = sym.expect("parameters have symbols");
+            args.push(self.store(Slot::Var(sym), ty, v));
         }
         result?;
         Ok(Expr::Call { func, args })
     }
 
-    fn assignment(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<(Place, Expr)> {
+    /// `x = e` / `x op= e`: the variable and the converted value to store.
+    fn assignment(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<(Var, Expr)> {
         let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
             return Err(self.unsupported(
                 a.left.span(),
@@ -963,45 +1240,54 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 "T13/T15",
             ));
         };
-        let place = self.resolve(cx, id)?;
-        let rhs = self.expr(cx, &a.right).and_then(|v| self.number_of(v))?;
-        use AssignmentOperator as A;
-        let op = match a.operator {
-            A::Assign => return Ok((place, rhs)),
-            A::Addition => BinOp::Add,
-            A::Subtraction => BinOp::Sub,
-            A::Multiplication => BinOp::Mul,
-            A::Division => BinOp::Div,
-            A::Remainder => BinOp::Rem,
-            A::BitwiseOR | A::BitwiseAnd | A::BitwiseXOR | A::ShiftLeft | A::ShiftRight => {
-                let op = match a.operator {
-                    A::BitwiseOR => BinOp::Or,
-                    A::BitwiseAnd => BinOp::And,
-                    A::BitwiseXOR => BinOp::Xor,
-                    A::ShiftLeft => BinOp::Shl,
-                    _ => BinOp::Shr,
-                };
-                let e = from_i32(Expr::binary(
-                    op,
-                    Type::I32,
-                    to_i32(read(&place)),
-                    to_i32(rhs),
-                ));
-                return Ok((place, e));
-            }
-            op => {
-                return Err(self.unsupported(
-                    a.span,
-                    &format!("operator `{}`", op.as_str()),
-                    "T08",
-                ));
-            }
+        let var = self.resolve(cx, id)?;
+        let rhs = self.expr(cx, &a.right)?;
+        let span = a.span;
+        let old = || {
+            number_of(Val {
+                e: read(var.place),
+                ty: var.ty,
+            })
         };
-        let e = Expr::binary(op, Type::F64, read(&place), rhs);
-        Ok((place, e))
+        use AssignmentOperator as A;
+        let arith = match a.operator {
+            A::Addition => Some(BinOp::Add),
+            A::Subtraction => Some(BinOp::Sub),
+            A::Multiplication => Some(BinOp::Mul),
+            A::Division => Some(BinOp::Div),
+            A::Remainder => Some(BinOp::Rem),
+            _ => None,
+        };
+        let bitwise = match a.operator {
+            A::BitwiseOR => Some(BinOp::Or),
+            A::BitwiseAnd => Some(BinOp::And),
+            A::BitwiseXOR => Some(BinOp::Xor),
+            A::ShiftLeft => Some(BinOp::Shl),
+            A::ShiftRight => Some(BinOp::Shr),
+            _ => None,
+        };
+        let num = |e| Val { e, ty: Type::F64 };
+        let value = if a.operator == A::Assign {
+            rhs
+        } else if let Some(op) = arith {
+            num(Expr::binary(op, Type::F64, old(), number_of(rhs)))
+        } else if let Some(op) = bitwise {
+            let (l, r) = (to_i32(old()), to_i32(number_of(rhs)));
+            num(from_i32(Expr::binary(op, Type::I32, l, r)))
+        } else if a.operator == A::ShiftRightZeroFill {
+            let r = number_of(rhs);
+            num(ushr(cx, old(), r))
+        } else {
+            return Err(self.unsupported(
+                span,
+                &format!("operator `{}`", a.operator.as_str()),
+                "later",
+            ));
+        };
+        Ok((var, self.store(Slot::Var(var.sym), var.ty, value)))
     }
 
-    fn update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<(Place, Expr)> {
+    fn update_target(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<(Var, BinOp)> {
         let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument else {
             return Err(self.unsupported(
                 u.argument.span(),
@@ -1009,26 +1295,49 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 "T13",
             ));
         };
-        let place = self.resolve(cx, id)?;
+        let var = self.resolve(cx, id)?;
         let op = if u.operator == UpdateOperator::Increment {
             BinOp::Add
         } else {
             BinOp::Sub
         };
-        let e = Expr::binary(op, Type::F64, read(&place), Expr::f64(1.0));
-        Ok((place, e))
+        Ok((var, op))
     }
 
-    fn resolve(&mut self, cx: &FnCx, id: &IdentifierReference<'a>) -> R<Place> {
+    /// `++x` / `x++` as a statement: the variable and the converted new value.
+    fn update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<(Var, Expr)> {
+        let (var, op) = self.update_target(cx, u)?;
+        let old = number_of(Val {
+            e: read(var.place),
+            ty: var.ty,
+        });
+        let new = Val {
+            e: Expr::binary(op, Type::F64, old, Expr::f64(1.0)),
+            ty: Type::F64,
+        };
+        Ok((var, self.store(Slot::Var(var.sym), var.ty, new)))
+    }
+
+    fn resolve(&mut self, cx: &FnCx, id: &IdentifierReference<'a>) -> R<Var> {
         let span = id.span;
         let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id() else {
             return Err(self.unsupported(span, &format!("global `{}`", id.name), "T21"));
         };
         if let Some(l) = cx.locals.get(&sym) {
-            return Ok(Place::Local(*l));
+            let ty = cx.func.local(*l).ty;
+            return Ok(Var {
+                place: Place::Local(*l),
+                sym,
+                ty,
+            });
         }
         if let Some(g) = self.globals.get(&sym) {
-            return Ok(Place::Global(*g));
+            let ty = self.module.globals[g.0 as usize].ty;
+            return Ok(Var {
+                place: Place::Global(*g),
+                sym,
+                ty,
+            });
         }
         if self.funcs.contains_key(&sym) {
             return Err(self.unsupported(
@@ -1040,24 +1349,144 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Err(self.unsupported(
             span,
             &format!("`{}` used before its declaration", id.name),
-            "T08",
+            "later",
         ))
     }
 
-    // ---- conversions -------------------------------------------------------------------
-
-    fn number_of(&mut self, v: Val) -> R<Expr> {
-        match v.ty {
-            Type::F64 => Ok(v.e),
-            _ => Err(self.unsupported(v.span, "boolean used as a value", "T08")),
+    /// `undefined`, `NaN` and `Infinity` when they refer to the global constants.
+    fn global_constant(&self, id: &IdentifierReference<'a>) -> Option<Const> {
+        if self
+            .scoping
+            .get_reference(id.reference_id())
+            .symbol_id()
+            .is_some()
+        {
+            return None; // shadowed by a declaration
+        }
+        match id.name.as_str() {
+            "undefined" => Some(Const::Undefined),
+            "NaN" => Some(Const::F64(f64::NAN)),
+            "Infinity" => Some(Const::F64(f64::INFINITY)),
+            _ => None,
         }
     }
 
-    fn cond_of(&mut self, v: Val) -> Expr {
-        match v.ty {
-            Type::Bool => v.e,
-            _ => truthy(v.e),
+    /// A literal allowed as a top-level initializer: number (possibly negated), boolean,
+    /// `null`, `undefined`, `NaN`, `Infinity`.
+    fn literal(&self, e: &Expression<'a>) -> Option<Const> {
+        match e {
+            Expression::NumericLiteral(n) => Some(Const::F64(n.value)),
+            Expression::BooleanLiteral(b) => Some(Const::Bool(b.value)),
+            Expression::NullLiteral(_) => Some(Const::Null),
+            Expression::Identifier(id) => self.global_constant(id),
+            Expression::ParenthesizedExpression(p) => self.literal(&p.expression),
+            Expression::UnaryExpression(u) if u.operator == UnaryOperator::UnaryNegation => {
+                match self.literal(&u.argument)? {
+                    Const::F64(v) => Some(Const::F64(-v)),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
+    }
+
+    fn undefined_val(&self) -> Val {
+        Val {
+            e: Expr::undefined(),
+            ty: Type::JsVal,
+        }
+    }
+}
+
+// ---- conversions -----------------------------------------------------------------------
+
+/// JS ToNumber.
+fn number_of(v: Val) -> Expr {
+    match v.ty {
+        Type::F64 => v.e,
+        Type::Bool => Expr::Cond {
+            cond: Box::new(v.e),
+            then: Box::new(Expr::f64(1.0)),
+            els: Box::new(Expr::f64(0.0)),
+            ty: Type::F64,
+        },
+        _ => Expr::convert(Type::JsVal, Type::F64, v.e),
+    }
+}
+
+/// The value as a JS value.
+fn jsval_of(v: Val) -> Expr {
+    match v.ty {
+        Type::JsVal => v.e,
+        t => Expr::convert(t, Type::JsVal, v.e),
+    }
+}
+
+/// JS ToBoolean.
+fn cond_of(v: Val) -> Expr {
+    match v.ty {
+        Type::Bool => v.e,
+        Type::F64 => truthy(v.e),
+        _ => Expr::convert(Type::JsVal, Type::Bool, v.e),
+    }
+}
+
+/// Two values that must share a type (branches of `?:`, operands of `&&`/`||`):
+/// the type if they agree, otherwise both as JS values.
+fn unify(a: Val, b: Val) -> (Expr, Expr, Type) {
+    if a.ty == b.ty {
+        let ty = a.ty;
+        (a.e, b.e, ty)
+    } else {
+        (jsval_of(a), jsval_of(b), Type::JsVal)
+    }
+}
+
+/// `===`/`!==` (`strict`) or `==`/`!=`. Same-typed numbers or booleans compare directly
+/// (loose and strict agree then); anything else goes through the JS value helpers.
+fn equality(l: Val, r: Val, op: BinOp, strict: bool) -> Expr {
+    if l.ty == r.ty && l.ty != Type::JsVal {
+        let ty = l.ty;
+        return Expr::binary(op, ty, l.e, r.e);
+    }
+    let op = match (op, strict) {
+        (op, true) => op,
+        (BinOp::Eq, false) => BinOp::LooseEq,
+        (_, false) => BinOp::LooseNe,
+    };
+    Expr::binary(op, Type::JsVal, jsval_of(l), jsval_of(r))
+}
+
+/// JS `a >>> b` on numbers: the unsigned 32-bit result as an `f64`.
+fn ushr(cx: &mut FnCx, a: Expr, b: Expr) -> Expr {
+    let tmp = cx.func.add_local("u32", Type::F64);
+    let signed = from_i32(Expr::binary(BinOp::ShrU, Type::I32, to_i32(a), to_i32(b)));
+    // As signed it's negative when bit 31 is set: add 2^32.
+    let negative = Expr::binary(
+        BinOp::Lt,
+        Type::F64,
+        Expr::Tee(tmp, Box::new(signed)),
+        Expr::f64(0.0),
+    );
+    Expr::Cond {
+        cond: Box::new(negative),
+        then: Box::new(Expr::binary(
+            BinOp::Add,
+            Type::F64,
+            Expr::Local(tmp),
+            Expr::f64(4294967296.0),
+        )),
+        els: Box::new(Expr::Local(tmp)),
+        ty: Type::F64,
+    }
+}
+
+fn bool_cond(cond: Expr, then: Expr, els: Expr) -> Expr {
+    Expr::Cond {
+        cond: Box::new(cond),
+        then: Box::new(then),
+        els: Box::new(els),
+        ty: Type::Bool,
     }
 }
 
@@ -1072,25 +1501,17 @@ fn truthy(e: Expr) -> Expr {
 }
 
 fn to_i32(e: Expr) -> Expr {
-    Expr::Convert {
-        from: Type::F64,
-        to: Type::I32,
-        arg: Box::new(e),
-    }
+    Expr::convert(Type::F64, Type::I32, e)
 }
 
 fn from_i32(e: Expr) -> Expr {
-    Expr::Convert {
-        from: Type::I32,
-        to: Type::F64,
-        arg: Box::new(e),
-    }
+    Expr::convert(Type::I32, Type::F64, e)
 }
 
-fn read(p: &Place) -> Expr {
+fn read(p: Place) -> Expr {
     match p {
-        Place::Local(l) => Expr::Local(*l),
-        Place::Global(g) => Expr::Global(*g),
+        Place::Local(l) => Expr::Local(l),
+        Place::Global(g) => Expr::Global(g),
     }
 }
 
@@ -1098,6 +1519,17 @@ fn set(p: Place, e: Expr) -> Stmt {
     match p {
         Place::Local(l) => Stmt::Set(l, e),
         Place::Global(g) => Stmt::SetGlobal(g, e),
+    }
+}
+
+/// An assignment used as a value: the stored value.
+fn assign_value(var: Var, value: Expr) -> Expr {
+    match var.place {
+        Place::Local(l) => Expr::Tee(l, Box::new(value)),
+        Place::Global(g) => Expr::Seq {
+            body: vec![Stmt::SetGlobal(g, value)],
+            value: Box::new(Expr::Global(g)),
+        },
     }
 }
 
@@ -1129,18 +1561,6 @@ fn find_target(targets: &[Target], name: Option<&str>, is_continue: bool) -> Opt
             None => !matches!(t.kind, TargetKind::Block),
         })
         .filter(|&i| !is_continue || !matches!(targets[i].kind, TargetKind::Block))
-}
-
-/// A number literal, possibly negated: the only allowed global initializer for now.
-fn literal_number(e: &Expression) -> Option<f64> {
-    match e {
-        Expression::NumericLiteral(n) => Some(n.value),
-        Expression::ParenthesizedExpression(p) => literal_number(&p.expression),
-        Expression::UnaryExpression(u) if u.operator == UnaryOperator::UnaryNegation => {
-            literal_number(&u.argument).map(|v| -v)
-        }
-        _ => None,
-    }
 }
 
 /// Does this statement contain `return <expr>` (not looking into nested functions)?

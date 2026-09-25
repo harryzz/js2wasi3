@@ -27,6 +27,9 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
 - A JS value is `(ref null eq)` (written `jsval`): `i31ref` for small integers, and GC structs for
   boxed f64, strings, objects, functions, symbols, bigints. `undefined`, `null`, `true` and
   `false` are singleton structs, so `null` is never a JS value.
+  (T08: integers in [-2^30, 2^30) except -0 are `i31ref`; the singletons are one `$oddball` struct type
+  with a kind field. Variables, params and results are `f64` unless a non-number is ever stored in them:
+  see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
 - Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
   inline caches only after T12 works and a benchmark justifies them.

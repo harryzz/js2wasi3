@@ -1,7 +1,7 @@
 //! Backend: IR → core Wasm bytes (WasmGC types, exception tag, linear memory for the ABI only).
 //!
 //! v0 (T06) handles the numbers-only IR from T05: `f64`/`i32`/`bool` locals and globals,
-//! structured control flow, direct calls and exports.
+//! structured control flow, direct calls and exports. T08 adds `jsval` (see [`runtime`]).
 //!
 //! # Mapping
 //! - `Bool` is an `i32` holding 0 or 1.
@@ -15,8 +15,14 @@
 //!   - `$to_int32(x)`: JS `ToInt32`. `i64.trunc_sat_f64_s` + wrap when |x| < 2^63, otherwise
 //!     `fmod(x, 2^32)` first. NaN and ±∞ give 0.
 //!
-//! Unsupported IR (placeholders, `jsval`) is reported with the IR kind, the function and
+//!   - JS value helpers (`$box_number`, `$to_number`, `$strict_eq`, …): see [`runtime`].
+//! - A module that uses `jsval` starts its type section with the runtime `rec` group and its
+//!   global section with the four singletons, so user types and globals are offset by those.
+//!
+//! Unsupported IR (placeholders) is reported with the IR kind, the function and
 //! its source position before any bytes are emitted.
+
+mod runtime;
 
 use std::collections::HashMap;
 
@@ -38,9 +44,16 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     check_supported(module)?;
 
+    let js = uses_jsval(module);
+    let mut types = TypeSection::new();
+    if js {
+        runtime::types(&mut types);
+    }
     let mut e = Emitter {
         m: module,
-        types: TypeSection::new(),
+        types,
+        type_base: if js { runtime::TYPES } else { 0 },
+        global_base: if js { runtime::GLOBALS } else { 0 },
         type_ids: HashMap::new(),
         helpers: Vec::new(),
     };
@@ -71,11 +84,20 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
 
     let mut globals = GlobalSection::new();
+    if js {
+        runtime::globals(&mut globals);
+    }
     for g in &module.globals {
-        let init = match g.init {
-            Const::F64(v) => ConstExpr::f64_const(v.into()),
-            Const::I32(v) => ConstExpr::i32_const(v),
-            Const::Bool(v) => ConstExpr::i32_const(v as i32),
+        let init = match (g.ty, g.init) {
+            (Type::JsVal, Const::F64(v)) => runtime::const_number(v),
+            (Type::JsVal, Const::Bool(v)) => {
+                ConstExpr::global_get(if v { runtime::G_TRUE } else { runtime::G_FALSE })
+            }
+            (_, Const::Undefined) => ConstExpr::global_get(runtime::G_UNDEFINED),
+            (_, Const::Null) => ConstExpr::global_get(runtime::G_NULL),
+            (_, Const::F64(v)) => ConstExpr::f64_const(v.into()),
+            (_, Const::I32(v)) => ConstExpr::i32_const(v),
+            (_, Const::Bool(v)) => ConstExpr::i32_const(v as i32),
         };
         globals.global(
             GlobalType {
@@ -111,7 +133,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
 
     let mut out = wasm_encoder::Module::new();
     out.section(&e.types).section(&funcs);
-    if !module.globals.is_empty() {
+    if !globals.is_empty() {
         out.section(&globals);
     }
     out.section(&exports).section(&code).section(&names);
@@ -122,8 +144,51 @@ fn val_type(t: Type) -> ValType {
     match t {
         Type::F64 => ValType::F64,
         Type::I32 | Type::Bool => ValType::I32,
-        other => unreachable!("check_supported rejects {other}"),
+        Type::JsVal => runtime::jsval(),
+        other => unreachable!("no Wasm type for {other}"),
     }
+}
+
+/// Does the module need the JS value runtime?
+fn uses_jsval(m: &ir::Module) -> bool {
+    fn expr(e: &Expr) -> bool {
+        match e {
+            Expr::Const(c) => c.ty() == Type::JsVal,
+            Expr::Local(_) | Expr::Global(_) => false,
+            Expr::Convert { from, to, arg } => {
+                *from == Type::JsVal || *to == Type::JsVal || expr(arg)
+            }
+            Expr::Binary { ty, lhs, rhs, .. } => *ty == Type::JsVal || expr(lhs) || expr(rhs),
+            Expr::Cond {
+                cond,
+                then,
+                els,
+                ty,
+            } => *ty == Type::JsVal || expr(cond) || expr(then) || expr(els),
+            Expr::TypeofIs { .. } | Expr::Suspend { .. } => true,
+            Expr::Tee(_, a) | Expr::Unary { arg: a, .. } => expr(a),
+            Expr::Call { args, .. } => args.iter().any(expr),
+            Expr::Seq { body, value } => stmts(body) || expr(value),
+        }
+    }
+    fn stmts(list: &[Stmt]) -> bool {
+        list.iter().any(|s| match s {
+            Stmt::Expr(e) | Stmt::Set(_, e) | Stmt::SetGlobal(_, e) | Stmt::Throw(e) => expr(e),
+            Stmt::Return(e) => e.as_ref().is_some_and(expr),
+            Stmt::Block { body, .. } | Stmt::Loop { body, .. } => stmts(body),
+            Stmt::If { cond, then, els } => expr(cond) || stmts(then) || stmts(els),
+            Stmt::Try {
+                body, catch_body, ..
+            } => stmts(body) || stmts(catch_body),
+            Stmt::Break(_) | Stmt::Continue(_) => false,
+        })
+    }
+    m.globals.iter().any(|g| g.ty == Type::JsVal)
+        || m.functions.iter().any(|f| {
+            f.result == Some(Type::JsVal)
+                || f.locals.iter().any(|l| l.ty == Type::JsVal)
+                || stmts(&f.body)
+        })
 }
 
 // ---- unsupported IR ------------------------------------------------------------------------
@@ -144,18 +209,12 @@ fn check_supported(m: &ir::Module) -> anyhow::Result<()> {
         if f.flags.is_async || f.flags.is_generator {
             report("async/generator function", "T18/T19");
         }
-        if f.locals.iter().any(|l| l.ty == Type::JsVal) || f.result == Some(Type::JsVal) {
-            report("jsval", "T08");
-        }
         let mut kinds = Vec::new();
         unsupported_stmts(&f.body, &mut kinds);
         kinds.dedup();
         for (kind, task) in kinds {
             report(kind, task);
         }
-    }
-    if m.globals.iter().any(|g| g.ty == Type::JsVal) {
-        errs.push("unsupported IR `jsval` global (planned: T08)".to_string());
     }
     if errs.is_empty() {
         Ok(())
@@ -199,8 +258,13 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
             unsupported_expr(arg, out);
         }
         Expr::Const(_) | Expr::Local(_) | Expr::Global(_) => {}
-        Expr::Tee(_, a) | Expr::Unary { arg: a, .. } | Expr::Convert { arg: a, .. } => {
-            unsupported_expr(a, out)
+        Expr::Tee(_, a)
+        | Expr::Unary { arg: a, .. }
+        | Expr::Convert { arg: a, .. }
+        | Expr::TypeofIs { arg: a, .. } => unsupported_expr(a, out),
+        Expr::Seq { body, value } => {
+            unsupported_stmts(body, out);
+            unsupported_expr(value, out);
         }
         Expr::Binary { lhs, rhs, .. } => {
             unsupported_expr(lhs, out);
@@ -223,6 +287,7 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
 enum Helper {
     JsRem,
     ToInt32,
+    Js(runtime::Helper),
 }
 
 impl Helper {
@@ -230,6 +295,7 @@ impl Helper {
         match self {
             Helper::JsRem => "js_rem",
             Helper::ToInt32 => "to_int32",
+            Helper::Js(h) => h.name(),
         }
     }
 
@@ -237,6 +303,7 @@ impl Helper {
         match self {
             Helper::JsRem => (vec![ValType::F64, ValType::F64], vec![ValType::F64]),
             Helper::ToInt32 => (vec![ValType::F64], vec![ValType::I32]),
+            Helper::Js(h) => h.signature(),
         }
     }
 }
@@ -253,6 +320,9 @@ enum Frame {
 struct Emitter<'m> {
     m: &'m ir::Module,
     types: TypeSection,
+    /// Runtime types / globals that come before the module's own.
+    type_base: u32,
+    global_base: u32,
     type_ids: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
     /// Helpers in index order. Helper `k` has function index `m.functions.len() + k`.
     helpers: Vec<Helper>,
@@ -260,7 +330,7 @@ struct Emitter<'m> {
 
 impl Emitter<'_> {
     fn type_id(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
-        let next = self.type_ids.len() as u32;
+        let next = self.type_base + self.type_ids.len() as u32;
         *self
             .type_ids
             .entry((params.clone(), results.clone()))
@@ -327,7 +397,7 @@ impl Emitter<'_> {
             }
             Stmt::SetGlobal(g, e) => {
                 self.expr(s, frames, e)?;
-                s.global_set(g.0);
+                s.global_set(self.global_base + g.0);
             }
             Stmt::Block { label, body } => {
                 s.block(BlockType::Empty);
@@ -401,11 +471,17 @@ impl Emitter<'_> {
             Expr::Const(Const::Bool(v)) => {
                 s.i32_const(*v as i32);
             }
+            Expr::Const(Const::Undefined) => {
+                s.global_get(runtime::G_UNDEFINED);
+            }
+            Expr::Const(Const::Null) => {
+                s.global_get(runtime::G_NULL);
+            }
             Expr::Local(l) => {
                 s.local_get(l.0);
             }
             Expr::Global(g) => {
-                s.global_get(g.0);
+                s.global_get(self.global_base + g.0);
             }
             Expr::Tee(l, v) => {
                 self.expr(s, frames, v)?;
@@ -465,17 +541,45 @@ impl Emitter<'_> {
                         BinOp::Shl => s.i32_shl(),
                         BinOp::Shr => s.i32_shr_s(),
                         BinOp::ShrU => s.i32_shr_u(),
+                        BinOp::LooseEq | BinOp::LooseNe => {
+                            unreachable!("validator rejects {op:?} on i32")
+                        }
                     },
                     Type::Bool => match op {
                         BinOp::Eq => s.i32_eq(),
                         BinOp::Ne => s.i32_ne(),
                         _ => unreachable!("validator rejects {op:?} on bool"),
                     },
-                    other => unreachable!("check_supported rejects {other}"),
+                    Type::JsVal => {
+                        let (h, negate) = match op {
+                            BinOp::Eq => (runtime::Helper::StrictEq, false),
+                            BinOp::Ne => (runtime::Helper::StrictEq, true),
+                            BinOp::LooseEq => (runtime::Helper::LooseEq, false),
+                            BinOp::LooseNe => (runtime::Helper::LooseEq, true),
+                            _ => unreachable!("validator rejects {op:?} on jsval"),
+                        };
+                        s.call(self.helper_index(Helper::Js(h)));
+                        if negate {
+                            s.i32_eqz();
+                        }
+                        s
+                    }
+                    other => unreachable!("no binary ops on {other}"),
                 };
+            }
+            Expr::Convert {
+                from: Type::F64,
+                to: Type::JsVal,
+                arg,
+            } if matches!(**arg, Expr::Const(Const::F64(_))) => {
+                let Expr::Const(Const::F64(v)) = **arg else {
+                    unreachable!()
+                };
+                runtime::push_number(s, v);
             }
             Expr::Convert { from, to, arg } => {
                 self.expr(s, frames, arg)?;
+                let js = |h| Helper::Js(h);
                 match (from, to) {
                     (Type::F64, Type::I32) => {
                         s.call(self.helper_index(Helper::ToInt32));
@@ -483,8 +587,35 @@ impl Emitter<'_> {
                     (Type::I32, Type::F64) => {
                         s.f64_convert_i32_s();
                     }
+                    (Type::F64, Type::JsVal) => {
+                        s.call(self.helper_index(js(runtime::Helper::Box)));
+                    }
+                    (Type::JsVal, Type::F64) => {
+                        s.call(self.helper_index(js(runtime::Helper::ToNumber)));
+                    }
+                    (Type::JsVal, Type::Bool) => {
+                        s.call(self.helper_index(js(runtime::Helper::ToBoolean)));
+                    }
+                    (Type::Bool, Type::JsVal) => {
+                        s.if_(BlockType::Result(runtime::jsval()));
+                        s.global_get(runtime::G_TRUE);
+                        s.else_();
+                        s.global_get(runtime::G_FALSE);
+                        s.end();
+                    }
                     _ => unreachable!("validator rejects {from} -> {to}"),
                 }
+            }
+            Expr::TypeofIs { arg, tag } => {
+                self.expr(s, frames, arg)?;
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Typeof)));
+                s.i32_const(runtime::typeof_code(*tag)).i32_eq();
+            }
+            Expr::Seq { body, value } => {
+                for x in body {
+                    self.stmt(s, frames, x)?;
+                }
+                return self.expr(s, frames, value);
             }
             Expr::Cond {
                 cond,
@@ -520,6 +651,7 @@ impl Emitter<'_> {
                 let rem = self.helper_index(Helper::JsRem);
                 to_int32(rem)
             }
+            Helper::Js(h) => h.body(&mut |x| self.helper_index(Helper::Js(x))),
         }
     }
 }

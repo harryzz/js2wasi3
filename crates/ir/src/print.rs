@@ -9,6 +9,7 @@
 //! ```
 //! Locals print as `name.index`, functions as `name#index`, globals as `@name`, labels as `L<n>`.
 //! `f64` constants always carry a decimal point (`1.0`, `NaN`, `inf`), `i32` constants a `_i32` suffix.
+//! `Seq` prints on one line: `seq { stmt; stmt; value }`.
 
 use std::fmt::{self, Write};
 
@@ -201,6 +202,20 @@ impl Printer<'_> {
                 let args: Vec<String> = args.iter().map(|a| self.expr(func, a)).collect();
                 format!("call {}({})", self.func_name(callee.0), args.join(", "))
             }
+            Expr::TypeofIs { arg, tag } => {
+                format!("typeof({}) == {:?}", self.expr(func, arg), tag.as_str())
+            }
+            Expr::Seq { body, value } => {
+                let mut p = Printer {
+                    m: self.m,
+                    out: String::new(),
+                    depth: 0,
+                };
+                p.stmts(func, body);
+                let mut parts: Vec<String> = p.out.lines().map(|l| l.trim().to_string()).collect();
+                parts.push(self.expr(func, value));
+                format!("seq {{ {} }}", parts.join("; "))
+            }
             Expr::Suspend { kind, arg } => {
                 let k = match kind {
                     SuspendKind::Await => "await",
@@ -222,6 +237,8 @@ fn konst(c: &Const) -> String {
         Const::F64(v) => format!("{v:?}"),
         Const::I32(v) => format!("{v}_i32"),
         Const::Bool(v) => v.to_string(),
+        Const::Undefined => "undefined".to_string(),
+        Const::Null => "null".to_string(),
     }
 }
 
@@ -253,5 +270,7 @@ fn binop(op: BinOp) -> &'static str {
         BinOp::Shl => "shl",
         BinOp::Shr => "shr",
         BinOp::ShrU => "shr_u",
+        BinOp::LooseEq => "loose_eq",
+        BinOp::LooseNe => "loose_ne",
     }
 }

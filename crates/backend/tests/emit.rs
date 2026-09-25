@@ -187,3 +187,129 @@ fn unsupported_ir_is_reported_with_kind_function_and_position() {
         "unsupported IR `Try` in function g at 3:1 (planned: T12)"
     );
 }
+
+/// The JS value runtime on its own (hand-built IR): boxing (i31 and `$number`), ToNumber,
+/// `===`, `==`, `typeof`. Returns a bit mask of passed checks.
+#[test]
+fn jsval_runtime_runs() {
+    use ir::{BinOp, Const, Expr, Stmt, Type, TypeofTag};
+    let mut m = ir::Module::default();
+    let mut f = ir::Function::new("f", &[("x", Type::F64)], Some(Type::F64));
+    let v = f.add_local("v", Type::JsVal);
+    let mask = f.add_local("mask", Type::F64);
+    let x = Expr::local(f.param(0));
+    let js = |e: Expr| Expr::convert(Type::F64, Type::JsVal, e);
+    let checks = [
+        // x boxed then unboxed is x (x = 2.5 boxes to $number, 7 stays an i31).
+        Expr::binary(
+            BinOp::Eq,
+            Type::F64,
+            Expr::convert(Type::JsVal, Type::F64, Expr::local(v)),
+            x.clone(),
+        ),
+        Expr::TypeofIs {
+            arg: Box::new(Expr::local(v)),
+            tag: TypeofTag::Number,
+        },
+        Expr::binary(BinOp::Eq, Type::JsVal, Expr::local(v), js(x.clone())),
+        Expr::binary(
+            BinOp::LooseEq,
+            Type::JsVal,
+            Expr::undefined(),
+            Expr::Const(Const::Null),
+        ),
+        Expr::unary(
+            ir::UnOp::Not,
+            Type::Bool,
+            Expr::binary(
+                BinOp::Eq,
+                Type::JsVal,
+                Expr::undefined(),
+                Expr::Const(Const::Null),
+            ),
+        ),
+        Expr::TypeofIs {
+            arg: Box::new(Expr::Const(Const::Null)),
+            tag: TypeofTag::Object,
+        },
+        Expr::TypeofIs {
+            arg: Box::new(Expr::convert(Type::Bool, Type::JsVal, Expr::bool(true))),
+            tag: TypeofTag::Boolean,
+        },
+        // NaN !== NaN, even as the same box.
+        Expr::unary(
+            ir::UnOp::Not,
+            Type::Bool,
+            Expr::binary(
+                BinOp::Eq,
+                Type::JsVal,
+                js(Expr::f64(f64::NAN)),
+                js(Expr::f64(f64::NAN)),
+            ),
+        ),
+        // -0 === 0
+        Expr::binary(
+            BinOp::Eq,
+            Type::JsVal,
+            js(Expr::f64(-0.0)),
+            js(Expr::f64(0.0)),
+        ),
+        // true == 1
+        Expr::binary(
+            BinOp::LooseEq,
+            Type::JsVal,
+            Expr::convert(Type::Bool, Type::JsVal, Expr::bool(true)),
+            js(Expr::f64(1.0)),
+        ),
+    ];
+    let n = checks.len();
+    f.body = vec![Stmt::Set(v, js(x.clone())), Stmt::Set(mask, Expr::f64(0.0))];
+    for (i, c) in checks.into_iter().enumerate() {
+        f.body.push(Stmt::If {
+            cond: c,
+            then: vec![Stmt::Set(
+                mask,
+                Expr::binary(
+                    BinOp::Add,
+                    Type::F64,
+                    Expr::local(mask),
+                    Expr::f64((1u32 << i) as f64),
+                ),
+            )],
+            els: vec![],
+        });
+    }
+    f.body.push(Stmt::Return(Some(Expr::local(mask))));
+    let id = m.add_function(f);
+    m.exports.push(ir::Export {
+        name: "f".into(),
+        func: id,
+        string_name: false,
+        pos: None,
+    });
+    let bytes = js2wasi3_backend::emit(&m).unwrap_or_else(|e| panic!("{e:#}"));
+    validate(&bytes);
+    let all = ((1u32 << n) - 1).to_string();
+    assert_eq!(invoke(&bytes, "f", &["2.5"]), all, "boxed $number");
+    assert_eq!(invoke(&bytes, "f", &["7"]), all, "i31");
+}
+
+/// T08 acceptance: small integers are `i31ref`s in the emitted module.
+#[test]
+fn values_use_i31ref() {
+    let src = std::fs::read_to_string(fixtures().join("values.js")).unwrap();
+    let bytes = compile("values.js", &src);
+    validate(&bytes);
+    let mut i31 = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.unwrap() {
+            let mut ops = body.get_operators_reader().unwrap();
+            while !ops.eof() {
+                if matches!(ops.read().unwrap(), wasmparser::Operator::RefI31) {
+                    i31 += 1;
+                }
+            }
+        }
+    }
+    assert!(i31 > 0, "no ref.i31 in values.js");
+}
