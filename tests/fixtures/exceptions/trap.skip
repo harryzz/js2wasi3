@@ -1,0 +1,1 @@
+a Wasm trap (unimplemented format string) must not be caught, unlike node; checked in crates/js2wasi3/tests/build.rs (traps_are_not_caught)

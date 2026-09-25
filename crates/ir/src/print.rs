@@ -210,7 +210,11 @@ impl Printer<'_> {
             Expr::Str(units) => quote(units),
             Expr::Intrinsic { op, args } => {
                 let args: Vec<String> = args.iter().map(|a| self.expr(func, a)).collect();
-                format!("${}({})", op.name(), args.join(", "))
+                let name = match op {
+                    crate::Intrinsic::NewError(k) => format!("new_{}", k.name()),
+                    _ => op.name().to_string(),
+                };
+                format!("${name}({})", args.join(", "))
             }
             Expr::TypeofIs { arg, tag } => {
                 format!("typeof({}) == {:?}", self.expr(func, arg), tag.as_str())

@@ -2,9 +2,13 @@
 # Differential tests: run each JS fixture with node (the oracle) and as a js2wasi3 command
 # (`js2wasi3 build` + `wasmtime run -Sp3`), then compare stdout, stderr and the exit status.
 #
-# Usage: scripts/diff.sh [-j jobs] [fixture.js | dir]...   (default: tests/fixtures)
+# Usage: scripts/diff.sh [-j jobs] [fixture.js | dir]...
+#   (default: tests/fixtures and its subdirectories, except unsupported/ which holds rejection tests)
 #   A dir means its *.js files (not subdirectories). `x.skip` next to `x.js` skips it; its
 #   first line is the reason. Each fixture should take under 2 s: slower ones are flagged.
+#   `x.uncaught` next to `x.js`: the program ends with an uncaught exception. node's stderr (source
+#   excerpt and stack) is first reduced to `Uncaught <message>`, as a js2wasi3 command prints it
+#   (scripts/node-uncaught.mjs).
 # Exit status: 0 if nothing failed, 1 otherwise.
 set -u
 
@@ -28,6 +32,10 @@ one() {
   local t0; t0=$(now_ms)
   timeout "$TIMEOUT" node "$f" >"$d/node.out" 2>"$d/node.err"
   echo $? >"$d/node.status"
+  if [ -f "${f%.js}.uncaught" ]; then
+    mv "$d/node.err" "$d/node.err.raw"
+    node "$ROOT/scripts/node-uncaught.mjs" "$d/node.err.raw" >"$d/node.err"
+  fi
   if ! "$BIN" build "$f" -o "$d/x.wasm" 2>"$d/build.err"; then
     echo "FAIL $(($(now_ms) - t0)) build failed" >"$res"
     cat "$d/build.err" >"$diff"
@@ -60,7 +68,12 @@ if [ "${1:-}" = "-j" ]; then
   jobs=$2
   shift 2
 fi
-[ $# -eq 0 ] && set -- "$ROOT/tests/fixtures"
+if [ $# -eq 0 ]; then
+  set -- "$ROOT/tests/fixtures"
+  for d in "$ROOT"/tests/fixtures/*/; do
+    [ "$(basename "$d")" != unsupported ] && set -- "$@" "${d%/}"
+  done
+fi
 
 files=()
 for arg in "$@"; do

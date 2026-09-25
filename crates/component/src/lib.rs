@@ -30,10 +30,16 @@ pub struct ExportSig {
     pub local: String,
     pub params: Vec<(String, ValType)>,
     pub result: Option<ValType>,
+    /// The function may throw: its WIT result is `result<T, js-error>` ([`JS_ERROR`]).
+    pub throws: bool,
     /// 1-based source position of the export, for diagnostics.
     pub line: u32,
     pub col: u32,
 }
+
+/// The WIT type a throwing export's error has (declared in the world when used).
+pub const JS_ERROR: &str =
+    "record js-error { name: string, message: string, stack: option<string> }";
 
 /// A naming error, positioned at the export it's about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +157,13 @@ pub fn world(name: WorldName, exports: &[ExportSig]) -> Result<World, Vec<NameEr
                 }
             }
         };
+        if wit.eq_ignore_ascii_case("js-error") && exports.iter().any(|e| e.throws) {
+            errs.push(error(format!(
+                "export `{}` maps to the WIT name `js-error`, which is the error type of throwing exports",
+                e.name
+            )));
+            continue;
+        }
         match taken.get(&wit.to_ascii_lowercase()) {
             Some(&j) => {
                 let first = &exports[j];
@@ -178,14 +191,20 @@ pub fn world(name: WorldName, exports: &[ExportSig]) -> Result<World, Vec<NameEr
         "package %{}:%{};\n\nworld %{} {{\n",
         name.namespace, name.package, name.world
     );
+    if exports.iter().any(|e| e.throws) {
+        let _ = writeln!(wit, "  {JS_ERROR}");
+    }
     for (e, wit_name) in exports.iter().zip(&export_names) {
+        let result = match (e.result, e.throws) {
+            (None, false) => String::new(),
+            (Some(t), false) => format!(" -> {}", ty(t)),
+            (None, true) => " -> result<_, js-error>".into(),
+            (Some(t), true) => format!(" -> result<{}, js-error>", ty(t)),
+        };
         let _ = writeln!(
             wit,
-            "  export %{wit_name}: func({}){};",
+            "  export %{wit_name}: func({}){result};",
             params(&e.params).join(", "),
-            e.result
-                .map(|t| format!(" -> {}", ty(t)))
-                .unwrap_or_default()
         );
     }
     wit.push_str("}\n");
@@ -298,6 +317,7 @@ mod tests {
                 .map(|p| (p.to_string(), ValType::F64))
                 .collect(),
             result: Some(ValType::F64),
+            throws: false,
             line: 1,
             col: 1,
         }
@@ -339,6 +359,36 @@ mod tests {
              \x20 export %sum-odd: func(%a: f64, %p1: f64) -> f64;\n\
              \x20 export %my-x: func() -> f64;\n\
              \x20 export %type: func(%p0: f64, %type: f64, %a: f64) -> f64;\n}\n"
+        );
+    }
+
+    #[test]
+    fn throwing_exports_return_results() {
+        let mut f = sig("f", false, &["x"]);
+        f.throws = true;
+        let mut g = sig("g", false, &[]);
+        (g.throws, g.result) = (true, None);
+        let mut h = sig("h", false, &[]);
+        (h.throws, h.result) = (true, Some(ValType::String));
+        let w = world(WorldName::from_path(Path::new("m.js")), &[f, g, h]).unwrap();
+        assert_eq!(
+            w.wit,
+            format!(
+                "package %js2wasi3:%m;\n\nworld %m {{\n  {JS_ERROR}\n\
+                 \x20 export %f: func(%x: f64) -> result<f64, js-error>;\n\
+                 \x20 export %g: func() -> result<_, js-error>;\n\
+                 \x20 export %h: func() -> result<string, js-error>;\n}}\n"
+            )
+        );
+        // The name is taken only when an export throws.
+        let mut e = sig("jsError", false, &[]);
+        assert!(world(WorldName::from_path(Path::new("m.js")), &[e.clone()]).is_ok());
+        e.throws = true;
+        let errs = world(WorldName::from_path(Path::new("m.js")), &[e]).unwrap_err();
+        assert!(
+            errs[0].message.contains("`js-error`"),
+            "{}",
+            errs[0].message
         );
     }
 

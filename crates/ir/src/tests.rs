@@ -252,3 +252,41 @@ fn expr_types() {
         None
     );
 }
+
+/// T12: `may_throw` follows calls (also recursive ones) and ignores what a `Try` catches.
+#[test]
+fn may_throw_follows_calls() {
+    let mut m = Module::default();
+    let throw = || Stmt::Throw(Expr::undefined());
+    let call = |f: u32| {
+        Stmt::Expr(Expr::Call {
+            func: FuncId(f),
+            args: vec![],
+        })
+    };
+    let caught = |body| Stmt::Try {
+        body,
+        catch_local: None,
+        catch_body: vec![],
+    };
+    let mut add = |body: Vec<Stmt>| {
+        let mut f = Function::new("f", &[], None);
+        f.body = body;
+        m.add_function(f);
+    };
+    add(vec![throw()]); // 0: throws
+    add(vec![call(0)]); // 1: calls a thrower
+    add(vec![caught(vec![call(0)])]); // 2: catches it
+    add(vec![Stmt::Try {
+        body: vec![],
+        catch_local: None,
+        catch_body: vec![throw()],
+    }]); // 3: a catch body isn't protected
+    add(vec![call(5)]); // 4, 5: mutual recursion, one throws
+    add(vec![
+        call(4),
+        Stmt::Expr(Expr::intrinsic(Intrinsic::Length, vec![Expr::undefined()])),
+    ]);
+    add(vec![call(6)]); // 6: recursion, never throws
+    assert_eq!(may_throw(&m), [true, true, false, true, true, true, false]);
+}

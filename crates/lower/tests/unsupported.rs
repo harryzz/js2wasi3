@@ -171,10 +171,6 @@ fn command_globals() {
 #[test]
 fn command_rules() {
     assert_eq!(
-        one("console.log(x);\nlet x = 1;"),
-        "1:13 unsupported: `x` used before its `let`/`const` declaration (a ReferenceError at run time) (planned: T12)"
-    );
-    assert_eq!(
         one("console.log('%d items', 3);"),
         "1:13 unsupported: `console.log` format string (a first argument containing `%`, followed by more arguments) (planned: T21)"
     );
@@ -185,5 +181,46 @@ fn command_rules() {
     assert_eq!(
         one("console.table(1);"),
         "1:1 unsupported: call of something other than a named function (planned: T14)"
+    );
+}
+
+/// T12: exceptions lower; what's left for later is rejected.
+#[test]
+fn exceptions() {
+    for src in [
+        "export function f(a) { try { if (a) throw a; return 1; } catch (e) { return 2; } finally { a = 0; } }",
+        "export function f() { try { throw new TypeError('x'); } catch { } return 0; }",
+        "export function f(a) { return new Error(a).message.length; }",
+        "export function f() { for (;;) { try { break; } finally { continue; } } }",
+    ] {
+        lowers(src);
+    }
+    // `main` reading a `let` before its declaration throws a ReferenceError (was a build error).
+    let ir = lowers("console.log(x);\nlet x = 1;");
+    assert!(
+        ir.contains("throw $new_ReferenceError(\"Cannot access \\'x\\' before"),
+        "{ir}"
+    );
+    // F22: a function called before a declaration checks an init flag; after it, no flag.
+    let ir = lowers("function f() { return n; }\nconsole.log(f());\nlet n = 5;");
+    assert!(ir.contains("global @n$init: bool mut = false"), "{ir}");
+    let ir = lowers("function f() { return n; }\nlet n = 5;\nconsole.log(f());");
+    assert!(!ir.contains("$init"), "{ir}");
+
+    assert_eq!(
+        one("export function f() { return new Map(); }"),
+        "1:30 unsupported: `new` (only the native error constructors so far) (planned: T16)"
+    );
+    assert_eq!(
+        one("export function f() { return new Error('a', 1); }"),
+        "1:30 unsupported: error constructor with an options argument (planned: T13)"
+    );
+    assert_eq!(
+        one("export function f() { try { } catch ({ a }) { } }"),
+        "1:38 unsupported: destructuring `catch` parameter (planned: T15)"
+    );
+    assert_eq!(
+        one("export function f(e) { return e.stack; }"),
+        "1:31 unsupported: property access (planned: T13)"
     );
 }

@@ -24,6 +24,11 @@
 //! unary `- + ! ~ void typeof`, `| & ^ << >> >>>`, comparisons, `=== !== == !=`, `.length`,
 //! `&& || ??`, `?:`, comma, assignment and compound assignment, `++`/`--`, direct calls, `if`,
 //! `while`, `do/while`, `for`, labels, `break`, `continue`, `return`.
+//!
+//! **Exceptions** (T12): `throw`, `try`/`catch` (with or without a binding)/`finally`. A `finally`
+//! is lowered with a completion local ([`Lowerer::try_stmt`]); `break`/`continue`/`return` that
+//! leave it go through it ([`Lowerer::jump`]). Errors are runtime values until objects exist (T13):
+//! `new E(m)` / `E(m)` for the native error constructors, and `.name` / `.message` reads.
 //! Converting a string to a number (`"5" * 2`, `"a" < "b"`) is rejected when the operand is known
 //! to be a string, and traps at run time otherwise (F20).
 //!
@@ -34,8 +39,9 @@
 //! statements (all but function declarations) become a synthetic `main` ([`ir::Module::main`]).
 //! Top-level variables stay globals: `main` assigns them where they're declared, and a literal
 //! initializer is the global's initial value when no code can run first (a `var` that could be
-//! read before its declaration starts as `undefined`). `main` reading a `let`/`const` before its
-//! declaration is rejected (TDZ); a function doing so isn't detected yet (F-item, T12).
+//! read before its declaration starts as `undefined`). `main` using a `let`/`const` before its
+//! declaration throws a ReferenceError (TDZ). A function using one checks an init flag if it could
+//! run before the declaration ([`Lowerer::tdz_flags`], F22).
 //! `console.log`/`info`/`debug` (stdout) and `console.error`/`warn` (stderr) take primitives:
 //! each is shown like node (`-0` as `-0`), joined by spaces, plus a newline. A library (a file
 //! with exports) can't have top-level code or `console` yet (T20).
@@ -48,8 +54,8 @@ use std::collections::{HashMap, HashSet};
 
 use js2wasi3_frontend::{Diagnostic, Diagnostics, Program, line_col, statement_kind};
 use js2wasi3_ir::{
-    self as ir, BinOp, Const, Expr, FuncId, GlobalId, Intrinsic, LabelId, LocalId, Pos, Stmt, Type,
-    TypeofTag, UnOp,
+    self as ir, BinOp, Const, ErrorKind, Expr, FuncId, GlobalId, Intrinsic, LabelId, LocalId, Pos,
+    Stmt, Type, TypeofTag, UnOp,
 };
 use oxc_ast::ast::*;
 use oxc_semantic::Scoping;
@@ -82,6 +88,7 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             command: program.exports.is_empty(),
             main: None,
             lexical_end: HashMap::new(),
+            tdz_flags: HashMap::new(),
         };
         l.run();
         if let Some(next) = l.next_facts() {
@@ -191,6 +198,9 @@ struct Lowerer<'p, 'a> {
     /// Top-level `let`/`const` of a command: where the declaration ends. `main` reading one
     /// before that is a TDZ error.
     lexical_end: HashMap<SymbolId, u32>,
+    /// Top-level `let`/`const` that a function may access before `main` initializes it: a `bool`
+    /// global, set once it is (F22). Functions check it on every access.
+    tdz_flags: HashMap<SymbolId, GlobalId>,
 }
 
 /// A value being built: an IR expression, its type (`F64`, `Bool` or `JsVal`) and its kind.
@@ -251,13 +261,58 @@ struct FnCx {
     targets: Vec<Target>,
     /// `var` declarations without an initializer: set to `undefined` on entry.
     var_undefined: Vec<LocalId>,
+    /// Enclosing `finally` blocks, innermost last.
+    finally: Vec<Finally>,
+    /// Holds the value of a `return` that runs a `finally` first (created on first use).
+    ret: Option<LocalId>,
 }
 
 impl FnCx {
+    fn new(id: FuncId, func: ir::Function) -> FnCx {
+        FnCx {
+            id,
+            func,
+            locals: HashMap::new(),
+            next_label: 0,
+            targets: Vec::new(),
+            var_undefined: Vec::new(),
+            finally: Vec::new(),
+            ret: None,
+        }
+    }
+
     fn label(&mut self) -> LabelId {
         self.next_label += 1;
         LabelId(self.next_label - 1)
     }
+}
+
+/// A jump out of statements: `break`/`continue` (to `targets[i]`) or `return`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Jump {
+    Break(usize),
+    Continue(usize),
+    Return,
+}
+
+/// A `try … finally` being lowered. Jumps crossing it set `kind` and break to `label`, where the
+/// finally body runs and then re-issues them (see [`Lowerer::try_stmt`]).
+struct Finally {
+    /// `targets.len()` at the `try`: targets below this index are outside it.
+    depth: usize,
+    label: LabelId,
+    /// The completion: 0 normal, 1 throw, `2 + i` for `jumps[i]`.
+    kind: LocalId,
+    jumps: Vec<Jump>,
+}
+
+/// A TDZ check on a variable access (top-level `let`/`const` of a command).
+#[derive(Clone, Copy)]
+enum Guard {
+    /// Always in the TDZ: `main` uses it before its declaration.
+    Always,
+    /// In the TDZ until `main` sets this `bool` global (F22).
+    Flag(GlobalId),
 }
 
 #[derive(Clone, Copy)]
@@ -273,16 +328,8 @@ struct Var {
     sym: SymbolId,
     ty: Type,
     kind: Kind,
-}
-
-impl Var {
-    fn val(&self) -> Val {
-        Val {
-            e: read(self.place),
-            ty: self.ty,
-            kind: self.kind,
-        }
-    }
+    /// Accesses throw a ReferenceError while the variable is uninitialized.
+    guard: Option<(Guard, SymbolId)>,
 }
 
 impl<'p, 'a> Lowerer<'p, 'a> {
@@ -328,9 +375,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// The facts for another round, if this round saw anything its assumptions didn't cover.
     /// Then this round's module is thrown away and lowering runs again.
     fn next_facts(&self) -> Option<Facts> {
+        let mut string_params = self.facts.string_params.clone();
+        let before = string_params.len();
+        string_params.extend(self.new_string_params.iter().copied());
+        if string_params.len() > before {
+            // A parameter the boundary passed as a number is a string now: start the kinds over,
+            // or the earlier guess (`Num`) would join with `Str` into `Any`. String parameters
+            // only grow, so this happens a bounded number of times.
+            return Some(Facts {
+                kinds: HashMap::new(),
+                string_params,
+            });
+        }
         let mut next = Facts {
             kinds: self.facts.kinds.clone(),
-            string_params: self.facts.string_params.clone(),
+            string_params,
         };
         let mut changed = false;
         for (s, k) in &self.seen {
@@ -339,9 +398,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 next.kinds.insert(*s, joined);
                 changed = true;
             }
-        }
-        for p in &self.new_string_params {
-            changed |= next.string_params.insert(*p);
         }
         changed.then_some(next)
     }
@@ -409,6 +465,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let _ = self.declare_top(stmt, &mut fns);
         }
         if self.command {
+            self.tdz_flags(&top);
             let mut f = ir::Function::new("main", &[], None);
             f.pos = Some(Pos { line: 1, col: 1 });
             self.main = Some(self.module.add_function(f));
@@ -660,17 +717,45 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         result
     }
 
+    /// F22: a function can run before a top-level `let`/`const` is initialized only if `main`
+    /// refers to a top-level function (calls it: functions aren't values yet) before the
+    /// declaration ends. Those variables get an init flag that functions check.
+    fn tdz_flags(&mut self, top: &[&'a Statement<'a>]) {
+        let nodes = self.p.semantic.nodes();
+        let first_call = self
+            .funcs
+            .keys()
+            .flat_map(|f| self.scoping.get_resolved_references(*f))
+            .map(|r| nodes.get_node(r.node_id()).span().start)
+            .filter(|at| {
+                top.iter()
+                    .any(|s| s.span().start <= *at && *at < s.span().end)
+            })
+            .min();
+        let Some(first_call) = first_call else {
+            return;
+        };
+        let mut lexical: Vec<(SymbolId, u32)> =
+            self.lexical_end.iter().map(|(s, e)| (*s, *e)).collect();
+        lexical.sort_by_key(|(_, end)| *end);
+        for (sym, end) in lexical {
+            if first_call < end {
+                self.module.globals.push(ir::Global {
+                    name: format!("{}$init", self.scoping.symbol_name(sym)),
+                    ty: Type::Bool,
+                    mutable: true,
+                    init: Const::Bool(false),
+                });
+                let g = GlobalId(self.module.globals.len() as u32 - 1);
+                self.tdz_flags.insert(sym, g);
+            }
+        }
+    }
+
     /// `main`: a command's top-level code. Top-level variables are globals set in place.
     fn lower_main(&mut self, id: FuncId, top: &[&'a Statement<'a>]) {
         let func = self.module.functions[id.0 as usize].clone();
-        let mut cx = FnCx {
-            id,
-            func,
-            locals: HashMap::new(),
-            next_label: 0,
-            targets: Vec::new(),
-            var_undefined: Vec::new(),
-        };
+        let mut cx = FnCx::new(id, func);
         let mut stmts = Vec::new();
         for s in top {
             let _ = match s {
@@ -707,21 +792,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let g = self.globals[&sym];
             let global = &self.module.globals[g.0 as usize];
             let (ty, init) = (global.ty, global.init);
-            let Some(e) = &decl.init else {
-                continue; // `undefined` from the start
-            };
-            if init != Const::Undefined && self.literal(e).is_some() {
-                continue; // the literal is the initial value
+            match &decl.init {
+                // `undefined` from the start.
+                None => {}
+                // The literal is the initial value.
+                Some(e) if init != Const::Undefined && self.literal(e).is_some() => {}
+                Some(e) => match self.expr(cx, e) {
+                    Ok(v) => {
+                        let e = self.store(Slot::Var(sym), ty, v);
+                        out.push(Stmt::SetGlobal(g, e));
+                    }
+                    Err(e) => result = Err(e),
+                },
             }
-            let v = match self.expr(cx, e) {
-                Ok(v) => v,
-                Err(e) => {
-                    result = Err(e);
-                    continue;
-                }
-            };
-            let e = self.store(Slot::Var(sym), ty, v);
-            out.push(Stmt::SetGlobal(g, e));
+            if let Some(flag) = self.tdz_flags.get(&sym) {
+                out.push(Stmt::SetGlobal(*flag, Expr::bool(true)));
+            }
         }
         result
     }
@@ -791,6 +877,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     fn wrap_exports(&mut self) {
         use ir::AbiType;
         let mut done: HashMap<FuncId, (FuncId, ir::AbiSig)> = HashMap::new();
+        let throws = ir::may_throw(&self.module);
         for i in 0..self.module.exports.len() {
             let func = self.module.exports[i].func;
             if let Some((w, sig)) = done.get(&func) {
@@ -820,6 +907,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     None if result_kind == Kind::Str => AbiType::String,
                     None => AbiType::F64,
                 }),
+                throws: throws[func.0 as usize],
             };
             let direct = params
                 .iter()
@@ -883,14 +971,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     fn lower_function(&mut self, f: &'a Function<'a>, id: FuncId) -> R<()> {
         let func = self.module.functions[id.0 as usize].clone();
-        let mut cx = FnCx {
-            id,
-            func,
-            locals: HashMap::new(),
-            next_label: 0,
-            targets: Vec::new(),
-            var_undefined: Vec::new(),
-        };
+        let mut cx = FnCx::new(id, func);
         for (i, p) in f.params.items.iter().enumerate() {
             if let BindingPattern::BindingIdentifier(b) = &p.pattern
                 && let Some(sym) = b.symbol_id.get()
@@ -968,7 +1049,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         Some(self.store(Slot::Result(cx.id), ty, v))
                     }
                 };
-                out.push(Stmt::Return(v));
+                out.extend(self.jump(cx, Jump::Return, v));
                 Ok(())
             }
             Statement::IfStatement(i) => {
@@ -1017,26 +1098,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         "later",
                     ));
                 };
-                out.push(Stmt::Break(cx.targets[t].brk));
+                out.extend(self.jump(cx, Jump::Break(t), None));
                 Ok(())
             }
             Statement::ContinueStatement(c) => {
                 let name = c.label.as_ref().map(|l| l.name.as_str());
                 let t = find_target(&cx.targets, name, true)
                     .expect("semantic analysis checks continue targets");
-                let jump = match cx.targets[t].kind {
-                    TargetKind::While => Stmt::Continue(cx.targets[t].brk),
-                    TargetKind::Wrapped(Some(l)) => Stmt::Break(l),
-                    TargetKind::Wrapped(None) => {
-                        let l = cx.label();
-                        cx.targets[t].kind = TargetKind::Wrapped(Some(l));
-                        Stmt::Break(l)
-                    }
-                    TargetKind::Block => unreachable!("find_target skips blocks for continue"),
-                };
-                out.push(jump);
+                out.extend(self.jump(cx, Jump::Continue(t), None));
                 Ok(())
             }
+            Statement::ThrowStatement(t) => {
+                let v = self.expr(cx, &t.argument)?;
+                out.push(Stmt::Throw(jsval_of(v)));
+                Ok(())
+            }
+            Statement::TryStatement(t) => self.try_stmt(cx, t, out),
             Statement::FunctionDeclaration(f) => {
                 Err(self.unsupported(f.span, "nested function (closures)", "T14"))
             }
@@ -1046,6 +1123,149 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 "later",
             )),
         }
+    }
+
+    /// A `break`, `continue` or `return` (with its converted value). If it leaves a `finally`,
+    /// it goes to the innermost such `finally` first, which re-issues it after its body.
+    fn jump(&mut self, cx: &mut FnCx, j: Jump, value: Option<Expr>) -> Vec<Stmt> {
+        let crossed = match j {
+            Jump::Break(t) | Jump::Continue(t) => cx.finally.iter().rposition(|f| t < f.depth),
+            Jump::Return => cx.finally.len().checked_sub(1),
+        };
+        if let Some(i) = crossed {
+            let mut out = Vec::new();
+            if let Some(v) = value {
+                let ty = cx
+                    .func
+                    .result
+                    .expect("a return value in a function with a result");
+                let ret = *cx.ret.get_or_insert_with(|| cx.func.add_local("ret", ty));
+                if v != Expr::Local(ret) {
+                    out.push(Stmt::Set(ret, v));
+                }
+            }
+            let f = &mut cx.finally[i];
+            let code = match f.jumps.iter().position(|x| *x == j) {
+                Some(k) => k,
+                None => {
+                    f.jumps.push(j);
+                    f.jumps.len() - 1
+                }
+            };
+            out.push(Stmt::Set(f.kind, Expr::i32(code as i32 + 2)));
+            out.push(Stmt::Break(f.label));
+            return out;
+        }
+        vec![match j {
+            Jump::Break(t) => Stmt::Break(cx.targets[t].brk),
+            Jump::Continue(t) => match cx.targets[t].kind {
+                TargetKind::While => Stmt::Continue(cx.targets[t].brk),
+                TargetKind::Wrapped(Some(l)) => Stmt::Break(l),
+                TargetKind::Wrapped(None) => {
+                    let l = cx.label();
+                    cx.targets[t].kind = TargetKind::Wrapped(Some(l));
+                    Stmt::Break(l)
+                }
+                TargetKind::Block => unreachable!("find_target skips blocks for continue"),
+            },
+            Jump::Return => Stmt::Return(value),
+        }]
+    }
+
+    /// `try`/`catch`/`finally` (design D2). A `finally` is lowered with one copy of its body:
+    ///
+    /// ```text
+    /// kind = 0
+    /// block $f { try { <try + catch> } catch (val) { kind = 1 } }   // a jump crossing it: kind = 2+i; br $f
+    /// <finally body>
+    /// if kind == 2+i { <jump i again> } …   if kind == 1 { throw val }
+    /// ```
+    fn try_stmt(&mut self, cx: &mut FnCx, t: &'a TryStatement<'a>, out: &mut Vec<Stmt>) -> R<()> {
+        let Some(fin) = &t.finalizer else {
+            return self.try_catch(cx, t, out);
+        };
+        let label = cx.label();
+        let kind = cx.func.add_local("completion", Type::I32);
+        let val = cx.func.add_local("exception", Type::JsVal);
+        cx.finally.push(Finally {
+            depth: cx.targets.len(),
+            label,
+            kind,
+            jumps: Vec::new(),
+        });
+        let mut protected = Vec::new();
+        let result = self.try_catch(cx, t, &mut protected);
+        let f = cx.finally.pop().expect("pushed above");
+        out.push(Stmt::Set(kind, Expr::i32(0)));
+        out.push(Stmt::Block {
+            label,
+            body: vec![Stmt::Try {
+                body: protected,
+                catch_local: Some(val),
+                catch_body: vec![Stmt::Set(kind, Expr::i32(1))],
+            }],
+        });
+        out.extend(self.stmts(cx, &fin.body));
+        let is = |code: i32| Expr::binary(BinOp::Eq, Type::I32, Expr::Local(kind), Expr::i32(code));
+        for (i, j) in f.jumps.into_iter().enumerate() {
+            let value = match (j, cx.func.result) {
+                (Jump::Return, Some(_)) => cx.ret.map(Expr::Local),
+                _ => None,
+            };
+            let then = self.jump(cx, j, value);
+            out.push(Stmt::If {
+                cond: is(i as i32 + 2),
+                then,
+                els: vec![],
+            });
+        }
+        out.push(Stmt::If {
+            cond: is(1),
+            then: vec![Stmt::Throw(Expr::Local(val))],
+            els: vec![],
+        });
+        result
+    }
+
+    /// The `try` block and the `catch` clause, if any.
+    fn try_catch(&mut self, cx: &mut FnCx, t: &'a TryStatement<'a>, out: &mut Vec<Stmt>) -> R<()> {
+        let body = self.stmts(cx, &t.block.body);
+        let Some(h) = &t.handler else {
+            out.extend(body);
+            return Ok(());
+        };
+        let mut catch_body = Vec::new();
+        let mut catch_local = None;
+        let mut result = Ok(());
+        match h.param.as_ref().map(|p| &p.pattern) {
+            None => {}
+            Some(BindingPattern::BindingIdentifier(b)) => {
+                let sym = b
+                    .symbol_id
+                    .get()
+                    .expect("semantic analysis assigns symbols");
+                let slot = Slot::Var(sym);
+                // The thrown value can be anything.
+                let tmp = cx.func.add_local("thrown", Type::JsVal);
+                let v = Val::js(Expr::Local(tmp), Kind::Any);
+                let ty = self.slot_ty(slot);
+                let local = cx.func.add_local(b.name.as_str(), ty);
+                cx.locals.insert(sym, local);
+                let v = self.store(slot, ty, v);
+                catch_body.push(Stmt::Set(local, v));
+                catch_local = Some(tmp);
+            }
+            Some(p) => {
+                result = Err(self.unsupported(p.span(), "destructuring `catch` parameter", "T15"));
+            }
+        }
+        catch_body.extend(self.stmts(cx, &h.body.body));
+        out.push(Stmt::Try {
+            body,
+            catch_local,
+            catch_body,
+        });
+        result
     }
 
     fn var_decl(
@@ -1220,15 +1440,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Expression::AssignmentExpression(a) => {
                 let (var, value) = self.assignment(cx, a)?;
-                out.push(set(var.place, value));
+                out.extend(self.write_var(cx, &var, value));
                 Ok(())
             }
             Expression::UpdateExpression(u) => {
                 let (var, value) = self.update(cx, u)?;
-                out.push(set(var.place, value));
+                out.extend(self.write_var(cx, &var, value));
                 Ok(())
             }
-            Expression::CallExpression(c) => {
+            Expression::CallExpression(c) if self.error_ctor(&c.callee).is_none() => {
                 let call = self.call(cx, c)?;
                 out.push(Stmt::Expr(call));
                 Ok(())
@@ -1291,7 +1511,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     return Ok(val(Expr::Const(c), c.ty()));
                 }
                 let var = self.resolve(cx, id)?;
-                Ok(var.val())
+                Ok(self.read_var(&var))
             }
             Expression::BinaryExpression(b) => self.binary(cx, b),
             Expression::LogicalExpression(l) => self.logical(cx, l),
@@ -1355,15 +1575,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Expression::AssignmentExpression(a) => {
                 let (var, value) = self.assignment(cx, a)?;
                 Ok(Val {
-                    e: assign_value(var, value),
-                    ..var.val()
+                    e: self.assign_value(cx, &var, value),
+                    ty: var.ty,
+                    kind: var.kind,
                 })
             }
             Expression::UpdateExpression(u) if u.prefix => {
                 let (var, value) = self.update(cx, u)?;
                 Ok(Val {
-                    e: assign_value(var, value),
-                    ..var.val()
+                    e: self.assign_value(cx, &var, value),
+                    ty: var.ty,
+                    kind: var.kind,
                 })
             }
             Expression::UpdateExpression(u) => {
@@ -1377,12 +1599,38 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Expr::f64(1.0),
                 ));
                 let new = self.store(Slot::Var(var.sym), var.ty, new);
-                let body = vec![
-                    Stmt::Set(old, self.num(var.val(), span)?),
-                    set(var.place, new),
-                ];
+                let mut body = vec![Stmt::Set(old, self.num(self.read_var(&var), span)?)];
+                body.extend(self.write_var(cx, &var, new));
                 let value = Box::new(Expr::Local(old));
                 Ok(val(Expr::Seq { body, value }, Type::F64))
+            }
+            Expression::NewExpression(n) => match self.error_ctor(&n.callee) {
+                Some(k) => self.new_error(cx, k, &n.arguments, span),
+                None => Err(self.unsupported(
+                    span,
+                    "`new` (only the native error constructors so far)",
+                    "T16",
+                )),
+            },
+            Expression::CallExpression(c)
+                if !c.optional && self.error_ctor(&c.callee).is_some() =>
+            {
+                let k = self.error_ctor(&c.callee).expect("checked by the guard");
+                self.new_error(cx, k, &c.arguments, span)
+            }
+            Expression::StaticMemberExpression(m)
+                if !m.optional && matches!(m.property.name.as_str(), "name" | "message") =>
+            {
+                let prop = if m.property.name == "name" {
+                    ir::ErrorProp::Name
+                } else {
+                    ir::ErrorProp::Message
+                };
+                let obj = self.expr(cx, &m.object)?;
+                Ok(Val::js(
+                    Expr::intrinsic(Intrinsic::ErrorProp(prop), vec![jsval_of(obj)]),
+                    Kind::Any,
+                ))
             }
             Expression::CallExpression(c) => {
                 let call = self.call(cx, c)?;
@@ -1438,9 +1686,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.hint_string(cx, &m.object);
                 let obj = self.expr(cx, &m.object)?;
                 let kind = obj.kind;
+                if kind == Kind::Str {
+                    return Ok(Val::num(Expr::intrinsic(
+                        Intrinsic::StringLength,
+                        vec![jsval_of(obj)],
+                    )));
+                }
                 let len = Expr::intrinsic(Intrinsic::Length, vec![jsval_of(obj)]);
                 Ok(match kind {
-                    Kind::Str => Val::num(Expr::convert(Type::JsVal, Type::F64, len)),
                     // Not known yet: any f64 will do, this round is thrown away.
                     Kind::Bottom => Val {
                         e: Expr::convert(Type::JsVal, Type::F64, len),
@@ -1742,6 +1995,49 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Ok(Expr::Call { func, args })
     }
 
+    /// The native error constructor `callee` names, if it's one (and not shadowed).
+    fn error_ctor(&self, callee: &Expression<'a>) -> Option<ErrorKind> {
+        let Expression::Identifier(id) = callee else {
+            return None;
+        };
+        let global = self
+            .scoping
+            .get_reference(id.reference_id())
+            .symbol_id()
+            .is_none();
+        global.then(|| ErrorKind::parse(id.name.as_str())).flatten()
+    }
+
+    /// `new E(message)` or `E(message)` (the same for the native errors).
+    fn new_error(
+        &mut self,
+        cx: &mut FnCx,
+        k: ErrorKind,
+        args: &'a [Argument<'a>],
+        span: Span,
+    ) -> R<Val> {
+        if args.len() > 1 {
+            return Err(self.unsupported(
+                span,
+                "error constructor with an options argument",
+                "T13",
+            ));
+        }
+        let message = match args.first() {
+            None => Expr::undefined(),
+            Some(a) => {
+                let Some(e) = a.as_expression() else {
+                    return Err(self.unsupported(a.span(), "spread argument", "T15"));
+                };
+                jsval_of(self.expr(cx, e)?)
+            }
+        };
+        Ok(Val::js(
+            Expr::intrinsic(Intrinsic::NewError(k), vec![message]),
+            Kind::Any,
+        ))
+    }
+
     /// `console.log`/`info`/`debug` (`Some(false)`: stdout) or `console.error`/`warn`
     /// (`Some(true)`: stderr), when `console` is the global.
     fn console_method(&self, callee: &Expression<'a>) -> Option<bool> {
@@ -1872,15 +2168,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             if var.kind == Kind::Str {
                 self.hint_string(cx, &a.right);
             }
-            add(var.val(), rhs)
+            add(self.read_var(&var), rhs)
         } else if let Some(op) = arith {
-            let (l, r) = (self.num(var.val(), span)?, self.num(rhs, span)?);
+            let (l, r) = (self.num(self.read_var(&var), span)?, self.num(rhs, span)?);
             num(Expr::binary(op, Type::F64, l, r))
         } else if let Some(op) = bitwise {
-            let (l, r) = (self.num(var.val(), span)?, self.num(rhs, span)?);
+            let (l, r) = (self.num(self.read_var(&var), span)?, self.num(rhs, span)?);
             num(from_i32(Expr::binary(op, Type::I32, to_i32(l), to_i32(r))))
         } else if a.operator == A::ShiftRightZeroFill {
-            let (l, r) = (self.num(var.val(), span)?, self.num(rhs, span)?);
+            let (l, r) = (self.num(self.read_var(&var), span)?, self.num(rhs, span)?);
             num(ushr(cx, l, r))
         } else {
             return Err(self.unsupported(
@@ -1912,7 +2208,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// `++x` / `x++` as a statement: the variable and the converted new value.
     fn update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<(Var, Expr)> {
         let (var, op) = self.update_target(cx, u)?;
-        let old = self.num(var.val(), u.span)?;
+        let old = self.num(self.read_var(&var), u.span)?;
         let new = Val::num(Expr::binary(op, Type::F64, old, Expr::f64(1.0)));
         Ok((var, self.store(Slot::Var(var.sym), var.ty, new)))
     }
@@ -1929,21 +2225,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 .get(&sym)
                 .map(|g| (Place::Global(*g), self.module.globals[g.0 as usize].ty))
         };
-        if cx.id == self.main.unwrap_or(FuncId(u32::MAX))
-            && self
-                .lexical_end
+        let in_main = cx.id == self.main.unwrap_or(FuncId(u32::MAX));
+        let guard = if in_main {
+            // `main` runs top to bottom: before the declaration it's always in the TDZ.
+            self.lexical_end
                 .get(&sym)
                 .is_some_and(|end| span.start < *end)
-        {
-            return Err(self.unsupported(
-                span,
-                &format!(
-                    "`{}` used before its `let`/`const` declaration (a ReferenceError at run time)",
-                    id.name
-                ),
-                "T12",
-            ));
-        }
+                .then_some(Guard::Always)
+        } else {
+            self.tdz_flags.get(&sym).map(|g| Guard::Flag(*g))
+        };
         if let Some((place, ty)) = place {
             // f64 slots are `Num` or `Bottom`, matching their type.
             let kind = self.slot_kind(Slot::Var(sym));
@@ -1952,6 +2243,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 sym,
                 ty,
                 kind,
+                guard: guard.map(|g| (g, sym)),
             });
         }
         if self.funcs.contains_key(&sym) {
@@ -1966,6 +2258,69 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             &format!("`{}` used before its declaration", id.name),
             "later",
         ))
+    }
+
+    /// The TDZ check of a guarded variable access: throws a ReferenceError like node's.
+    fn tdz_check(&self, guard: Guard, sym: SymbolId) -> Stmt {
+        let name = self.scoping.symbol_name(sym);
+        let throw = Stmt::Throw(Expr::intrinsic(
+            Intrinsic::NewError(ErrorKind::ReferenceError),
+            vec![Expr::str(&format!(
+                "Cannot access '{name}' before initialization"
+            ))],
+        ));
+        match guard {
+            Guard::Always => throw,
+            Guard::Flag(g) => Stmt::If {
+                cond: Expr::unary(UnOp::Not, Type::Bool, Expr::Global(g)),
+                then: vec![throw],
+                els: vec![],
+            },
+        }
+    }
+
+    /// Read a variable.
+    fn read_var(&self, var: &Var) -> Val {
+        let e = read(var.place);
+        let e = match var.guard {
+            Some((g, sym)) => Expr::Seq {
+                body: vec![self.tdz_check(g, sym)],
+                value: Box::new(e),
+            },
+            None => e,
+        };
+        Val {
+            e,
+            ty: var.ty,
+            kind: var.kind,
+        }
+    }
+
+    /// Store `value` (already converted to the variable's type) into a variable. The TDZ check
+    /// comes after the value is computed, as in JS.
+    fn write_var(&self, cx: &mut FnCx, var: &Var, value: Expr) -> Vec<Stmt> {
+        match var.guard {
+            None => vec![set(var.place, value)],
+            Some((g, sym)) => {
+                let tmp = cx.func.add_local("tmp", var.ty);
+                vec![
+                    Stmt::Set(tmp, value),
+                    self.tdz_check(g, sym),
+                    set(var.place, Expr::Local(tmp)),
+                ]
+            }
+        }
+    }
+
+    /// An assignment used as a value: the stored value.
+    fn assign_value(&self, cx: &mut FnCx, var: &Var, value: Expr) -> Expr {
+        match (var.place, var.guard) {
+            (Place::Local(l), None) => Expr::Tee(l, Box::new(value)),
+            _ => Expr::Seq {
+                body: self.write_var(cx, var, value),
+                value: Box::new(read(var.place)),
+            },
+        }
     }
 
     /// `undefined`, `NaN` and `Infinity` when they refer to the global constants.
@@ -2249,17 +2604,6 @@ fn set(p: Place, e: Expr) -> Stmt {
     }
 }
 
-/// An assignment used as a value: the stored value.
-fn assign_value(var: Var, value: Expr) -> Expr {
-    match var.place {
-        Place::Local(l) => Expr::Tee(l, Box::new(value)),
-        Place::Global(g) => Expr::Seq {
-            body: vec![Stmt::SetGlobal(g, value)],
-            value: Box::new(Expr::Global(g)),
-        },
-    }
-}
-
 /// `if (!cond) break label`, with `!true` folded away for `while (true)`.
 fn exit_unless(cond: Expr, label: LabelId) -> Vec<Stmt> {
     if cond == Expr::bool(true) {
@@ -2321,10 +2665,20 @@ fn has_value_return(s: &Statement) -> bool {
     }
 }
 
-/// Conservative: true only if control provably can't fall off the end of `list`.
+/// Conservative: true only if control provably can't fall off the end of `list`
+/// (it returns or throws).
 fn always_returns(list: &[Statement]) -> bool {
     list.iter().any(|s| match s {
-        Statement::ReturnStatement(_) => true,
+        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
+        Statement::TryStatement(t) => {
+            t.finalizer
+                .as_ref()
+                .is_some_and(|f| always_returns(&f.body))
+                || (always_returns(&t.block.body)
+                    && t.handler
+                        .as_ref()
+                        .is_none_or(|h| always_returns(&h.body.body)))
+        }
         Statement::BlockStatement(b) => always_returns(&b.body),
         Statement::IfStatement(i) => i.alternate.as_ref().is_some_and(|a| {
             always_returns(std::slice::from_ref(&i.consequent))

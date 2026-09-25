@@ -19,9 +19,11 @@
 //! - `Break(label)` / `Continue(label)`: labels must name an enclosing `Block`/`Loop`
 //!   (`Continue` only a `Loop`).
 //! - `Return(e?)`.
-//! - `Try { body, catch_local, catch_body }` *(placeholder, T12)*: JS `try/catch`.
-//!   `finally` is lowered away before reaching the IR.
-//! - `Throw(e)` *(placeholder, T12)*: throw a JS value.
+//! - `Try { body, catch_local, catch_body }`: JS `try/catch`. A JS value thrown in `body` (by
+//!   `Throw`, a callee or a runtime helper) is stored into `catch_local` (a `jsval` local, if any),
+//!   then `catch_body` runs. Wasm traps are never caught. `finally` is lowered away before
+//!   reaching the IR (T12: a completion local and a dispatch after one copy of the finally body).
+//! - `Throw(e)`: throw the JS value `e` (`jsval`).
 //!
 //! Expressions ([`Expr`]):
 //! - `Const(c)`: `f64`, `i32` or `bool` literal, or `undefined` / `null` (type `jsval`).
@@ -47,8 +49,10 @@
 use std::fmt;
 
 mod print;
+mod throws;
 mod validate;
 
+pub use throws::may_throw;
 pub use validate::validate;
 
 /// Value types. Wasm types get chosen in the backend: `Bool` is an `i32` 0/1, `JsVal` is `(ref null eq)`.
@@ -131,6 +135,8 @@ impl AbiType {
 pub struct AbiSig {
     pub params: Vec<AbiType>,
     pub result: Option<AbiType>,
+    /// The function may throw a JS value: the WIT result is `result<T, js-error>` (T12).
+    pub throws: bool,
 }
 
 impl AbiSig {
@@ -139,6 +145,63 @@ impl AbiSig {
         AbiSig {
             params: vec![AbiType::F64; params as usize],
             result: result.then_some(AbiType::F64),
+            throws: false,
+        }
+    }
+}
+
+/// A native error constructor (`new TypeError(m)`): the `name` of the errors it creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorKind {
+    Error,
+    TypeError,
+    RangeError,
+    ReferenceError,
+    SyntaxError,
+    EvalError,
+    UriError,
+}
+
+impl ErrorKind {
+    pub const ALL: [ErrorKind; 7] = [
+        ErrorKind::Error,
+        ErrorKind::TypeError,
+        ErrorKind::RangeError,
+        ErrorKind::ReferenceError,
+        ErrorKind::SyntaxError,
+        ErrorKind::EvalError,
+        ErrorKind::UriError,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ErrorKind::Error => "Error",
+            ErrorKind::TypeError => "TypeError",
+            ErrorKind::RangeError => "RangeError",
+            ErrorKind::ReferenceError => "ReferenceError",
+            ErrorKind::SyntaxError => "SyntaxError",
+            ErrorKind::EvalError => "EvalError",
+            ErrorKind::UriError => "URIError",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ErrorKind> {
+        ErrorKind::ALL.into_iter().find(|k| k.name() == s)
+    }
+}
+
+/// A property of an error value that can be read before objects exist (T13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorProp {
+    Name,
+    Message,
+}
+
+impl ErrorProp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorProp::Name => "name",
+            ErrorProp::Message => "message",
         }
     }
 }
@@ -154,8 +217,10 @@ pub enum Intrinsic {
     ToString,
     /// JS Number::toString of an `f64` (a string).
     NumberToString,
-    /// `v.length`.
+    /// `v.length` (a TypeError for `undefined` / `null`).
     Length,
+    /// `s.length` of a JS value known to be a string, as an `f64`. Never throws.
+    StringLength,
     /// `typeof v` (a string).
     TypeofString,
     /// `console.log` formatting of one primitive: ToString, except `-0` gives `"-0"` (a string).
@@ -165,6 +230,12 @@ pub enum Intrinsic {
     NoFormat,
     /// Append a JS string to stdout (`stderr: false`) or stderr. No result. Commands only.
     ConsoleWrite { stderr: bool },
+    /// `new E(message)` / `E(message)`: a new error; the message is `""` if the argument is
+    /// `undefined`, else its ToString.
+    NewError(ErrorKind),
+    /// `v.name` / `v.message`: the field of an error; `undefined` on other primitives; a
+    /// TypeError is thrown for `undefined` / `null`.
+    ErrorProp(ErrorProp),
 }
 
 impl Intrinsic {
@@ -177,8 +248,11 @@ impl Intrinsic {
             | Intrinsic::Length
             | Intrinsic::TypeofString
             | Intrinsic::Inspect
-            | Intrinsic::NoFormat => (&[JsVal], Some(JsVal)),
+            | Intrinsic::NoFormat
+            | Intrinsic::NewError(_)
+            | Intrinsic::ErrorProp(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::NumberToString => (&[F64], Some(JsVal)),
+            Intrinsic::StringLength => (&[JsVal], Some(F64)),
             Intrinsic::ConsoleWrite { .. } => (&[JsVal], None),
         }
     }
@@ -190,12 +264,21 @@ impl Intrinsic {
             Intrinsic::ToString => "to_string",
             Intrinsic::NumberToString => "number_to_string",
             Intrinsic::Length => "length",
+            Intrinsic::StringLength => "string_length",
             Intrinsic::TypeofString => "typeof",
             Intrinsic::Inspect => "inspect",
             Intrinsic::NoFormat => "no_format",
             Intrinsic::ConsoleWrite { stderr: false } => "write_stdout",
             Intrinsic::ConsoleWrite { stderr: true } => "write_stderr",
+            Intrinsic::NewError(_) => "new_error",
+            Intrinsic::ErrorProp(ErrorProp::Name) => "get_name",
+            Intrinsic::ErrorProp(ErrorProp::Message) => "get_message",
         }
+    }
+
+    /// Can it throw a JS value? (Traps don't count.)
+    pub fn may_throw(self) -> bool {
+        matches!(self, Intrinsic::Length | Intrinsic::ErrorProp(_))
     }
 }
 

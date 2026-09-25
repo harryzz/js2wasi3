@@ -203,3 +203,42 @@ fn command_output_is_streamed() {
     assert_eq!(stdout.lines().count(), 5000);
     assert_eq!(stdout.lines().last().unwrap(), format!("4999 {line}"));
 }
+
+/// T12: exports that may throw return `result<T, js-error>`; the others keep plain types.
+#[test]
+fn throwing_exports_return_results() {
+    let out = out_dir("throws").join("lib.wasm");
+    let b = build(&fixture("exceptions/lib.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    for (call, want) in [
+        ("double(2)", "ok(4)"),
+        (
+            "double(-1.5)",
+            "err({name: \"RangeError\", message: \"negative: -1.5\"})",
+        ),
+        ("shout(\"hi\")", "ok(\"hi!\")"),
+        // A thrown non-error: no name, its console.log text as the message.
+        ("shout(\"\")", "err({name: \"\", message: \"empty\"})"),
+        ("fail()", "err({name: \"TypeError\", message: \"\"})"),
+        ("safe(-3)", "-1"),
+        ("safe(4)", "4"),
+        ("first-length(\"h\u{e9}llo\u{1f600}\")", "7"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+}
+
+/// T12 acceptance: a Wasm trap (here the unimplemented `%` format string) is not a JS exception:
+/// neither `catch` nor `finally` runs, and the command fails with the trap.
+#[test]
+fn traps_are_not_caught() {
+    let out = out_dir("trap").join("trap.wasm");
+    let b = build(&fixture("exceptions/trap.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let (ok, stdout, stderr) = run_command(&out);
+    assert!(!ok);
+    let stderr = String::from_utf8_lossy(&stderr);
+    assert!(stderr.contains("no_format"), "{stderr}");
+    assert!(!stderr.contains("Uncaught"), "{stderr}");
+    assert_eq!(String::from_utf8(stdout).unwrap(), "before\n");
+}

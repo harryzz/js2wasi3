@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T12.** Start with the *Handoff* section in [T12-exceptions.md](T12-exceptions.md). The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T13.** T12 is done: `throw`/`try`/`catch`/`finally` on native Wasm EH, errors as runtime values, `result<T, js-error>` for exports that may throw, `Uncaught …` in commands (see T12's Notes / Result). The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -22,7 +22,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T09](T09-strings.md) | Strings + string boundary | done | T08 |
 | [T10](T10-command-console.md) | Command world + console.log (P3 stdout) | done | T09 |
 | [T11](T11-diff-harness.md) | Differential harness node vs wasmtime | done | T10 |
-| [T12](T12-exceptions.md) | Exceptions (native EH) | todo | T11 |
+| [T12](T12-exceptions.md) | Exceptions (native EH) | done | T11 |
 | [T13](T13-objects.md) | Objects and prototypes | todo | T12 |
 | [T14](T14-closures.md) | Closures, function values, `this` | todo | T13 |
 | [T15](T15-arrays-iteration.md) | Arrays and iteration | todo | T14 |
@@ -64,12 +64,17 @@ Each open item names where it came from and which task should pick it up. When i
 | F19 | String literals as `array.new_fixed` globals cost ~3 bytes per code unit; long ones should come from a data segment (`array.new_data`, lazily) | T09 | optimisation pass, after T11 | [ ] |
 | F20 | String → number (ToNumber of a string: `"5" * 2`, `"1" == 1`) and `<`/`>` on two strings. Rejected when known to be a string, a trap at run time otherwise | T09 | T21 | [ ] |
 | F21 | Canonical ABI: more than 16 flat params (passed in memory) are rejected today | T09 | T20 | [ ] |
-| F22 | TDZ: a function reading a top-level `let`/`const` before `main` initialized it gets a placeholder value (only direct reads in `main` are rejected) | T10 | T12 (throw ReferenceError) | [ ] |
+| F22 | TDZ: a function reading a top-level `let`/`const` before `main` initialized it gets a placeholder value (only direct reads in `main` are rejected) | T10 | T12 (throw ReferenceError) | [x] T12 (init flags; `main` throws too) |
 | F23 | `console.log` format strings (`%s %d %i %f %j %o %O %c %%`, first of ≥2 args): rejected for literals, a trap otherwise | T10 | T21 | [ ] |
 | F24 | `console.log` of objects, arrays, functions (node's `util.inspect` format) | T10 | T13/T15 | [ ] |
-| F25 | Uncaught exception in a command: print it to stderr, flush, `task.return(err)` (`run` in `backend/src/host.rs` must catch `$js`) | T10 | T12 | [ ] |
+| F25 | Uncaught exception in a command: print it to stderr, flush, `task.return(err)` (`run` in `backend/src/host.rs` must catch `$js`) | T10 | T12 | [x] T12 |
 | F26 | Event loop: the callback ignores `TASK_CANCELLED`; output is only pumped while JS runs if the host takes writes at once (otherwise buffered until `main` returns) | T10 | T19 | [ ] |
 | F27 | When stdout's reader goes away (`\| head`) `run` returns `err` (exit 1); node exits 0. Decide which the harness expects | T10 | T11 | [x] T11 (keep `err`: the write failed; not covered by the harness) |
 | F28 | `var` in a nested top-level block (`{ var z }`, `for (var i …)`) is a local of `main`: functions using it are rejected | T10 | T14 | [ ] |
-| F29 | Harness: uncaught exceptions print differently from node (stack traces), so stderr needs a comparison mode for them (e.g. first line only, via a sidecar) | T11 | T12 | [ ] |
+| F29 | Harness: uncaught exceptions print differently from node (stack traces), so stderr needs a comparison mode for them (e.g. first line only, via a sidecar) | T11 | T12 | [x] T12 (`x.uncaught`, `scripts/node-uncaught.mjs`) |
 | F30 | `scripts/diff.sh` isn't run by `cargo test` (it needs node); wire it into CI once there is one | T11 | not scheduled | [ ] |
+| F31 | Stack traces: `err.stack`, `console.log(err)` printing the stack like node (today `[TypeError: msg]`), `js-error.stack` (always `none`) | T12 | not scheduled | [ ] |
+| F32 | Errors as real objects: `Error.prototype`, `instanceof`, other properties, `{ cause }`, `new` of other constructors; replace the `name`/`message` intrinsics with property access | T12 | T13 (subclassing: T16) | [ ] |
+| F33 | Deep recursion is a Wasm trap (uncatchable); node throws a catchable `RangeError: Maximum call stack size exceeded` | T12 | not scheduled | [ ] |
+| F34 | `ir::may_throw` is conservative (e.g. `.length` of a value not known to be a string), so some exports get `result<T, js-error>` needlessly | T12 | T20 (user WIT decides) | [ ] |
+| F35 | When the event-loop callback runs JS (T19), it must catch `$js` like `run` does (print `Uncaught …`, return `err`) | T12 | T19 | [ ] |

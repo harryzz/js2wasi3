@@ -11,9 +11,11 @@
 //! - An adapter per such export: flat params `f64` / `(ptr, len)`, then the IR function; a string
 //!   result is returned through an 8-byte return area `(ptr, len)` (a string result flattens to
 //!   two values, more than the one allowed for flat results).
+//! - An export that may throw (T12) also goes through an adapter: it catches the JS exception
+//!   and returns `result<T, js-error>` through a return area (see [`adapter`]).
 
-use js2wasi3_ir::AbiType;
-use wasm_encoder::{BlockType, Function, InstructionSink, MemArg, ValType};
+use js2wasi3_ir::{AbiSig, AbiType};
+use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType};
 
 use crate::runtime::{self, Cx, T_STRING};
 
@@ -89,9 +91,11 @@ pub fn flat_params(params: &[AbiType]) -> Vec<ValType> {
         .collect()
 }
 
-/// Core result of an export: a string comes back through a pointer to `(ptr, len)`.
-pub fn flat_result(result: Option<AbiType>) -> Vec<ValType> {
-    match result {
+/// Core result of an export: a string, or a `result` (if it may throw), comes back through a
+/// pointer to a return area.
+pub fn flat_result(sig: &AbiSig) -> Vec<ValType> {
+    match sig.result {
+        _ if sig.throws => vec![ValType::I32],
         None => vec![],
         Some(AbiType::F64) => vec![ValType::F64],
         Some(AbiType::String) => vec![ValType::I32],
@@ -99,54 +103,141 @@ pub fn flat_result(result: Option<AbiType>) -> Vec<ValType> {
 }
 
 /// The adapter for an export of `func` with signature `sig`.
-pub fn adapter(
-    cx: &mut dyn Cx,
-    bump: u32,
-    func: u32,
-    params: &[AbiType],
-    result: Option<AbiType>,
-) -> Function {
+///
+/// If the function may throw (`sig.throws`), the WIT result is `result<T, js-error>`, returned
+/// through a return area: discriminant (u8) at 0, payload at the payload's alignment (8 for an
+/// `f64`, else 4). The `js-error` payload is `{ name: string, message: string, stack: option<string> }`
+/// at offsets 0, 8 and 16 (option discriminant; `stack` is always `none`). An error gives its
+/// `name` and `message`; any other thrown value gives `name: ""` and its `console.log` text.
+pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function {
     let utf8_to_string = cx.helper(runtime::Helper::Abi(Helper::Utf8ToString));
     let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
-    let to_utf8 = matches!(result, Some(AbiType::String))
+    let to_utf8 = (sig.result == Some(AbiType::String) || sig.throws)
         .then(|| cx.helper(runtime::Helper::Abi(Helper::StringToUtf8)));
-    let nflat = flat_params(params).len() as u32;
-    // Locals after the params: the (ptr, len) of a string result, the return area.
-    let (ptr, len, ret) = (nflat, nflat + 1, nflat + 2);
-    let mut f = Function::new([(3, ValType::I32)]);
+    let nflat = flat_params(&sig.params).len() as u32;
+    // Locals after the params: the (ptr, len) of a string, the return area, an f64 result,
+    // the thrown value.
+    let (ptr, len, ret, num, exc) = (nflat, nflat + 1, nflat + 2, nflat + 3, nflat + 4);
+    let mut f = Function::new([(3, ValType::I32), (1, ValType::F64), (1, runtime::jsval())]);
     let mut s = f.instructions();
-    let mut i = 0;
-    for p in params {
-        match p {
-            AbiType::F64 => {
-                s.local_get(i);
-                i += 1;
-            }
-            AbiType::String => {
-                s.local_get(i).local_get(i + 1).call(utf8_to_string);
-                i += 2;
+    // The arguments as the IR function takes them.
+    let args = |s: &mut InstructionSink| {
+        let mut i = 0;
+        for p in &sig.params {
+            match p {
+                AbiType::F64 => {
+                    s.local_get(i);
+                    i += 1;
+                }
+                AbiType::String => {
+                    s.local_get(i).local_get(i + 1).call(utf8_to_string);
+                    i += 2;
+                }
             }
         }
-    }
-    // The arguments are GC strings now: free the memory they came in.
-    s.i32_const(HEAP_BASE).global_set(bump);
-    s.call(func);
-    if let Some(to_utf8) = to_utf8 {
-        s.ref_cast_non_null(runtime::string()).call(to_utf8);
-        s.local_set(len).local_set(ptr);
+        // The arguments are GC strings now: free the memory they came in.
+        s.i32_const(HEAP_BASE).global_set(bump);
+    };
+    let alloc = |s: &mut InstructionSink, align: i32, size: i32| {
         s.i32_const(0)
             .i32_const(0)
-            .i32_const(4)
-            .i32_const(8)
+            .i32_const(align)
+            .i32_const(size)
             .call(realloc)
-            .local_tee(ret);
-        s.local_get(ptr).i32_store(mem(0, 2));
-        s.local_get(ret).local_get(len).i32_store(mem(4, 2));
-        s.local_get(ret);
+            .local_set(ret);
+    };
+    // Store the string on the stack as (ptr, len) at `ret + offset`.
+    let store_string = |s: &mut InstructionSink, to_utf8: u32, offset: u64| {
+        s.call(to_utf8).local_set(len).local_set(ptr);
+        s.local_get(ret).local_get(ptr).i32_store(mem(offset, 2));
+        s.local_get(ret)
+            .local_get(len)
+            .i32_store(mem(offset + 4, 2));
+    };
+    if !sig.throws {
+        args(&mut s);
+        s.call(func);
+        if let Some(to_utf8) = to_utf8 {
+            s.ref_cast_non_null(runtime::string());
+            alloc(&mut s, 4, 8);
+            store_string(&mut s, to_utf8, 0);
+            s.local_get(ret);
+        }
+        s.end();
+        return f;
     }
+    let to_utf8 = to_utf8.expect("errors carry strings");
+    let describe = cx.helper(runtime::Helper::Describe);
+    let empty = cx.str("");
+    // result<T, js-error>: payload offset (= alignment) and size.
+    let payload: u64 = if sig.result == Some(AbiType::F64) {
+        8
+    } else {
+        4
+    };
+    let size = (payload as i32 + JS_ERROR_SIZE + payload as i32 - 1) & -(payload as i32);
+    s.block(BlockType::Result(runtime::jsval()));
+    s.try_table(
+        BlockType::Empty,
+        [Catch::One {
+            tag: runtime::TAG,
+            label: 0,
+        }],
+    );
+    // Inside the `try_table`, which takes no values from outside.
+    args(&mut s);
+    s.call(func);
+    match sig.result {
+        None => alloc(&mut s, payload as i32, size),
+        Some(AbiType::F64) => {
+            s.local_set(num);
+            alloc(&mut s, payload as i32, size);
+            s.local_get(ret).local_get(num).f64_store(mem(payload, 3));
+        }
+        Some(AbiType::String) => {
+            s.ref_cast_non_null(runtime::string());
+            alloc(&mut s, payload as i32, size);
+            store_string(&mut s, to_utf8, payload);
+        }
+    }
+    s.local_get(ret).i32_const(0).i32_store8(mem(0, 0));
+    s.local_get(ret).return_();
+    s.end();
+    s.unreachable();
+    s.end();
+    // Caught: the err case.
+    s.local_set(exc);
+    alloc(&mut s, payload as i32, size);
+    s.local_get(ret).i32_const(1).i32_store8(mem(0, 0));
+    s.local_get(exc).ref_test_non_null(runtime::error());
+    s.if_(BlockType::Result(runtime::string_ref()));
+    s.local_get(exc)
+        .ref_cast_non_null(runtime::error())
+        .struct_get(runtime::T_ERROR, 0);
+    s.else_();
+    s.global_get(empty);
+    s.end();
+    store_string(&mut s, to_utf8, payload);
+    s.local_get(exc).ref_test_non_null(runtime::error());
+    s.if_(BlockType::Result(runtime::string_ref()));
+    s.local_get(exc)
+        .ref_cast_non_null(runtime::error())
+        .struct_get(runtime::T_ERROR, 1);
+    s.else_();
+    s.local_get(exc).call(describe);
+    s.end();
+    store_string(&mut s, to_utf8, payload + 8);
+    // stack: none
+    s.local_get(ret)
+        .i32_const(0)
+        .i32_store8(mem(payload + 16, 0));
+    s.local_get(ret);
     s.end();
     f
 }
+
+/// Size of the `js-error` record: two strings and an `option<string>` (u8 + padding + string).
+const JS_ERROR_SIZE: i32 = 8 + 8 + 12;
 
 /// `cabi_realloc(old_ptr, old_size, align, new_size) -> ptr`: bump allocation, growing memory.
 fn realloc(bump: u32) -> Function {

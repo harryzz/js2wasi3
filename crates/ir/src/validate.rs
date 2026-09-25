@@ -4,7 +4,8 @@
 //! only to an enclosing `Loop`, no label defined twice on one path), and types: assignments,
 //! returns, conditions, operand types allowed for each op, call arity/argument types, and
 //! no value-less call used as a value, `Break`/`Continue` never leaving a `Seq`.
-//! Placeholder kinds (`Try`, `Throw`, `Suspend`) are checked structurally only.
+//! `Try` catches into a `jsval` local and `Throw` throws a `jsval`.
+//! The placeholder `Suspend` is checked structurally only.
 
 use crate::{BinOp, Expr, Function, Module, Stmt, Type, UnOp};
 
@@ -186,12 +187,14 @@ impl V<'_> {
             } => {
                 self.stmts(body);
                 if let Some(l) = catch_local {
-                    self.local_ty(*l);
+                    let t = self.local_ty(*l);
+                    self.expect("catch local", t, Type::JsVal);
                 }
                 self.stmts(catch_body);
             }
             Stmt::Throw(e) => {
-                self.expr(e);
+                let t = self.value("throw operand", e);
+                self.expect("throw operand", t, Type::JsVal);
             }
         }
     }

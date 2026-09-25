@@ -8,12 +8,18 @@
 //!   immutable globals built with `array.new_fixed` (see [`Cx::string`]).
 //! - `undefined`, `null`, `false`, `true`: four `$oddball` singletons (immutable globals 0–3)
 //!   whose field is the kind below. Identity (`ref.eq`) compares them.
-//! - Types: one `rec` group `[$number, $oddball, $string, $i64s]` at type indices 0–3
+//! - Errors (T12, until objects exist): `$error { name, message: (ref $string) }`, made by the
+//!   native error constructors. `typeof` is `"object"`, ToString is `Error.prototype.toString`,
+//!   ToPrimitive is that string (so ToNumber is NaN), `console.log` shows `[name: message]`
+//!   (node's format for an error without a stack).
+//! - Types: one `rec` group `[$number, $oddball, $string, $i64s, $error]` at type indices 0–4
 //!   (`$i64s` holds the number → string tables, see [`crate::numstr`]).
+//! - Exceptions (design D2): one tag, [`TAG`], `(param (ref null eq))`: `throw` throws the JS value.
+//!   Runtime errors (reading a property of `null`) throw a TypeError the same way.
 //!
-//! The helpers know these primitives. Objects (T13) extend them.
+//! The helpers know these values. Objects (T13) extend them.
 
-use js2wasi3_ir::TypeofTag;
+use js2wasi3_ir::{ErrorKind, ErrorProp, TypeofTag};
 use wasm_encoder::{
     ArrayType, BlockType, CompositeInnerType, CompositeType, ConstExpr, FieldType, Function,
     GlobalSection, GlobalType, HeapType, Instruction, InstructionSink, RefType, StorageType,
@@ -26,8 +32,12 @@ pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
 pub const T_STRING: u32 = 2;
 pub const T_I64S: u32 = 3;
+pub const T_ERROR: u32 = 4;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 4;
+pub const TYPES: u32 = 5;
+
+/// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
+pub const TAG: u32 = 0;
 
 pub const G_UNDEFINED: u32 = 0;
 pub const G_NULL: u32 = 1;
@@ -96,6 +106,10 @@ fn i31() -> HeapType {
     HeapType::I31
 }
 
+pub fn error() -> HeapType {
+    HeapType::Concrete(T_ERROR)
+}
+
 /// The `typeof` code of a tag: its index in [`TypeofTag::ALL`].
 pub fn typeof_code(tag: TypeofTag) -> i32 {
     TypeofTag::ALL.iter().position(|t| *t == tag).unwrap() as i32
@@ -133,6 +147,12 @@ pub fn types(types: &mut TypeSection) {
             StorageType::Val(ValType::I64),
             false,
         )))),
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(string_ref()), false),
+                field(StorageType::Val(string_ref()), false),
+            ]),
+        })),
     ]);
 }
 
@@ -235,6 +255,15 @@ pub enum Helper {
     Length,
     Inspect,
     NoFormat,
+    /// `(message: jsval) -> jsval`: `new E(message)`.
+    NewError(ErrorKind),
+    /// `(v: jsval) -> jsval`: `v.name` / `v.message`.
+    ErrorProp(ErrorProp),
+    /// `(v: jsval, prop: (ref $string))`: throw the TypeError for reading `prop` of `undefined`/`null`.
+    ThrowRead,
+    /// `(v: jsval) -> (ref $string)`: how an uncaught exception is shown: ToString for an
+    /// error, the `console.log` text otherwise.
+    Describe,
     Num(numstr::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
@@ -259,6 +288,11 @@ impl Helper {
             Helper::Length => "length",
             Helper::Inspect => "inspect",
             Helper::NoFormat => "no_format",
+            Helper::NewError(_) => "new_error",
+            Helper::ErrorProp(ErrorProp::Name) => "get_name",
+            Helper::ErrorProp(ErrorProp::Message) => "get_message",
+            Helper::ThrowRead => "throw_read_error",
+            Helper::Describe => "describe",
             Helper::Num(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
@@ -279,8 +313,11 @@ impl Helper {
             Helper::StrEq => (vec![s, s], vec![ValType::I32]),
             Helper::Concat => (vec![s, s], vec![s]),
             Helper::JsAdd => (vec![v, v], vec![v]),
-            Helper::Length | Helper::NoFormat => (vec![v], vec![v]),
-            Helper::Inspect => (vec![v], vec![s]),
+            Helper::Length | Helper::NoFormat | Helper::NewError(_) | Helper::ErrorProp(_) => {
+                (vec![v], vec![v])
+            }
+            Helper::Inspect | Helper::Describe => (vec![v], vec![s]),
+            Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
@@ -305,6 +342,10 @@ impl Helper {
             Helper::Length => length(cx),
             Helper::Inspect => inspect(cx),
             Helper::NoFormat => no_format(),
+            Helper::NewError(k) => new_error(cx, k),
+            Helper::ErrorProp(p) => error_prop(cx, p),
+            Helper::ThrowRead => throw_read(cx),
+            Helper::Describe => describe(cx),
             Helper::Num(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());
@@ -383,6 +424,11 @@ fn to_number() -> Function {
     s.if_(BlockType::Empty);
     s.unreachable();
     s.end();
+    // An error's ToPrimitive is "Name: message", which is never numeric.
+    s.local_get(V).ref_test_non_null(error());
+    s.if_(BlockType::Empty);
+    s.f64_const(f64::NAN.into()).return_();
+    s.end();
     // undefined → NaN, null/false → 0, true → 1.
     kind(&mut s, V);
     s.local_set(K);
@@ -426,8 +472,14 @@ fn to_boolean() -> Function {
     as_string(&mut s, V);
     s.array_len().i32_const(0).i32_ne();
     s.else_();
+    // Errors (objects) are truthy.
+    s.local_get(V).ref_test_non_null(error());
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(1);
+    s.else_();
     kind(&mut s, V);
     s.i32_const(K_TRUE).i32_eq();
+    s.end();
     s.end();
     s.end();
     s.end();
@@ -497,16 +549,31 @@ fn strict_eq(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$loose_eq(a, b) -> i32`: JS `==` on primitives. `null == undefined`; a nullish value
-/// equals nothing else; two strings compare by content; anything else compares as numbers.
+/// `$loose_eq(a, b) -> i32`: JS `==`. Two errors compare by identity, one error as its
+/// ToString. Then `null == undefined`; a nullish value equals nothing else; two strings compare
+/// by content; anything else compares as numbers.
 fn loose_eq(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(Helper::IsNullish);
     let to_number = cx.helper(Helper::ToNumber);
     let str_eq = cx.helper(Helper::StrEq);
     const NA: u32 = 2;
     const NB: u32 = 3;
+    let to_string = cx.helper(Helper::ToString);
     let mut f = Function::new([(2, ValType::I32)]);
     let mut s = f.instructions();
+    // Two errors (objects) compare by identity; one error compares as its ToPrimitive, a string.
+    s.local_get(0).ref_test_non_null(error());
+    s.local_get(1).ref_test_non_null(error());
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(0).local_get(1).ref_eq().return_();
+    s.end();
+    for v in [0, 1] {
+        s.local_get(v).ref_test_non_null(error());
+        s.if_(BlockType::Empty);
+        s.local_get(v).call(to_string).local_set(v);
+        s.end();
+    }
     s.local_get(0).call(is_nullish).local_set(NA);
     s.local_get(1).call(is_nullish).local_set(NB);
     s.local_get(NA).local_get(NB).i32_or();
@@ -543,12 +610,17 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::String));
     s.else_();
+    s.local_get(V).ref_test_non_null(error());
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(typeof_code(TypeofTag::Object));
+    s.else_();
     // Oddball kinds 0..=3 map to undefined, object (null), boolean, boolean: kind - (kind == 3).
     const _: () = assert!(K_UNDEFINED == 0 && K_NULL == 1 && K_FALSE == 2 && K_TRUE == 3);
     kind(&mut s, V);
     s.local_tee(K);
     s.local_get(K).i32_const(K_TRUE).i32_eq();
     s.i32_sub();
+    s.end();
     s.end();
     s.end();
     s.end();
@@ -653,11 +725,13 @@ fn concat() -> Function {
     f
 }
 
-/// `$to_string(v: jsval) -> (ref $string)`: JS ToString on primitives.
+/// `$to_string(v: jsval) -> (ref $string)`: JS ToString on primitives and errors.
 fn to_string(cx: &mut dyn Cx) -> Function {
     let is_number = cx.helper(Helper::IsNumber);
     let to_number = cx.helper(Helper::ToNumber);
     let number_to_string = cx.helper(Helper::Num(numstr::Helper::NumberToString));
+    let concat = cx.helper(Helper::Concat);
+    let colon = cx.str(": ");
     let names = [
         cx.str("undefined"),
         cx.str("null"),
@@ -680,6 +754,36 @@ fn to_string(cx: &mut dyn Cx) -> Function {
         .call(number_to_string)
         .return_();
     s.end();
+    // Error.prototype.toString: "name: message", or just one of them if the other is empty.
+    s.local_get(V).ref_test_non_null(error());
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .ref_cast_non_null(error())
+        .struct_get(T_ERROR, 0);
+    s.local_get(V)
+        .ref_cast_non_null(error())
+        .struct_get(T_ERROR, 1);
+    s.array_len().i32_eqz();
+    s.br_if(1);
+    s.drop();
+    s.local_get(V)
+        .ref_cast_non_null(error())
+        .struct_get(T_ERROR, 1);
+    s.local_get(V)
+        .ref_cast_non_null(error())
+        .struct_get(T_ERROR, 0);
+    s.array_len().i32_eqz();
+    s.br_if(1);
+    s.drop();
+    s.local_get(V)
+        .ref_cast_non_null(error())
+        .struct_get(T_ERROR, 0);
+    s.global_get(colon).call(concat);
+    s.local_get(V)
+        .ref_cast_non_null(error())
+        .struct_get(T_ERROR, 1);
+    s.call(concat).return_();
+    s.end();
     kind(&mut s, V);
     s.local_set(K);
     for (k, g) in names[..3].iter().enumerate() {
@@ -693,8 +797,8 @@ fn to_string(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$js_add(a, b: jsval) -> jsval`: JS `+` on primitives. If either is a string, concatenate
-/// the ToString of both; otherwise add the ToNumber of both.
+/// `$js_add(a, b: jsval) -> jsval`: JS `+`. If either is a string or an error (whose
+/// ToPrimitive is a string), concatenate the ToString of both; otherwise add the ToNumber of both.
 fn js_add(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
     let concat = cx.helper(Helper::Concat);
@@ -702,8 +806,12 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     let box_ = cx.helper(Helper::Box);
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(0).ref_test_non_null(string());
-    s.local_get(1).ref_test_non_null(string());
+    // An error's ToPrimitive is a string too.
+    for v in [0, 1] {
+        s.local_get(v).ref_test_non_null(string());
+        s.local_get(v).ref_test_non_null(error());
+        s.i32_or();
+    }
     s.i32_or();
     s.if_(BlockType::Result(jsval()));
     s.local_get(0).call(to_string);
@@ -718,11 +826,13 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$length(v: jsval) -> jsval`: `v.length` on primitives. A string's length; `undefined` for
-/// numbers and booleans. On `undefined`/`null` it's a TypeError: a trap until T12 has exceptions.
+/// `$length(v: jsval) -> jsval`: `v.length`. A string's length; `undefined` for numbers,
+/// booleans and errors. On `undefined`/`null` it throws a TypeError.
 fn length(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(Helper::IsNullish);
     let box_ = cx.helper(Helper::Box);
+    let throw_read = cx.helper(Helper::ThrowRead);
+    let prop = cx.str("length");
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
@@ -733,6 +843,7 @@ fn length(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
+    s.local_get(V).global_get(prop).call(throw_read);
     s.unreachable();
     s.end();
     s.global_get(G_UNDEFINED);
@@ -741,13 +852,21 @@ fn length(cx: &mut dyn Cx) -> Function {
 }
 
 /// `$inspect(v) -> (ref $string)`: how `console.log` shows a primitive: ToString, except
-/// that `-0` shows as `-0`.
+/// that `-0` shows as `-0`. An error shows as `[<ToString>]` (node, for an error without a stack).
 fn inspect(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
+    let concat = cx.helper(Helper::Concat);
     let minus_zero = cx.str("-0");
+    let (open, close) = (cx.str("["), cx.str("]"));
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(error());
+    s.if_(BlockType::Empty);
+    s.global_get(open);
+    s.local_get(V).call(to_string).call(concat);
+    s.global_get(close).call(concat).return_();
+    s.end();
     // -0 is never an i31.
     s.local_get(V).ref_test_non_null(number());
     s.if_(BlockType::Empty);
@@ -791,6 +910,101 @@ fn no_format() -> Function {
     s.br(0).end().end();
     s.end();
     s.local_get(V);
+    s.end();
+    f
+}
+
+/// `$new_error(message: jsval) -> jsval`: `new E(message)`: the message is `""` for
+/// `undefined`, otherwise its ToString.
+fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
+    let to_string = cx.helper(Helper::ToString);
+    let name = cx.str(k.name());
+    let empty = cx.str("");
+    const M: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.global_get(name);
+    s.local_get(M).global_get(G_UNDEFINED).ref_eq();
+    s.if_(BlockType::Result(string_ref()));
+    s.global_get(empty);
+    s.else_();
+    s.local_get(M).call(to_string);
+    s.end();
+    s.struct_new(T_ERROR);
+    s.end();
+    f
+}
+
+/// `$get_name(v)` / `$get_message(v) -> jsval`: the field of an error; `undefined` for other
+/// primitives; a TypeError for `undefined` / `null`.
+fn error_prop(cx: &mut dyn Cx, p: ErrorProp) -> Function {
+    let is_nullish = cx.helper(Helper::IsNullish);
+    let throw_read = cx.helper(Helper::ThrowRead);
+    let prop = cx.str(p.as_str());
+    let field = match p {
+        ErrorProp::Name => 0,
+        ErrorProp::Message => 1,
+    };
+    const V: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(error());
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .ref_cast_non_null(error())
+        .struct_get(T_ERROR, field)
+        .return_();
+    s.end();
+    s.local_get(V).call(is_nullish);
+    s.if_(BlockType::Empty);
+    s.local_get(V).global_get(prop).call(throw_read);
+    s.unreachable();
+    s.end();
+    s.global_get(G_UNDEFINED);
+    s.end();
+    f
+}
+
+/// `$throw_read_error(v: jsval, prop: (ref $string))`: throw node's TypeError for reading a
+/// property of `undefined` / `null`: "Cannot read properties of null (reading 'prop')".
+fn throw_read(cx: &mut dyn Cx) -> Function {
+    let to_string = cx.helper(Helper::ToString);
+    let concat = cx.helper(Helper::Concat);
+    let name = cx.str(ErrorKind::TypeError.name());
+    let parts = [
+        cx.str("Cannot read properties of "),
+        cx.str(" (reading '"),
+        cx.str("')"),
+    ];
+    const V: u32 = 0;
+    const PROP: u32 = 1;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.global_get(name);
+    s.global_get(parts[0]);
+    s.local_get(V).call(to_string).call(concat);
+    s.global_get(parts[1]).call(concat);
+    s.local_get(PROP).call(concat);
+    s.global_get(parts[2]).call(concat);
+    s.struct_new(T_ERROR);
+    s.throw(TAG);
+    s.end();
+    f
+}
+
+/// `$describe(v) -> (ref $string)`: see [`Helper::Describe`].
+fn describe(cx: &mut dyn Cx) -> Function {
+    let to_string = cx.helper(Helper::ToString);
+    let inspect = cx.helper(Helper::Inspect);
+    const V: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(error());
+    s.if_(BlockType::Result(string_ref()));
+    s.local_get(V).call(to_string);
+    s.else_();
+    s.local_get(V).call(inspect);
+    s.end();
     s.end();
     f
 }

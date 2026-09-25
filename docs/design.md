@@ -30,6 +30,7 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   (T08: integers in [-2^30, 2^30) except -0 are `i31ref`; the singletons are one `$oddball` struct type
   with a kind field. Variables, params and results are `f64` unless a non-number is ever stored in them:
   see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.)
+  (T12: errors are a runtime `$error { name, message }` struct until objects exist (T13); `typeof` is `"object"`.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
@@ -46,6 +47,12 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
 - Wasm traps stay traps: JS can't catch them.
 - At the boundary the tag never escapes: a library export returns `result<T, js-error>`, and a
   command prints the error to stderr and returns `err`.
+- (T12) `finally` uses dispatch, not duplication: an `i32` completion local per `finally` (0 normal, 1 throw,
+  2+ one per `break`/`continue`/`return` leaving it), one copy of the finally body, then `if` chains re-issue
+  the jump or `throw $js` the saved value. No `catch_all`/`exnref`/`throw_ref`: one tag, traps stay uncatchable.
+  Only exports that may throw (`ir::may_throw`) get `result<T, js-error>` (see [wit-names.md](wit-names.md)).
+  An uncaught exception in a command prints `Uncaught <name>: <message>` (or the `console.log` text of a
+  non-error) to stderr and exits 1. Runtime errors (`.length` of `null`, TDZ) throw node's TypeError/ReferenceError.
 
 ### D3. Async: P3 at the boundary, a state machine inside
 Component Model async handles concurrency **between the component and the host**:
@@ -93,10 +100,13 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 | Commands | `scripts/diff.sh` | node vs js2wasi3 + `wasmtime run -Sp3`: stdout, stderr and exit status |
 
 **Differential harness** (T11): `scripts/diff.sh [-j jobs] [fixture.js | dir]...`
-- The default is `tests/fixtures`, not recursive (`tests/fixtures/unsupported/` holds rejection tests, not diff targets).
+- The default is `tests/fixtures` and its subdirectories (T12: `exceptions/`), except `tests/fixtures/unsupported/`
+  (rejection tests, not diff targets).
 - It builds the compiler once, then runs the fixtures in parallel (10 s timeout each). It prints PASS/FAIL/SKIP with
   the time per fixture (SLOW at ≥ 2 s), the diffs or build diagnostics of failures, and a summary. Exit 1 on any failure.
 - `x.skip` next to `x.js` skips it; its first line is the reason (e.g. libraries: exports, nothing to run).
+- `x.uncaught` next to `x.js` (T12, F29): the program ends with an uncaught exception. node's stderr (source excerpt,
+  stack) is reduced to `Uncaught <message>` by `scripts/node-uncaught.mjs` before the comparison.
 - Fixtures are ES modules for node too (`tests/fixtures/package.json`: `"type": "module"`), so strict mode matches.
 - A command fixture is self-checking: it prints its results, and node's output is the expectation, so no `.out`
   file is needed. Keep each one under 2 s. Constructs that aren't supported yet show up as build failures.

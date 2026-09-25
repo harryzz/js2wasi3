@@ -8,6 +8,9 @@
 //!   doubling through the bump `cabi_realloc`; nothing is freed). A stream is opened on first
 //!   use: `stream.new`, then `write-via-stream` hands the readable end to the host and returns a
 //!   future for the result.
+//! - **Uncaught exceptions** (T12): `run` catches the JS exception tag around `main`, appends
+//!   `Uncaught <text>` to stderr ([`Helper::Uncaught`]) and makes `run` return `err` (exit status 1,
+//!   like node). Output written before the exception is kept.
 //! - **Event loop** (design D3, callback lift): `run` creates the waitable set, runs `main`, then
 //!   [`Helper::Flush`]. Flush advances each open stream: write the unwritten bytes (a write may
 //!   complete partially, or block: then it waits on the set), then drop the writable end and read
@@ -18,7 +21,7 @@
 //! Per stream, [`G_PHASE`]: 0 unused, 1 open, 2 waiting for a write, 3 waiting for the future, 4 done,
 //! 5 the reader went away (later output is dropped; the stream still gets closed, and `run` fails).
 
-use wasm_encoder::{BlockType, EntityType, Function, ImportSection, MemArg, ValType};
+use wasm_encoder::{BlockType, Catch, EntityType, Function, ImportSection, MemArg, ValType};
 
 use crate::abi;
 use crate::runtime::{self, Cx};
@@ -189,6 +192,8 @@ pub enum Helper {
     Step(u32),
     /// `() -> i32`: step every stream, then the callback code (`WAIT` or `EXIT` after `task.return`).
     Flush,
+    /// `(v: jsval)`: report an uncaught exception: `Uncaught <describe(v)>` to stderr, `run` fails.
+    Uncaught,
     /// `() -> i32`: the `run` export (async lift with callback).
     Run,
     /// `(event, index, payload: i32) -> i32`: its callback.
@@ -209,6 +214,7 @@ impl Helper {
             Helper::Step(0) => "step_stdout",
             Helper::Step(_) => "step_stderr",
             Helper::Flush => "flush",
+            Helper::Uncaught => "uncaught",
             Helper::Run => "run",
             Helper::Callback => "run_callback",
         }
@@ -219,6 +225,7 @@ impl Helper {
         match self {
             Helper::Append(_) => (vec![runtime::string_ref()], vec![]),
             Helper::Advance(_) | Helper::Closed(_) => (vec![I32], vec![]),
+            Helper::Uncaught => (vec![runtime::jsval()], vec![]),
             Helper::Pump(_) | Helper::Step(_) | Helper::Flush | Helper::Run => (vec![], vec![I32]),
             Helper::Callback => (vec![I32; 3], vec![I32]),
         }
@@ -315,12 +322,41 @@ impl Helper {
                 s.end();
                 f
             }
+            Helper::Uncaught => {
+                let describe = cx.helper(runtime::Helper::Describe);
+                let concat = cx.helper(runtime::Helper::Concat);
+                let append = cx.helper(runtime::Helper::Host(Helper::Append(1)));
+                let (prefix, newline) = (cx.str("Uncaught "), cx.str("\n"));
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.global_get(prefix);
+                s.local_get(0).call(describe).call(concat);
+                s.global_get(newline).call(concat);
+                s.call(append);
+                s.i32_const(1).global_set(err);
+                s.end();
+                f
+            }
             Helper::Run => {
                 let flush = cx.helper(runtime::Helper::Host(Helper::Flush));
+                let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
                 s.call(import(Import::WaitableSetNew)).global_set(ws);
+                s.block(BlockType::Result(runtime::jsval()));
+                s.try_table(
+                    BlockType::Empty,
+                    [Catch::One {
+                        tag: runtime::TAG,
+                        label: 0,
+                    }],
+                );
                 s.call(main);
+                s.call(flush).return_();
+                s.end();
+                s.unreachable();
+                s.end();
+                s.call(uncaught);
                 s.call(flush);
                 s.end();
                 f

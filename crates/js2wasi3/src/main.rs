@@ -63,6 +63,7 @@ fn plan_world(
                 .map(|(l, t)| (l.name.clone(), ty(*t)))
                 .collect(),
             result: e.sig.result.map(ty),
+            throws: e.sig.throws,
             line: pos.line,
             col: pos.col,
         });

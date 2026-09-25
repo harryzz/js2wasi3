@@ -7,6 +7,9 @@
 //! - `Bool` is an `i32` holding 0 or 1.
 //! - `Block L { .. }` → `block`. `Loop L { .. }` → `block $brk (loop $cont ..)`: `Break L` branches
 //!   to `$brk`, `Continue L` to `$cont`. `if` also opens a label level, which depth computation accounts for.
+//! - `Throw e` → `throw $js`. `Try { body, catch_local, catch_body }` →
+//!   `block (block (result jsval) (try_table (catch $js 0) body) (br 1)) (local.set catch_local) catch_body`:
+//!   no `catch_all`, so Wasm traps are never caught (design D2).
 //! - A function with a result ends in `unreachable`: the lowering guarantees every path returns,
 //!   but Wasm validation can't see through an `if/else` whose two arms both `return`.
 //! - Runtime helpers are emitted after the user functions, and only when used:
@@ -32,9 +35,10 @@ use std::collections::HashMap;
 use anyhow::{Context, bail};
 use js2wasi3_ir::{self as ir, AbiType, BinOp, Const, Expr, Intrinsic, LabelId, Stmt, Type, UnOp};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, DataCountSection, DataSection, ExportKind, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, IndirectNameMap,
-    InstructionSink, MemorySection, MemoryType, NameMap, NameSection, TypeSection, ValType,
+    BlockType, Catch, CodeSection, ConstExpr, DataCountSection, DataSection, ExportKind,
+    ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    IndirectNameMap, InstructionSink, MemorySection, MemoryType, NameMap, NameSection, TagKind,
+    TagSection, TagType, TypeSection, ValType,
 };
 
 /// Emit a core Wasm module for `module`.
@@ -55,7 +59,9 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         .exports
         .iter()
         .filter(|x| {
-            x.sig.params.contains(&AbiType::String) || x.sig.result == Some(AbiType::String)
+            x.sig.params.contains(&AbiType::String)
+                || x.sig.result == Some(AbiType::String)
+                || x.sig.throws
         })
         .collect();
     let abi = !adapted.is_empty() || command.is_some();
@@ -103,6 +109,14 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     if command.is_some() {
         host::imports(&mut imports, &mut |p, r| e.type_id(p, r));
     }
+    // The exception tag (`runtime::TAG`) comes with the JS runtime.
+    let mut tags = TagSection::new();
+    if js {
+        tags.tag(TagType {
+            kind: TagKind::Exception,
+            func_type_idx: e.type_id(vec![runtime::jsval()], vec![]),
+        });
+    }
     let mut funcs = FunctionSection::new();
     let mut code = CodeSection::new();
     for f in &module.functions {
@@ -120,16 +134,10 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut adapter_names = Vec::new();
     for x in &adapted {
         let params = abi::flat_params(&x.sig.params);
-        let results = abi::flat_result(x.sig.result);
+        let results = abi::flat_result(&x.sig);
         funcs.function(e.type_id(params, results));
         let bump = e.bump;
-        code.function(&abi::adapter(
-            &mut e,
-            bump,
-            func_base + x.func.0,
-            &x.sig.params,
-            x.sig.result,
-        ));
+        code.function(&abi::adapter(&mut e, bump, func_base + x.func.0, &x.sig));
         adapter_names.push(format!("{}$abi", x.name));
     }
     let realloc =
@@ -267,6 +275,9 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     if abi {
         out.section(&memory);
     }
+    if js {
+        out.section(&tags);
+    }
     if !globals.is_empty() {
         out.section(&globals);
     }
@@ -318,13 +329,11 @@ fn uses_jsval(m: &ir::Module) -> bool {
     }
     fn stmts(list: &[Stmt]) -> bool {
         list.iter().any(|s| match s {
-            Stmt::Expr(e) | Stmt::Set(_, e) | Stmt::SetGlobal(_, e) | Stmt::Throw(e) => expr(e),
+            Stmt::Throw(_) | Stmt::Try { .. } => true, // the tag's type is `jsval`
+            Stmt::Expr(e) | Stmt::Set(_, e) | Stmt::SetGlobal(_, e) => expr(e),
             Stmt::Return(e) => e.as_ref().is_some_and(expr),
             Stmt::Block { body, .. } | Stmt::Loop { body, .. } => stmts(body),
             Stmt::If { cond, then, els } => expr(cond) || stmts(then) || stmts(els),
-            Stmt::Try {
-                body, catch_body, ..
-            } => stmts(body) || stmts(catch_body),
             Stmt::Break(_) | Stmt::Continue(_) => false,
         })
     }
@@ -374,17 +383,14 @@ fn unsupported_stmts(list: &[Stmt], out: &mut Vec<(&'static str, &'static str)>)
             Stmt::Try {
                 body, catch_body, ..
             } => {
-                out.push(("Try", "T12"));
                 unsupported_stmts(body, out);
                 unsupported_stmts(catch_body, out);
             }
-            Stmt::Throw(e) => {
-                out.push(("Throw", "T12"));
-                unsupported_expr(e, out);
-            }
-            Stmt::Expr(e) | Stmt::Set(_, e) | Stmt::SetGlobal(_, e) | Stmt::Return(Some(e)) => {
-                unsupported_expr(e, out)
-            }
+            Stmt::Expr(e)
+            | Stmt::Set(_, e)
+            | Stmt::SetGlobal(_, e)
+            | Stmt::Return(Some(e))
+            | Stmt::Throw(e) => unsupported_expr(e, out),
             Stmt::Block { body, .. } | Stmt::Loop { body, .. } => unsupported_stmts(body, out),
             Stmt::If { cond, then, els } => {
                 unsupported_expr(cond, out);
@@ -648,7 +654,46 @@ impl Emitter<'_> {
                 }
                 s.return_();
             }
-            Stmt::Try { .. } | Stmt::Throw(_) => unreachable!("rejected by check_supported"),
+            Stmt::Throw(e) => {
+                self.expr(s, frames, e)?;
+                s.throw(runtime::TAG);
+            }
+            Stmt::Try {
+                body,
+                catch_local,
+                catch_body,
+            } => {
+                s.block(BlockType::Empty);
+                frames.push(Frame::Anon);
+                s.block(BlockType::Result(runtime::jsval()));
+                frames.push(Frame::Anon);
+                // Catch labels count from outside the `try_table`: 0 is the block above.
+                s.try_table(
+                    BlockType::Empty,
+                    [Catch::One {
+                        tag: runtime::TAG,
+                        label: 0,
+                    }],
+                );
+                frames.push(Frame::Anon);
+                for x in body {
+                    self.stmt(s, frames, x)?;
+                }
+                frames.pop();
+                s.end();
+                s.br(1);
+                frames.pop();
+                s.end();
+                match catch_local {
+                    Some(l) => s.local_set(l.0),
+                    None => s.drop(),
+                };
+                for x in catch_body {
+                    self.stmt(s, frames, x)?;
+                }
+                frames.pop();
+                s.end();
+            }
         }
         Ok(())
     }
@@ -829,9 +874,18 @@ impl Emitter<'_> {
                 }
                 for a in args {
                     self.expr(s, frames, a)?;
-                    if matches!(op, Intrinsic::Concat | Intrinsic::ConsoleWrite { .. }) {
+                    if matches!(
+                        op,
+                        Intrinsic::Concat
+                            | Intrinsic::ConsoleWrite { .. }
+                            | Intrinsic::StringLength
+                    ) {
                         s.ref_cast_non_null(runtime::string());
                     }
+                }
+                if *op == Intrinsic::StringLength {
+                    s.array_len().f64_convert_i32_u();
+                    return Ok(true);
                 }
                 let h = match op {
                     Intrinsic::JsAdd => H::JsAdd,
@@ -839,12 +893,15 @@ impl Emitter<'_> {
                     Intrinsic::ToString => H::ToString,
                     Intrinsic::NumberToString => H::Num(numstr::Helper::NumberToString),
                     Intrinsic::Length => H::Length,
+                    Intrinsic::StringLength => unreachable!("inline"),
                     Intrinsic::TypeofString => H::TypeofString,
                     Intrinsic::Inspect => H::Inspect,
                     Intrinsic::NoFormat => H::NoFormat,
                     Intrinsic::ConsoleWrite { stderr } => {
                         H::Host(host::Helper::Append(*stderr as u32))
                     }
+                    Intrinsic::NewError(k) => H::NewError(*k),
+                    Intrinsic::ErrorProp(p) => H::ErrorProp(*p),
                 };
                 s.call(self.helper_index(Helper::Js(h)));
                 return Ok(op.signature().1.is_some());

@@ -104,8 +104,10 @@ pub fn parse<'a>(
     let exports = collect_exports(&ret.module_record, source);
 
     let ast = alloc.alloc(ret.program);
+    // AST nodes: the lowering maps references to source positions (TDZ analysis, T12).
     let sem = SemanticBuilder::new()
         .with_check_syntax_error(true)
+        .with_build_nodes(true)
         .build(ast);
     if sem.diagnostics.has_errors() {
         return Err(convert(path, source, sem.diagnostics.into_vec()));

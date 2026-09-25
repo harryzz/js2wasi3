@@ -110,6 +110,24 @@ Strings cross the boundary as UTF-8 (the Canonical ABI, with `cabi_realloc`). JS
 may contain lone surrogates, which WIT strings can't: **a lone surrogate in a returned string becomes
 U+FFFD**.
 
+## Exceptions at the boundary (T12)
+
+An export that **may throw** (an uncaught `throw`, a call of a function that may, or a runtime error such as
+`.length` of `null`; `ir::may_throw` decides) returns `result<T, js-error>` (`result<_, js-error>` without a
+result). Exports that can't throw keep their plain types. The world then declares
+
+```wit
+record js-error { name: string, message: string, stack: option<string> }
+```
+
+A thrown error gives its `name` and `message`. Any other thrown value gives `name: ""` and the value's
+`console.log` text as `message`. `stack` is always `none` for now. With this record in the world, an export whose WIT
+name is `js-error` is an error.
+
+```js
+export function check(x) { if (x < 0) throw new RangeError("neg"); return x; }  // check: func(x: f64) -> result<f64, js-error>
+```
+
 ## Package and world name
 
 - **Default: taken from the entry file name.** The file stem goes through the same conversion, with `.` treated like `_`.
