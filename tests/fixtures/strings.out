@@ -1,0 +1,10 @@
+checks() 32767
+greet("x") "hi x"
+joinWith("p", "q", 3) "p-q:3"
+len("héllo") 5
+lone() "a�b"
+mixedAdd() "77;77;7true;7null;7undefined;7;71.5;77;14;8;7;NaN;7;8.5;true7;8;2;1;NaN;true;2.5;null7;7;1;0;NaN;null;1.5;undefined7;NaN;NaN;NaN;NaN;undefined;NaN;7;7;true;null;undefined;;1.5;1.57;8.5;2.5;1.5;NaN;1.5;3;"
+numbers(2) "1,0,0.30000000000000004,1e+21,1e-7,1073741824,0.6666666666666666,-1.5e-10"
+show() "[7|7][7|7][true|true][null|null][undefined|undefined][|][1.5|1.5]"
+typeofNames() "string,number,boolean,object,undefined,string,number,"
+unicode() "é€😀4"

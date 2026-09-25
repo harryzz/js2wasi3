@@ -42,8 +42,17 @@ pub fn validate(m: &Module) -> Result<(), Vec<String>> {
         );
     }
     for e in &m.exports {
-        if e.func.0 as usize >= m.functions.len() {
+        let Some(f) = m.functions.get(e.func.0 as usize) else {
             errs.push(format!("export {:?}: no function #{}", e.name, e.func.0));
+            continue;
+        };
+        let params: Vec<Type> = f.locals[..f.params as usize].iter().map(|l| l.ty).collect();
+        let want: Vec<Type> = e.sig.params.iter().map(|a| a.ir_type()).collect();
+        if params != want || f.result != e.sig.result.map(|a| a.ir_type()) {
+            errs.push(format!(
+                "export {:?}: function {} doesn't match its boundary signature {:?}",
+                e.name, f.name, e.sig
+            ));
         }
     }
     if errs.is_empty() { Ok(()) } else { Err(errs) }
@@ -286,6 +295,23 @@ impl V<'_> {
             Expr::Suspend { arg, .. } => {
                 self.value("suspend operand", arg);
                 Some(Type::JsVal)
+            }
+            Expr::Str(_) => Some(Type::JsVal),
+            Expr::Intrinsic { op, args } => {
+                let (params, result) = op.signature();
+                if args.len() != params.len() {
+                    self.err(format!(
+                        "${}: {} args for {} params",
+                        op.name(),
+                        args.len(),
+                        params.len()
+                    ));
+                }
+                for (a, p) in args.iter().zip(params) {
+                    let t = self.value("intrinsic argument", a);
+                    self.expect(&format!("${} argument", op.name()), t, *p);
+                }
+                Some(result)
             }
             Expr::TypeofIs { arg, .. } => {
                 let t = self.value("typeof operand", arg);

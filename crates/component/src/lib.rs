@@ -12,10 +12,11 @@ use wit_parser::Resolve;
 
 pub mod names;
 
-/// A WIT value type. v0 has only `f64` (T09 adds strings).
+/// A WIT value type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValType {
     F64,
+    String,
 }
 
 /// One exported function, as the entry module declares it.
@@ -214,6 +215,7 @@ fn params(ps: &[(String, ValType)]) -> Vec<String> {
 fn ty(t: ValType) -> &'static str {
     match t {
         ValType::F64 => "f64",
+        ValType::String => "string",
     }
 }
 

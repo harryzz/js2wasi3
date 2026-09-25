@@ -1,25 +1,34 @@
 //! Lowering: checked JS AST ([`js2wasi3_frontend::Program`]) → [`js2wasi3_ir::Module`].
 //!
-//! # Subset (T05 numbers + T08 primitive values)
-//! Values are numbers, booleans, `undefined` and `null`. Expressions have one of three IR types:
-//! `f64`, `bool` (comparisons, `!`, boolean literals) or `jsval` (anything else); see [`Val`].
+//! # Subset (T05 numbers, T08 primitive values, T09 strings)
+//! Values are numbers, booleans, strings, `undefined` and `null`. Expressions have one of three
+//! IR types: `f64`, `bool` (comparisons, `!`, boolean literals) or `jsval` (anything else), and a
+//! [`Kind`] saying what they are known to hold (`Num`, `Bool`, `Str` or `Any`); see [`Val`].
 //!
 //! **Type inference** is optimistic and driven by the lowering itself: every variable, parameter
-//! and function result starts as `f64`. When the lowering would store a non-`f64` value into an
-//! `f64` slot, it records the slot as *demoted* to `jsval`, and [`lower`] runs again with that
-//! knowledge until no new slot is demoted. So a slot is `f64` exactly when every value stored
-//! into it is a number, and the inference can't disagree with the code it produces.
+//! and function result starts as `f64`. Each store records the kind of the stored value for its
+//! slot; when a slot's kind changes (`Num` → `Bool`/`Str` → `Any`), [`lower`] runs again with that
+//! knowledge until nothing changes. A slot is `f64` exactly when every value stored into it is a
+//! number, so the inference can't disagree with the code it produces.
+//!
+//! **Boundary types** (the WIT signature of an export, see `docs/wit-names.md` and T09): a
+//! parameter is `string` if its JSDoc says `@param {string}`, or, without JSDoc, if it's used as
+//! a string (a `+`, `==`, `===` operand next to a known string, a template-literal interpolation,
+//! a `.length` read); otherwise `f64`. The result is `string` if `@returns {string}` or every
+//! returned value is a string; otherwise `f64`.
 //!
 //! Supported: top-level `function` declarations (exported or not), simple parameters (missing
 //! arguments are `undefined`), `var`/`let`/`const`, top-level variables with a literal
-//! initializer (they become globals), number/boolean/`null` literals, `undefined`, `NaN`,
-//! `Infinity`, `+ - * / %` (on primitives: ToNumber), unary `- + ! ~ void`,
-//! `| & ^ << >> >>>`, comparisons, `=== !== == !=`, `typeof x === "..."`, `&& || ??`, `?:`,
-//! comma, assignment and compound assignment, `++`/`--`, direct calls, `if`, `while`,
-//! `do/while`, `for`, labels, `break`, `continue`, `return`.
+//! initializer (they become globals), number/boolean/string/`null` literals, template literals,
+//! `undefined`, `NaN`, `Infinity`, `+` (addition or concatenation), `- * / %` (ToNumber),
+//! unary `- + ! ~ void typeof`, `| & ^ << >> >>>`, comparisons, `=== !== == !=`, `.length`,
+//! `&& || ??`, `?:`, comma, assignment and compound assignment, `++`/`--`, direct calls, `if`,
+//! `while`, `do/while`, `for`, labels, `break`, `continue`, `return`.
+//! Converting a string to a number (`"5" * 2`, `"a" < "b"`) is rejected when the operand is known
+//! to be a string, and traps at run time otherwise (F20).
 //!
-//! An export whose parameters or result aren't all `f64` gets a wrapper `<name>$export`
-//! with `f64` parameters (boxed into JS values) and an `f64` result (ToNumber).
+//! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
+//! that converts (box an `f64`, ToNumber / ToString of the result).
 //!
 //! Anything else produces `unsupported: <construct> (planned: <task>)` at its source
 //! position. The lowering never guesses: a construct it can't lower exactly is rejected.
@@ -29,8 +38,8 @@ use std::collections::{HashMap, HashSet};
 
 use js2wasi3_frontend::{Diagnostic, Diagnostics, Program, line_col, statement_kind};
 use js2wasi3_ir::{
-    self as ir, BinOp, Const, Expr, FuncId, GlobalId, LabelId, LocalId, Pos, Stmt, Type, TypeofTag,
-    UnOp,
+    self as ir, BinOp, Const, Expr, FuncId, GlobalId, Intrinsic, LabelId, LocalId, Pos, Stmt, Type,
+    TypeofTag, UnOp,
 };
 use oxc_ast::ast::*;
 use oxc_semantic::Scoping;
@@ -44,7 +53,7 @@ use oxc_syntax::{
 
 /// Lower a whole module. Returns every unsupported construct as a diagnostic.
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
-    let mut demoted = HashSet::new();
+    let mut facts = Facts::default();
     loop {
         let mut l = Lowerer {
             p: program,
@@ -55,15 +64,17 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             globals: HashMap::new(),
             names: HashMap::new(),
             diags: Vec::new(),
-            demoted: &demoted,
-            newly_demoted: HashSet::new(),
+            facts: &facts,
+            seen: HashMap::new(),
+            new_string_params: HashSet::new(),
+            exported: HashSet::new(),
+            jsdoc: HashMap::new(),
         };
         l.run();
-        if !l.newly_demoted.is_empty() {
-            // Each round demotes at least one more slot, so this terminates.
-            let new = std::mem::take(&mut l.newly_demoted);
+        if let Some(next) = l.next_facts() {
+            // Facts only grow (kinds go up a finite lattice), so this terminates.
             drop(l);
-            demoted.extend(new);
+            facts = next;
             continue;
         }
         return if l.diags.is_empty() {
@@ -81,6 +92,54 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
 enum Slot {
     Var(SymbolId),
     Result(FuncId),
+}
+
+/// What a value is known to hold: a lattice `Bottom < Num | Bool | Str < Any`.
+/// `Bottom` ("nothing known yet") comes from reading a slot no store has reached so far; in
+/// the final round it's left only in dead code. `Num` and `Bottom` values have IR type `f64`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Kind {
+    Bottom,
+    Num,
+    Bool,
+    Str,
+    Any,
+}
+
+impl Kind {
+    fn join(self, o: Kind) -> Kind {
+        match (self, o) {
+            (Kind::Bottom, k) | (k, Kind::Bottom) => k,
+            (a, b) if a == b => a,
+            _ => Kind::Any,
+        }
+    }
+
+    fn of_const(c: &Const) -> Kind {
+        match c {
+            Const::F64(_) | Const::I32(_) => Kind::Num,
+            Const::Bool(_) => Kind::Bool,
+            Const::Undefined | Const::Null => Kind::Any,
+        }
+    }
+}
+
+/// What earlier rounds learned: the kind stored into each slot (absent: `Bottom`), and the
+/// exported parameters used as strings. Every kind rule is monotone and facts only grow, so the
+/// rounds reach the least fixpoint.
+#[derive(Default)]
+struct Facts {
+    kinds: HashMap<Slot, Kind>,
+    string_params: HashSet<SymbolId>,
+}
+
+/// Boundary types from an exported function's JSDoc.
+#[derive(Default)]
+struct JsDoc {
+    params: HashMap<String, ir::AbiType>,
+    result: Option<ir::AbiType>,
+    /// Unsupported types, reported if the function is exported.
+    errors: Vec<String>,
 }
 
 /// Marker: a diagnostic has been recorded, abandon the current construct.
@@ -104,16 +163,48 @@ struct Lowerer<'p, 'a> {
     /// Top-level names, for resolving the export list.
     names: HashMap<String, Binding>,
     diags: Vec<Diagnostic>,
-    /// Slots known to hold non-numbers (from earlier rounds).
-    demoted: &'p HashSet<Slot>,
-    /// Slots found to hold non-numbers in this round.
-    newly_demoted: HashSet<Slot>,
+    /// What earlier rounds learned: this round's code assumes it.
+    facts: &'p Facts,
+    /// The kinds this round stores into each slot (absent: nothing stored).
+    seen: HashMap<Slot, Kind>,
+    /// Exported parameters this round found used as strings.
+    new_string_params: HashSet<SymbolId>,
+    /// Functions with an export.
+    exported: HashSet<FuncId>,
+    jsdoc: HashMap<FuncId, JsDoc>,
 }
 
-/// A value being built: an IR expression and its type (`F64`, `Bool` or `JsVal`).
+/// A value being built: an IR expression, its type (`F64`, `Bool` or `JsVal`) and its kind.
 struct Val {
     e: Expr,
     ty: Type,
+    kind: Kind,
+}
+
+impl Val {
+    /// A value whose kind is all its type says.
+    fn new(e: Expr, ty: Type) -> Val {
+        let kind = match ty {
+            Type::F64 => Kind::Num,
+            Type::Bool => Kind::Bool,
+            _ => Kind::Any,
+        };
+        Val { e, ty, kind }
+    }
+
+    fn num(e: Expr) -> Val {
+        Val::new(e, Type::F64)
+    }
+
+    /// A JS value of a known kind (never `Num`/`Bottom`: those are `f64`).
+    fn js(e: Expr, kind: Kind) -> Val {
+        debug_assert!(!matches!(kind, Kind::Num | Kind::Bottom));
+        Val {
+            e,
+            ty: Type::JsVal,
+            kind,
+        }
+    }
 }
 
 /// A `break`/`continue` target.
@@ -156,12 +247,23 @@ enum Place {
     Global(GlobalId),
 }
 
-/// A resolved variable: where it lives, its slot and its type.
+/// A resolved variable: where it lives, its slot, its type and kind.
 #[derive(Clone, Copy)]
 struct Var {
     place: Place,
     sym: SymbolId,
     ty: Type,
+    kind: Kind,
+}
+
+impl Var {
+    fn val(&self) -> Val {
+        Val {
+            e: read(self.place),
+            ty: self.ty,
+            kind: self.kind,
+        }
+    }
 }
 
 impl<'p, 'a> Lowerer<'p, 'a> {
@@ -186,30 +288,83 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     // ---- inferred types ----------------------------------------------------------------
 
+    /// The kind of the values in `s`, as assumed by this round.
+    fn slot_kind(&self, s: Slot) -> Kind {
+        self.facts.kinds.get(&s).copied().unwrap_or(Kind::Bottom)
+    }
+
     fn slot_ty(&self, s: Slot) -> Type {
-        if self.demoted.contains(&s) || self.newly_demoted.contains(&s) {
-            Type::JsVal
-        } else {
-            Type::F64
+        match self.slot_kind(s) {
+            Kind::Num | Kind::Bottom => Type::F64,
+            _ => Type::JsVal,
         }
     }
 
-    /// Record that `s` holds non-numbers. Its current `f64` code is discarded by a new round.
-    fn demote(&mut self, s: Slot) {
-        if !self.demoted.contains(&s) {
-            self.newly_demoted.insert(s);
-        }
+    /// Record that a value of kind `k` is stored into `s`.
+    fn observe(&mut self, s: Slot, k: Kind) {
+        let joined = self.seen.get(&s).map_or(k, |cur| cur.join(k));
+        self.seen.insert(s, joined);
     }
 
-    /// `v` converted for storing into `slot` of type `ty` (demoting the slot if needed).
+    /// The facts for another round, if this round saw anything its assumptions didn't cover.
+    /// Then this round's module is thrown away and lowering runs again.
+    fn next_facts(&self) -> Option<Facts> {
+        let mut next = Facts {
+            kinds: self.facts.kinds.clone(),
+            string_params: self.facts.string_params.clone(),
+        };
+        let mut changed = false;
+        for (s, k) in &self.seen {
+            let joined = next.kinds.get(s).map_or(*k, |f| f.join(*k));
+            if joined != Kind::Bottom && next.kinds.get(s) != Some(&joined) {
+                next.kinds.insert(*s, joined);
+                changed = true;
+            }
+        }
+        for p in &self.new_string_params {
+            changed |= next.string_params.insert(*p);
+        }
+        changed.then_some(next)
+    }
+
+    /// `v` converted for storing into `slot` of type `ty`.
     fn store(&mut self, slot: Slot, ty: Type, v: Val) -> Expr {
+        self.observe(slot, v.kind);
         match ty {
             Type::JsVal => jsval_of(v),
             _ if v.ty == Type::F64 => v.e,
-            _ => {
-                self.demote(slot);
-                Expr::f64(0.0) // placeholder: this round's module is thrown away
-            }
+            _ => Expr::f64(0.0), // placeholder: `observe` forced a new round
+        }
+    }
+
+    /// JS ToNumber of `v`, rejected for strings (not implemented yet: F20).
+    fn num(&mut self, v: Val, span: Span) -> R<Expr> {
+        if v.kind == Kind::Str {
+            return Err(self.unsupported(span, "converting a string to a number", "T21"));
+        }
+        Ok(number_of(v))
+    }
+
+    /// `e` is an exported function's parameter used as a string: make it a WIT `string`
+    /// (unless its JSDoc says otherwise).
+    fn hint_string(&mut self, cx: &FnCx, e: &Expression<'a>) {
+        let Expression::Identifier(id) = e.without_parentheses() else {
+            return;
+        };
+        let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id() else {
+            return;
+        };
+        let is_param = self.func_params[&cx.id].contains(&Some(sym));
+        let documented = self
+            .jsdoc
+            .get(&cx.id)
+            .is_some_and(|d| d.params.contains_key(id.name.as_str()));
+        if is_param
+            && self.exported.contains(&cx.id)
+            && !documented
+            && !self.facts.string_params.contains(&sym)
+        {
+            self.new_string_params.insert(sym);
         }
     }
 
@@ -221,6 +376,44 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let mut fns: Vec<(&'a Function<'a>, FuncId)> = Vec::new();
         for stmt in body.iter() {
             let _ = self.declare_top(stmt, &mut fns);
+        }
+        for e in &self.p.exports {
+            if e.from.is_none()
+                && let Some(Binding::Func(f)) = e.local.as_deref().and_then(|l| self.names.get(l))
+            {
+                self.exported.insert(*f);
+            }
+        }
+        // Boundary facts: string parameters (JSDoc or earlier usage) hold strings.
+        for func in self.exported.clone() {
+            let params = self.func_params[&func].clone();
+            let f = self.module.function(func);
+            let pos = f.pos.expect("declared functions have a position");
+            let names: Vec<String> = f.locals[..f.params as usize]
+                .iter()
+                .map(|l| l.name.clone())
+                .collect();
+            let doc = self.jsdoc.remove(&func).unwrap_or_default();
+            for (name, sym) in names.iter().zip(params) {
+                let Some(sym) = sym else { continue };
+                let string = match doc.params.get(name) {
+                    Some(t) => *t == ir::AbiType::String,
+                    None => self.facts.string_params.contains(&sym),
+                };
+                // What the boundary passes in.
+                let kind = if string { Kind::Str } else { Kind::Num };
+                self.observe(Slot::Var(sym), kind);
+            }
+            for e in &doc.errors {
+                self.diags.push(Diagnostic {
+                    path: self.p.path.clone(),
+                    line: pos.line,
+                    col: pos.col,
+                    message: format!("unsupported: {e} (planned: T20)"),
+                    help: None,
+                });
+            }
+            self.jsdoc.insert(func, doc);
         }
         // Pass 2: lower bodies.
         for (f, id) in fns {
@@ -238,10 +431,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         fns: &mut Vec<(&'a Function<'a>, FuncId)>,
     ) -> R<()> {
         match stmt {
-            Statement::FunctionDeclaration(f) => self.declare_function(f, fns),
+            Statement::FunctionDeclaration(f) => self.declare_function(f, f.span.start, fns),
             Statement::VariableDeclaration(d) => self.declare_globals(d),
             Statement::ExportDeclaration(e) => match &e.declaration {
-                Declaration::FunctionDeclaration(f) => self.declare_function(f, fns),
+                Declaration::FunctionDeclaration(f) => self.declare_function(f, e.span.start, fns),
                 Declaration::VariableDeclaration(d) => {
                     self.declare_globals(d)?;
                     Err(self.unsupported(
@@ -258,7 +451,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             },
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(f) if f.id.is_some() => {
-                    self.declare_function(f, fns)
+                    self.declare_function(f, e.span.start, fns)
                 }
                 _ => Err(self.unsupported(
                     e.span,
@@ -295,9 +488,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// `doc_at`: where a JSDoc comment for the function would be attached (the start of the
+    /// `export` statement or of the declaration).
     fn declare_function(
         &mut self,
         f: &'a Function<'a>,
+        doc_at: u32,
         fns: &mut Vec<(&'a Function<'a>, FuncId)>,
     ) -> R<()> {
         let id_node = f.id.as_ref().expect("function declarations have a name");
@@ -344,6 +540,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         );
         func.pos = Some(self.pos(f.span));
         self.module.add_function(func);
+        if let Some(text) = self.p.jsdoc(doc_at) {
+            self.jsdoc.insert(id, parse_jsdoc(text));
+        }
         self.func_params
             .insert(id, params.iter().map(|(_, s)| *s).collect());
         if let Some(sym) = id_node.symbol_id.get() {
@@ -382,9 +581,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 .get()
                 .expect("semantic analysis assigns symbols");
             let slot = Slot::Var(sym);
-            if init.ty() != Type::F64 {
-                self.demote(slot);
-            }
+            self.observe(slot, Kind::of_const(&init));
             self.module.globals.push(ir::Global {
                 name: b.name.to_string(),
                 ty: self.slot_ty(slot),
@@ -410,6 +607,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     func,
                     string_name: e.string_name,
                     pos,
+                    sig: ir::AbiSig::default(), // set by `wrap_exports`
                 });
                 Ok(())
             }
@@ -419,46 +617,96 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
-    /// Give every export whose signature isn't all `f64` an `f64` wrapper (the WIT boundary is `f64`).
+    /// Set each export's boundary signature. Where the function's IR signature differs, the
+    /// export goes through a wrapper `<name>$export` that converts.
     fn wrap_exports(&mut self) {
-        let mut wrappers: HashMap<FuncId, FuncId> = HashMap::new();
+        use ir::AbiType;
+        let mut done: HashMap<FuncId, (FuncId, ir::AbiSig)> = HashMap::new();
         for i in 0..self.module.exports.len() {
             let func = self.module.exports[i].func;
-            let f = self.module.function(func).clone();
-            let params = &f.locals[..f.params as usize];
-            if params.iter().all(|l| l.ty == Type::F64) && f.result != Some(Type::JsVal) {
+            if let Some((w, sig)) = done.get(&func) {
+                self.module.exports[i].func = *w;
+                self.module.exports[i].sig = sig.clone();
                 continue;
             }
-            let wrapper = *wrappers.entry(func).or_insert_with(|| {
-                let sig: Vec<(&str, Type)> = params
+            let f = self.module.function(func).clone();
+            let params = &f.locals[..f.params as usize];
+            let syms = &self.func_params[&func];
+            let doc = self.jsdoc.get(&func);
+            let result_kind = self.slot_kind(Slot::Result(func));
+            let sig = ir::AbiSig {
+                params: params
                     .iter()
-                    .map(|l| (l.name.as_str(), Type::F64))
+                    .zip(syms)
+                    .map(|(l, sym)| match doc.and_then(|d| d.params.get(&l.name)) {
+                        Some(t) => *t,
+                        None if sym.is_some_and(|s| self.facts.string_params.contains(&s)) => {
+                            AbiType::String
+                        }
+                        None => AbiType::F64,
+                    })
+                    .collect(),
+                result: f.result.map(|_| match doc.and_then(|d| d.result) {
+                    Some(t) => t,
+                    None if result_kind == Kind::Str => AbiType::String,
+                    None => AbiType::F64,
+                }),
+            };
+            let direct = params
+                .iter()
+                .zip(&sig.params)
+                .all(|(l, a)| l.ty == a.ir_type())
+                && f.result == sig.result.map(|a| a.ir_type())
+                && (sig.result != Some(AbiType::String) || result_kind == Kind::Str);
+            let target = if direct {
+                func
+            } else {
+                let wsig: Vec<(&str, Type)> = params
+                    .iter()
+                    .zip(&sig.params)
+                    .map(|(l, a)| (l.name.as_str(), a.ir_type()))
                     .collect();
-                let result = f.result.map(|_| Type::F64);
-                let mut w = ir::Function::new(format!("{}$export", f.name), &sig, result);
+                let mut w = ir::Function::new(
+                    format!("{}$export", f.name),
+                    &wsig,
+                    sig.result.map(|a| a.ir_type()),
+                );
                 w.pos = f.pos;
                 let args = params
                     .iter()
+                    .zip(&sig.params)
                     .enumerate()
-                    .map(|(j, l)| {
+                    .map(|(j, (l, a))| {
                         let p = Expr::local(LocalId(j as u32));
-                        match l.ty {
-                            Type::JsVal => Expr::convert(Type::F64, Type::JsVal, p),
-                            _ => p,
+                        if l.ty == a.ir_type() {
+                            p
+                        } else {
+                            Expr::convert(a.ir_type(), l.ty, p)
                         }
                     })
                     .collect();
                 let call = Expr::Call { func, args };
-                w.body = vec![match f.result {
-                    None => Stmt::Expr(call),
-                    Some(Type::JsVal) => {
+                w.body = vec![match (sig.result, f.result) {
+                    (None, _) | (_, None) => Stmt::Expr(call),
+                    (Some(AbiType::F64), Some(Type::F64)) => Stmt::Return(Some(call)),
+                    (Some(AbiType::F64), Some(_)) => {
                         Stmt::Return(Some(Expr::convert(Type::JsVal, Type::F64, call)))
                     }
-                    Some(_) => Stmt::Return(Some(call)),
+                    (Some(AbiType::String), Some(Type::F64)) => Stmt::Return(Some(
+                        Expr::intrinsic(ir::Intrinsic::NumberToString, vec![call]),
+                    )),
+                    (Some(AbiType::String), Some(_)) if result_kind == Kind::Str => {
+                        Stmt::Return(Some(call))
+                    }
+                    (Some(AbiType::String), Some(_)) => {
+                        Stmt::Return(Some(Expr::intrinsic(ir::Intrinsic::ToString, vec![call])))
+                    }
                 }];
                 self.module.add_function(w)
-            });
-            self.module.exports[i].func = wrapper;
+            };
+            self.module.exports[i].func = target;
+            self.module.exports[i].sig = sig.clone();
+            done.insert(func, (target, sig));
         }
     }
 
@@ -860,7 +1108,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     fn expr(&mut self, cx: &mut FnCx, e: &'a Expression<'a>) -> R<Val> {
         let span = e.span();
-        let val = |e: Expr, ty: Type| Val { e, ty };
+        let val = Val::new;
         match e {
             Expression::NumericLiteral(n) => Ok(val(Expr::f64(n.value), Type::F64)),
             Expression::BooleanLiteral(b) => Ok(val(Expr::bool(b.value), Type::Bool)),
@@ -874,7 +1122,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     return Ok(val(Expr::Const(c), c.ty()));
                 }
                 let var = self.resolve(cx, id)?;
-                Ok(val(read(var.place), var.ty))
+                Ok(var.val())
             }
             Expression::BinaryExpression(b) => self.binary(cx, b),
             Expression::LogicalExpression(l) => self.logical(cx, l),
@@ -889,14 +1137,27 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     let value = Box::new(Expr::undefined());
                     Ok(val(Expr::Seq { body, value }, Type::JsVal))
                 }
-                UnaryOperator::Typeof => Err(self.unsupported(
-                    span,
-                    "`typeof` used as a value (it's a string); only `typeof x === \"...\"` works so far",
-                    "T09",
-                )),
+                UnaryOperator::Typeof => {
+                    let v = self.expr(cx, &u.argument)?;
+                    let known = match v.kind {
+                        Kind::Num | Kind::Bottom => Some("number"),
+                        Kind::Bool => Some("boolean"),
+                        Kind::Str => Some("string"),
+                        Kind::Any => None,
+                    };
+                    let e = match known {
+                        Some(name) => Expr::Seq {
+                            body: vec![Stmt::Expr(v.e)],
+                            value: Box::new(Expr::str(name)),
+                        },
+                        None => Expr::intrinsic(Intrinsic::TypeofString, vec![jsval_of(v)]),
+                    };
+                    Ok(Val::js(e, Kind::Str))
+                }
                 UnaryOperator::Delete => Err(self.unsupported(span, "operator `delete`", "T13")),
                 op => {
-                    let v = number_of(self.expr(cx, &u.argument)?);
+                    let v = self.expr(cx, &u.argument)?;
+                    let v = self.num(v, span)?;
                     let e = match op {
                         UnaryOperator::UnaryNegation => Expr::unary(UnOp::Neg, Type::F64, v),
                         UnaryOperator::UnaryPlus => v,
@@ -913,34 +1174,42 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let then = self.expr(cx, &c.consequent);
                 let els = self.expr(cx, &c.alternate);
                 let (cond, then, els) = (test?, then?, els?);
-                let (then, els, ty) = unify(then, els);
+                let (then, els, ty, kind) = unify(then, els);
                 let e = Expr::Cond {
                     cond: Box::new(cond),
                     then: Box::new(then),
                     els: Box::new(els),
                     ty,
                 };
-                Ok(val(e, ty))
+                Ok(Val { e, ty, kind })
             }
             Expression::AssignmentExpression(a) => {
                 let (var, value) = self.assignment(cx, a)?;
-                Ok(val(assign_value(var, value), var.ty))
+                Ok(Val {
+                    e: assign_value(var, value),
+                    ..var.val()
+                })
             }
             Expression::UpdateExpression(u) if u.prefix => {
                 let (var, value) = self.update(cx, u)?;
-                Ok(val(assign_value(var, value), var.ty))
+                Ok(Val {
+                    e: assign_value(var, value),
+                    ..var.val()
+                })
             }
             Expression::UpdateExpression(u) => {
                 // Postfix: the value is the old value as a number.
                 let (var, op) = self.update_target(cx, u)?;
                 let old = cx.func.add_local("old", Type::F64);
-                let new = Val {
-                    e: Expr::binary(op, Type::F64, Expr::Local(old), Expr::f64(1.0)),
-                    ty: Type::F64,
-                };
+                let new = Val::num(Expr::binary(
+                    op,
+                    Type::F64,
+                    Expr::Local(old),
+                    Expr::f64(1.0),
+                ));
                 let new = self.store(Slot::Var(var.sym), var.ty, new);
                 let body = vec![
-                    Stmt::Set(old, number_of(val(read(var.place), var.ty))),
+                    Stmt::Set(old, self.num(var.val(), span)?),
                     set(var.place, new),
                 ];
                 let value = Box::new(Expr::Local(old));
@@ -948,14 +1217,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Expression::CallExpression(c) => {
                 let call = self.call(cx, c)?;
-                let Expr::Call { func, .. } = &call else {
+                let &Expr::Call { func, .. } = &call else {
                     unreachable!()
                 };
-                match self.module.function(*func).result {
-                    Some(ty) => Ok(val(call, ty)),
+                match self.module.function(func).result {
+                    Some(Type::F64) => Ok(Val {
+                        e: call,
+                        ty: Type::F64,
+                        kind: self.slot_kind(Slot::Result(func)),
+                    }),
+                    Some(ty) => {
+                        let kind = self.slot_kind(Slot::Result(func));
+                        Ok(Val { e: call, ty, kind })
+                    }
                     None => {
                         // Its `undefined` result is used, so the function gets a result.
-                        self.demote(Slot::Result(*func));
+                        self.observe(Slot::Result(func), Kind::Any);
                         Ok(self.undefined_val())
                     }
                 }
@@ -971,10 +1248,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 result?;
                 let v = v?;
                 let value = Box::new(v.e);
-                Ok(val(Expr::Seq { body, value }, v.ty))
+                Ok(Val {
+                    e: Expr::Seq { body, value },
+                    ..v
+                })
             }
-            Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
-                Err(self.unsupported(span, "string", "T09"))
+            Expression::StringLiteral(s) => Ok(Val::js(
+                Expr::Str(utf16(s.value.as_str(), s.lone_surrogates)),
+                Kind::Str,
+            )),
+            Expression::TemplateLiteral(t) => self.template(cx, t),
+            Expression::StaticMemberExpression(m) if m.property.name == "length" && !m.optional => {
+                self.hint_string(cx, &m.object);
+                let obj = self.expr(cx, &m.object)?;
+                let kind = obj.kind;
+                let len = Expr::intrinsic(Intrinsic::Length, vec![jsval_of(obj)]);
+                Ok(match kind {
+                    Kind::Str => Val::num(Expr::convert(Type::JsVal, Type::F64, len)),
+                    // Not known yet: any f64 will do, this round is thrown away.
+                    Kind::Bottom => Val {
+                        e: Expr::convert(Type::JsVal, Type::F64, len),
+                        ty: Type::F64,
+                        kind: Kind::Bottom,
+                    },
+                    _ => Val::js(len, Kind::Any),
+                })
             }
             Expression::BigIntLiteral(_) => Err(self.unsupported(span, "BigInt", "not scheduled")),
             Expression::ObjectExpression(_) => Err(self.unsupported(span, "object literal", "T13")),
@@ -1004,7 +1302,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let l = self.expr(cx, &b.left);
         let r = self.expr(cx, &b.right);
         let (l, r) = (l?, r?);
-        let num = |e| Val { e, ty: Type::F64 };
+        let num = Val::num;
         let bitwise = match b.operator {
             B::BitwiseOR => Some(BinOp::Or),
             B::BitwiseAnd => Some(BinOp::And),
@@ -1014,11 +1312,24 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             _ => None,
         };
         if let Some(op) = bitwise {
-            let (l, r) = (to_i32(number_of(l)), to_i32(number_of(r)));
+            let (l, r) = (to_i32(self.num(l, span)?), to_i32(self.num(r, span)?));
             return Ok(num(from_i32(Expr::binary(op, Type::I32, l, r))));
         }
         if b.operator == B::ShiftRightZeroFill {
-            return Ok(num(ushr(cx, number_of(l), number_of(r))));
+            let (l, r) = (self.num(l, span)?, self.num(r, span)?);
+            return Ok(num(ushr(cx, l, r)));
+        }
+        if b.operator == B::Addition || b.operator.is_equality() {
+            // A parameter next to a known string is used as a string.
+            if l.kind == Kind::Str {
+                self.hint_string(cx, &b.right);
+            }
+            if r.kind == Kind::Str {
+                self.hint_string(cx, &b.left);
+            }
+        }
+        if b.operator == B::Addition {
+            return Ok(add(l, r));
         }
         let eq = match b.operator {
             B::StrictEquality => Some((BinOp::Eq, true)),
@@ -1028,15 +1339,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             _ => None,
         };
         if let Some((op, strict)) = eq {
-            return Ok(Val {
-                e: equality(l, r, op, strict),
-                ty: Type::Bool,
-            });
+            return Ok(Val::new(equality(l, r, op, strict), Type::Bool));
         }
         // Arithmetic and relational operators on primitives: ToNumber on both operands.
-        // (`+` and `<` on two strings arrive with T09.)
+        // (`<` on two strings compares them as strings: F20.)
         let op = match b.operator {
-            B::Addition => BinOp::Add,
             B::Subtraction => BinOp::Sub,
             B::Multiplication => BinOp::Mul,
             B::Division => BinOp::Div,
@@ -1057,13 +1364,44 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ));
             }
         };
-        let e = Expr::binary(op, Type::F64, number_of(l), number_of(r));
+        let e = Expr::binary(op, Type::F64, self.num(l, span)?, self.num(r, span)?);
         let ty = if op.is_comparison() {
             Type::Bool
         } else {
             Type::F64
         };
-        Ok(Val { e, ty })
+        Ok(Val::new(e, ty))
+    }
+
+    /// A template literal: the concatenation of its strings and the ToString of its expressions.
+    fn template(&mut self, cx: &mut FnCx, t: &'a TemplateLiteral<'a>) -> R<Val> {
+        let mut parts = Vec::new();
+        let mut result = Ok(());
+        for (i, q) in t.quasis.iter().enumerate() {
+            let Some(cooked) = &q.value.cooked else {
+                return Err(self.unsupported(
+                    q.span,
+                    "invalid escape in a template literal",
+                    "never",
+                ));
+            };
+            if !cooked.is_empty() {
+                parts.push(Expr::Str(utf16(cooked.as_str(), q.lone_surrogates)));
+            }
+            if let Some(e) = t.expressions.get(i) {
+                self.hint_string(cx, e);
+                match self.expr(cx, e) {
+                    Ok(v) => parts.push(to_str(v)),
+                    Err(e) => result = Err(e),
+                }
+            }
+        }
+        result?;
+        let e = parts
+            .into_iter()
+            .reduce(|a, b| Expr::intrinsic(Intrinsic::Concat, vec![a, b]))
+            .unwrap_or_else(|| Expr::str(""));
+        Ok(Val::js(e, Kind::Str))
     }
 
     /// `typeof x === "tag"` (also `==`, `!==`, `!=`, either side). `None` if `b` isn't one.
@@ -1079,30 +1417,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         };
         let v = self.expr(cx, &u.argument)?;
         let tag = TypeofTag::parse(s.value.as_str());
-        let e = match v.ty {
-            Type::JsVal => match tag {
-                Some(tag) => Expr::TypeofIs {
-                    arg: Box::new(v.e),
-                    tag,
-                },
-                // No value has that typeof.
-                None => Expr::Seq {
-                    body: vec![Stmt::Expr(v.e)],
-                    value: Box::new(Expr::bool(false)),
-                },
+        let known = match v.kind {
+            Kind::Num | Kind::Bottom => Some(TypeofTag::Number),
+            Kind::Bool => Some(TypeofTag::Boolean),
+            Kind::Str => Some(TypeofTag::String),
+            Kind::Any => None,
+        };
+        let e = match (known, tag) {
+            (None, Some(tag)) => Expr::TypeofIs {
+                arg: Box::new(jsval_of(v)),
+                tag,
             },
-            // Known statically.
-            ty => {
-                let known = if ty == Type::F64 {
-                    TypeofTag::Number
-                } else {
-                    TypeofTag::Boolean
-                };
-                Expr::Seq {
-                    body: vec![Stmt::Expr(v.e)],
-                    value: Box::new(Expr::bool(tag == Some(known))),
-                }
-            }
+            // Known statically, or no value has that typeof.
+            (known, tag) => Expr::Seq {
+                body: vec![Stmt::Expr(v.e)],
+                value: Box::new(Expr::bool(known.is_some() && known == tag)),
+            },
         };
         let negate = matches!(
             b.operator,
@@ -1113,7 +1443,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         } else {
             e
         };
-        Ok(Some(Val { e, ty: Type::Bool }))
+        Ok(Some(Val::new(e, Type::Bool)))
     }
 
     fn logical(&mut self, cx: &mut FnCx, l: &'a LogicalExpression<'a>) -> R<Val> {
@@ -1121,8 +1451,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let b = self.expr(cx, &l.right);
         let (a, b) = (a?, b?);
         if l.operator == LogicalOperator::Coalesce {
-            if a.ty != Type::JsVal {
-                // A number or boolean is never null/undefined: `a ?? b` is `a`, `b` isn't evaluated.
+            if a.kind != Kind::Any {
+                // A number, boolean or string is never null/undefined: `a ?? b` is `a`.
+                // (`Bottom`: not known yet.)
                 return Ok(a);
             }
             let tmp = cx.func.add_local("tmp", Type::JsVal);
@@ -1138,11 +1469,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 els: Box::new(Expr::Local(tmp)),
                 ty: Type::JsVal,
             };
-            return Ok(Val { e, ty: Type::JsVal });
+            return Ok(Val::js(e, Kind::Any));
         }
         let and = l.operator == LogicalOperator::And;
         // The result is one of the operands, so they get a common type.
-        let (a, b, ty) = unify(a, b);
+        let (a, b, ty, kind) = unify(a, b);
         let e = if ty == Type::Bool {
             if and {
                 bool_cond(a, b, Expr::bool(false))
@@ -1155,6 +1486,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let cond = cond_of(Val {
                 e: Expr::Tee(tmp, Box::new(a)),
                 ty,
+                kind,
             });
             let (then, els) = if and {
                 (b, Expr::Local(tmp))
@@ -1168,7 +1500,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ty,
             }
         };
-        Ok(Val { e, ty })
+        Ok(Val { e, ty, kind })
     }
 
     fn call(&mut self, cx: &mut FnCx, c: &'a CallExpression<'a>) -> R<Expr> {
@@ -1243,15 +1575,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let var = self.resolve(cx, id)?;
         let rhs = self.expr(cx, &a.right)?;
         let span = a.span;
-        let old = || {
-            number_of(Val {
-                e: read(var.place),
-                ty: var.ty,
-            })
-        };
         use AssignmentOperator as A;
         let arith = match a.operator {
-            A::Addition => Some(BinOp::Add),
             A::Subtraction => Some(BinOp::Sub),
             A::Multiplication => Some(BinOp::Mul),
             A::Division => Some(BinOp::Div),
@@ -1266,17 +1591,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             A::ShiftRight => Some(BinOp::Shr),
             _ => None,
         };
-        let num = |e| Val { e, ty: Type::F64 };
+        let num = Val::num;
         let value = if a.operator == A::Assign {
             rhs
+        } else if a.operator == A::Addition {
+            if var.kind == Kind::Str {
+                self.hint_string(cx, &a.right);
+            }
+            add(var.val(), rhs)
         } else if let Some(op) = arith {
-            num(Expr::binary(op, Type::F64, old(), number_of(rhs)))
+            let (l, r) = (self.num(var.val(), span)?, self.num(rhs, span)?);
+            num(Expr::binary(op, Type::F64, l, r))
         } else if let Some(op) = bitwise {
-            let (l, r) = (to_i32(old()), to_i32(number_of(rhs)));
-            num(from_i32(Expr::binary(op, Type::I32, l, r)))
+            let (l, r) = (self.num(var.val(), span)?, self.num(rhs, span)?);
+            num(from_i32(Expr::binary(op, Type::I32, to_i32(l), to_i32(r))))
         } else if a.operator == A::ShiftRightZeroFill {
-            let r = number_of(rhs);
-            num(ushr(cx, old(), r))
+            let (l, r) = (self.num(var.val(), span)?, self.num(rhs, span)?);
+            num(ushr(cx, l, r))
         } else {
             return Err(self.unsupported(
                 span,
@@ -1307,14 +1638,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// `++x` / `x++` as a statement: the variable and the converted new value.
     fn update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<(Var, Expr)> {
         let (var, op) = self.update_target(cx, u)?;
-        let old = number_of(Val {
-            e: read(var.place),
-            ty: var.ty,
-        });
-        let new = Val {
-            e: Expr::binary(op, Type::F64, old, Expr::f64(1.0)),
-            ty: Type::F64,
-        };
+        let old = self.num(var.val(), u.span)?;
+        let new = Val::num(Expr::binary(op, Type::F64, old, Expr::f64(1.0)));
         Ok((var, self.store(Slot::Var(var.sym), var.ty, new)))
     }
 
@@ -1323,20 +1648,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id() else {
             return Err(self.unsupported(span, &format!("global `{}`", id.name), "T21"));
         };
-        if let Some(l) = cx.locals.get(&sym) {
-            let ty = cx.func.local(*l).ty;
+        let place = if let Some(l) = cx.locals.get(&sym) {
+            Some((Place::Local(*l), cx.func.local(*l).ty))
+        } else {
+            self.globals
+                .get(&sym)
+                .map(|g| (Place::Global(*g), self.module.globals[g.0 as usize].ty))
+        };
+        if let Some((place, ty)) = place {
+            // f64 slots are `Num` or `Bottom`, matching their type.
+            let kind = self.slot_kind(Slot::Var(sym));
             return Ok(Var {
-                place: Place::Local(*l),
+                place,
                 sym,
                 ty,
-            });
-        }
-        if let Some(g) = self.globals.get(&sym) {
-            let ty = self.module.globals[g.0 as usize].ty;
-            return Ok(Var {
-                place: Place::Global(*g),
-                sym,
-                ty,
+                kind,
             });
         }
         if self.funcs.contains_key(&sym) {
@@ -1391,10 +1717,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     fn undefined_val(&self) -> Val {
-        Val {
-            e: Expr::undefined(),
-            ty: Type::JsVal,
-        }
+        Val::js(Expr::undefined(), Kind::Any)
     }
 }
 
@@ -1433,13 +1756,117 @@ fn cond_of(v: Val) -> Expr {
 
 /// Two values that must share a type (branches of `?:`, operands of `&&`/`||`):
 /// the type if they agree, otherwise both as JS values.
-fn unify(a: Val, b: Val) -> (Expr, Expr, Type) {
+fn unify(a: Val, b: Val) -> (Expr, Expr, Type, Kind) {
+    let kind = a.kind.join(b.kind);
     if a.ty == b.ty {
         let ty = a.ty;
-        (a.e, b.e, ty)
+        (a.e, b.e, ty, kind)
     } else {
-        (jsval_of(a), jsval_of(b), Type::JsVal)
+        (jsval_of(a), jsval_of(b), Type::JsVal, kind)
     }
+}
+
+/// JS ToString of `v`.
+fn to_str(v: Val) -> Expr {
+    match (v.kind, v.ty) {
+        (Kind::Str, _) => v.e,
+        (_, Type::F64) => Expr::intrinsic(Intrinsic::NumberToString, vec![v.e]),
+        _ => Expr::intrinsic(Intrinsic::ToString, vec![jsval_of(v)]),
+    }
+}
+
+/// JS `l + r`: concatenation if either is known to be a string, addition if both are known
+/// to be numbers or booleans, otherwise decided at run time.
+fn add(l: Val, r: Val) -> Val {
+    if l.kind == Kind::Str || r.kind == Kind::Str {
+        let e = Expr::intrinsic(Intrinsic::Concat, vec![to_str(l), to_str(r)]);
+        Val::js(e, Kind::Str)
+    } else if l.kind == Kind::Bottom || r.kind == Kind::Bottom {
+        // Not known yet (could still be a string): any f64 will do, this round is thrown away.
+        Val {
+            e: Expr::binary(BinOp::Add, Type::F64, number_of(l), number_of(r)),
+            ty: Type::F64,
+            kind: Kind::Bottom,
+        }
+    } else if l.kind == Kind::Any || r.kind == Kind::Any {
+        let e = Expr::intrinsic(Intrinsic::JsAdd, vec![jsval_of(l), jsval_of(r)]);
+        Val::js(e, Kind::Any)
+    } else {
+        Val::num(Expr::binary(
+            BinOp::Add,
+            Type::F64,
+            number_of(l),
+            number_of(r),
+        ))
+    }
+}
+
+/// UTF-16 code units of a string literal's value. With `lone_surrogates`, oxc encodes a lone
+/// surrogate as U+FFFD followed by 4 hex digits (and U+FFFD itself as U+FFFD `fffd`).
+fn utf16(value: &str, lone_surrogates: bool) -> Vec<u16> {
+    if !lone_surrogates {
+        return value.encode_utf16().collect();
+    }
+    let mut out = Vec::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{fffd}' {
+            let hex: String = chars.by_ref().take(4).collect();
+            out.push(u16::from_str_radix(&hex, 16).expect("oxc lone-surrogate escape"));
+        } else {
+            let mut buf = [0u16; 2];
+            out.extend_from_slice(c.encode_utf16(&mut buf));
+        }
+    }
+    out
+}
+
+/// The `@param {type} name` and `@returns {type}` tags of a JSDoc comment. Only `string` and
+/// `number` are boundary types so far; anything else is recorded as an error.
+fn parse_jsdoc(text: &str) -> JsDoc {
+    let mut doc = JsDoc::default();
+    let mut rest = text;
+    while let Some(at) = rest.find('@') {
+        rest = &rest[at + 1..];
+        let tag: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        rest = &rest[tag.len()..];
+        if !matches!(tag.as_str(), "param" | "returns" | "return") {
+            continue;
+        }
+        let after = rest.trim_start();
+        let Some(ty_text) = after.strip_prefix('{').and_then(|t| t.split_once('}')) else {
+            continue; // no type
+        };
+        let (ty, tail) = ty_text;
+        rest = tail;
+        let ty = ty.trim();
+        let abi = match ty {
+            "string" => Some(ir::AbiType::String),
+            "number" => Some(ir::AbiType::F64),
+            _ => None,
+        };
+        let name: String = tail
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        match (tag.as_str(), abi) {
+            ("param", Some(t)) => {
+                doc.params.insert(name, t);
+            }
+            (_, Some(t)) => doc.result = Some(t),
+            ("param", None) => doc.errors.push(format!(
+                "JSDoc type `{{{ty}}}` of parameter `{name}` at the WIT boundary (only `string` and `number` so far)"
+            )),
+            (_, None) => doc.errors.push(format!(
+                "JSDoc return type `{{{ty}}}` at the WIT boundary (only `string` and `number` so far)"
+            )),
+        }
+    }
+    doc
 }
 
 /// `===`/`!==` (`strict`) or `==`/`!=`. Same-typed numbers or booleans compare directly

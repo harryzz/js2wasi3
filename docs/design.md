@@ -30,10 +30,15 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   (T08: integers in [-2^30, 2^30) except -0 are `i31ref`; the singletons are one `$oddball` struct type
   with a kind field. Variables, params and results are `f64` unless a non-number is ever stored in them:
   see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.)
+  (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
+  (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
 - Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
   inline caches only after T12 works and a benchmark justifies them.
 - Linear memory exists **only** for the Canonical ABI boundary (`cabi_realloc`, string/list copies).
+  (T09: a bump allocator, reset by every export adapter once its string arguments are copied into
+  GC strings; see `crates/backend/src/abi.rs`. The core-side adapters live in the backend because they
+  use the GC runtime; `crates/component` only generates the WIT and packages.)
 
 ### D2. Exceptions: native Wasm EH
 - One private tag `$js (param (ref null eq))`. `throw` becomes `throw $js`. `try/catch` becomes `try_table (catch $js)`.
@@ -66,7 +71,8 @@ The entry module's ES exports become the world's exports. WIT types map to JS:
 `result` ↔ return or throw, `option` ↔ value or `undefined`, `record` ↔ plain object, `variant` ↔ `{tag, val}`,
 `resource` ↔ class, `list<u8>` ↔ `Uint8Array`, `future<T>` ↔ Promise, `stream<T>` ↔ async iterable.
 v0 generates the WIT from the export signatures (all `f64`). Later versions take a user `.wit` world.
-JS names become kebab-case WIT names, and the world is named after the entry file (or `--world`). See [wit-names.md](wit-names.md).
+JS names become kebab-case WIT names, and the world is named after the entry file (or `--world`).
+Parameter and result types (`f64` / `string`) come from JSDoc or usage (T09). See [wit-names.md](wit-names.md).
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

@@ -83,6 +83,33 @@ Parameter names don't affect the ABI, so they never cause an error. Each one goe
 If the result is invalid, or duplicates an earlier parameter of the same function, it becomes `p<index>` (`p0`, `p1`, …).
 Parameters that aren't plain identifiers (destructuring, later) get `p<index>` too.
 
+## Parameter and result types (T09)
+
+Decided with the user at the start of T09. Plain JS has no types, so a generated world picks each
+exported function's WIT types like this:
+
+- **JSDoc wins.** `@param {string} name` / `@param {number} n` and `@returns {string}` / `{number}`
+  on the exported function (the `/** ... */` comment right before `export function` or `function`).
+  Other JSDoc types on an exported function are an error ("JSDoc type `{boolean}` ... planned: T20").
+- **Otherwise usage.** A parameter is `string` if the function uses it as a string: an operand of `+`,
+  `==`, `!=`, `===` or `!==` whose other operand is known to be a string, a template-literal
+  interpolation (`${name}`), or a `.length` read. Everything else is `f64`.
+- **Result**: `string` if every returned value is a string (known statically), otherwise `f64`
+  (values that aren't numbers go through JS ToNumber at the boundary).
+
+```js
+export function greet(name) { return "hi " + name; }   // greet: func(name: string) -> string
+/** @param {number} n */
+export function label(n) { return `#${n}`; }           // label: func(n: f64) -> string
+```
+
+The usage rule is a heuristic: `${n}` alone makes `n` a string. JSDoc overrides it. User-written WIT
+worlds (T20) replace all of this.
+
+Strings cross the boundary as UTF-8 (the Canonical ABI, with `cabi_realloc`). JS strings are UTF-16 and
+may contain lone surrogates, which WIT strings can't: **a lone surrogate in a returned string becomes
+U+FFFD**.
+
 ## Package and world name
 
 - **Default: taken from the entry file name.** The file stem goes through the same conversion, with `.` treated like `_`.

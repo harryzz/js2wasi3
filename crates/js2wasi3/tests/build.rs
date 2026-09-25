@@ -82,23 +82,56 @@ fn bad_world_option() {
     assert!(String::from_utf8_lossy(&b.stderr).contains("is not a WIT identifier"));
 }
 
-/// T08 acceptance: `values.js` (typeof, equality and truthiness tables, ToNumber, implicit
-/// `undefined`, `>>>`, ...) matches node's results in `values.out` (`jsName(args) result` per line).
-#[test]
-fn values_match_node() {
-    let out = out_dir("values").join("values.wasm");
-    let b = build(&fixture("values.js"), &out, &[]);
+/// Build `<name>.js` and check every line of `<name>.out` (node's results, `jsName(args) result`):
+/// numbers compare as numbers, strings (`"..."`, as wasmtime prints them) exactly.
+fn matches_node(name: &str) {
+    let out = out_dir(name).join(format!("{name}.wasm"));
+    let b = build(&fixture(&format!("{name}.js")), &out, &[]);
     assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
-    let expected = std::fs::read_to_string(fixture("values.out")).unwrap();
+    let expected = std::fs::read_to_string(fixture(&format!("{name}.out"))).unwrap();
     for line in expected.lines() {
-        let (call, want) = line.rsplit_once(' ').unwrap();
+        let (call, want) = line.split_once(") ").unwrap();
         let (name, args) = call.split_once('(').unwrap();
         let wit = js2wasi3_component::names::to_wit(name).unwrap();
-        let got = invoke(&out, &format!("{wit}({args}"));
-        assert_eq!(
-            got.parse::<f64>().unwrap(),
-            want.parse::<f64>().unwrap(),
-            "{call}"
-        );
+        let got = invoke(&out, &format!("{wit}({args})"));
+        if want.starts_with('"') {
+            assert_eq!(got, want, "{call})");
+        } else {
+            assert_eq!(
+                got.parse::<f64>().unwrap(),
+                want.parse::<f64>().unwrap(),
+                "{call})"
+            );
+        }
     }
+}
+
+/// T08 acceptance: `values.js` (typeof, equality and truthiness tables, ToNumber, implicit
+/// `undefined`, `>>>`, ...) matches node.
+#[test]
+fn values_match_node() {
+    matches_node("values");
+}
+
+/// T09: `strings.js` (concatenation, template literals, `.length`, ToString of every kind, `+`
+/// decided at run time, UTF-8 at the boundary, lone surrogates → U+FFFD) matches node.
+#[test]
+fn strings_match_node() {
+    matches_node("strings");
+}
+
+/// T09 acceptance.
+#[test]
+fn greet_takes_and_returns_a_string() {
+    let dir = out_dir("greet");
+    let src = dir.join("greet.js");
+    std::fs::write(
+        &src,
+        "export function greet(name) { return \"hi \" + name; }\n",
+    )
+    .unwrap();
+    let out = dir.join("greet.wasm");
+    let b = build(&src, &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert_eq!(invoke(&out, "greet(\"x\")"), "\"hi x\"");
 }

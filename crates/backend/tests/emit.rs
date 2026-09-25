@@ -286,6 +286,7 @@ fn jsval_runtime_runs() {
         func: id,
         string_name: false,
         pos: None,
+        sig: ir::AbiSig::numbers(1, true),
     });
     let bytes = js2wasi3_backend::emit(&m).unwrap_or_else(|e| panic!("{e:#}"));
     validate(&bytes);
@@ -312,4 +313,24 @@ fn values_use_i31ref() {
         }
     }
     assert!(i31 > 0, "no ref.i31 in values.js");
+}
+
+/// T09 acceptance: number → string matches node for the 200 values in `numstr.txt` (node's
+/// `String(x)` of each; it round-trips, so the line is also the JS literal). One check function.
+#[test]
+fn number_to_string_matches_node() {
+    let lines = std::fs::read_to_string(fixtures().join("numstr.txt")).unwrap();
+    let mut src =
+        String::from("export function check() {\n  if (\"\" + (-0) !== \"0\") return 1000;\n");
+    for (i, s) in lines.lines().enumerate() {
+        src.push_str(&format!("  if (\"\" + ({s}) !== {s:?}) return {i};\n"));
+    }
+    src.push_str("  return -1;\n}\n");
+    let got = invoke(&compile("numstr.js", &src), "check", &[]);
+    assert_eq!(
+        got,
+        "-1",
+        "first mismatch: line {got}: {:?}",
+        got.parse::<usize>().ok().and_then(|i| lines.lines().nth(i))
+    );
 }

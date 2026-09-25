@@ -20,6 +20,7 @@ fn add_module() -> Module {
         func: id,
         string_name: false,
         pos: None,
+        sig: AbiSig::numbers(2, true),
     });
     m
 }
@@ -161,6 +162,7 @@ fn all_kinds_print() {
         func: sum,
         string_name: false,
         pos: None,
+        sig: AbiSig::numbers(1, true),
     });
 
     let expected = "\

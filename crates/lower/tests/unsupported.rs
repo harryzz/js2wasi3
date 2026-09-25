@@ -38,6 +38,8 @@ fn primitive_values_lower() {
         "export function f(a) { return typeof a === 'number' && typeof null !== 'object'; }",
         "export function f(a) { return a >>> 0; }",
         "let g = true;\nexport function f() { return g = !g; }",
+        "export function f(a) { return typeof a; }",
+        "export function f(a) { return `a${a}b` + 'c'.length; }",
     ] {
         let alloc = Allocator::default();
         let program = frontend::parse(&alloc, "t.js", src).unwrap();
@@ -82,8 +84,8 @@ fn module_level_rules() {
 #[test]
 fn declarations_and_functions() {
     assert_eq!(
-        one("export function f(a) { return typeof a; }"),
-        "1:31 unsupported: `typeof` used as a value (it's a string); only `typeof x === \"...\"` works so far (planned: T09)"
+        one("/** @param {boolean} a */\nexport function f(a) { return 1; }"),
+        "2:8 unsupported: JSDoc type `{boolean}` of parameter `a` at the WIT boundary (only `string` and `number` so far) (planned: T20)"
     );
     assert_eq!(
         one("export function f(a) { a ||= 1; return a; }"),
@@ -109,11 +111,11 @@ fn declarations_and_functions() {
 
 #[test]
 fn all_errors_are_reported() {
-    let e = errors("export function f() {\n  let s = 'a';\n  delete 1;\n  return 1 ** 2;\n}");
+    let e = errors("export function f() {\n  let s = 'a' * 2;\n  delete 1;\n  return 1 ** 2;\n}");
     assert_eq!(
         e,
         vec![
-            "2:11 unsupported: string (planned: T09)",
+            "2:11 unsupported: converting a string to a number (planned: T21)",
             "3:3 unsupported: operator `delete` (planned: T13)",
             "4:10 unsupported: operator `**` (planned: T21 (Math.pow))",
         ]

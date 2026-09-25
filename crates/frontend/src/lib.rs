@@ -120,7 +120,18 @@ pub fn parse<'a>(
     })
 }
 
-impl Program<'_> {
+impl<'a> Program<'a> {
+    /// The text inside the JSDoc comment (`/** ... */`, without the delimiters) that directly
+    /// precedes the token starting at `offset`, if any.
+    pub fn jsdoc(&self, offset: u32) -> Option<&'a str> {
+        self.ast
+            .comments
+            .iter()
+            .rev()
+            .find(|c| c.is_leading() && c.is_jsdoc() && c.attached_to == offset)
+            .map(|c| c.content_span().source_text(self.source))
+    }
+
     /// 1-based line and column of a byte offset in this program's source.
     pub fn line_col(&self, offset: u32) -> (u32, u32) {
         line_col(self.source, offset)

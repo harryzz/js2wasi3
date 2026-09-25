@@ -32,6 +32,9 @@
 //!   These are machine ops, except on `JsVal`: `Eq`/`Ne` are JS `===`/`!==` and `LooseEq`/`LooseNe`
 //!   are JS `==`/`!=` (both only on `JsVal`). Arithmetic on JS values goes through `JsVal → F64` first.
 //! - `TypeofIs { arg, tag }`: `typeof arg === "<tag>"`, as `Bool` (`arg` is `JsVal`).
+//! - `Str(units)`: a string literal (UTF-16 code units), type `JsVal`.
+//! - `Intrinsic { op, args }`: a runtime operation with a fixed signature ([`Intrinsic::signature`]),
+//!   e.g. JS `+` on JS values or ToString.
 //! - `Seq { body, value }`: run `body`, then evaluate `value`. `body` must not `Break`/`Continue` out.
 //! - `Convert { from, to, arg }`: `F64 → I32` is JS `ToInt32` (modulo 2^32, NaN/±inf → 0),
 //!   not a saturating truncation. `I32 → F64` is signed. `F64 → JsVal` boxes a number, `JsVal → F64` is
@@ -99,6 +102,81 @@ pub struct Export {
     /// `name` was written as a string literal in the source (`export { f as "my-f" }`).
     pub string_name: bool,
     pub pos: Option<Pos>,
+    /// Types at the component boundary. `func` takes and returns `f64` for [`AbiType::F64`]
+    /// and a JS string (`JsVal`) for [`AbiType::String`].
+    pub sig: AbiSig,
+}
+
+/// A value type at the component boundary (a WIT type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AbiType {
+    F64,
+    String,
+}
+
+impl AbiType {
+    /// The IR type the exported function uses for it.
+    pub fn ir_type(self) -> Type {
+        match self {
+            AbiType::F64 => Type::F64,
+            AbiType::String => Type::JsVal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AbiSig {
+    pub params: Vec<AbiType>,
+    pub result: Option<AbiType>,
+}
+
+impl AbiSig {
+    /// All `f64` (the T07/T08 boundary), for a function with `params` parameters.
+    pub fn numbers(params: u32, result: bool) -> AbiSig {
+        AbiSig {
+            params: vec![AbiType::F64; params as usize],
+            result: result.then_some(AbiType::F64),
+        }
+    }
+}
+
+/// A runtime operation on JS values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Intrinsic {
+    /// JS `a + b` on two JS values (concatenation if either is a string).
+    JsAdd,
+    /// Concatenation of two JS strings.
+    Concat,
+    /// JS ToString of a JS value (a string).
+    ToString,
+    /// JS Number::toString of an `f64` (a string).
+    NumberToString,
+    /// `v.length`.
+    Length,
+    /// `typeof v` (a string).
+    TypeofString,
+}
+
+impl Intrinsic {
+    pub fn signature(self) -> (&'static [Type], Type) {
+        use Type::*;
+        match self {
+            Intrinsic::JsAdd | Intrinsic::Concat => (&[JsVal, JsVal], JsVal),
+            Intrinsic::ToString | Intrinsic::Length | Intrinsic::TypeofString => (&[JsVal], JsVal),
+            Intrinsic::NumberToString => (&[F64], JsVal),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Intrinsic::JsAdd => "js_add",
+            Intrinsic::Concat => "concat",
+            Intrinsic::ToString => "to_string",
+            Intrinsic::NumberToString => "number_to_string",
+            Intrinsic::Length => "length",
+            Intrinsic::TypeofString => "typeof",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -324,6 +402,11 @@ pub enum Expr {
         arg: Box<Expr>,
         tag: TypeofTag,
     },
+    Str(Vec<u16>),
+    Intrinsic {
+        op: Intrinsic,
+        args: Vec<Expr>,
+    },
     Seq {
         body: Vec<Stmt>,
         value: Box<Expr>,
@@ -345,6 +428,12 @@ impl Expr {
     }
     pub fn undefined() -> Expr {
         Expr::Const(Const::Undefined)
+    }
+    pub fn str(s: &str) -> Expr {
+        Expr::Str(s.encode_utf16().collect())
+    }
+    pub fn intrinsic(op: Intrinsic, args: Vec<Expr>) -> Expr {
+        Expr::Intrinsic { op, args }
     }
     pub fn convert(from: Type, to: Type, arg: Expr) -> Expr {
         Expr::Convert {
@@ -389,6 +478,8 @@ impl Expr {
             Expr::Call { func: f, .. } => return module.functions[f.0 as usize].result,
             Expr::Suspend { .. } => Type::JsVal,
             Expr::TypeofIs { .. } => Type::Bool,
+            Expr::Str(_) => Type::JsVal,
+            Expr::Intrinsic { op, .. } => op.signature().1,
             Expr::Seq { value, .. } => return value.ty(func, module),
         })
     }

@@ -22,16 +22,18 @@
 //! Unsupported IR (placeholders) is reported with the IR kind, the function and
 //! its source position before any bytes are emitted.
 
+mod abi;
+mod numstr;
 mod runtime;
 
 use std::collections::HashMap;
 
 use anyhow::{Context, bail};
-use js2wasi3_ir::{self as ir, BinOp, Const, Expr, LabelId, Stmt, Type, UnOp};
+use js2wasi3_ir::{self as ir, AbiType, BinOp, Const, Expr, Intrinsic, LabelId, Stmt, Type, UnOp};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, IndirectNameMap, InstructionSink, NameMap, NameSection, TypeSection,
-    ValType,
+    BlockType, CodeSection, ConstExpr, DataCountSection, DataSection, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, IndirectNameMap, InstructionSink,
+    MemorySection, MemoryType, NameMap, NameSection, TypeSection, ValType,
 };
 
 /// Emit a core Wasm module for `module`.
@@ -45,19 +47,43 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     check_supported(module)?;
 
     let js = uses_jsval(module);
+    // Exports with a string at the boundary go through an ABI adapter (and need memory).
+    let adapted: Vec<&ir::Export> = module
+        .exports
+        .iter()
+        .filter(|x| {
+            x.sig.params.contains(&AbiType::String) || x.sig.result == Some(AbiType::String)
+        })
+        .collect();
+    let abi = !adapted.is_empty();
+    for x in &adapted {
+        // More flat params than this are passed through memory: not implemented (F21).
+        if abi::flat_params(&x.sig.params).len() > abi::MAX_FLAT_PARAMS {
+            bail!(
+                "unsupported: export `{}` has more than {} parameter values at the boundary (a string counts twice) (planned: F21)",
+                x.name,
+                abi::MAX_FLAT_PARAMS
+            );
+        }
+    }
     let mut types = TypeSection::new();
     if js {
         runtime::types(&mut types);
     }
+    let n = module.functions.len() as u32;
     let mut e = Emitter {
         m: module,
         types,
         type_base: if js { runtime::TYPES } else { 0 },
-        global_base: if js { runtime::GLOBALS } else { 0 },
+        global_base: if js { runtime::GLOBALS + abi as u32 } else { 0 },
+        bump: runtime::GLOBALS,
         type_ids: HashMap::new(),
+        helper_base: n + adapted.len() as u32,
         helpers: Vec::new(),
+        strings: Vec::new(),
+        string_ids: HashMap::new(),
+        tables: false,
     };
-    let n = module.functions.len() as u32;
 
     let mut funcs = FunctionSection::new();
     let mut code = CodeSection::new();
@@ -73,6 +99,23 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
                 .with_context(|| format!("in function {}", f.name))?,
         );
     }
+    let mut adapter_names = Vec::new();
+    for x in &adapted {
+        let params = abi::flat_params(&x.sig.params);
+        let results = abi::flat_result(x.sig.result);
+        funcs.function(e.type_id(params, results));
+        let bump = e.bump;
+        code.function(&abi::adapter(
+            &mut e,
+            bump,
+            x.func.0,
+            &x.sig.params,
+            x.sig.result,
+        ));
+        adapter_names.push(format!("{}$abi", x.name));
+    }
+    let realloc =
+        abi.then(|| e.helper_index(Helper::Js(runtime::Helper::Abi(abi::Helper::Realloc))));
     // Helpers can request other helpers, so iterate until the list stops growing.
     let mut i = 0;
     while i < e.helpers.len() {
@@ -86,6 +129,16 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut globals = GlobalSection::new();
     if js {
         runtime::globals(&mut globals);
+    }
+    if abi {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(abi::HEAP_BASE),
+        );
     }
     for g in &module.globals {
         let init = match (g.ty, g.init) {
@@ -109,9 +162,32 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         );
     }
 
+    for units in &e.strings {
+        runtime::string_global(&mut globals, units);
+    }
+
     let mut exports = ExportSection::new();
+    let mut next_adapter = n;
     for x in &module.exports {
-        exports.export(&x.name, ExportKind::Func, x.func.0);
+        let index = if adapted.iter().any(|a| std::ptr::eq(*a, x)) {
+            next_adapter += 1;
+            next_adapter - 1
+        } else {
+            x.func.0
+        };
+        exports.export(&x.name, ExportKind::Func, index);
+    }
+    let mut memory = MemorySection::new();
+    if let Some(realloc) = realloc {
+        memory.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        exports.export("memory", ExportKind::Memory, 0);
+        exports.export("cabi_realloc", ExportKind::Func, realloc);
     }
 
     let mut names = NameSection::new();
@@ -125,18 +201,34 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         }
         lnames.append(i as u32, &locals);
     }
+    for (k, name) in adapter_names.iter().enumerate() {
+        fnames.append(n + k as u32, name);
+    }
     for (k, h) in e.helpers.iter().enumerate() {
-        fnames.append(n + k as u32, h.name());
+        fnames.append(e.helper_base + k as u32, h.name());
     }
     names.functions(&fnames);
     names.locals(&lnames);
 
     let mut out = wasm_encoder::Module::new();
     out.section(&e.types).section(&funcs);
+    if abi {
+        out.section(&memory);
+    }
     if !globals.is_empty() {
         out.section(&globals);
     }
-    out.section(&exports).section(&code).section(&names);
+    out.section(&exports);
+    if e.tables {
+        out.section(&DataCountSection { count: 1 });
+    }
+    out.section(&code);
+    if e.tables {
+        let mut data = DataSection::new();
+        data.passive(numstr::table_bytes().iter().copied());
+        out.section(&data);
+    }
+    out.section(&names);
     Ok(out.finish())
 }
 
@@ -165,7 +257,8 @@ fn uses_jsval(m: &ir::Module) -> bool {
                 els,
                 ty,
             } => *ty == Type::JsVal || expr(cond) || expr(then) || expr(els),
-            Expr::TypeofIs { .. } | Expr::Suspend { .. } => true,
+            Expr::TypeofIs { .. } | Expr::Suspend { .. } | Expr::Str(_) => true,
+            Expr::Intrinsic { .. } => true,
             Expr::Tee(_, a) | Expr::Unary { arg: a, .. } => expr(a),
             Expr::Call { args, .. } => args.iter().any(expr),
             Expr::Seq { body, value } => stmts(body) || expr(value),
@@ -262,6 +355,8 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
         | Expr::Unary { arg: a, .. }
         | Expr::Convert { arg: a, .. }
         | Expr::TypeofIs { arg: a, .. } => unsupported_expr(a, out),
+        Expr::Str(_) => {}
+        Expr::Intrinsic { args, .. } => args.iter().for_each(|a| unsupported_expr(a, out)),
         Expr::Seq { body, value } => {
             unsupported_stmts(body, out);
             unsupported_expr(value, out);
@@ -323,9 +418,44 @@ struct Emitter<'m> {
     /// Runtime types / globals that come before the module's own.
     type_base: u32,
     global_base: u32,
+    /// Global index of the ABI bump pointer (when there are string exports).
+    bump: u32,
     type_ids: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
-    /// Helpers in index order. Helper `k` has function index `m.functions.len() + k`.
+    /// Function index of the first helper (after the user functions and ABI adapters).
+    helper_base: u32,
+    /// Helpers in index order. Helper `k` has function index `helper_base + k`.
     helpers: Vec<Helper>,
+    /// Interned string constants, emitted as globals after the user globals.
+    strings: Vec<Vec<u16>>,
+    string_ids: HashMap<Vec<u16>, u32>,
+    /// The number → string tables (data segment 0) are needed.
+    tables: bool,
+}
+
+impl runtime::Cx for Emitter<'_> {
+    fn helper(&mut self, h: runtime::Helper) -> u32 {
+        self.helper_index(Helper::Js(h))
+    }
+
+    fn string(&mut self, units: &[u16]) -> u32 {
+        let base = self.global_base + self.m.globals.len() as u32;
+        if let Some(k) = self.string_ids.get(units) {
+            return base + k;
+        }
+        let k = self.strings.len() as u32;
+        self.strings.push(units.to_vec());
+        self.string_ids.insert(units.to_vec(), k);
+        base + k
+    }
+
+    fn tables_data(&mut self) -> u32 {
+        self.tables = true;
+        0
+    }
+
+    fn bump_global(&mut self) -> u32 {
+        self.bump
+    }
 }
 
 impl Emitter<'_> {
@@ -348,7 +478,7 @@ impl Emitter<'_> {
                 self.helpers.len() - 1
             }
         };
-        self.m.functions.len() as u32 + k as u32
+        self.helper_base + k as u32
     }
 
     fn function(&mut self, f: &ir::Function) -> anyhow::Result<Function> {
@@ -617,6 +747,28 @@ impl Emitter<'_> {
                 }
                 return self.expr(s, frames, value);
             }
+            Expr::Str(units) => {
+                let g = runtime::Cx::string(self, units);
+                s.global_get(g);
+            }
+            Expr::Intrinsic { op, args } => {
+                use runtime::Helper as H;
+                for a in args {
+                    self.expr(s, frames, a)?;
+                    if *op == Intrinsic::Concat {
+                        s.ref_cast_non_null(runtime::string());
+                    }
+                }
+                let h = match op {
+                    Intrinsic::JsAdd => H::JsAdd,
+                    Intrinsic::Concat => H::Concat,
+                    Intrinsic::ToString => H::ToString,
+                    Intrinsic::NumberToString => H::Num(numstr::Helper::NumberToString),
+                    Intrinsic::Length => H::Length,
+                    Intrinsic::TypeofString => H::TypeofString,
+                };
+                s.call(self.helper_index(Helper::Js(h)));
+            }
             Expr::Cond {
                 cond,
                 then,
@@ -651,7 +803,7 @@ impl Emitter<'_> {
                 let rem = self.helper_index(Helper::JsRem);
                 to_int32(rem)
             }
-            Helper::Js(h) => h.body(&mut |x| self.helper_index(Helper::Js(x))),
+            Helper::Js(h) => h.body(self),
         }
     }
 }

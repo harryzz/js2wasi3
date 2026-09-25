@@ -4,42 +4,76 @@
 //!   locals before their first assignment.
 //! - Numbers: `i31ref` when the value is an integer in [-2^30, 2^30) and not -0, otherwise a
 //!   `$number` struct holding the `f64`.
+//! - Strings: `$string`, an `(array (mut i16))` of UTF-16 code units. String constants are
+//!   immutable globals built with `array.new_fixed` (see [`Cx::string`]).
 //! - `undefined`, `null`, `false`, `true`: four `$oddball` singletons (immutable globals 0–3)
 //!   whose field is the kind below. Identity (`ref.eq`) compares them.
-//! - Types: one `rec` group `[$number, $oddball]` at type indices 0 and 1.
+//! - Types: one `rec` group `[$number, $oddball, $string, $i64s]` at type indices 0–3
+//!   (`$i64s` holds the number → string tables, see [`crate::numstr`]).
 //!
-//! The helpers only know these primitives. Strings (T09) and objects (T13) extend them.
+//! The helpers know these primitives. Objects (T13) extend them.
 
 use js2wasi3_ir::TypeofTag;
 use wasm_encoder::{
-    BlockType, CompositeInnerType, CompositeType, ConstExpr, FieldType, Function, GlobalSection,
-    GlobalType, HeapType, Instruction, InstructionSink, RefType, StorageType, StructType, SubType,
-    TypeSection, ValType,
+    ArrayType, BlockType, CompositeInnerType, CompositeType, ConstExpr, FieldType, Function,
+    GlobalSection, GlobalType, HeapType, Instruction, InstructionSink, RefType, StorageType,
+    StructType, SubType, TypeSection, ValType,
 };
+
+use crate::{abi, numstr};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
+pub const T_STRING: u32 = 2;
+pub const T_I64S: u32 = 3;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 2;
+pub const TYPES: u32 = 4;
 
 pub const G_UNDEFINED: u32 = 0;
 pub const G_NULL: u32 = 1;
 pub const G_FALSE: u32 = 2;
 pub const G_TRUE: u32 = 3;
+/// `(mut (ref null $i64s))`: the number → string tables, loaded on first use.
+pub const G_TABLES: u32 = 4;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = 4;
+pub const GLOBALS: u32 = 5;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
 const K_NULL: i32 = 1;
+const K_FALSE: i32 = 2;
 const K_TRUE: i32 = 3;
 
 /// Smallest and one past the largest integer kept as an `i31ref`.
 const I31_MIN: i32 = -(1 << 30);
 const I31_END: i32 = 1 << 30;
 
+/// What helper bodies need from the emitter.
+pub trait Cx {
+    /// Function index of a helper (emitted on demand).
+    fn helper(&mut self, h: Helper) -> u32;
+    /// Global index of an interned string constant.
+    fn string(&mut self, units: &[u16]) -> u32;
+    /// Index of the passive data segment with the number → string tables.
+    fn tables_data(&mut self) -> u32;
+    /// Global index of the ABI bump pointer (only in modules with string exports).
+    fn bump_global(&mut self) -> u32;
+
+    fn str(&mut self, s: &str) -> u32 {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        self.string(&units)
+    }
+}
+
 pub fn jsval() -> ValType {
     ValType::Ref(RefType::EQREF)
+}
+
+pub fn string_ref() -> ValType {
+    ValType::Ref(RefType {
+        nullable: false,
+        heap_type: string(),
+    })
 }
 
 fn number() -> HeapType {
@@ -50,6 +84,14 @@ fn oddball() -> HeapType {
     HeapType::Concrete(T_ODDBALL)
 }
 
+pub fn string() -> HeapType {
+    HeapType::Concrete(T_STRING)
+}
+
+fn i31() -> HeapType {
+    HeapType::I31
+}
+
 /// The `typeof` code of a tag: its index in [`TypeofTag::ALL`].
 pub fn typeof_code(tag: TypeofTag) -> i32 {
     TypeofTag::ALL.iter().position(|t| *t == tag).unwrap() as i32
@@ -57,27 +99,42 @@ pub fn typeof_code(tag: TypeofTag) -> i32 {
 
 /// Emit the `rec` group. Must be the first entries of the type section.
 pub fn types(types: &mut TypeSection) {
-    let st = |ty: ValType| SubType {
+    let sub = |inner| SubType {
         is_final: true,
         supertype_idx: None,
         composite_type: CompositeType {
-            inner: CompositeInnerType::Struct(StructType {
-                fields: Box::new([FieldType {
-                    element_type: StorageType::Val(ty),
-                    mutable: false,
-                }]),
-            }),
+            inner,
             shared: false,
             descriptor: None,
             describes: None,
         },
     };
-    types.ty().rec([st(ValType::F64), st(ValType::I32)]);
+    let field = |ty: StorageType, mutable| FieldType {
+        element_type: ty,
+        mutable,
+    };
+    let st = |ty: ValType| {
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([field(StorageType::Val(ty), false)]),
+        }))
+    };
+    types.ty().rec([
+        st(ValType::F64),
+        st(ValType::I32),
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::I16,
+            true,
+        )))),
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::Val(ValType::I64),
+            false,
+        )))),
+    ]);
 }
 
-/// Emit the four singletons. Must be the first entries of the global section.
+/// Emit the runtime globals. Must be the first entries of the global section.
 pub fn globals(globals: &mut GlobalSection) {
-    for kind in 0..GLOBALS as i32 {
+    for kind in [K_UNDEFINED, K_NULL, K_FALSE, K_TRUE] {
         globals.global(
             GlobalType {
                 val_type: ValType::Ref(RefType {
@@ -93,6 +150,37 @@ pub fn globals(globals: &mut GlobalSection) {
             ]),
         );
     }
+    globals.global(
+        GlobalType {
+            val_type: ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(T_I64S),
+            }),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_I64S)),
+    );
+}
+
+/// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
+pub fn string_global(globals: &mut GlobalSection, units: &[u16]) {
+    let mut insns: Vec<Instruction> = units
+        .iter()
+        .map(|u| Instruction::I32Const(*u as i32))
+        .collect();
+    insns.push(Instruction::ArrayNewFixed {
+        array_type_index: T_STRING,
+        array_size: units.len() as u32,
+    });
+    globals.global(
+        GlobalType {
+            val_type: string_ref(),
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::extended(insns),
+    );
 }
 
 /// A constant `f64` as a JS value, in a constant expression.
@@ -135,6 +223,14 @@ pub enum Helper {
     StrictEq,
     LooseEq,
     Typeof,
+    TypeofString,
+    StrEq,
+    Concat,
+    ToString,
+    JsAdd,
+    Length,
+    Num(numstr::Helper),
+    Abi(abi::Helper),
 }
 
 impl Helper {
@@ -148,11 +244,20 @@ impl Helper {
             Helper::StrictEq => "strict_eq",
             Helper::LooseEq => "loose_eq",
             Helper::Typeof => "typeof",
+            Helper::TypeofString => "typeof_string",
+            Helper::StrEq => "string_eq",
+            Helper::Concat => "concat",
+            Helper::ToString => "to_string",
+            Helper::JsAdd => "js_add",
+            Helper::Length => "length",
+            Helper::Num(h) => h.name(),
+            Helper::Abi(h) => h.name(),
         }
     }
 
     pub fn signature(self) -> (Vec<ValType>, Vec<ValType>) {
         let v = jsval();
+        let s = string_ref();
         match self {
             Helper::Box => (vec![ValType::F64], vec![v]),
             Helper::ToNumber => (vec![v], vec![ValType::F64]),
@@ -160,26 +265,39 @@ impl Helper {
                 (vec![v], vec![ValType::I32])
             }
             Helper::StrictEq | Helper::LooseEq => (vec![v, v], vec![ValType::I32]),
+            Helper::TypeofString | Helper::ToString => (vec![v], vec![s]),
+            Helper::StrEq => (vec![s, s], vec![ValType::I32]),
+            Helper::Concat => (vec![s, s], vec![s]),
+            Helper::JsAdd => (vec![v, v], vec![v]),
+            Helper::Length => (vec![v], vec![v]),
+            Helper::Num(h) => h.signature(),
+            Helper::Abi(h) => h.signature(),
         }
     }
 
-    /// The helper's body. `index` gives the function index of another helper.
-    pub fn body(self, index: &mut dyn FnMut(Helper) -> u32) -> Function {
+    pub fn body(self, cx: &mut dyn Cx) -> Function {
         match self {
             Helper::Box => box_number(),
             Helper::ToNumber => to_number(),
             Helper::ToBoolean => to_boolean(),
             Helper::IsNumber => is_number(),
             Helper::IsNullish => is_nullish(),
-            Helper::StrictEq => strict_eq(index(Helper::IsNumber), index(Helper::ToNumber)),
-            Helper::LooseEq => loose_eq(index(Helper::IsNullish), index(Helper::ToNumber)),
-            Helper::Typeof => typeof_(index(Helper::IsNumber)),
+            Helper::StrictEq => strict_eq(cx),
+            Helper::LooseEq => loose_eq(cx),
+            Helper::Typeof => typeof_(cx),
+            Helper::TypeofString => typeof_string(cx),
+            Helper::StrEq => str_eq(),
+            Helper::Concat => concat(),
+            Helper::ToString => to_string(cx),
+            Helper::JsAdd => js_add(cx),
+            Helper::Length => length(cx),
+            Helper::Num(h) => h.body(cx),
+            Helper::Abi(h) => {
+                let bump = cx.bump_global();
+                h.body(cx, bump)
+            }
         }
     }
-}
-
-fn i31() -> HeapType {
-    HeapType::I31
 }
 
 /// `$box_number(x: f64) -> jsval`.
@@ -218,6 +336,11 @@ fn kind(s: &mut InstructionSink, v: u32) {
         .struct_get(T_ODDBALL, 0);
 }
 
+/// Push local `v` cast to `(ref $string)`.
+fn as_string(s: &mut InstructionSink, v: u32) {
+    s.local_get(v).ref_cast_non_null(string());
+}
+
 /// `$to_number(v: jsval) -> f64`: JS ToNumber on primitives.
 fn to_number() -> Function {
     const V: u32 = 0;
@@ -237,6 +360,11 @@ fn to_number() -> Function {
         .ref_cast_non_null(number())
         .struct_get(T_NUMBER, 0);
     s.else_();
+    // ToNumber of a string (parsing) isn't implemented yet: trap (F20).
+    s.local_get(V).ref_test_non_null(string());
+    s.if_(BlockType::Empty);
+    s.unreachable();
+    s.end();
     // undefined → NaN, null/false → 0, true → 1.
     kind(&mut s, V);
     s.local_set(K);
@@ -274,8 +402,15 @@ fn to_boolean() -> Function {
         .f64_const(0.0.into())
         .f64_gt();
     s.else_();
+    s.local_get(V).ref_test_non_null(string());
+    s.if_(BlockType::Result(ValType::I32));
+    // false only for "".
+    as_string(&mut s, V);
+    s.array_len().i32_const(0).i32_ne();
+    s.else_();
     kind(&mut s, V);
     s.i32_const(K_TRUE).i32_eq();
+    s.end();
     s.end();
     s.end();
     s.end();
@@ -308,9 +443,19 @@ fn is_nullish() -> Function {
     f
 }
 
+/// Push "locals `a` and `b` are both strings".
+fn both_strings(s: &mut InstructionSink, a: u32, b: u32) {
+    s.local_get(a).ref_test_non_null(string());
+    s.local_get(b).ref_test_non_null(string());
+    s.i32_and();
+}
+
 /// `$strict_eq(a, b) -> i32`: JS `===`. Numbers compare by value (NaN ≠ NaN, +0 = -0),
-/// everything else by identity.
-fn strict_eq(is_number: u32, to_number: u32) -> Function {
+/// strings by content, everything else by identity.
+fn strict_eq(cx: &mut dyn Cx) -> Function {
+    let is_number = cx.helper(Helper::IsNumber);
+    let to_number = cx.helper(Helper::ToNumber);
+    let str_eq = cx.helper(Helper::StrEq);
     let mut f = Function::new([]);
     let mut s = f.instructions();
     s.local_get(0).call(is_number);
@@ -321,15 +466,25 @@ fn strict_eq(is_number: u32, to_number: u32) -> Function {
     s.local_get(1).call(to_number);
     s.f64_eq();
     s.else_();
+    both_strings(&mut s, 0, 1);
+    s.if_(BlockType::Result(ValType::I32));
+    as_string(&mut s, 0);
+    as_string(&mut s, 1);
+    s.call(str_eq);
+    s.else_();
     s.local_get(0).local_get(1).ref_eq();
+    s.end();
     s.end();
     s.end();
     f
 }
 
 /// `$loose_eq(a, b) -> i32`: JS `==` on primitives. `null == undefined`; a nullish value
-/// equals nothing else; numbers and booleans compare as numbers.
-fn loose_eq(is_nullish: u32, to_number: u32) -> Function {
+/// equals nothing else; two strings compare by content; anything else compares as numbers.
+fn loose_eq(cx: &mut dyn Cx) -> Function {
+    let is_nullish = cx.helper(Helper::IsNullish);
+    let to_number = cx.helper(Helper::ToNumber);
+    let str_eq = cx.helper(Helper::StrEq);
     const NA: u32 = 2;
     const NB: u32 = 3;
     let mut f = Function::new([(2, ValType::I32)]);
@@ -340,16 +495,24 @@ fn loose_eq(is_nullish: u32, to_number: u32) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.local_get(NA).local_get(NB).i32_and();
     s.else_();
+    both_strings(&mut s, 0, 1);
+    s.if_(BlockType::Result(ValType::I32));
+    as_string(&mut s, 0);
+    as_string(&mut s, 1);
+    s.call(str_eq);
+    s.else_();
     s.local_get(0).call(to_number);
     s.local_get(1).call(to_number);
     s.f64_eq();
+    s.end();
     s.end();
     s.end();
     f
 }
 
 /// `$typeof(v) -> i32`: a [`typeof_code`].
-fn typeof_(is_number: u32) -> Function {
+fn typeof_(cx: &mut dyn Cx) -> Function {
+    let is_number = cx.helper(Helper::IsNumber);
     const V: u32 = 0;
     const K: u32 = 1;
     let mut f = Function::new([(1, ValType::I32)]);
@@ -358,13 +521,203 @@ fn typeof_(is_number: u32) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Number));
     s.else_();
+    s.local_get(V).ref_test_non_null(string());
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(typeof_code(TypeofTag::String));
+    s.else_();
     // Oddball kinds 0..=3 map to undefined, object (null), boolean, boolean: kind - (kind == 3).
-    const _: () = assert!(K_UNDEFINED == 0 && K_NULL == 1 && K_TRUE == 3);
+    const _: () = assert!(K_UNDEFINED == 0 && K_NULL == 1 && K_FALSE == 2 && K_TRUE == 3);
     kind(&mut s, V);
     s.local_tee(K);
     s.local_get(K).i32_const(K_TRUE).i32_eq();
     s.i32_sub();
     s.end();
+    s.end();
+    s.end();
+    f
+}
+
+/// `$typeof_string(v) -> (ref $string)`: JS `typeof` as a value.
+fn typeof_string(cx: &mut dyn Cx) -> Function {
+    let typeof_ = cx.helper(Helper::Typeof);
+    let names: Vec<u32> = TypeofTag::ALL.iter().map(|t| cx.str(t.as_str())).collect();
+    const V: u32 = 0;
+    const C: u32 = 1;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(V).call(typeof_).local_set(C);
+    // if code == 0 then name0 else if code == 1 ... else last name
+    let (last, rest) = names.split_last().unwrap();
+    for (i, g) in rest.iter().enumerate() {
+        s.local_get(C).i32_const(i as i32).i32_eq();
+        s.if_(BlockType::Result(string_ref()));
+        s.global_get(*g);
+        s.else_();
+    }
+    s.global_get(*last);
+    for _ in rest {
+        s.end();
+    }
+    s.end();
+    f
+}
+
+/// `$string_eq(a, b: (ref $string)) -> i32`: same length and code units.
+fn str_eq() -> Function {
+    const A: u32 = 0;
+    const B: u32 = 1;
+    const I: u32 = 2;
+    const N: u32 = 3;
+    let mut f = Function::new([(2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(A).local_get(B).ref_eq();
+    s.if_(BlockType::Empty);
+    s.i32_const(1).return_();
+    s.end();
+    s.local_get(A).array_len().local_tee(N);
+    s.local_get(B).array_len().i32_ne();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(A).local_get(I).array_get_u(T_STRING);
+    s.local_get(B).local_get(I).array_get_u(T_STRING);
+    s.i32_ne();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.i32_const(1);
+    s.end();
+    f
+}
+
+/// `$concat(a, b: (ref $string)) -> (ref $string)`.
+fn concat() -> Function {
+    const A: u32 = 0;
+    const B: u32 = 1;
+    const R: u32 = 2;
+    let mut f = Function::new([(
+        1,
+        ValType::Ref(RefType {
+            nullable: true,
+            heap_type: string(),
+        }),
+    )]);
+    let mut s = f.instructions();
+    // Concatenating "" gives the other string back: no copy.
+    s.local_get(A).array_len().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(B).return_();
+    s.end();
+    s.local_get(B).array_len().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(A).return_();
+    s.end();
+    s.local_get(A).array_len();
+    s.local_get(B).array_len();
+    s.i32_add().array_new_default(T_STRING).local_set(R);
+    // array.copy dst dst_off src src_off len
+    s.local_get(R).i32_const(0).local_get(A).i32_const(0);
+    s.local_get(A).array_len();
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(R)
+        .local_get(A)
+        .array_len()
+        .local_get(B)
+        .i32_const(0);
+    s.local_get(B).array_len();
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(R).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `$to_string(v: jsval) -> (ref $string)`: JS ToString on primitives.
+fn to_string(cx: &mut dyn Cx) -> Function {
+    let is_number = cx.helper(Helper::IsNumber);
+    let to_number = cx.helper(Helper::ToNumber);
+    let number_to_string = cx.helper(Helper::Num(numstr::Helper::NumberToString));
+    let names = [
+        cx.str("undefined"),
+        cx.str("null"),
+        cx.str("false"),
+        cx.str("true"),
+    ];
+    const V: u32 = 0;
+    const K: u32 = 1;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(string());
+    s.if_(BlockType::Empty);
+    as_string(&mut s, V);
+    s.return_();
+    s.end();
+    s.local_get(V).call(is_number);
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .call(to_number)
+        .call(number_to_string)
+        .return_();
+    s.end();
+    kind(&mut s, V);
+    s.local_set(K);
+    for (k, g) in names[..3].iter().enumerate() {
+        s.local_get(K).i32_const(k as i32).i32_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(*g).return_();
+        s.end();
+    }
+    s.global_get(names[3]);
+    s.end();
+    f
+}
+
+/// `$js_add(a, b: jsval) -> jsval`: JS `+` on primitives. If either is a string, concatenate
+/// the ToString of both; otherwise add the ToNumber of both.
+fn js_add(cx: &mut dyn Cx) -> Function {
+    let to_string = cx.helper(Helper::ToString);
+    let concat = cx.helper(Helper::Concat);
+    let to_number = cx.helper(Helper::ToNumber);
+    let box_ = cx.helper(Helper::Box);
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(0).ref_test_non_null(string());
+    s.local_get(1).ref_test_non_null(string());
+    s.i32_or();
+    s.if_(BlockType::Result(jsval()));
+    s.local_get(0).call(to_string);
+    s.local_get(1).call(to_string);
+    s.call(concat);
+    s.else_();
+    s.local_get(0).call(to_number);
+    s.local_get(1).call(to_number);
+    s.f64_add().call(box_);
+    s.end();
+    s.end();
+    f
+}
+
+/// `$length(v: jsval) -> jsval`: `v.length` on primitives. A string's length; `undefined` for
+/// numbers and booleans. On `undefined`/`null` it's a TypeError: a trap until T12 has exceptions.
+fn length(cx: &mut dyn Cx) -> Function {
+    let is_nullish = cx.helper(Helper::IsNullish);
+    let box_ = cx.helper(Helper::Box);
+    const V: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(string());
+    s.if_(BlockType::Empty);
+    as_string(&mut s, V);
+    s.array_len().f64_convert_i32_u().call(box_).return_();
+    s.end();
+    s.local_get(V).call(is_nullish);
+    s.if_(BlockType::Empty);
+    s.unreachable();
+    s.end();
+    s.global_get(G_UNDEFINED);
     s.end();
     f
 }
@@ -377,7 +730,7 @@ mod tests {
     fn typeof_codes_match_oddball_kinds() {
         assert_eq!(typeof_code(TypeofTag::Undefined), K_UNDEFINED);
         assert_eq!(typeof_code(TypeofTag::Object), K_NULL);
-        assert_eq!(typeof_code(TypeofTag::Boolean), 2);
+        assert_eq!(typeof_code(TypeofTag::Boolean), K_FALSE);
         assert_eq!(typeof_code(TypeofTag::Number), 3);
     }
 

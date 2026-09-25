@@ -44,9 +44,9 @@ fn plan_world(
     ir: &ir::Module,
     name: component::WorldName,
 ) -> anyhow::Result<component::World> {
-    let ty = |t: ir::Type| match t {
-        ir::Type::F64 => Ok(component::ValType::F64),
-        other => anyhow::bail!("exported functions take and return numbers only (got {other})"),
+    let ty = |t: ir::AbiType| match t {
+        ir::AbiType::F64 => component::ValType::F64,
+        ir::AbiType::String => component::ValType::String,
     };
     let mut sigs = Vec::new();
     for e in &ir.exports {
@@ -55,12 +55,14 @@ fn plan_world(
         sigs.push(component::ExportSig {
             name: e.name.clone(),
             string_name: e.string_name,
-            local: f.name.clone(),
+            // A converting wrapper is named `<local>$export`.
+            local: f.name.trim_end_matches("$export").to_string(),
             params: f.locals[..f.params as usize]
                 .iter()
-                .map(|l| Ok((l.name.clone(), ty(l.ty)?)))
-                .collect::<anyhow::Result<_>>()?,
-            result: f.result.map(ty).transpose()?,
+                .zip(&e.sig.params)
+                .map(|(l, t)| (l.name.clone(), ty(*t)))
+                .collect(),
+            result: e.sig.result.map(ty),
             line: pos.line,
             col: pos.col,
         });

@@ -9,7 +9,7 @@
 //! ```
 //! Locals print as `name.index`, functions as `name#index`, globals as `@name`, labels as `L<n>`.
 //! `f64` constants always carry a decimal point (`1.0`, `NaN`, `inf`), `i32` constants a `_i32` suffix.
-//! `Seq` prints on one line: `seq { stmt; stmt; value }`.
+//! `Seq` prints on one line: `seq { stmt; stmt; value }`. Intrinsics print as `$name(args)`.
 
 use std::fmt::{self, Write};
 
@@ -202,6 +202,11 @@ impl Printer<'_> {
                 let args: Vec<String> = args.iter().map(|a| self.expr(func, a)).collect();
                 format!("call {}({})", self.func_name(callee.0), args.join(", "))
             }
+            Expr::Str(units) => quote(units),
+            Expr::Intrinsic { op, args } => {
+                let args: Vec<String> = args.iter().map(|a| self.expr(func, a)).collect();
+                format!("${}({})", op.name(), args.join(", "))
+            }
             Expr::TypeofIs { arg, tag } => {
                 format!("typeof({}) == {:?}", self.expr(func, arg), tag.as_str())
             }
@@ -225,6 +230,19 @@ impl Printer<'_> {
             }
         }
     }
+}
+
+/// A string literal: `"..."` with JSON-style escapes; lone surrogates as `\u{d800}`.
+fn quote(units: &[u16]) -> String {
+    let mut out = String::from("\"");
+    for c in char::decode_utf16(units.iter().copied()) {
+        match c {
+            Ok(c) => out.extend(c.escape_debug()),
+            Err(e) => out.push_str(&format!("\\u{{{:x}}}", e.unpaired_surrogate())),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn local(func: &Function, i: u32) -> String {

@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T09.** The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T10.** The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -19,7 +19,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T06](T06-backend-v0.md) | Backend v0: IR → core Wasm | done | T04 |
 | [T07](T07-component-lib.md) | Component v0: library world | done | T06 |
 | [T08](T08-jsval.md) | JS values on WasmGC | done | T07 |
-| [T09](T09-strings.md) | Strings + string boundary | todo | T08 |
+| [T09](T09-strings.md) | Strings + string boundary | done | T08 |
 | [T10](T10-command-console.md) | Command world + console.log (P3 stdout) | todo | T09 |
 | [T11](T11-diff-harness.md) | Differential harness node vs wasmtime | todo | T10 |
 | [T12](T12-exceptions.md) | Exceptions (native EH) | todo | T11 |
@@ -45,7 +45,7 @@ Each open item names where it came from and which task should pick it up. When i
 |---|---|---|---|---|
 | F1 | IR validator: label scoping, `Continue` only to a `Loop`, id ranges, type agreement | T04 | start of T06 | [x] T06 (`ir::validate`) |
 | F2 | Source positions per statement in the IR (only `Function.pos` today). T05 didn't need them: its diagnostics use AST spans | T04 | when backend errors need source positions | [ ] |
-| F3 | Static data segments (string literals) in the IR | T04 | T09 | [ ] |
+| F3 | Static data segments (string literals) in the IR | T04 | T09 | [x] T09 (`Expr::Str`; literals are `array.new_fixed` globals, no data segment needed; see F19) |
 | F4 | Reject imports / re-exports of other files with a clear "unsupported" diagnostic | T03 | T05 | [x] T05 (`lower`: import, re-export, `export *`) |
 | F5 | Show secondary diagnostic labels (e.g. "first declared here") as notes | T03 | any, when useful | [ ] |
 | F6 | TypeScript input (`.ts`): today it's parsed as `.mjs` | T03 | not planned yet, needs a task | [ ] |
@@ -55,9 +55,12 @@ Each open item names where it came from and which task should pick it up. When i
 | F10 | Implicit `undefined`: declarations without init, `return;` mixed with values, falling off the end, missing args, void results as values, postfix `++` as value, booleans as values | T05 | T08 | [x] T08 |
 | F11 | Top-level code and non-literal top-level initializers (module init) | T05 | T10 | [ ] |
 | F12 | `--emit-wit <file>`: write the generated WIT next to the component (component binaries don't keep the world/package name, `wasm-tools component wit` shows `root:component`) | T07 | any, when useful (latest T20) | [ ] |
-| F13 | Export signatures beyond `f64`: map `JsVal`/`Bool` params and results to WIT types at the boundary. T08: `$export` wrappers convert jsval ↔ f64 (ToNumber), so the boundary stays `f64` | T07 | T09 (strings), T20 (user WIT) | [ ] |
+| F13 | Export signatures beyond `f64`: map `JsVal`/`Bool` params and results to WIT types at the boundary. T08: `$export` wrappers convert jsval ↔ f64 (ToNumber). T09: `string` done (JSDoc + usage); `bool`, `option`, records etc. remain | T07 | T20 (user WIT) | [ ] |
 | F14 | Inference: `bool`-typed slots (booleans stored in variables are boxed today), int32 ranges | T08 | optimisation pass, after T11 | [ ] |
 | F15 | wasmtime 49 `--invoke` can't call exports whose WIT name is a keyword (`bool`, `use`, `type`…), even as `%bool`. Valid components, CLI-only limit. Avoid such names in tests; maybe warn at build | T08 | T11 (harness) | [ ] |
 | F16 | Calls with more arguments than parameters (evaluate the extras, then drop them) | T08 | T14 | [ ] |
-| F17 | `typeof x` as a value (a string) | T08 | T09 | [ ] |
+| F17 | `typeof x` as a value (a string) | T08 | T09 | [x] T09 (`$typeof_string`, folded when the kind is known) |
 | F18 | Logical assignment `&&=`, `\|\|=`, `??=` | T08 | T13 or any | [ ] |
+| F19 | String literals as `array.new_fixed` globals cost ~3 bytes per code unit; long ones should come from a data segment (`array.new_data`, lazily) | T09 | optimisation pass, after T11 | [ ] |
+| F20 | String → number (ToNumber of a string: `"5" * 2`, `"1" == 1`) and `<`/`>` on two strings. Rejected when known to be a string, a trap at run time otherwise | T09 | T21 | [ ] |
+| F21 | Canonical ABI: more than 16 flat params (passed in memory) are rejected today | T09 | T20 | [ ] |
