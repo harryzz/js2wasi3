@@ -1,0 +1,10 @@
+[package]
+name = "js2wasi3-component"
+description = "WIT world + core module -> WASI 0.3 component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true

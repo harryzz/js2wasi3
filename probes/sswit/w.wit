@@ -1,0 +1,1 @@
+package probe:ss; world ss { export main: func() -> u32; }

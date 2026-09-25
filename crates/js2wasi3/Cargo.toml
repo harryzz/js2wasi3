@@ -1,0 +1,15 @@
+[package]
+name = "js2wasi3"
+description = "JavaScript -> WASI 0.3 Wasm component compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+js2wasi3-frontend.workspace = true
+js2wasi3-ir.workspace = true
+js2wasi3-backend.workspace = true
+js2wasi3-component.workspace = true

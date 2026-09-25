@@ -1,0 +1,17 @@
+(module
+  (type $ft (func)) (type $ct (cont $ft)) (type $bt (func (result i32 (ref $ct))))
+  (tag $yield (param i32))
+  (func $gen (local $i i32)
+    (loop $l (suspend $yield (i32.const 1))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (i32.const 1000000)))))
+  (elem declare func $gen)
+  (func (export "main") (result i32)
+    (local $k (ref null $ct)) (local $sum i32)
+    (local.set $k (cont.new $ct (ref.func $gen)))
+    (loop $l
+      (block $on (type $bt)
+        (resume $ct (on $yield $on) (local.get $k))
+        (return (local.get $sum)))
+      (local.set $k) (local.set $sum (i32.add (local.get $sum))) (br $l))
+    unreachable))

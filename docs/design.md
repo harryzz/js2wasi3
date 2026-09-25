@@ -1,0 +1,75 @@
+# js2wasi3 design
+
+A compiler written from scratch: **JavaScript (ES modules) → a WASI 0.3 Wasm component**,
+using WasmGC for the heap, native Wasm exception handling for JS exceptions, and the
+Component Model's async ABI for I/O. Porffor is a reference for JS semantics only;
+`docs/archive/porffor-wasi-p3-task.md` is the superseded plan.
+
+## Pipeline
+
+```text
+entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──backend──▶ core Wasm ──component──▶ component.wasm
+          (oxc)                       (crates/ir)  (wasm-encoder)            (wit-component, WASI 0.3.1 WIT)
+```
+
+| Crate | Owns | Must not |
+|---|---|---|
+| `frontend` | parsing, scopes, early errors, spans, diagnostics | know about Wasm |
+| `ir` | JS-aware IR, AST→IR lowering, IR passes (e.g. the suspension transform) | encode bytes |
+| `backend` | IR → core module: types, functions, runtime helpers, tag | call WASI directly from JS lowering |
+| `component` | WIT world selection/generation, the Canonical ABI glue, packaging | contain JS semantics |
+| `js2wasi3` | CLI | contain logic |
+
+## Decisions
+
+### D1. Heap: WasmGC
+- A JS value is `(ref null eq)` (written `jsval`): `i31ref` for small integers, and GC structs for
+  boxed f64, strings, objects, functions, symbols, bigints. `undefined`, `null`, `true` and
+  `false` are singleton structs, so `null` is never a JS value.
+- Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
+- Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
+  inline caches only after T12 works and a benchmark justifies them.
+- Linear memory exists **only** for the Canonical ABI boundary (`cabi_realloc`, string/list copies).
+
+### D2. Exceptions: native Wasm EH
+- One private tag `$js (param (ref null eq))`. `throw` becomes `throw $js`. `try/catch` becomes `try_table (catch $js)`.
+  `finally` is lowered in the IR (normal, break/continue/return and throw paths).
+- Wasm traps stay traps: JS can't catch them.
+- At the boundary the tag never escapes: a library export returns `result<T, js-error>`, and a
+  command prints the error to stderr and returns `err`.
+
+### D3. Async: P3 at the boundary, a state machine inside
+Component Model async handles concurrency **between the component and the host**:
+async lift/lower, `future`, `stream`, waitable sets and the callback event loop. It gives no
+way to pause **one JS function in the middle of its body** while other JS keeps
+running in the same export call. JS needs that for every `await`, every generator `yield`
+(even with no I/O) and every async generator, and many such frames can be paused at once.
+
+| Option | Needs | Measured | Verdict |
+|---|---|---|---|
+| **State machine**: the IR turns async functions and generators into resumable frames (GC struct + state index) | only default features | plain code | **default** |
+| Core stack switching (`cont.new`/`resume`/`suspend`) | `-W stack-switching` (experimental) | ~0.03 µs per switch | optional backend mode later (T22) |
+| Component Model threads (🧵) | 2 experimental flags | ~0.75 µs per switch (goes through the host) | not for JS coroutines |
+| Stackful async lift (🚟) | 1 experimental flag | one stack per export call | not enough on its own |
+
+The event loop is the **async callback lift**. The export runs JS until no microtasks are left,
+then returns `WAIT` on one waitable set (or `EXIT` after `task.return`). The callback settles the
+Promise for the finished handle, drains microtasks again, and repeats.
+Probes 2 and 5 in `probes/` show this loop working with Wasmtime 49.
+
+### D4. The WIT boundary follows jco/componentize-js conventions
+The entry module's ES exports become the world's exports. WIT types map to JS:
+`result` ↔ return or throw, `option` ↔ value or `undefined`, `record` ↔ plain object, `variant` ↔ `{tag, val}`,
+`resource` ↔ class, `list<u8>` ↔ `Uint8Array`, `future<T>` ↔ Promise, `stream<T>` ↔ async iterable.
+v0 generates the WIT from the export signatures (all `f64`). Later versions take a user `.wit` world.
+
+### D5. Built-ins
+A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
+plus built-ins written in JS/TS and compiled by js2wasi3 itself, using intrinsics (T20).
+
+## Working rules
+- One task file = one session. Don't start the next task without approval.
+- Each iteration runs only that task's tests, `wasm-tools validate` and one wasmtime smoke run.
+  Broad suites run only at the end of a task or on request.
+- Unsupported syntax reports the construct and its source location. It never miscompiles silently.
+- No C, Rust or LLVM IR source is generated as an intermediate step. Wasm is emitted directly.

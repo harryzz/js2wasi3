@@ -1,0 +1,6 @@
+package probe:cmd;
+world cmd {
+  import wasi:clocks/monotonic-clock@0.3.1;
+  import wasi:cli/stdout@0.3.1;
+  export wasi:cli/run@0.3.1;
+}

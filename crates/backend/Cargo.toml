@@ -1,0 +1,11 @@
+[package]
+name = "js2wasi3-backend"
+description = "IR -> core Wasm module (WasmGC, exceptions)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+js2wasi3-ir.workspace = true

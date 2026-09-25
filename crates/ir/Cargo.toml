@@ -1,0 +1,10 @@
+[package]
+name = "js2wasi3-ir"
+description = "js2wasi3 IR: JS-aware, backend-neutral mid-level representation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
