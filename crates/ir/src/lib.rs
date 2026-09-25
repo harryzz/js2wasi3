@@ -45,6 +45,7 @@
 //! - `Cond { cond, then, els, ty }`: conditional expression (`?:`, `&&`, `||` after lowering).
 //! - `Call { func, args }`: direct call.
 //! - `Closure(c)` (T14): a new function object ([`Closure`]), a `jsval`.
+//! - `Array(elems)` (T15): a new array of the `jsval` elements (`None`: a hole).
 //! - `CallRef { callee, this, args, what }` (T14): call the JS value `callee` with `this` and the
 //!   arguments (all `jsval`), a `jsval`. A TypeError "`what` is not a function" if it isn't one.
 //! - Cells (T14): a captured variable lives in a cell, an internal `jsval` made by
@@ -206,11 +207,15 @@ pub enum Builtin {
     Boolean,
     Error(ErrorKind),
     Function,
+    Array,
+    Symbol,
+    /// `%ArrayIteratorPrototype%` (not a global name).
+    ArrayIterator,
 }
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 12] = [
+    pub const ALL: [Builtin; 15] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -223,6 +228,9 @@ impl Builtin {
         Builtin::Error(ErrorKind::EvalError),
         Builtin::Error(ErrorKind::UriError),
         Builtin::Function,
+        Builtin::Array,
+        Builtin::Symbol,
+        Builtin::ArrayIterator,
     ];
 
     pub fn name(self) -> &'static str {
@@ -233,6 +241,9 @@ impl Builtin {
             Builtin::Boolean => "Boolean",
             Builtin::Error(k) => k.name(),
             Builtin::Function => "Function",
+            Builtin::Array => "Array",
+            Builtin::Symbol => "Symbol",
+            Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
         }
     }
 
@@ -316,6 +327,46 @@ pub enum Intrinsic {
     EnvGet(u32),
     /// Argument `i` of an argument array (`undefined` past its end).
     ArgGet(u32),
+    /// `arr.push(v)` on a new array (literals). No result.
+    ArrayPush,
+    /// `...v` in an array literal: append what iterating `v` gives (args: array, v, the
+    /// TypeError message if `v` isn't iterable). No result.
+    ArraySpread,
+    /// The arguments from index `i` on of an argument array, as a new array (rest parameters).
+    ArgsRest(u32),
+    /// Start iterating `v` (args: v, the TypeError message if it isn't iterable): an internal
+    /// iteration state (a `jsval` that never reaches JS).
+    IterOpen,
+    /// Advance an iteration: `false` when it's done.
+    IterStep,
+    /// The value the last `IterStep` produced.
+    IterValue,
+    /// Close an iteration that isn't done (the iterator's `return`); args: state, `throwing`
+    /// (`bool`: errors from `return` are ignored). No result.
+    IterClose,
+    /// The rest of an iteration, as a new array.
+    IterRest,
+    /// `f.apply(this, args)` without the lookup: args: callee, this, array-like, what (the
+    /// TypeError text if it isn't a function).
+    CallList,
+    /// `{...rest}` in a pattern: a new object with `src`'s own enumerable properties except the
+    /// keys in the array `excluded`.
+    ObjectRest,
+    /// Destructuring `v` (args: v, message prefix): a TypeError "<prefix>undefined." / "…null."
+    /// if it's `undefined` / `null`. No result.
+    CheckDestructure,
+    /// `Symbol(description)`.
+    NewSymbol,
+    /// `Symbol.iterator`.
+    SymbolIterator,
+    /// `Array.isArray(v)` (`bool`).
+    IsArray,
+    /// `Object.keys(v)`.
+    ObjectKeys,
+    /// `Object.values(v)`.
+    ObjectValues,
+    /// `Object.entries(v)`.
+    ObjectEntries,
 }
 
 impl Intrinsic {
@@ -352,6 +403,21 @@ impl Intrinsic {
             Intrinsic::CellSet(_) => (&[JsVal, JsVal], None),
             Intrinsic::CellIsUninit => (&[JsVal], Some(Bool)),
             Intrinsic::EnvGet(_) | Intrinsic::ArgGet(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::ArrayPush => (&[JsVal, JsVal], None),
+            Intrinsic::ArraySpread => (&[JsVal, JsVal, JsVal], None),
+            Intrinsic::ArgsRest(_)
+            | Intrinsic::IterValue
+            | Intrinsic::IterRest
+            | Intrinsic::NewSymbol
+            | Intrinsic::ObjectKeys
+            | Intrinsic::ObjectValues
+            | Intrinsic::ObjectEntries => (&[JsVal], Some(JsVal)),
+            Intrinsic::IterOpen | Intrinsic::ObjectRest => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::IterStep | Intrinsic::IsArray => (&[JsVal], Some(Bool)),
+            Intrinsic::IterClose => (&[JsVal, Bool], None),
+            Intrinsic::CallList => (&[JsVal, JsVal, JsVal, JsVal], Some(JsVal)),
+            Intrinsic::CheckDestructure => (&[JsVal, JsVal], None),
+            Intrinsic::SymbolIterator => (&[], Some(JsVal)),
         }
     }
 
@@ -391,6 +457,23 @@ impl Intrinsic {
             Intrinsic::CellIsUninit => "cell_is_uninit",
             Intrinsic::EnvGet(_) => "env_get",
             Intrinsic::ArgGet(_) => "arg_get",
+            Intrinsic::ArrayPush => "array_push",
+            Intrinsic::ArraySpread => "array_spread",
+            Intrinsic::ArgsRest(_) => "args_rest",
+            Intrinsic::IterOpen => "iter_open",
+            Intrinsic::IterStep => "iter_step",
+            Intrinsic::IterValue => "iter_value",
+            Intrinsic::IterClose => "iter_close",
+            Intrinsic::IterRest => "iter_rest",
+            Intrinsic::CallList => "call_list",
+            Intrinsic::ObjectRest => "object_rest",
+            Intrinsic::CheckDestructure => "check_destructure",
+            Intrinsic::NewSymbol => "new_symbol",
+            Intrinsic::SymbolIterator => "symbol_iterator",
+            Intrinsic::IsArray => "is_array",
+            Intrinsic::ObjectKeys => "object_keys",
+            Intrinsic::ObjectValues => "object_values",
+            Intrinsic::ObjectEntries => "object_entries",
         }
     }
 
@@ -405,6 +488,19 @@ impl Intrinsic {
                 | Intrinsic::ObjectCreate
                 | Intrinsic::GetPrototypeOf
                 | Intrinsic::HasOwn
+                | Intrinsic::ArraySpread
+                | Intrinsic::IterOpen
+                | Intrinsic::IterStep
+                | Intrinsic::IterValue
+                | Intrinsic::IterClose
+                | Intrinsic::IterRest
+                | Intrinsic::CallList
+                | Intrinsic::ObjectRest
+                | Intrinsic::CheckDestructure
+                | Intrinsic::NewSymbol
+                | Intrinsic::ObjectKeys
+                | Intrinsic::ObjectValues
+                | Intrinsic::ObjectEntries
         )
     }
 }
@@ -642,6 +738,8 @@ pub enum Expr {
         value: Box<Expr>,
     },
     Closure(Box<Closure>),
+    /// An array literal: elements (`jsval`), `None` for a hole (T15).
+    Array(Vec<Option<Expr>>),
     CallRef {
         callee: Box<Expr>,
         this: Box<Expr>,
@@ -737,7 +835,7 @@ impl Expr {
             Expr::Str(_) => Type::JsVal,
             Expr::Intrinsic { op, .. } => return op.signature().1,
             Expr::Seq { value, .. } => return value.ty(func, module),
-            Expr::Closure(_) | Expr::CallRef { .. } => Type::JsVal,
+            Expr::Closure(_) | Expr::CallRef { .. } | Expr::Array(_) => Type::JsVal,
         })
     }
 }

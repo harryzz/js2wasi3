@@ -58,6 +58,7 @@ fn expr(e: &Expr, throws: &[bool]) -> bool {
         Expr::Intrinsic { op, args } => op.may_throw() || args.iter().any(|a| expr(a, throws)),
         Expr::Seq { body, value } => stmts(body, throws) || expr(value, throws),
         Expr::Closure(c) => c.env.iter().any(|a| expr(a, throws)),
+        Expr::Array(elems) => elems.iter().flatten().any(|a| expr(a, throws)),
         // Unknown callee (T14).
         Expr::CallRef { .. } => true,
     }

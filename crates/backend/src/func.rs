@@ -50,6 +50,13 @@ pub enum Helper {
     /// The code of `Function.prototype.call` (a `$code`): call `this` with `args[0]` as `this`
     /// and the other arguments.
     Call,
+    /// `Function.prototype.apply` (T15): call `this` with `args[0]` as `this` and the elements of the
+    /// array-like `args[1]` as the arguments.
+    Apply,
+    /// `(f, this, args: jsval (an array-like), what: (ref $string)) -> jsval`: `f(...args)`.
+    CallList,
+    /// `(v: jsval) -> (ref $vals)`: CreateListFromArrayLike (`undefined`/`null`: empty).
+    ListFromArrayLike,
 }
 
 impl Helper {
@@ -59,6 +66,9 @@ impl Helper {
             Helper::CallValue => "call_value",
             Helper::ArgGet => "arg_get",
             Helper::Call => "Function.prototype.call",
+            Helper::Apply => "Function.prototype.apply",
+            Helper::CallList => "call_list",
+            Helper::ListFromArrayLike => "list_from_array_like",
         }
     }
 
@@ -78,7 +88,9 @@ impl Helper {
             ),
             Helper::CallValue => (vec![v, v, rt(false, T_VALS), s], vec![v]),
             Helper::ArgGet => (vec![v, ValType::I32], vec![v]),
-            Helper::Call => (vec![v, v, v], vec![v]),
+            Helper::Call | Helper::Apply => (vec![v, v, v], vec![v]),
+            Helper::CallList => (vec![v, v, v, s], vec![v]),
+            Helper::ListFromArrayLike => (vec![v], vec![rt(false, T_VALS)]),
         }
     }
 
@@ -88,6 +100,9 @@ impl Helper {
             Helper::CallValue => call_value(cx),
             Helper::ArgGet => arg_get(),
             Helper::Call => call(cx),
+            Helper::Apply => apply(cx),
+            Helper::CallList => call_list(cx),
+            Helper::ListFromArrayLike => list_from_array_like(cx),
         }
     }
 }
@@ -240,6 +255,92 @@ fn call(cx: &mut dyn Cx) -> Function {
     s.local_get(REST).ref_as_non_null();
     s.global_get(what);
     s.call(call_value);
+    s.end();
+    f
+}
+
+fn apply(cx: &mut dyn Cx) -> Function {
+    let call_list = fh(cx, Helper::CallList);
+    let what = cx.str("Function.prototype.apply was called on a value that");
+    const THIS: u32 = 1;
+    const ARGS: u32 = 2;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(THIS);
+    for i in 0..2 {
+        s.i32_const(i);
+        s.local_get(ARGS).ref_cast_non_null(vals()).array_len();
+        s.i32_lt_u();
+        s.if_(BlockType::Result(jsval()));
+        s.local_get(ARGS)
+            .ref_cast_non_null(vals())
+            .i32_const(i)
+            .array_get(T_VALS);
+        s.else_();
+        s.global_get(G_UNDEFINED);
+        s.end();
+    }
+    s.global_get(what);
+    s.call(call_list);
+    s.end();
+    f
+}
+
+fn call_list(cx: &mut dyn Cx) -> Function {
+    let list = fh(cx, Helper::ListFromArrayLike);
+    let call_value = fh(cx, Helper::CallValue);
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(0).local_get(1);
+    s.local_get(2).call(list);
+    s.local_get(3).call(call_value);
+    s.end();
+    f
+}
+
+/// Arrays copy their elements (holes: `undefined`); other objects: `length` and indices.
+fn list_from_array_like(cx: &mut dyn Cx) -> Function {
+    let is_nullish = cx.helper(runtime::Helper::IsNullish);
+    let get = oh(cx, object::Helper::Get);
+    let to_number = cx.helper(runtime::Helper::ToNumber);
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let not_obj = cx.str("CreateListFromArrayLike called on non-object");
+    let length = cx.str("length");
+    const V: u32 = 0;
+    const N: u32 = 1;
+    const I: u32 = 2;
+    const OUT: u32 = 3;
+    const E: u32 = 4;
+    let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_VALS)), (1, jsval())]);
+    let mut s = f.instructions();
+    s.local_get(V).call(is_nullish);
+    s.if_(BlockType::Empty);
+    s.i32_const(0).array_new_default(T_VALS).return_();
+    s.end();
+    s.local_get(V)
+        .ref_test_non_null(runtime::object())
+        .i32_eqz();
+    s.if_(BlockType::Empty);
+    s.global_get(not_obj).call(throw);
+    s.end();
+    s.local_get(V).ref_test_non_null(crate::array::array());
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(V)
+        .ref_cast_non_null(crate::array::array())
+        .struct_get(runtime::T_ARRAY, crate::array::F_LENGTH);
+    s.else_();
+    s.local_get(V).global_get(length).call(get).call(to_number);
+    s.i32_trunc_sat_f64_u();
+    s.end();
+    s.local_tee(N).array_new_default(T_VALS).local_set(OUT);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(OUT).ref_as_non_null().local_get(I);
+    s.local_get(V).local_get(I).ref_i31().call(get).local_tee(E);
+    s.array_set(T_VALS);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(OUT).ref_as_non_null();
     s.end();
     f
 }

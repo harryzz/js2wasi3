@@ -51,6 +51,11 @@
 //! its declaration gets an uninitialized cell and TDZ checks. Not yet: `arguments`, `apply`/`bind`
 //! (T15/T21), `new` of user functions (T16), assigning to a function's binding.
 //!
+//! **Arrays and iteration** (T15): array literals (holes, spread), `for-of`, spread calls, and
+//! destructuring everywhere (declarations, assignments, parameters with defaults/patterns/rest,
+//! `catch`, `for-in`/`for-of` heads): see [`patterns`]. `Symbol()`, `Symbol.iterator`,
+//! `Array.isArray`, `Object.keys/values/entries`.
+//!
 //! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
 //! that converts (box an `f64`, ToNumber / ToString of the result).
 //!
@@ -70,6 +75,7 @@
 //! All diagnostics of a file are collected, not just the first.
 
 mod closures;
+mod patterns;
 
 use std::collections::{HashMap, HashSet};
 
@@ -90,6 +96,7 @@ use oxc_syntax::{
     scope::ScopeId,
     symbol::SymbolId,
 };
+use patterns::{Mode, Pat, Src};
 
 /// Lower a whole module. Returns every unsupported construct as a diagnostic.
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
@@ -121,6 +128,8 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             lowered: HashSet::new(),
             hidden: HashMap::new(),
             fn_scope: HashMap::new(),
+            rest_param: HashSet::new(),
+            fn_length: HashMap::new(),
         };
         l.run();
         if let Some(next) = l.next_facts() {
@@ -246,6 +255,10 @@ struct Lowerer<'p, 'a> {
     /// Hidden leading params of each JS function.
     hidden: HashMap<FuncId, Hidden>,
     fn_scope: HashMap<FuncId, ScopeId>,
+    /// Functions with a rest parameter (their last IR parameter, an array).
+    rest_param: HashSet<FuncId>,
+    /// Top-level functions' `length`.
+    fn_length: HashMap<FuncId, u32>,
 }
 
 /// A function other than a top-level declaration (T14).
@@ -625,6 +638,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.exported.insert(*f);
             }
         }
+        for func in self.exported.clone() {
+            if self.rest_param.contains(&func) {
+                let pos = self
+                    .module
+                    .function(func)
+                    .pos
+                    .expect("declared functions have a position");
+                self.diags.push(Diagnostic {
+                    path: self.p.path.clone(),
+                    line: pos.line,
+                    col: pos.col,
+                    message: "unsupported: rest parameter in an exported function (planned: T20)"
+                        .to_string(),
+                    help: None,
+                });
+            }
+        }
         // Boundary facts: string parameters (JSDoc or earlier usage) hold strings.
         for func in self.exported.clone() {
             let params = self.func_params[&func].clone();
@@ -747,22 +777,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if f.generator {
             return Err(self.unsupported(f.span, "generator function", "T18"));
         }
+        // Simple parameters are typed; the others (defaults, patterns: `None`) are `jsval`s bound
+        // in the body's prologue, and a rest parameter is one more `jsval` (an array).
         let mut params = Vec::new();
-        let mut bad = false;
+        let bad = false;
         for p in &f.params.items {
             match (&p.pattern, &p.initializer) {
                 (BindingPattern::BindingIdentifier(b), None) => {
                     params.push((b.name.as_str(), b.symbol_id.get()))
                 }
-                _ => {
-                    self.unsupported(p.span, "default or destructured parameter", "T15");
-                    bad = true;
-                }
+                _ => params.push(("param", None)),
             }
-        }
-        if let Some(rest) = &f.params.rest {
-            self.unsupported(rest.span, "rest parameter", "T15");
-            bad = true;
         }
         let body = f.body.as_ref().expect("function declarations have a body");
         let id = FuncId(self.module.functions.len() as u32);
@@ -780,9 +805,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             sig.push(("this", Type::JsVal));
         }
         for (n, sym) in &params {
-            let ty = sym.map_or(Type::F64, |s| self.slot_ty(Slot::Var(s)));
+            let ty = sym.map_or(Type::JsVal, |s| self.slot_ty(Slot::Var(s)));
             sig.push((n, ty));
         }
+        if f.params.rest.is_some() {
+            sig.push(("rest", Type::JsVal));
+            self.rest_param.insert(id);
+        }
+        self.fn_length.insert(id, js_length(&f.params));
         let mut func = ir::Function::new(
             id_node.name.as_str(),
             &sig,
@@ -825,10 +855,37 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Err(self.unsupported(d.span, "`using` declaration", "not scheduled"));
         }
         let is_var = d.kind == VariableDeclarationKind::Var;
-        let mut result = Ok(());
+        let result = Ok(());
         for decl in &d.declarations {
             let BindingPattern::BindingIdentifier(b) = &decl.id else {
-                result = Err(self.unsupported(decl.span, "destructuring declaration", "T15"));
+                // A pattern (T15): each name is a global, set by `main`.
+                for b in decl.id.get_binding_identifiers() {
+                    let sym = b
+                        .symbol_id
+                        .get()
+                        .expect("semantic analysis assigns symbols");
+                    let slot = Slot::Var(sym);
+                    if is_var {
+                        self.observe(slot, Kind::Any);
+                    }
+                    let ty = self.slot_ty(slot);
+                    self.module.globals.push(ir::Global {
+                        name: b.name.to_string(),
+                        ty,
+                        mutable: true,
+                        init: if ty == Type::F64 {
+                            Const::F64(0.0)
+                        } else {
+                            Const::Undefined
+                        },
+                    });
+                    let id = GlobalId(self.module.globals.len() as u32 - 1);
+                    self.globals.insert(sym, id);
+                    self.names.insert(b.name.to_string(), Binding::Global);
+                    if !is_var {
+                        self.lexical_end.insert(sym, decl.span.end);
+                    }
+                }
                 continue;
             };
             let sym = b
@@ -983,7 +1040,30 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let mut result = Ok(());
         for decl in &d.declarations {
             let BindingPattern::BindingIdentifier(b) = &decl.id else {
-                continue; // reported when declared
+                let Some(init) = &decl.init else { continue };
+                let src = Src::Text(self.callee_text(init));
+                let fresh = d.kind != VariableDeclarationKind::Var;
+                let r = self.expr(cx, init).and_then(|v| {
+                    self.pattern(
+                        cx,
+                        Pat::Bind(&decl.id),
+                        jsval_of(v),
+                        Mode::Decl { fresh },
+                        Some(src),
+                        out,
+                    )
+                });
+                if let Err(e) = r {
+                    result = Err(e);
+                }
+                for b in decl.id.get_binding_identifiers() {
+                    if let Some(sym) = b.symbol_id.get()
+                        && let Some(flag) = self.tdz_flags.get(&sym)
+                    {
+                        out.push(Stmt::SetGlobal(*flag, Expr::bool(true)));
+                    }
+                }
+                continue;
             };
             let sym = b
                 .symbol_id
@@ -1225,13 +1305,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             let mut params = Vec::new();
             for p in &f.params().items {
-                let (name, sym) = match &p.pattern {
-                    BindingPattern::BindingIdentifier(b) => (b.name.to_string(), b.symbol_id.get()),
-                    _ => ("param".to_string(), None), // reported when lowered
+                let (name, sym) = match (&p.pattern, &p.initializer) {
+                    (BindingPattern::BindingIdentifier(b), None) => {
+                        (b.name.to_string(), b.symbol_id.get())
+                    }
+                    _ => ("param".to_string(), None),
                 };
-                let ty = sym.map_or(Type::F64, |s| self.slot_ty(Slot::Var(s)));
+                let ty = sym.map_or(Type::JsVal, |s| self.slot_ty(Slot::Var(s)));
                 sig.push((name, ty));
                 params.push(sym);
+            }
+            if f.params().rest.is_some() {
+                sig.push(("rest".to_string(), Type::JsVal));
+                self.rest_param.insert(id);
             }
             let result = Slot::Result(id);
             let returns_value = f.expression().is_some()
@@ -1296,17 +1382,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if is_generator {
             bad = Some(self.unsupported(f.span(), "generator function", "T18"));
         }
-        for p in &f.params().items {
-            if !matches!(
-                (&p.pattern, &p.initializer),
-                (BindingPattern::BindingIdentifier(_), None)
-            ) {
-                bad = Some(self.unsupported(p.span, "default or destructured parameter", "T15"));
-            }
-        }
-        if let Some(rest) = &f.params().rest {
-            bad = Some(self.unsupported(rest.span, "rest parameter", "T15"));
-        }
         self.lowered.insert(id);
         if let Some(e) = bad {
             return Err(e);
@@ -1368,7 +1443,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
         }
         let mut params = Vec::new();
+        let mut complex = Vec::new();
         for (i, p) in f.params().items.iter().enumerate() {
+            if p.initializer.is_some() || !matches!(p.pattern, BindingPattern::BindingIdentifier(_))
+            {
+                complex.push((cx.func.param(k + i as u32), p));
+                continue;
+            }
             if let BindingPattern::BindingIdentifier(b) = &p.pattern
                 && let Some(sym) = b.symbol_id.get()
             {
@@ -1415,6 +1496,33 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
         }
         let before = self.diags.len();
+        // Parameters with defaults or patterns, then the rest parameter.
+        for (param, p) in complex {
+            let mode = Mode::Decl { fresh: false };
+            let v = Expr::Local(param);
+            let _ = match &p.initializer {
+                Some(init) => self.param_default(&mut cx, &p.pattern, init, v, &mut prologue),
+                None => self.pattern(
+                    &mut cx,
+                    Pat::Bind(&p.pattern),
+                    v,
+                    mode,
+                    Some(Src::Value),
+                    &mut prologue,
+                ),
+            };
+        }
+        if let Some(rest) = &f.params().rest {
+            let param = cx.func.param(cx.func.params - 1);
+            let _ = self.pattern(
+                &mut cx,
+                Pat::Bind(&rest.rest.argument),
+                Expr::Local(param),
+                Mode::Decl { fresh: false },
+                None,
+                &mut prologue,
+            );
+        }
         let mut stmts = Vec::new();
         if let Some(e) = f.expression() {
             // `(…) => e`
@@ -1504,7 +1612,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Ok(Expr::Closure(Box::new(ir::Closure {
             code,
             name,
-            length: f.params().items.len() as u32,
+            length: js_length(f.params()),
             constructor,
             env,
             shared: false,
@@ -1521,7 +1629,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Expr::Closure(Box::new(ir::Closure {
             code,
             name: f.name.clone(),
-            length: self.func_params[&func].len() as u32,
+            length: self.fn_length[&func],
             constructor: true,
             env: Vec::new(),
             shared: true,
@@ -1553,11 +1661,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if hidden.this {
             args.push(Expr::Local(LocalId(1)));
         }
+        let rest = self.rest_param.contains(&func);
         for i in hidden.count()..f.params {
-            let arg = Expr::intrinsic(
-                Intrinsic::ArgGet(i - hidden.count()),
-                vec![Expr::Local(LocalId(2))],
-            );
+            let op = if rest && i == f.params - 1 {
+                Intrinsic::ArgsRest(i - hidden.count())
+            } else {
+                Intrinsic::ArgGet(i - hidden.count())
+            };
+            let arg = Expr::intrinsic(op, vec![Expr::Local(LocalId(2))]);
             args.push(match f.locals[i as usize].ty {
                 Type::JsVal => arg,
                 // Not known to be `Any` yet (this round is thrown away).
@@ -1720,6 +1831,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Statement::WhileStatement(w) => self.while_loop(cx, None, w, out),
             Statement::ForInStatement(f) => self.for_in(cx, None, f, out),
+            Statement::ForOfStatement(f) => self.for_of(cx, None, f, out),
             Statement::DoWhileStatement(w) => self.do_while_loop(cx, None, w, out),
             Statement::ForStatement(f) => self.for_loop(cx, None, f, out),
             Statement::LabeledStatement(l) => {
@@ -1729,6 +1841,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Statement::DoWhileStatement(w) => self.do_while_loop(cx, name, w, out),
                     Statement::ForStatement(f) => self.for_loop(cx, name, f, out),
                     Statement::ForInStatement(f) => self.for_in(cx, name, f, out),
+                    Statement::ForOfStatement(f) => self.for_of(cx, name, f, out),
                     body => {
                         let brk = cx.label();
                         cx.targets.push(Target {
@@ -1910,7 +2023,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 catch_local = Some(tmp);
             }
             Some(p) => {
-                result = Err(self.unsupported(p.span(), "destructuring `catch` parameter", "T15"));
+                let tmp = cx.func.add_local("thrown", Type::JsVal);
+                catch_local = Some(tmp);
+                let src = Src::Text("undefined".to_string());
+                if let Err(e) = self.pattern(
+                    cx,
+                    Pat::Bind(p),
+                    Expr::Local(tmp),
+                    Mode::Decl { fresh: true },
+                    Some(src),
+                    &mut catch_body,
+                ) {
+                    result = Err(e);
+                }
             }
         }
         catch_body.extend(self.stmts(cx, &h.body.body));
@@ -1937,7 +2062,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let mut result = Ok(());
         for decl in &d.declarations {
             let BindingPattern::BindingIdentifier(b) = &decl.id else {
-                result = Err(self.unsupported(decl.span, "destructuring declaration", "T15"));
+                // A pattern (its initializer is required by the parser).
+                let Some(init) = &decl.init else { continue };
+                let r = self.expr(cx, init).and_then(|v| {
+                    let src = Src::Text(self.callee_text(init));
+                    let fresh = d.kind != VariableDeclarationKind::Var;
+                    self.pattern(
+                        cx,
+                        Pat::Bind(&decl.id),
+                        jsval_of(v),
+                        Mode::Decl { fresh },
+                        Some(src),
+                        out,
+                    )
+                });
+                if let Err(e) = r {
+                    result = Err(e);
+                }
                 continue;
             };
             let sym = b
@@ -2120,6 +2261,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     result = result.and(self.expr_stmt(cx, x, out));
                 }
                 result
+            }
+            Expression::AssignmentExpression(a)
+                if a.left.as_assignment_target_pattern().is_some() =>
+            {
+                let v = self.destructuring_assign(cx, a)?;
+                out.push(Stmt::Expr(v.e));
+                Ok(())
             }
             Expression::AssignmentExpression(a) if a.left.as_member_expression().is_some() => {
                 let v = self.member_assign(cx, a)?;
@@ -2309,6 +2457,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 };
                 Ok(Val { e, ty, kind })
             }
+            Expression::AssignmentExpression(a)
+                if a.left.as_assignment_target_pattern().is_some() =>
+            {
+                self.destructuring_assign(cx, a)
+            }
             Expression::AssignmentExpression(a) if a.left.as_member_expression().is_some() => {
                 self.member_assign(cx, a)
             }
@@ -2365,6 +2518,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if !c.optional && self.object_static(&c.callee).is_some() =>
             {
                 self.object_call(cx, c)
+            }
+            Expression::CallExpression(c)
+                if !c.optional && self.builtin_ident(&c.callee) == Some(Builtin::Symbol) =>
+            {
+                let args = self.args(cx, &c.arguments, 1)?;
+                Ok(Val::js(
+                    Expr::intrinsic(Intrinsic::NewSymbol, args),
+                    Kind::Any,
+                ))
             }
             Expression::CallExpression(c) => {
                 let (call, kind) = self.call(cx, c)?;
@@ -2444,7 +2606,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Expression::BigIntLiteral(_) => Err(self.unsupported(span, "BigInt", "not scheduled")),
             Expression::ObjectExpression(o) => self.object_literal(cx, o),
-            Expression::ArrayExpression(_) => Err(self.unsupported(span, "array literal", "T15")),
+            Expression::ArrayExpression(a) => Ok(Val::js(
+                self.array_literal(cx, &a.elements, None, span)?,
+                Kind::Any,
+            )),
             Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
                 self.named(cx, e, None)
             }
@@ -2452,6 +2617,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 cx.this.map_or_else(Expr::undefined, Expr::Local),
                 Kind::Any,
             )),
+            Expression::StaticMemberExpression(sm)
+                if !sm.optional && self.builtin_ident(&sm.object) == Some(Builtin::Symbol) =>
+            {
+                if sm.property.name == "iterator" {
+                    return Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::SymbolIterator, vec![]),
+                        Kind::Any,
+                    ));
+                }
+                if sm.property.name == "prototype" {
+                    return Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::Prototype(Builtin::Symbol), vec![]),
+                        Kind::Any,
+                    ));
+                }
+                Err(self.unsupported(span, &format!("`Symbol.{}`", sm.property.name), "T21"))
+            }
             Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_) => {
                 let m = e.as_member_expression().expect("a member expression");
                 if let Some(b) = self.builtin_prototype(m) {
@@ -2732,6 +2914,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Ok((self.console(cx, c, stderr)?, Call::Console));
         }
         let callee = c.callee.without_parentheses();
+        if c.arguments.iter().any(|a| a.is_spread()) {
+            return self.spread_call(cx, c);
+        }
         if let Expression::Identifier(id) = callee
             && let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id()
         {
@@ -2788,6 +2973,50 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         ))
     }
 
+    /// `f(...args)`: the arguments go in an array, the call through the function object.
+    fn spread_call(&mut self, cx: &mut FnCx, c: &'a CallExpression<'a>) -> R<(Expr, Call)> {
+        let callee = c.callee.without_parentheses();
+        let (f, this, pre) = match callee.as_member_expression() {
+            Some(m)
+                if !matches!(m, MemberExpression::PrivateFieldExpression(_))
+                    && self.builtin_prototype(m).is_none() =>
+            {
+                let (obj, key) = self.member(cx, m)?;
+                let t = cx.func.add_local("this", Type::JsVal);
+                (
+                    Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(t), key]),
+                    Expr::Local(t),
+                    vec![Stmt::Set(t, obj)],
+                )
+            }
+            _ => (
+                jsval_of(self.expr(cx, &c.callee)?),
+                Expr::undefined(),
+                Vec::new(),
+            ),
+        };
+        let tf = cx.func.add_local("callee", Type::JsVal);
+        let mut body = pre;
+        body.push(Stmt::Set(tf, f));
+        let args = self.spread_args(cx, &c.arguments, c.span)?;
+        let call = Expr::intrinsic(
+            Intrinsic::CallList,
+            vec![
+                Expr::Local(tf),
+                this,
+                args,
+                Expr::str(&self.callee_text(&c.callee)),
+            ],
+        );
+        Ok((
+            Expr::Seq {
+                body,
+                value: Box::new(call),
+            },
+            Call::Value,
+        ))
+    }
+
     /// A call of a known function with its typed signature. `self_obj`: its function object, if it
     /// takes one. `this` is `undefined`; missing arguments are `undefined`, extra ones are evaluated
     /// (after the others) and dropped (F16).
@@ -2805,11 +3034,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             args.push(Expr::undefined());
         }
         let mut extra = Vec::new();
+        let rest = self.rest_param.contains(&func);
+        let mut rest_values = Vec::new();
         let mut result = Ok(());
         for (i, a) in arguments.iter().enumerate() {
             let Some(e) = a.as_expression() else {
-                result = Err(self.unsupported(a.span(), "spread argument", "T15"));
-                continue;
+                unreachable!("calls with spread arguments go through `spread_call`");
             };
             let v = match self.expr(cx, e) {
                 Ok(v) => v,
@@ -2819,11 +3049,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
             };
             match params.get(i) {
-                Some(sym) => {
+                // A typed parameter.
+                Some(Some(sym)) => {
                     let ty = self.module.function(func).locals[hidden.count() as usize + i].ty;
-                    let sym = sym.expect("parameters have symbols");
-                    args.push(self.store(Slot::Var(sym), ty, v));
+                    args.push(self.store(Slot::Var(*sym), ty, v));
                 }
+                // A default or a pattern: bound in the callee.
+                Some(None) => args.push(jsval_of(v)),
+                None if rest => rest_values.push(Some(jsval_of(v))),
                 None => extra.push(Stmt::Expr(v.e)),
             }
         }
@@ -2831,9 +3064,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         for (i, sym) in params.iter().enumerate().skip(arguments.len()) {
             // A missing argument is `undefined`.
             let v = self.undefined_val();
-            let ty = self.module.function(func).locals[hidden.count() as usize + i].ty;
-            let sym = sym.expect("parameters have symbols");
-            args.push(self.store(Slot::Var(sym), ty, v));
+            match sym {
+                Some(sym) => {
+                    let ty = self.module.function(func).locals[hidden.count() as usize + i].ty;
+                    args.push(self.store(Slot::Var(*sym), ty, v));
+                }
+                None => args.push(v.e),
+            }
+        }
+        if rest {
+            args.push(Expr::Array(rest_values));
         }
         if extra.is_empty() {
             return Ok((Expr::Call { func, args }, Call::Direct(func)));
@@ -3005,19 +3245,26 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let several = c.arguments.len() > 1;
         let mut parts = Vec::new();
+        // Every argument is evaluated before any is formatted (`console.log(a, a.pop())`).
+        let mut pre = Vec::new();
         let mut result = Ok(());
         for (i, a) in c.arguments.iter().enumerate() {
             let Some(e) = a.as_expression() else {
                 result = Err(self.unsupported(a.span(), "spread argument", "T15"));
                 continue;
             };
-            let v = match self.expr(cx, e) {
+            let mut v = match self.expr(cx, e) {
                 Ok(v) => v,
                 Err(e) => {
                     result = Err(e);
                     continue;
                 }
             };
+            if several && !matches!(v.e, Expr::Const(_) | Expr::Str(_)) {
+                let t = cx.func.add_local("arg", v.ty);
+                pre.push(Stmt::Set(t, v.e));
+                v.e = Expr::Local(t);
+            }
             if i == 0 && several && matches!(v.kind, Kind::Str | Kind::Any) {
                 match static_string(e) {
                     Some(text) if text.contains('%') => {
@@ -3054,10 +3301,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .into_iter()
             .reduce(|a, b| Expr::intrinsic(Intrinsic::Concat, vec![a, b]))
             .expect("the newline");
-        Ok(Expr::intrinsic(
-            Intrinsic::ConsoleWrite { stderr },
-            vec![text],
-        ))
+        let write = Expr::intrinsic(Intrinsic::ConsoleWrite { stderr }, vec![text]);
+        Ok(if pre.is_empty() {
+            write
+        } else {
+            Expr::Seq {
+                body: pre,
+                value: Box::new(write),
+            }
+        })
     }
 
     // ---- objects (T13) -------------------------------------------------------------------
@@ -3091,13 +3343,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let Expression::StaticMemberExpression(m) = callee else {
             return None;
         };
-        if m.optional || self.builtin_ident(&m.object) != Some(Builtin::Object) {
+        if m.optional {
             return None;
         }
-        match m.property.name.as_str() {
-            "create" => Some(Intrinsic::ObjectCreate),
-            "getPrototypeOf" => Some(Intrinsic::GetPrototypeOf),
-            "hasOwn" => Some(Intrinsic::HasOwn),
+        match (self.builtin_ident(&m.object)?, m.property.name.as_str()) {
+            (Builtin::Object, "create") => Some(Intrinsic::ObjectCreate),
+            (Builtin::Object, "getPrototypeOf") => Some(Intrinsic::GetPrototypeOf),
+            (Builtin::Object, "hasOwn") => Some(Intrinsic::HasOwn),
+            (Builtin::Object, "keys") => Some(Intrinsic::ObjectKeys),
+            (Builtin::Object, "values") => Some(Intrinsic::ObjectValues),
+            (Builtin::Object, "entries") => Some(Intrinsic::ObjectEntries),
+            (Builtin::Array, "isArray") => Some(Intrinsic::IsArray),
             _ => None,
         }
     }
@@ -3116,7 +3372,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let n = op.signature().0.len();
         let args = self.args(cx, &c.arguments, n)?;
         let e = Expr::intrinsic(op, args);
-        Ok(if op == Intrinsic::HasOwn {
+        Ok(if matches!(op, Intrinsic::HasOwn | Intrinsic::IsArray) {
             Val::new(e, Type::Bool)
         } else {
             Val::js(e, Kind::Any)
@@ -3411,6 +3667,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let name = match &p.key {
             PropertyKey::StaticIdentifier(id) if !p.computed => Some(id.name.as_str()),
             PropertyKey::StringLiteral(sl) if !p.computed => Some(sl.value.as_str()),
+            PropertyKey::StaticMemberExpression(m)
+                if p.computed
+                    && m.property.name == "iterator"
+                    && self.builtin_ident(&m.object) == Some(Builtin::Symbol) =>
+            {
+                Some("[Symbol.iterator]")
+            }
             _ => None,
         };
         if name.is_none()
@@ -3597,7 +3860,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ForStatementLeft::VariableDeclaration(d) => {
                 let decl = &d.declarations[0];
                 let BindingPattern::BindingIdentifier(b) = &decl.id else {
-                    return Err(self.unsupported(decl.span, "destructuring declaration", "T15"));
+                    let fresh = d.kind != VariableDeclarationKind::Var;
+                    return self.pattern(
+                        cx,
+                        Pat::Bind(&decl.id),
+                        jsval_of(key),
+                        Mode::Decl { fresh },
+                        None,
+                        out,
+                    );
                 };
                 let sym = b
                     .symbol_id
@@ -3617,11 +3888,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.extend(self.write_var(cx, &var, v));
                 Ok(())
             }
-            other => Err(self.unsupported(
-                other.span(),
-                "`for-in` target other than a variable",
-                "later",
-            )),
+            left => match left.as_assignment_target() {
+                Some(t) => self.pattern(cx, Pat::Target(t), jsval_of(key), Mode::Assign, None, out),
+                None => Err(self.unsupported(left.span(), "`for-in` target", "later")),
+            },
         }
     }
 
@@ -3724,7 +3994,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let span = id.span;
         let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id() else {
             if id.name == "arguments" && cx.scope.is_some() {
-                return Err(self.unsupported(span, "`arguments`", "T15"));
+                return Err(self.unsupported(span, "`arguments`", "T21"));
             }
             return Err(self.unsupported(span, &format!("global `{}`", id.name), "T21"));
         };
@@ -3995,6 +4265,15 @@ fn static_string<'x>(e: &'x Expression) -> Option<&'x str> {
         }
         _ => None,
     }
+}
+
+/// A function's `length`: the parameters before the first default (a rest parameter doesn't count).
+fn js_length(params: &FormalParameters) -> u32 {
+    params
+        .items
+        .iter()
+        .position(|p| p.initializer.is_some())
+        .unwrap_or(params.items.len()) as u32
 }
 
 /// JS ToNumber.

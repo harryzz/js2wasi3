@@ -37,6 +37,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   `(self, this, args) -> jsval` and an environment array. Captured variables are boxed in cells, one per
   variable (flat closures); direct calls stay typed, calls through values use one uniform `call_ref`.
   See `crates/backend/src/func.rs` and `crates/lower/src/closures.rs`.)
+  (T15: arrays are `$array`, a subtype of `$object` with a dense `$vals` store (holes are Wasm null) and a length;
+  symbols are `$symbol`, a subtype of `$string` compared by identity, so property keys stay string arrays.
+  Iteration uses an internal `$iter` state with fast paths for arrays and strings and the protocol otherwise.
+  See `crates/backend/src/{array,iter,inspect}.rs` and `crates/lower/src/patterns.rs`.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.

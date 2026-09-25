@@ -217,7 +217,9 @@ impl Printer<'_> {
                     crate::Intrinsic::NewCell(t)
                     | crate::Intrinsic::CellGet(t)
                     | crate::Intrinsic::CellSet(t) => format!("{}.{t}", op.name()),
-                    crate::Intrinsic::EnvGet(i) | crate::Intrinsic::ArgGet(i) => {
+                    crate::Intrinsic::EnvGet(i)
+                    | crate::Intrinsic::ArgGet(i)
+                    | crate::Intrinsic::ArgsRest(i) => {
                         format!("{}.{i}", op.name())
                     }
                     _ => op.name().to_string(),
@@ -249,6 +251,13 @@ impl Printer<'_> {
                     if c.constructor { ", ctor" } else { "" },
                     env.join(", ")
                 )
+            }
+            Expr::Array(elems) => {
+                let elems: Vec<String> = elems
+                    .iter()
+                    .map(|a| a.as_ref().map_or(String::new(), |a| self.expr(func, a)))
+                    .collect();
+                format!("[{}]", elems.join(", "))
             }
             Expr::CallRef {
                 callee, this, args, ..

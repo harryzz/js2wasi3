@@ -17,6 +17,9 @@
 //!   IR carries them as `jsval`, so cell and environment accesses start with a `ref.cast`. Functions
 //!   with the `$code` signature get the runtime's `$code` type, and every `ref.func` target is in a
 //!   declarative element segment.
+//! - (T15) `Array` → `array.new_fixed $vals` (holes: `ref.null`) and `$new_array`; iteration, spread and
+//!   destructuring intrinsics call the helpers in [`iter`], [`array`] and [`object`]; `console.log`
+//!   formatting is [`inspect`].
 //! - A function with a result ends in `unreachable`: the lowering guarantees every path returns,
 //!   but Wasm validation can't see through an `if/else` whose two arms both `return`.
 //! - Runtime helpers are emitted after the user functions, and only when used:
@@ -33,8 +36,11 @@
 //! its source position before any bytes are emitted.
 
 mod abi;
+mod array;
 mod func;
 mod host;
+mod inspect;
+mod iter;
 mod numstr;
 mod object;
 mod runtime;
@@ -380,7 +386,7 @@ fn uses_jsval(m: &ir::Module) -> bool {
             Expr::Tee(_, a) | Expr::Unary { arg: a, .. } => expr(a),
             Expr::Call { args, .. } => args.iter().any(expr),
             Expr::Seq { body, value } => stmts(body) || expr(value),
-            Expr::Closure(_) | Expr::CallRef { .. } => true,
+            Expr::Closure(_) | Expr::CallRef { .. } | Expr::Array(_) => true,
         }
     }
     fn stmts(list: &[Stmt]) -> bool {
@@ -488,6 +494,10 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
         }
         Expr::Call { args, .. } => args.iter().for_each(|a| unsupported_expr(a, out)),
         Expr::Closure(c) => c.env.iter().for_each(|a| unsupported_expr(a, out)),
+        Expr::Array(elems) => elems
+            .iter()
+            .flatten()
+            .for_each(|a| unsupported_expr(a, out)),
         Expr::CallRef {
             callee, this, args, ..
         } => {
@@ -528,6 +538,7 @@ fn visit_exprs(list: &[Stmt], f: &mut dyn FnMut(&Expr)) {
                 expr(value, f);
             }
             Expr::Closure(c) => c.env.iter().for_each(|a| expr(a, f)),
+            Expr::Array(elems) => elems.iter().flatten().for_each(|a| expr(a, f)),
             Expr::CallRef {
                 callee, this, args, ..
             } => {
@@ -1023,6 +1034,11 @@ impl Emitter<'_> {
                     if matches!(op, Intrinsic::KeysLen | Intrinsic::KeysGet) && i == 0 {
                         s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_KEYS));
                     }
+                    if (op == &Intrinsic::CallList && i == 3)
+                        || (op == &Intrinsic::CheckDestructure && i == 1)
+                    {
+                        s.ref_cast_non_null(runtime::string());
+                    }
                     if i == 0 {
                         match op {
                             Intrinsic::CellGet(t) | Intrinsic::CellSet(t) => {
@@ -1037,6 +1053,12 @@ impl Emitter<'_> {
                             }
                             Intrinsic::EnvGet(_) => {
                                 s.ref_cast_non_null(func::function());
+                            }
+                            Intrinsic::ArrayPush => {
+                                s.ref_cast_non_null(array::array());
+                            }
+                            Intrinsic::IterValue => {
+                                s.ref_cast_non_null(iter::iter());
                             }
                             _ => {}
                         }
@@ -1095,6 +1117,23 @@ impl Emitter<'_> {
                         s.call(self.helper_index(Helper::Js(H::Func(func::Helper::ArgGet))));
                         return Ok(true);
                     }
+                    Intrinsic::ArgsRest(i) => {
+                        s.i32_const(*i as i32);
+                        s.call(self.helper_index(Helper::Js(H::Arr(array::Helper::FromArgs))));
+                        return Ok(true);
+                    }
+                    Intrinsic::IterValue => {
+                        s.struct_get(runtime::T_ITER, 4);
+                        return Ok(true);
+                    }
+                    Intrinsic::SymbolIterator => {
+                        s.global_get(runtime::G_SYM_ITERATOR);
+                        return Ok(true);
+                    }
+                    Intrinsic::IsArray => {
+                        s.ref_test_non_null(array::array());
+                        return Ok(true);
+                    }
                     _ => {}
                 }
                 let h = match op {
@@ -1112,7 +1151,24 @@ impl Emitter<'_> {
                     | Intrinsic::CellSet(_)
                     | Intrinsic::CellIsUninit
                     | Intrinsic::EnvGet(_)
-                    | Intrinsic::ArgGet(_) => unreachable!("inline"),
+                    | Intrinsic::ArgGet(_)
+                    | Intrinsic::ArgsRest(_)
+                    | Intrinsic::IterValue
+                    | Intrinsic::SymbolIterator
+                    | Intrinsic::IsArray => unreachable!("inline"),
+                    Intrinsic::ArrayPush => H::Arr(array::Helper::Push),
+                    Intrinsic::ArraySpread => H::Iter(iter::Helper::Spread),
+                    Intrinsic::IterOpen => H::Iter(iter::Helper::Open),
+                    Intrinsic::IterStep => H::Iter(iter::Helper::Step),
+                    Intrinsic::IterClose => H::Iter(iter::Helper::Close),
+                    Intrinsic::IterRest => H::Iter(iter::Helper::Rest),
+                    Intrinsic::CallList => H::Func(func::Helper::CallList),
+                    Intrinsic::ObjectRest => H::Obj(object::Helper::ObjectRest),
+                    Intrinsic::CheckDestructure => H::Obj(object::Helper::CheckDestructure),
+                    Intrinsic::NewSymbol => H::NewSymbol,
+                    Intrinsic::ObjectKeys => H::Obj(object::Helper::Keys(0)),
+                    Intrinsic::ObjectValues => H::Obj(object::Helper::Keys(1)),
+                    Intrinsic::ObjectEntries => H::Obj(object::Helper::Keys(2)),
                     Intrinsic::TypeofString => H::TypeofString,
                     Intrinsic::Inspect => H::Inspect,
                     Intrinsic::NoFormat => H::NoFormat,
@@ -1191,6 +1247,21 @@ impl Emitter<'_> {
                     s.end();
                     s.global_get(g);
                 }
+            }
+            Expr::Array(elems) => {
+                for x in elems {
+                    match x {
+                        Some(x) => {
+                            self.expr(s, frames, x)?;
+                        }
+                        None => {
+                            s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
+                        }
+                    }
+                }
+                s.array_new_fixed(runtime::T_VALS, elems.len() as u32);
+                s.i32_const(elems.len() as i32);
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Arr(array::Helper::New))));
             }
             Expr::CallRef {
                 callee,

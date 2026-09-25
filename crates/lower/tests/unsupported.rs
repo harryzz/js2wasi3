@@ -94,9 +94,10 @@ fn declarations_and_functions() {
         one("export async function f() { }"),
         "1:8 unsupported: async function (planned: T19)"
     );
+    lowers("export function f(a = 1) { return a; }");
     assert_eq!(
-        one("export function f(a = 1) { return a; }"),
-        "1:19 unsupported: default or destructured parameter (planned: T15)"
+        one("export function f(...a) { return 0; }"),
+        "1:8 unsupported: rest parameter in an exported function (planned: T20)"
     );
     assert_eq!(
         one("export function f() { return x; }"),
@@ -106,12 +107,12 @@ fn declarations_and_functions() {
 
 #[test]
 fn all_errors_are_reported() {
-    let e = errors("export function f() {\n  let s = 'a' * 2;\n  [1];\n  return 1 ** 2;\n}");
+    let e = errors("export function f() {\n  let s = 'a' * 2;\n  new Map();\n  return 1 ** 2;\n}");
     assert_eq!(
         e,
         vec![
             "2:11 unsupported: converting a string to a number (planned: T21)",
-            "3:3 unsupported: array literal (planned: T15)",
+            "3:3 unsupported: `new` (only the native error constructors so far) (planned: T16)",
             "4:10 unsupported: operator `**` (planned: T21 (Math.pow))",
         ]
     );
@@ -206,10 +207,7 @@ fn exceptions() {
         one("export function f() { return new Map(); }"),
         "1:30 unsupported: `new` (only the native error constructors so far) (planned: T16)"
     );
-    assert_eq!(
-        one("export function f() { try { } catch ({ a }) { } }"),
-        "1:38 unsupported: destructuring `catch` parameter (planned: T15)"
-    );
+    lowers("export function f() { try { } catch ({ a }) { } }");
 }
 
 /// T13: objects lower; what's left for later is rejected.
@@ -236,9 +234,28 @@ fn objects() {
         one("export function f(o) { return Object.create(o, {}); }"),
         "1:31 unsupported: `Object.create` with property descriptors (planned: not scheduled)"
     );
+    lowers("export function f(o) { for (o.k in o) {} }");
+}
+
+/// T15: arrays, iteration, spread, destructuring lower.
+#[test]
+fn arrays_and_iteration() {
+    for src in [
+        "export function f(a) { const [x, , ...r] = [a, 2, 3, 4]; return x + r.length; }",
+        "export function f(o) { let n = 0; for (const [k, v] of Object.entries(o)) n += v; return n; }",
+        "export function f({ a = 1, ...rest } = {}, [b] = [2]) { return a + b; }",
+        "export function f(a) { const s = Symbol('s'); const o = { [s]: a }; return o[s]; }",
+        "export function f(a) { return Math2(...[a, 2]); } function Math2(x, y) { return x * y; }",
+    ] {
+        lowers(src);
+    }
     assert_eq!(
-        one("export function f(o) { for (o.k in o) {} }"),
-        "1:29 unsupported: `for-in` target other than a variable (planned: later)"
+        one("for await (const x of []) {}"),
+        "1:1 unsupported: `for await` (planned: T19)"
+    );
+    assert_eq!(
+        one("export function f(a) { return [...a, , 1]; }"),
+        "1:31 unsupported: array hole after a spread element (planned: later)"
     );
 }
 
@@ -260,7 +277,7 @@ fn closures() {
     }
     assert_eq!(
         one("export function f() { return arguments; }"),
-        "1:30 unsupported: `arguments` (planned: T15)"
+        "1:30 unsupported: `arguments` (planned: T21)"
     );
     assert_eq!(
         one("export function f() { function g() {} g = 1; return 0; }"),

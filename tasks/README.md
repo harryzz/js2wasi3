@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T15.** T14 is done: functions are values (closures with captured variables in cells, arrows, methods, `this`, calls through values, `Function.prototype.call`; see T14's Notes / Result). T13: plain objects with prototypes (literals, get/set/delete/`in`, `for-in`, `Object.create`), errors are objects. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T16.** T15 is done: arrays, symbols, the iterator protocol, `for-of`, spread, destructuring and `console.log` of arrays/plain objects (see T15's Notes / Result). T14: functions are values (closures, arrows, methods, `this`, `call`/`apply`). T13: plain objects with prototypes. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -25,7 +25,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T12](T12-exceptions.md) | Exceptions (native EH) | done | T11 |
 | [T13](T13-objects.md) | Objects and prototypes | done | T12 |
 | [T14](T14-closures.md) | Closures, function values, `this` | done | T13 |
-| [T15](T15-arrays-iteration.md) | Arrays and iteration | todo | T14 |
+| [T15](T15-arrays-iteration.md) | Arrays and iteration | done | T14 |
 | [T16](T16-classes.md) | Classes | todo | T15 |
 | [T17](T17-promises-microtasks.md) | Promises + microtask queue | todo | T16 |
 | [T18](T18-generators-state-machine.md) | Suspension transform: generators | todo | T17 |
@@ -66,7 +66,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F21 | Canonical ABI: more than 16 flat params (passed in memory) are rejected today | T09 | T20 | [ ] |
 | F22 | TDZ: a function reading a top-level `let`/`const` before `main` initialized it gets a placeholder value (only direct reads in `main` are rejected) | T10 | T12 (throw ReferenceError) | [x] T12 (init flags; `main` throws too) |
 | F23 | `console.log` format strings (`%s %d %i %f %j %o %O %c %%`, first of ≥2 args): rejected for literals, a trap otherwise | T10 | T21 | [ ] |
-| F24 | `console.log` of objects, arrays, functions (node's `util.inspect` format; plain objects trap today, errors print `[Name: msg]`) | T10 | T21 (self-hosted, with arrays; moved in T13) | [ ] |
+| F24 | `console.log` of objects, arrays, functions (node's `util.inspect` format). T15: arrays and plain objects print like node (`crates/backend/src/inspect.rs`); still trapping: class instances, null prototypes, > 100 elements, extra array properties, symbol keys, strings needing escapes, nested errors; non-ASCII widths are counted as UTF-16 units | T10 | T21 | [ ] |
 | F25 | Uncaught exception in a command: print it to stderr, flush, `task.return(err)` (`run` in `backend/src/host.rs` must catch `$js`) | T10 | T12 | [x] T12 |
 | F26 | Event loop: the callback ignores `TASK_CANCELLED`; output is only pumped while JS runs if the host takes writes at once (otherwise buffered until `main` returns) | T10 | T19 | [ ] |
 | F27 | When stdout's reader goes away (`\| head`) `run` returns `err` (exit 1); node exits 0. Decide which the harness expects | T10 | T11 | [x] T11 (keep `err`: the write failed; not covered by the harness) |
@@ -80,14 +80,22 @@ Each open item names where it came from and which task should pick it up. When i
 | F35 | When the event-loop callback runs JS (T19), it must catch `$js` like `run` does (print `Uncaught …`, return `err`) | T12 | T19 | [ ] |
 | F36 | Getters/setters, `Object.defineProperty`, property attributes beyond enumerable (read-only, non-configurable), `Object.freeze`/`seal` | T13 | T16 (with class `get`/`set`; needs T14) | [ ] |
 | F37 | Built-in methods (`Object.prototype.toString`, `String.prototype.slice`, …) are sentinels that trap when read; a user-replaced `toString`/`valueOf` traps in ToPrimitive. T14: values are callable now (`Function.prototype.call` is real); ToPrimitive still returns a string only, so calling a user `valueOf` needs it to return any primitive | T13 | T16 (user methods) / T21 (the methods) | [ ] |
-| F38 | Symbols as property keys (`Symbol.iterator` is needed by T15) | T13 | T15 | [ ] |
-| F39 | `Object.keys`/`values`/`entries`/`assign`/`fromEntries`, `JSON.stringify` | T13 | T15 (arrays) / T21 | [ ] |
+| F38 | Symbols as property keys (`Symbol.iterator` is needed by T15) | T13 | T15 | [x] T15 (`$symbol` ⊂ `$string`; `Symbol()`, `Symbol.iterator`; rest in F53) |
+| F39 | `Object.keys`/`values`/`entries`/`assign`/`fromEntries`, `JSON.stringify`. T15: `keys`/`values`/`entries` done | T13 | T21 | [ ] |
 | F40 | Hidden classes / inline caches for property access (dictionary mode only today) | T13 | after a benchmark | [ ] |
 | F41 | Method calls `o.m()` and optional calls `o?.m()` | T13 | T14 | [x] T14 (`CallRef`, `chain_call`) |
-| F42 | `arguments` (an array-like object) | T14 | T15 | [ ] |
-| F43 | `Function.prototype.apply` (needs arrays), `bind`, `toString` (source text): sentinels that trap when read | T14 | T15 (`apply`) / T21 | [ ] |
+| F42 | `arguments` (an array-like object) | T14 | T21 (moved in T15: rest parameters cover it) | [ ] |
+| F43 | `Function.prototype.apply` (needs arrays), `bind`, `toString` (source text): sentinels that trap when read. T15: `apply` done | T14 | T21 | [ ] |
 | F44 | `new` of user functions, `instanceof` with a user function (the `prototype` objects already exist) | T14 | T16 | [ ] |
 | F45 | Rejected for now: assigning to a function declaration's binding (calls to it are direct), a function with a computed key in a literal (its `name` comes from the key at run time), a closure in a `for (let …)` head reading a head variable before its declaration | T14 | later | [ ] |
 | F46 | Function objects get `length`/`name` (and `prototype` for `function`s) when made: 1–2 extra allocations per closure; could be lazy. Cell and environment reads `ref.cast` every time; a self-recursive nested function reads its own binding's cell for `self` | T14 | after a benchmark | [ ] |
 | F47 | `Function.prototype` is a plain object (spec: a function, so `typeof` is `"function"`); functions' `name`/`length` are writable (read-only attributes, F36) | T14 | T21 | [ ] |
 | F48 | `console.log` of a function with own enumerable properties traps (node prints them after `[Function: f]`, F24) | T14 | T21 | [ ] |
+| F49 | Array methods other than `push`/`pop`/`join`/`toString`/`values`/`[Symbol.iterator]` (`map`, `forEach`, `slice`, `indexOf`, …) are sentinels; `Array(...)`, `Array.from`, `Array.of`; the real methods only accept arrays as `this` | T15 | T21 | [ ] |
+| F50 | Sparse arrays: an index or length ≥ 2^26 traps (dense store only) | T15 | after a benchmark / when needed | [ ] |
+| F51 | Arrays and strings iterate without looking up `Symbol.iterator` (a replaced `Array.prototype[Symbol.iterator]` isn't seen); `values` and `[Symbol.iterator]` are two function objects (spec: the same) | T15 | T21 | [ ] |
+| F52 | Array `length` is read-only-unaware: `Object.defineProperty`/frozen arrays (F36); array iterator objects print as a trap | T15 | T16/T21 | [ ] |
+| F53 | Symbols: `Symbol.for`, other well-known symbols, `description` of `Symbol()` vs `Symbol("")` (both empty), `Object.getOwnPropertySymbols`; object spread / `{...rest}` skip symbol keys; `sym == 1` throws (node: false) | T15 | T21 | [ ] |
+| F54 | Destructuring assignment evaluates a member target after the value (spec: the reference first); a hole after a spread element in an array literal is rejected | T15 | later | [ ] |
+| F55 | Exported functions with a rest parameter are rejected (the WIT signature needs a `list`) | T15 | T20 | [ ] |
+| F56 | `for-of` and array destructuring always wrap the loop/bindings in a `try_table` (needed only for the protocol path; zero-cost EH, but bigger code) | T15 | optimisation pass | [ ] |

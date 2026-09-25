@@ -29,13 +29,13 @@ use js2wasi3_ir::{Builtin, ErrorKind};
 use wasm_encoder::{BlockType, Function, InstructionSink, ValType};
 
 use crate::runtime::{
-    self, Cx, G_BUILTIN, G_NULL, G_PROTOS, G_UNDEFINED, T_BYTES, T_I32S, T_KEYS, T_OBJECT,
+    self, Cx, G_BUILTIN, G_NULL, G_PROTOS, G_UNDEFINED, T_ARRAY, T_BYTES, T_I32S, T_KEYS, T_OBJECT,
     T_STRING, T_VALS, TAG, jsval, object, rt, string, string_ref,
 };
-use crate::{func, numstr};
+use crate::{array, func, numstr};
 
 const F_CLASS: u32 = 0;
-const F_PROTO: u32 = 1;
+pub const F_PROTO: u32 = 1;
 const F_KEYS: u32 = 2;
 const F_VALS: u32 = 3;
 const F_ATTRS: u32 = 4;
@@ -131,8 +131,51 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         Builtin::Boolean => &["toString", "valueOf"],
         Builtin::Error(ErrorKind::Error) => &["toString"],
         Builtin::Error(_) => &[],
-        // `call` is replaced by a real function (`crate::func`).
+        // `call` and `apply` are replaced by real functions (`crate::func`).
         Builtin::Function => &["apply", "bind", "call", "toString"],
+        // `join`, `pop`, `push`, `toString` are real functions (`crate::array`).
+        Builtin::Array => &[
+            "at",
+            "concat",
+            "copyWithin",
+            "fill",
+            "find",
+            "findIndex",
+            "findLast",
+            "findLastIndex",
+            "lastIndexOf",
+            "pop",
+            "push",
+            "reverse",
+            "shift",
+            "unshift",
+            "slice",
+            "sort",
+            "splice",
+            "includes",
+            "indexOf",
+            "join",
+            "keys",
+            "entries",
+            "values",
+            "forEach",
+            "filter",
+            "flat",
+            "flatMap",
+            "map",
+            "every",
+            "some",
+            "reduce",
+            "reduceRight",
+            "toLocaleString",
+            "toString",
+            "toReversed",
+            "toSorted",
+            "toSpliced",
+            "with",
+        ],
+        Builtin::Symbol => &["toString", "valueOf", "description"],
+        Builtin::ArrayIterator => &[],
     }
 }
 
@@ -148,8 +191,11 @@ fn parent(b: Builtin) -> Option<Builtin> {
 pub enum Helper {
     /// `(s: (ref $string)) -> i32`: FNV-1a.
     Hash,
-    /// `(o: (ref $object), k: (ref $string)) -> i32`: own entry index or -1.
+    /// `(o: (ref $object), k: (ref $string)) -> i32`: own entry index or -1 (dictionary part).
     FindOwn,
+    /// `(o: (ref $object), k: (ref $string)) -> eqref`: the own property's value (an array's
+    /// elements and `length` included), Wasm null if there's none.
+    OwnGet,
     /// `(o: (ref null $object), k) -> jsval`: the value on the prototype chain, Wasm null if absent.
     Lookup,
     /// `(o: (ref null $object), k) -> (ref null $object)`: the object on the chain that has `k`.
@@ -212,6 +258,14 @@ pub enum Helper {
     InspectTrap,
     /// `()`: trap: ToPrimitive needs a user `valueOf`/`toString` (T14).
     UserPrimitiveTrap,
+    /// `(src, excluded: jsval (an array of keys)) -> jsval`: `{...rest}` in a pattern (T15).
+    ObjectRest,
+    /// `(v, prefix: (ref $string))`: TypeError "<prefix>undefined." / "…null." for those.
+    CheckDestructure,
+    /// `(v) -> jsval`: `Object.keys` (0), `Object.values` (1), `Object.entries` (2).
+    Keys(u8),
+    /// `(o: (ref $object)) -> i32`: the number of live enumerable symbol keys.
+    SymbolKeys,
 }
 
 impl Helper {
@@ -219,6 +273,7 @@ impl Helper {
         match self {
             Helper::Hash => "string_hash",
             Helper::FindOwn => "find_own",
+            Helper::OwnGet => "own_get",
             Helper::Lookup => "lookup",
             Helper::Holder => "holder",
             Helper::Define => "define",
@@ -239,6 +294,9 @@ impl Helper {
                 Builtin::Error(ErrorKind::EvalError) => "EvalError.prototype",
                 Builtin::Error(ErrorKind::UriError) => "URIError.prototype",
                 Builtin::Function => "Function.prototype",
+                Builtin::Array => "Array.prototype",
+                Builtin::Symbol => "Symbol.prototype",
+                Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -263,6 +321,12 @@ impl Helper {
             Helper::BuiltinTrap => "builtin_not_implemented",
             Helper::InspectTrap => "inspect_object_not_implemented",
             Helper::UserPrimitiveTrap => "user_to_primitive_not_implemented",
+            Helper::ObjectRest => "object_rest",
+            Helper::CheckDestructure => "check_destructure",
+            Helper::Keys(0) => "Object.keys",
+            Helper::Keys(1) => "Object.values",
+            Helper::Keys(_) => "Object.entries",
+            Helper::SymbolKeys => "symbol_keys",
         }
     }
 
@@ -275,6 +339,7 @@ impl Helper {
         match self {
             Helper::Hash => (vec![s], vec![I32]),
             Helper::FindOwn => (vec![o, s], vec![I32]),
+            Helper::OwnGet => (vec![o, s], vec![v]),
             Helper::Lookup => (vec![on, s], vec![v]),
             Helper::Holder => (vec![on, s], vec![on]),
             Helper::Define => (vec![o, s, v, I32], vec![]),
@@ -300,6 +365,10 @@ impl Helper {
             Helper::BuiltinTrap | Helper::InspectTrap | Helper::UserPrimitiveTrap => {
                 (vec![], vec![])
             }
+            Helper::ObjectRest => (vec![v, v], vec![v]),
+            Helper::CheckDestructure => (vec![v, s], vec![]),
+            Helper::Keys(_) => (vec![v], vec![v]),
+            Helper::SymbolKeys => (vec![o], vec![I32]),
         }
     }
 
@@ -307,6 +376,7 @@ impl Helper {
         match self {
             Helper::Hash => hash(),
             Helper::FindOwn => find_own(cx),
+            Helper::OwnGet => own_get(cx),
             Helper::Lookup => lookup(cx, false),
             Helper::Holder => lookup(cx, true),
             Helper::Define => define(cx),
@@ -353,6 +423,10 @@ impl Helper {
                 f.instructions().unreachable().end();
                 f
             }
+            Helper::ObjectRest => object_rest(cx),
+            Helper::CheckDestructure => check_destructure(cx),
+            Helper::Keys(k) => keys(cx, k),
+            Helper::SymbolKeys => symbol_keys(),
         }
     }
 }
@@ -500,31 +574,62 @@ fn find_own(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$lookup` / `$holder`: walk the prototype chain.
-fn lookup(cx: &mut dyn Cx, holder: bool) -> Function {
+fn own_get(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwn);
+    let array_own = cx.helper(runtime::Helper::Arr(array::Helper::OwnGet));
     const O: u32 = 0;
     const K: u32 = 1;
     const E: u32 = 2;
-    let mut f = Function::new([(1, ValType::I32)]);
+    const R: u32 = 3;
+    let mut f = Function::new([(1, ValType::I32), (1, jsval())]);
+    let mut s = f.instructions();
+    s.local_get(O).ref_test_non_null(array::array());
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .ref_cast_non_null(array::array())
+        .local_get(K)
+        .call(array_own)
+        .local_tee(R);
+    s.ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(R).return_();
+    s.end();
+    s.end();
+    s.local_get(O).local_get(K).call(find).local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Result(jsval()));
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .array_get(T_VALS);
+    s.else_();
+    s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
+    s.end();
+    s.end();
+    f
+}
+
+/// `$lookup` / `$holder`: walk the prototype chain.
+fn lookup(cx: &mut dyn Cx, holder: bool) -> Function {
+    let own = h(cx, Helper::OwnGet);
+    const O: u32 = 0;
+    const K: u32 = 1;
+    const R: u32 = 2;
+    let mut f = Function::new([(1, jsval())]);
     let mut s = f.instructions();
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(O).ref_is_null().br_if(1);
     s.local_get(O)
         .ref_as_non_null()
         .local_get(K)
-        .call(find)
-        .local_tee(E);
-    s.i32_const(0).i32_ge_s();
+        .call(own)
+        .local_tee(R);
+    s.ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
     if holder {
         s.local_get(O).return_();
     } else {
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_VALS)
-            .local_get(E)
-            .array_get(T_VALS)
-            .return_();
+        s.local_get(R).return_();
     }
     s.end();
     s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(O);
@@ -551,8 +656,21 @@ fn define(cx: &mut dyn Cx) -> Function {
     const MASK: u32 = 5;
     const I: u32 = 6;
     const IDX: u32 = 7;
+    let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define));
     let mut f = Function::new([(3, ValType::I32), (1, rt(true, T_I32S))]);
     let mut s = f.instructions();
+    // An array's index or `length`.
+    s.local_get(O).ref_test_non_null(array::array());
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .ref_cast_non_null(array::array())
+        .local_get(K)
+        .local_get(V)
+        .call(array_define);
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.end();
     s.local_get(O).local_get(K).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
@@ -884,17 +1002,61 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     if b == Builtin::Function {
         props.push((cx.str("name"), Some(cx.str(""))));
     }
-    // Function.prototype: `length: 0` and a real `call`.
-    let function = (b == Builtin::Function).then(|| {
-        let code = cx.helper(runtime::Helper::Func(func::Helper::Call));
-        cx.declare_func(code);
-        (
-            cx.str("length"),
-            cx.str("call"),
-            code,
-            cx.helper(runtime::Helper::Func(func::Helper::New)),
-        )
-    });
+    // Real methods (function objects), replacing their sentinels: (code, key, name, length).
+    // (A `None` key is `Symbol.iterator`.)
+    let values = runtime::Helper::Iter(crate::iter::Helper::ProtoValues);
+    let real: Vec<(runtime::Helper, Option<&str>, &str, i32)> = match b {
+        Builtin::Function => vec![
+            (
+                runtime::Helper::Func(func::Helper::Call),
+                Some("call"),
+                "call",
+                1,
+            ),
+            (
+                runtime::Helper::Func(func::Helper::Apply),
+                Some("apply"),
+                "apply",
+                2,
+            ),
+        ],
+        Builtin::Array => array::proto_methods()
+            .into_iter()
+            .map(|(name, h, len)| (runtime::Helper::Arr(h), Some(name), name, len))
+            .chain([
+                (values, Some("values"), "values", 0),
+                (values, None, "values", 0),
+            ])
+            .collect(),
+        Builtin::String => vec![(values, None, "[Symbol.iterator]", 0)],
+        Builtin::ArrayIterator => vec![
+            (
+                runtime::Helper::Iter(crate::iter::Helper::Next),
+                Some("next"),
+                "next",
+                0,
+            ),
+            (
+                runtime::Helper::Iter(crate::iter::Helper::This),
+                None,
+                "[Symbol.iterator]",
+                0,
+            ),
+        ],
+        _ => Vec::new(),
+    };
+    let real: Vec<(u32, u32, u32, i32)> = real
+        .into_iter()
+        .map(|(h, key, name, len)| {
+            let code = cx.helper(h);
+            cx.declare_func(code);
+            let key = key.map_or(runtime::G_SYM_ITERATOR, |k| cx.str(k));
+            (key, cx.str(name), code, len)
+        })
+        .collect();
+    let new_function = cx.helper(runtime::Helper::Func(func::Helper::New));
+    // `length: 0` (Function.prototype, Array.prototype).
+    let length = matches!(b, Builtin::Function | Builtin::Array).then(|| cx.str("length"));
     const O: u32 = 0;
     let mut f = Function::new([(1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
@@ -916,14 +1078,19 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         };
         s.i32_const(HIDDEN).call(define);
     }
-    if let Some((length, call, code, new)) = function {
+    if let Some(length) = length {
         s.local_get(O).ref_as_non_null().global_get(length);
         s.i32_const(0).ref_i31();
         s.i32_const(HIDDEN).call(define);
-        s.local_get(O).ref_as_non_null().global_get(call);
+    }
+    for (key, name, code, len) in real {
+        s.local_get(O).ref_as_non_null().global_get(key);
         s.ref_func(code);
         s.ref_null(func::vals());
-        s.global_get(call).i32_const(1).i32_const(0).call(new);
+        s.global_get(name)
+            .i32_const(len)
+            .i32_const(0)
+            .call(new_function);
         s.i32_const(HIDDEN).call(define);
     }
     s.local_get(O).ref_as_non_null();
@@ -986,11 +1153,17 @@ fn array_index() -> Function {
     f
 }
 
+/// ToPropertyKey: a symbol stays itself, anything else is ToString.
 fn to_key(cx: &mut dyn Cx) -> Function {
     let to_string = rh(cx, runtime::Helper::ToString);
     let mut f = Function::new([]);
     let mut s = f.instructions();
+    s.local_get(0).ref_test_non_null(runtime::symbol());
+    s.if_(BlockType::Result(string_ref()));
+    s.local_get(0).ref_cast_non_null(string());
+    s.else_();
     s.local_get(0).call(to_string);
+    s.end();
     s.end();
     f
 }
@@ -1017,12 +1190,17 @@ fn string_has(cx: &mut dyn Cx, s: &mut InstructionSink, st: u32, k: u32) {
 /// Push the prototype of primitive local `v` (a string, number or boolean).
 fn primitive_proto(cx: &mut dyn Cx, s: &mut InstructionSink, v: u32) {
     let is_number = rh(cx, runtime::Helper::IsNumber);
-    let (sp, np, bp) = (
+    let (sp, np, bp, yp) = (
         h(cx, Helper::Proto(Builtin::String)),
         h(cx, Helper::Proto(Builtin::Number)),
         h(cx, Helper::Proto(Builtin::Boolean)),
+        h(cx, Helper::Proto(Builtin::Symbol)),
     );
-    s.local_get(v).ref_test_non_null(string());
+    s.local_get(v).ref_test_non_null(runtime::symbol());
+    s.if_(BlockType::Result(rt(false, T_OBJECT)));
+    s.call(yp);
+    s.else_();
+    runtime::is_string(s, v);
     s.if_(BlockType::Result(rt(false, T_OBJECT)));
     s.call(sp);
     s.else_();
@@ -1031,6 +1209,7 @@ fn primitive_proto(cx: &mut dyn Cx, s: &mut InstructionSink, v: u32) {
     s.call(np);
     s.else_();
     s.call(bp);
+    s.end();
     s.end();
     s.end();
 }
@@ -1050,8 +1229,41 @@ fn get(cx: &mut dyn Cx) -> Function {
     const K: u32 = 2;
     const R: u32 = 3;
     const I: u32 = 4;
-    let mut f = Function::new([(1, rt(true, T_STRING)), (1, jsval()), (1, ValType::I64)]);
+    let mut f = Function::new([
+        (1, rt(true, T_STRING)),
+        (1, jsval()),
+        (1, ValType::I64),
+        (1, ValType::I32),
+    ]);
     let mut s = f.instructions();
+    const J: u32 = 5;
+    // Fast path: an array element at a small integer index.
+    s.local_get(V).ref_test_non_null(array::array());
+    s.local_get(KEY)
+        .ref_test_non_null(wasm_encoder::HeapType::I31);
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(KEY)
+        .ref_cast_non_null(wasm_encoder::HeapType::I31)
+        .i31_get_s()
+        .local_tee(J);
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_LENGTH);
+    s.i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_ELEMS)
+        .local_get(J)
+        .array_get(T_VALS)
+        .local_tee(R);
+    s.ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(R).return_();
+    s.end();
+    s.end();
+    s.end();
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
     s.local_get(V).local_get(KEY).call(to_key).call(throw_read);
@@ -1063,7 +1275,7 @@ fn get(cx: &mut dyn Cx) -> Function {
     as_obj(&mut s, V);
     s.local_get(K).ref_as_non_null().call(lookup);
     s.else_();
-    s.local_get(V).ref_test_non_null(string());
+    runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
     {
         s.local_get(K)
@@ -1137,11 +1349,31 @@ fn set(cx: &mut dyn Cx) -> Function {
     const KEY: u32 = 1;
     const VAL: u32 = 2;
     const K: u32 = 3;
+    let set_index = cx.helper(runtime::Helper::Arr(array::Helper::SetIndex));
     let mut f = Function::new([(1, rt(true, T_STRING))]);
     let mut s = f.instructions();
     let k = |s: &mut InstructionSink| {
         s.local_get(K).ref_as_non_null();
     };
+    // Fast path: an array element at a non-negative small integer index.
+    s.local_get(V).ref_test_non_null(array::array());
+    s.local_get(KEY)
+        .ref_test_non_null(wasm_encoder::HeapType::I31);
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(KEY)
+        .ref_cast_non_null(wasm_encoder::HeapType::I31)
+        .i31_get_s()
+        .i32_const(0)
+        .i32_ge_s();
+    s.if_(BlockType::Empty);
+    s.local_get(V).ref_cast_non_null(array::array());
+    s.local_get(KEY)
+        .ref_cast_non_null(wasm_encoder::HeapType::I31)
+        .i31_get_s();
+    s.local_get(VAL).call(set_index).return_();
+    s.end();
+    s.end();
     // Concatenate the string globals / pushes in `parts`, then throw.
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
@@ -1172,7 +1404,7 @@ fn set(cx: &mut dyn Cx) -> Function {
         s.local_get(VAL).i32_const(0).call(define).return_();
     }
     s.end();
-    s.local_get(V).ref_test_non_null(string());
+    runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
     string_has(cx, &mut s, V, K);
     s.if_(BlockType::Empty);
@@ -1207,6 +1439,11 @@ fn delete(cx: &mut dyn Cx) -> Function {
     let convert = cx.str("Cannot convert undefined or null to object");
     let cannot = cx.str("Cannot delete property '");
     let of = cx.str("' of [object String]");
+    let of_array = cx.str("' of [object Array]");
+    let array_own = cx.helper(runtime::Helper::Arr(array::Helper::OwnGet));
+    let index = h(cx, Helper::ArrayIndex);
+    let str_eq = rh(cx, runtime::Helper::StrEq);
+    let length = cx.str("length");
     const V: u32 = 0;
     const KEY: u32 = 1;
     const K: u32 = 2;
@@ -1217,13 +1454,43 @@ fn delete(cx: &mut dyn Cx) -> Function {
     s.global_get(convert).call(throw);
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
+    // An array: `length` can't be deleted; an element becomes a hole.
+    s.local_get(V).ref_test_non_null(array::array());
+    s.if_(BlockType::Empty);
+    s.local_get(K)
+        .ref_as_non_null()
+        .global_get(length)
+        .call(str_eq);
+    s.if_(BlockType::Empty);
+    s.global_get(cannot);
+    s.local_get(K).ref_as_non_null().call(concat);
+    s.global_get(of_array).call(concat);
+    s.call(throw);
+    s.end();
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .local_get(K)
+        .ref_as_non_null()
+        .call(array_own)
+        .ref_is_null()
+        .i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_ELEMS);
+    s.local_get(K).ref_as_non_null().call(index).i32_wrap_i64();
+    s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
+    s.array_set(T_VALS);
+    s.i32_const(1).return_();
+    s.end();
+    s.end();
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
     s.local_get(K).ref_as_non_null().call(remove);
     s.i32_const(1).return_();
     s.end();
-    s.local_get(V).ref_test_non_null(string());
+    runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
     string_has(cx, &mut s, V, K);
     s.if_(BlockType::Empty);
@@ -1267,7 +1534,7 @@ fn has(cx: &mut dyn Cx) -> Function {
 
 fn has_own(cx: &mut dyn Cx) -> Function {
     let to_key = h(cx, Helper::ToKey);
-    let find = h(cx, Helper::FindOwn);
+    let own = h(cx, Helper::OwnGet);
     let is_nullish = rh(cx, runtime::Helper::IsNullish);
     let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
     let convert = cx.str("Cannot convert undefined or null to object");
@@ -1284,10 +1551,10 @@ fn has_own(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
-    s.local_get(K).ref_as_non_null().call(find);
-    s.i32_const(0).i32_ge_s().return_();
+    s.local_get(K).ref_as_non_null().call(own);
+    s.ref_is_null().i32_eqz().return_();
     s.end();
-    s.local_get(V).ref_test_non_null(string());
+    runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
     string_has(cx, &mut s, V, K);
     s.return_();
@@ -1331,7 +1598,7 @@ fn set_proto() -> Function {
 
 fn copy_props(cx: &mut dyn Cx) -> Function {
     let own_keys = h(cx, Helper::OwnKeys);
-    let find = h(cx, Helper::FindOwn);
+    let own = h(cx, Helper::OwnGet);
     let define = h(cx, Helper::Define);
     let number_to_string = rh(cx, runtime::Helper::Num(numstr::Helper::NumberToString));
     const T: u32 = 0;
@@ -1360,17 +1627,14 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
                 .local_tee(KK);
             s.ref_as_non_null();
             as_obj(s, SRC);
-            s.struct_get(T_OBJECT, F_VALS);
-            as_obj(s, SRC);
-            s.local_get(KK).ref_as_non_null().call(find);
-            s.array_get(T_VALS);
+            s.local_get(KK).ref_as_non_null().call(own);
             s.i32_const(0).call(define);
         });
         s.return_();
     }
     s.end();
     // A string spreads its characters.
-    s.local_get(SRC).ref_test_non_null(string());
+    runtime::is_string(&mut s, SRC);
     s.if_(BlockType::Empty);
     s.local_get(SRC)
         .ref_cast_non_null(string())
@@ -1391,9 +1655,11 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$own_keys(o)`: live enumerable keys: array indices ascending, then the others in insertion order.
+/// `$own_keys(o)`: live enumerable string keys: array indices ascending (an array's elements
+/// first), then the others in insertion order. (Symbol keys are skipped.)
 fn own_keys(cx: &mut dyn Cx) -> Function {
     let index = h(cx, Helper::ArrayIndex);
+    let index_keys = cx.helper(runtime::Helper::Arr(array::Helper::IndexKeys));
     const O: u32 = 0;
     const E: u32 = 1;
     const N: u32 = 2;
@@ -1406,12 +1672,15 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
     const KK: u32 = 9;
     const OUT: u32 = 10;
     const IDX: u32 = 11;
+    const ELEMS: u32 = 12;
+    const ALL: u32 = 13;
     let mut f = Function::new([
         (7, ValType::I32),
         (1, ValType::I64),
         (1, rt(true, T_STRING)),
         (1, rt(true, T_KEYS)),
         (1, rt(true, T_I32S)),
+        (2, rt(true, T_KEYS)),
     ]);
     let mut s = f.instructions();
     // Push "entry E is live and enumerable", setting KK.
@@ -1429,6 +1698,10 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
             .array_get_u(T_BYTES)
             .i32_const(HIDDEN)
             .i32_and()
+            .i32_eqz();
+        s.i32_and();
+        s.local_get(KK)
+            .ref_test_non_null(runtime::symbol())
             .i32_eqz();
         s.i32_and();
     };
@@ -1501,6 +1774,32 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
         s.end();
         s.end();
     });
+    // An array: its elements' indices come first.
+    s.local_get(O).ref_test_non_null(array::array());
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .ref_cast_non_null(array::array())
+        .call(index_keys)
+        .local_tee(ELEMS)
+        .array_len()
+        .local_get(OUT)
+        .array_len()
+        .i32_add()
+        .array_new_default(T_KEYS)
+        .local_set(ALL);
+    s.local_get(ALL).ref_as_non_null().i32_const(0);
+    s.local_get(ELEMS).ref_as_non_null().i32_const(0);
+    s.local_get(ELEMS).array_len();
+    s.array_copy(T_KEYS, T_KEYS);
+    s.local_get(ALL)
+        .ref_as_non_null()
+        .local_get(ELEMS)
+        .array_len();
+    s.local_get(OUT).ref_as_non_null().i32_const(0);
+    s.local_get(OUT).array_len();
+    s.array_copy(T_KEYS, T_KEYS);
+    s.local_get(ALL).ref_as_non_null().return_();
+    s.end();
     s.local_get(OUT).ref_as_non_null();
     s.end();
     f
@@ -1510,7 +1809,7 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
 /// the chain has (enumerable or not). A string's indices. Nothing for other primitives.
 fn for_in_keys(cx: &mut dyn Cx) -> Function {
     let own_keys = h(cx, Helper::OwnKeys);
-    let find = h(cx, Helper::FindOwn);
+    let own = h(cx, Helper::OwnGet);
     let number_to_string = rh(cx, runtime::Helper::Num(numstr::Helper::NumberToString));
     const V: u32 = 0;
     const I: u32 = 1;
@@ -1530,7 +1829,7 @@ fn for_in_keys(cx: &mut dyn Cx) -> Function {
         (1, ValType::I32),
     ]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(string());
+    runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
     {
         s.local_get(V)
@@ -1572,9 +1871,9 @@ fn for_in_keys(cx: &mut dyn Cx) -> Function {
             .ref_as_non_null()
             .local_get(KK)
             .ref_as_non_null()
-            .call(find)
-            .i32_const(0)
-            .i32_ge_s();
+            .call(own)
+            .ref_is_null()
+            .i32_eqz();
         s.if_(BlockType::Empty);
         s.i32_const(1).local_set(SEEN);
         s.br(2);
@@ -1767,6 +2066,9 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
     let get = h(cx, Helper::Get);
     let obj_proto = h(cx, Helper::Proto(Builtin::Object));
     let err_proto = h(cx, Helper::Proto(Builtin::Error(ErrorKind::Error)));
+    let array_proto = h(cx, Helper::Proto(Builtin::Array));
+    let join = cx.helper(runtime::Helper::Arr(array::Helper::Join));
+    let comma = cx.str(",");
     let user = h(cx, Helper::UserPrimitiveTrap);
     let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
     let to_string = rh(cx, runtime::Helper::ToString);
@@ -1818,6 +2120,17 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
     s.global_get(tag_object);
     s.end();
     s.return_();
+    s.end();
+    // Array.prototype.toString: `join()`.
+    s.local_get(HD).call(array_proto).ref_eq();
+    s.local_get(O).ref_test_non_null(array::array());
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .ref_cast_non_null(array::array())
+        .global_get(comma)
+        .call(join)
+        .return_();
     s.end();
     s.local_get(HD).call(err_proto).ref_eq().i32_eqz();
     s.if_(BlockType::Empty);
@@ -1895,6 +2208,147 @@ fn throw(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     let mut s = f.instructions();
     s.local_get(0).global_get(G_UNDEFINED).call(new_error);
     s.throw(TAG);
+    s.end();
+    f
+}
+
+/// `{...rest}`: copy the own enumerable properties, then delete the excluded keys.
+fn object_rest(cx: &mut dyn Cx) -> Function {
+    let new_object = h(cx, Helper::NewObject);
+    let copy = h(cx, Helper::CopyProps);
+    let remove = h(cx, Helper::Remove);
+    let to_key = h(cx, Helper::ToKey);
+    const SRC: u32 = 0;
+    const EX: u32 = 1;
+    const O: u32 = 2;
+    const I: u32 = 3;
+    let mut f = Function::new([(1, jsval()), (1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.call(new_object).local_set(O);
+    s.local_get(O).local_get(SRC).call(copy);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I);
+    s.local_get(EX)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_LENGTH);
+    s.i32_ge_u().br_if(1);
+    as_obj(&mut s, O);
+    s.local_get(EX)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_ELEMS)
+        .local_get(I)
+        .array_get(T_VALS)
+        .call(to_key)
+        .call(remove);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(O);
+    s.end();
+    f
+}
+
+fn check_destructure(cx: &mut dyn Cx) -> Function {
+    let concat = rh(cx, runtime::Helper::Concat);
+    let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
+    let (undefined, null) = (cx.str("undefined."), cx.str("null."));
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    for (g, text) in [(G_UNDEFINED, undefined), (G_NULL, null)] {
+        s.local_get(0).global_get(g).ref_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(1).global_get(text).call(concat).call(throw);
+        s.end();
+    }
+    s.end();
+    f
+}
+
+/// `Object.keys` / `values` / `entries`: own enumerable string keys (a string's indices).
+fn keys(cx: &mut dyn Cx, which: u8) -> Function {
+    let is_nullish = rh(cx, runtime::Helper::IsNullish);
+    let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
+    let own_keys = h(cx, Helper::OwnKeys);
+    let for_in_keys = h(cx, Helper::ForInKeys);
+    let get = h(cx, Helper::Get);
+    let new = cx.helper(runtime::Helper::Arr(array::Helper::New));
+    let convert = cx.str("Cannot convert undefined or null to object");
+    const V: u32 = 0;
+    const KS: u32 = 1;
+    const N: u32 = 2;
+    const I: u32 = 3;
+    const OUT: u32 = 4;
+    const K: u32 = 5;
+    let mut f = Function::new([
+        (1, rt(true, T_KEYS)),
+        (2, ValType::I32),
+        (1, rt(true, T_VALS)),
+        (1, jsval()),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(V).call(is_nullish);
+    s.if_(BlockType::Empty);
+    s.global_get(convert).call(throw);
+    s.end();
+    s.local_get(V).ref_test_non_null(object());
+    s.if_(BlockType::Result(rt(false, T_KEYS)));
+    as_obj(&mut s, V);
+    s.call(own_keys);
+    s.else_();
+    // A string's indices; nothing for other primitives.
+    s.local_get(V)
+        .call(for_in_keys)
+        .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_KEYS));
+    s.end();
+    s.local_tee(KS).array_len().local_tee(N);
+    s.array_new_default(T_VALS).local_set(OUT);
+    count_loop(&mut s, I, N, |s| {
+        s.local_get(KS).local_get(I).array_get(T_KEYS).local_set(K);
+        s.local_get(OUT).local_get(I);
+        match which {
+            0 => {
+                s.local_get(K);
+            }
+            1 => {
+                s.local_get(V).local_get(K).call(get);
+            }
+            _ => {
+                s.local_get(K);
+                s.local_get(V).local_get(K).call(get);
+                s.array_new_fixed(T_VALS, 2).i32_const(2).call(new);
+            }
+        }
+        s.array_set(T_VALS);
+    });
+    s.local_get(OUT).ref_as_non_null().local_get(N).call(new);
+    s.end();
+    f
+}
+
+fn symbol_keys() -> Function {
+    const O: u32 = 0;
+    const E: u32 = 1;
+    const N: u32 = 2;
+    const C: u32 = 3;
+    let mut f = Function::new([(3, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(N);
+    count_loop(&mut s, E, N, |s| {
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(E)
+            .array_get(T_KEYS)
+            .ref_test_non_null(runtime::symbol());
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_ATTRS)
+            .local_get(E)
+            .array_get_u(T_BYTES)
+            .i32_const(HIDDEN)
+            .i32_and()
+            .i32_eqz();
+        s.i32_and();
+        s.local_get(C).i32_add().local_set(C);
+    });
+    s.local_get(C);
     s.end();
     f
 }

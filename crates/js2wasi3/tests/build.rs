@@ -276,7 +276,7 @@ fn unimplemented_object_features_trap() {
         ),
         (
             "inspect",
-            "console.log(\"before\");\nconsole.log({ a: 1 });\n",
+            "console.log(\"before\");\nconsole.log(Object.create(null));\n",
             "inspect_object_not_implemented",
         ),
         (

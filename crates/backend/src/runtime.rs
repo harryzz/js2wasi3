@@ -28,7 +28,7 @@ use wasm_encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, func, host, numstr, object};
+use crate::{abi, array, func, host, inspect, iter, numstr, object};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
@@ -52,8 +52,15 @@ pub const T_FUNCTION: u32 = 10;
 pub const T_CELL_F64: u32 = 11;
 /// `(struct (mut (ref null eq)))`: a captured `jsval` variable (Wasm null: not initialized yet).
 pub const T_CELL: u32 = 12;
+/// `$symbol`: a final subtype of `$string` holding the description (T15). Compared by identity.
+pub const T_SYMBOL: u32 = 13;
+/// `$array`: a final subtype of `$object` with `elems: mut (ref $vals)` (holes: Wasm null) and
+/// `length: mut i32` (T15).
+pub const T_ARRAY: u32 = 14;
+/// `$iter`: the state of an iteration (T15, see [`crate::iter`]).
+pub const T_ITER: u32 = 15;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 13;
+pub const TYPES: u32 = 16;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -68,8 +75,12 @@ pub const G_TABLES: u32 = 4;
 pub const G_BUILTIN: u32 = 5;
 /// `(mut (ref null $object))` per [`js2wasi3_ir::Builtin`]: its prototype, created on first use.
 pub const G_PROTOS: u32 = 6;
+/// `(ref $string)`: the well-known symbol `Symbol.iterator` (a `$symbol`, T15).
+pub const G_SYM_ITERATOR: u32 = G_PROTOS + js2wasi3_ir::Builtin::ALL.len() as u32;
+/// `(ref $string)`: a private symbol keying an iterator object's state (T15, see [`crate::iter`]).
+pub const G_SYM_STATE: u32 = G_SYM_ITERATOR + 1;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_PROTOS + js2wasi3_ir::Builtin::ALL.len() as u32;
+pub const GLOBALS: u32 = G_SYM_STATE + 1;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -132,6 +143,17 @@ fn i31() -> HeapType {
     HeapType::I31
 }
 
+pub fn symbol() -> HeapType {
+    HeapType::Concrete(T_SYMBOL)
+}
+
+/// Push "local `v` is a string" (a `$string` that isn't a `$symbol`).
+pub fn is_string(s: &mut InstructionSink, v: u32) {
+    s.local_get(v).ref_test_non_null(string());
+    s.local_get(v).ref_test_non_null(symbol()).i32_eqz();
+    s.i32_and();
+}
+
 pub fn object() -> HeapType {
     HeapType::Concrete(T_OBJECT)
 }
@@ -180,16 +202,21 @@ pub fn types(types: &mut TypeSection) {
         field(StorageType::Val(ValType::I32), true),
         field(StorageType::Val(rt(true, T_I32S)), true),
     ];
+    let mut array_fields = object_fields.clone();
+    array_fields.push(field(StorageType::Val(rt(false, T_VALS)), true));
+    array_fields.push(field(StorageType::Val(ValType::I32), true));
     let mut function_fields = object_fields.clone();
     function_fields.push(field(StorageType::Val(rt(false, T_CODE)), false));
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
     types.ty().rec([
         st(ValType::F64),
         st(ValType::I32),
-        sub(CompositeInnerType::Array(ArrayType(field(
-            StorageType::I16,
-            true,
-        )))),
+        // $string: not final, `$symbol` extends it.
+        sub_of(
+            CompositeInnerType::Array(ArrayType(field(StorageType::I16, true))),
+            false,
+            None,
+        ),
         sub(CompositeInnerType::Array(ArrayType(field(
             StorageType::Val(ValType::I64),
             false,
@@ -235,6 +262,28 @@ pub fn types(types: &mut TypeSection) {
         })),
         sub(CompositeInnerType::Struct(StructType {
             fields: Box::new([field(StorageType::Val(jsval()), true)]),
+        })),
+        sub_of(
+            CompositeInnerType::Array(ArrayType(field(StorageType::I16, true))),
+            true,
+            Some(T_STRING),
+        ),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: array_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        // $iter: kind, obj, next, index, value (see `iter.rs`).
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(jsval()), false),
+                field(StorageType::Val(jsval()), false),
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(jsval()), true),
+            ]),
         })),
     ]);
 }
@@ -290,6 +339,24 @@ pub fn globals(globals: &mut GlobalSection) {
                 shared: false,
             },
             &ConstExpr::ref_null(object()),
+        );
+    }
+    for description in ["Symbol.iterator", "state"] {
+        let mut insns: Vec<Instruction> = description
+            .encode_utf16()
+            .map(|u| Instruction::I32Const(u as i32))
+            .collect();
+        insns.push(Instruction::ArrayNewFixed {
+            array_type_index: T_SYMBOL,
+            array_size: insns.len() as u32,
+        });
+        globals.global(
+            GlobalType {
+                val_type: string_ref(),
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::extended(insns),
         );
     }
 }
@@ -366,9 +433,14 @@ pub enum Helper {
     /// `(v: jsval) -> (ref $string)`: how an uncaught exception is shown: ToString for an
     /// error, the `console.log` text otherwise.
     Describe,
+    /// `(description: jsval) -> jsval`: `Symbol(description)` (T15).
+    NewSymbol,
     Num(numstr::Helper),
     Obj(object::Helper),
     Func(func::Helper),
+    Arr(array::Helper),
+    Iter(iter::Helper),
+    Fmt(inspect::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
 }
@@ -393,9 +465,13 @@ impl Helper {
             Helper::NoFormat => "no_format",
             Helper::ThrowRead => "throw_read_error",
             Helper::Describe => "describe",
+            Helper::NewSymbol => "new_symbol",
             Helper::Num(h) => h.name(),
             Helper::Obj(h) => h.name(),
             Helper::Func(h) => h.name(),
+            Helper::Arr(h) => h.name(),
+            Helper::Iter(h) => h.name(),
+            Helper::Fmt(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
         }
@@ -415,12 +491,15 @@ impl Helper {
             Helper::StrEq => (vec![s, s], vec![ValType::I32]),
             Helper::Concat => (vec![s, s], vec![s]),
             Helper::JsAdd => (vec![v, v], vec![v]),
-            Helper::NoFormat => (vec![v], vec![v]),
+            Helper::NoFormat | Helper::NewSymbol => (vec![v], vec![v]),
             Helper::Inspect | Helper::Describe => (vec![v], vec![s]),
             Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
             Helper::Obj(h) => h.signature(),
             Helper::Func(h) => h.signature(),
+            Helper::Arr(h) => h.signature(),
+            Helper::Iter(h) => h.signature(),
+            Helper::Fmt(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
         }
@@ -445,9 +524,13 @@ impl Helper {
             Helper::NoFormat => no_format(),
             Helper::ThrowRead => throw_read(cx),
             Helper::Describe => describe(cx),
+            Helper::NewSymbol => new_symbol(cx),
             Helper::Num(h) => h.body(cx),
             Helper::Obj(h) => h.body(cx),
             Helper::Func(h) => h.body(cx),
+            Helper::Arr(h) => h.body(cx),
+            Helper::Iter(h) => h.body(cx),
+            Helper::Fmt(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());
                 h.body(cx, base, main)
@@ -504,6 +587,8 @@ fn as_string(s: &mut InstructionSink, v: u32) {
 /// `$to_number(v: jsval) -> f64`: JS ToNumber on primitives.
 fn to_number(cx: &mut dyn Cx) -> Function {
     let to_primitive_num = cx.helper(Helper::Obj(object::Helper::ObjectToNumber));
+    let throw = cx.helper(Helper::Obj(object::Helper::Throw(ErrorKind::TypeError)));
+    let no_num = cx.str("Cannot convert a Symbol value to a number");
     const V: u32 = 0;
     const K: u32 = 1;
     let mut f = Function::new([(1, ValType::I32)]);
@@ -521,6 +606,10 @@ fn to_number(cx: &mut dyn Cx) -> Function {
         .ref_cast_non_null(number())
         .struct_get(T_NUMBER, 0);
     s.else_();
+    s.local_get(V).ref_test_non_null(symbol());
+    s.if_(BlockType::Empty);
+    s.global_get(no_num).call(throw);
+    s.end();
     // ToNumber of a string (parsing) isn't implemented yet: trap (F20).
     s.local_get(V).ref_test_non_null(string());
     s.if_(BlockType::Empty);
@@ -572,14 +661,16 @@ fn to_boolean() -> Function {
         .f64_const(0.0.into())
         .f64_gt();
     s.else_();
-    s.local_get(V).ref_test_non_null(string());
+    is_string(&mut s, V);
     s.if_(BlockType::Result(ValType::I32));
     // false only for "".
     as_string(&mut s, V);
     s.array_len().i32_const(0).i32_ne();
     s.else_();
-    // Objects are truthy.
+    // Objects and symbols are truthy.
     s.local_get(V).ref_test_non_null(object());
+    s.local_get(V).ref_test_non_null(symbol());
+    s.i32_or();
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(1);
     s.else_();
@@ -712,6 +803,10 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Number));
     s.else_();
+    s.local_get(V).ref_test_non_null(symbol());
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(typeof_code(TypeofTag::Symbol));
+    s.else_();
     s.local_get(V).ref_test_non_null(string());
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::String));
@@ -730,6 +825,7 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.local_tee(K);
     s.local_get(K).i32_const(K_TRUE).i32_eq();
     s.i32_sub();
+    s.end();
     s.end();
     s.end();
     s.end();
@@ -774,6 +870,13 @@ fn str_eq() -> Function {
     s.local_get(A).local_get(B).ref_eq();
     s.if_(BlockType::Empty);
     s.i32_const(1).return_();
+    s.end();
+    // A symbol is only equal to itself (T15).
+    s.local_get(A).ref_test_non_null(symbol());
+    s.local_get(B).ref_test_non_null(symbol());
+    s.i32_or();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
     s.end();
     s.local_get(A).array_len().local_tee(N);
     s.local_get(B).array_len().i32_ne();
@@ -850,8 +953,14 @@ fn to_string(cx: &mut dyn Cx) -> Function {
     ];
     const V: u32 = 0;
     const K: u32 = 1;
+    let throw = cx.helper(Helper::Obj(object::Helper::Throw(ErrorKind::TypeError)));
+    let no_str = cx.str("Cannot convert a Symbol value to a string");
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(symbol());
+    s.if_(BlockType::Empty);
+    s.global_get(no_str).call(throw);
+    s.end();
     s.local_get(V).ref_test_non_null(string());
     s.if_(BlockType::Empty);
     as_string(&mut s, V);
@@ -918,68 +1027,14 @@ fn js_add(cx: &mut dyn Cx) -> Function {
 /// A function shows as `[Function: name]` or `[Function (anonymous)]`.
 /// Other objects trap (`inspect_object`): node's `util.inspect` format isn't implemented (F24).
 fn inspect(cx: &mut dyn Cx) -> Function {
-    let to_string = cx.helper(Helper::ToString);
-    let concat = cx.helper(Helper::Concat);
-    let trap = cx.helper(Helper::Obj(object::Helper::InspectTrap));
-    let minus_zero = cx.str("-0");
-    let (open, close) = (cx.str("["), cx.str("]"));
-    let get = cx.helper(Helper::Obj(object::Helper::Get));
-    let own_keys = cx.helper(Helper::Obj(object::Helper::OwnKeys));
-    let (name, named, anonymous) = (
-        cx.str("name"),
-        cx.str("[Function: "),
-        cx.str("[Function (anonymous)]"),
-    );
-    const V: u32 = 0;
-    const N: u32 = 1;
-    let mut f = Function::new([(1, jsval())]);
+    let format = cx.helper(Helper::Fmt(inspect::Helper::Format));
+    let mut f = Function::new([]);
     let mut s = f.instructions();
-    // A function: `[Function: name]` (T14); with own enumerable properties node shows them too (F24).
-    s.local_get(V).ref_test_non_null(func::function());
-    s.if_(BlockType::Empty);
-    s.local_get(V)
-        .ref_cast_non_null(object())
-        .call(own_keys)
-        .array_len();
-    s.if_(BlockType::Empty);
-    s.call(trap);
-    s.end();
-    s.local_get(V).global_get(name).call(get).local_tee(N);
-    s.ref_test_non_null(string());
-    s.if_(BlockType::Empty);
-    s.local_get(N).ref_cast_non_null(string()).array_len();
-    s.if_(BlockType::Empty);
-    s.global_get(named);
-    s.local_get(N).ref_cast_non_null(string()).call(concat);
-    s.global_get(close).call(concat).return_();
-    s.end();
-    s.end();
-    s.global_get(anonymous).return_();
-    s.end();
-    s.local_get(V).ref_test_non_null(object());
-    s.if_(BlockType::Empty);
-    object::is_error(&mut s, V);
-    s.if_(BlockType::Empty);
-    s.global_get(open);
-    s.local_get(V).call(to_string).call(concat);
-    s.global_get(close).call(concat).return_();
-    s.end();
-    s.call(trap);
-    s.end();
-    // -0 is never an i31.
-    s.local_get(V).ref_test_non_null(number());
-    s.if_(BlockType::Empty);
-    s.local_get(V)
-        .ref_cast_non_null(number())
-        .struct_get(T_NUMBER, 0)
-        .i64_reinterpret_f64()
-        .i64_const(i64::MIN)
-        .i64_eq();
-    s.if_(BlockType::Empty);
-    s.global_get(minus_zero).return_();
-    s.end();
-    s.end();
-    s.local_get(V).call(to_string);
+    s.local_get(0)
+        .i32_const(0)
+        .i32_const(0)
+        .i32_const(0)
+        .call(format);
     s.end();
     f
 }
@@ -991,7 +1046,7 @@ fn no_format() -> Function {
     const I: u32 = 1;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(string());
+    is_string(&mut s, V);
     s.if_(BlockType::Empty);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I);
@@ -1034,6 +1089,37 @@ fn throw_read(cx: &mut dyn Cx) -> Function {
     s.local_get(PROP).call(concat);
     s.global_get(parts[2]).call(concat);
     s.call(throw);
+    s.end();
+    f
+}
+
+/// `$new_symbol(description)`: a `$symbol` whose content is the description (`undefined`: empty).
+fn new_symbol(cx: &mut dyn Cx) -> Function {
+    let to_string = cx.helper(Helper::ToString);
+    const D: u32 = 0;
+    const S: u32 = 1;
+    let mut f = Function::new([(
+        1,
+        ValType::Ref(RefType {
+            nullable: true,
+            heap_type: string(),
+        }),
+    )]);
+    let mut s = f.instructions();
+    s.local_get(D).global_get(G_UNDEFINED).ref_eq();
+    s.if_(BlockType::Result(string_ref()));
+    s.array_new_fixed(T_STRING, 0);
+    s.else_();
+    s.local_get(D).call(to_string);
+    s.end();
+    s.local_tee(S);
+    s.array_len().array_new_default(T_SYMBOL);
+    s.local_tee(D);
+    s.ref_cast_non_null(symbol()).i32_const(0);
+    s.local_get(S).ref_as_non_null().i32_const(0);
+    s.local_get(S).ref_as_non_null().array_len();
+    s.array_copy(T_SYMBOL, T_STRING);
+    s.local_get(D);
     s.end();
     f
 }

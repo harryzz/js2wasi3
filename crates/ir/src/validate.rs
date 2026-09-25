@@ -358,6 +358,13 @@ impl V<'_> {
                 }
                 Some(Type::JsVal)
             }
+            Expr::Array(elems) => {
+                for a in elems.iter().flatten() {
+                    let t = self.value("array element", a);
+                    self.expect("array element", t, Type::JsVal);
+                }
+                Some(Type::JsVal)
+            }
             Expr::CallRef {
                 callee, this, args, ..
             } => {
