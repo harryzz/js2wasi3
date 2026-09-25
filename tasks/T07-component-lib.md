@@ -1,6 +1,6 @@
 # T07: Component v0: a library world from ES exports
 
-Status: todo | Depends on: T06
+Status: done | Depends on: T06
 
 ## Goal
 Turn the core module into a component whose WIT world is generated from the entry's exports
@@ -63,5 +63,52 @@ cargo run -q -- build --core tests/fixtures/fib.js -o /tmp/fib.wasm && wasmtime 
 - Remember the rules in `CLAUDE.md`: set `in progress` in `tasks/README.md`, **append to `## Progress` after every step**, and update the Follow-ups table at the end.
 
 ## Progress
+- 2026-09-25: baseline ok. `check-tools.sh` all ok; `cargo test` all ok (IR 5, frontend 6, lower 2+8, backend 5); `fib(20)` core smoke = 6765.
+- 2026-09-25: re-checked WIT identifier rules on wasm-tools 1.259: later words may start with a digit (`x-2y` ok), `%` works
+  before any identifier, including package/world names (`package %js2wasi3:%sum-odd`). The keyword list is in `wit-parser-0.259.0/src/ast/lex.rs`.
+- 2026-09-25: **decisions, agreed with the user, written up in `docs/wit-names.md`** (and linked from design D4):
+  1. Name mapping: `crates/component` computes JS→WIT names; the backend takes the map and emits core exports under the WIT names.
+  2. Conversion: split at `_`/`$`/case boundaries, lowercase, join with `-`, always write `%` in the generated WIT text. Errors (a diagnostic, never a panic)
+     for an empty result, a first word without a leading letter, non-ASCII names, and case-insensitive collisions. Escape hatch: `export { f as "wit-name" }`
+     (the string is used as is and must be a valid WIT name). Params never cause an error: invalid or duplicate ones become `p<index>`.
+  3. World: `js2wasi3:<stem>/<stem>` from the file name (`.` treated like `_`, falls back to `app`); `--world ns:pkg/world` overrides it.
+- 2026-09-25: note for implementation: lowering already resolves `export { a as b }` from `p.exports` (lower pass 3), and `ir::Export.name`
+  holds the JS name. The string-literal export form needs a flag from the frontend saying the name was a string.
+- 2026-09-25: plan. The frontend `Export` gets `string_name` (the name was a string literal). `ir::Export` gets `pos` + `string_name`.
+  `crates/component` gets its own plain input (`ExportSig`: name, string flag, param names, f64 only, line/col), so it doesn't depend on
+  the frontend or the IR. The CLI joins them: plan the names, rename `ir.exports[*].name` to the WIT names (so the backend needs no change),
+  emit, then `package`.
+- 2026-09-25: frontend `Export.string_name` (checks for a quote at the name span; `js2wasi3 parse` prints such names quoted) and
+  `ir::Export { string_name, pos }` are in. `crates/component`: `names::{to_wit, is_wit_name}`, `WorldName::{from_path, parse}`, `world()`, `package()`.
+  `cargo test -p js2wasi3-component`: 6 ok. Next: CLI wiring + acceptance.
+- 2026-09-25: CLI wired (`--world`, `plan_world`). Acceptance: `js2wasi3 build tests/fixtures/add.js -o add.wasm` → `wasm-tools validate` ok →
+  `wasmtime run --invoke 'add(1, 2)' add.wasm` prints `3`. `names.js` with `--world acme:math/calc` → `sum-odd(10, 0)` = 25, `times-ten(4)` = 40, `default(5)` = -5.
+- 2026-09-25: found that `wasm-tools component wit` always shows `root:component`: the world name isn't stored in component binaries
+  (`wit-parser` decoding.rs:299). Documented in `docs/wit-names.md`; writing the WIT next to the output → F12.
+- 2026-09-25: fixed the help text (it suggested `export { _1 as ... }`; it now uses the local name: `export { f as "my-name" }`).
+  Added CLI tests `crates/js2wasi3/tests/build.rs` (4). Full `cargo test` ok, `cargo clippy --all-targets` clean.
+  wit-component validates with `WasmFeatures::all()`, so GC/EH code in T08+ won't be rejected by the encoder.
 
 ## Notes / Result
+
+**Done.** `js2wasi3 build x.js -o x.wasm` produces a component whose world is generated from the ES exports (sync lift, `f64` only).
+
+What changed:
+- `crates/component`: `names.rs` (JS → WIT names), `lib.rs` (`WorldName`, `world()`, `package()` via wit-parser `push_source` +
+  `embed_component_metadata` + `ComponentEncoder`). Unit tests: 6.
+- `crates/frontend`: `Export.string_name`; `js2wasi3 parse` prints string export names quoted.
+- `crates/ir`: `Export { string_name, pos }`. The IR printer didn't change.
+- `crates/lower`: fills them in.
+- `crates/js2wasi3`: `build --world <ns:pkg/world>`; `plan_world` maps naming errors to source diagnostics and renames IR exports to WIT names.
+- Fixtures: `tests/fixtures/names.js`, `tests/fixtures/unsupported/bad-names.js`. CLI tests: `crates/js2wasi3/tests/build.rs` (4).
+- Docs: `docs/wit-names.md` (all naming rules and decisions), linked from design D4.
+
+Commands run: `cargo test -q` (all ok), `cargo clippy -q --all-targets` (clean), `wasm-tools validate add.wasm`,
+`wasmtime run --invoke 'add(1, 2)' add.wasm` → `3`.
+
+Unsupported / limits:
+- Only `f64` params/results. `plan_world` rejects other IR types with an error (none can reach it today).
+- The world name isn't visible in the output binary (`root:component`); see F12.
+- `--world` takes no package version (`@1.0.0`).
+
+Next smallest step: T08 (JS values on WasmGC). At the boundary, `JsVal` params/results will need a WIT type mapping (F13).

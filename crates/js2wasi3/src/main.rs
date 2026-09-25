@@ -1,6 +1,10 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use std::path::Path;
+
+use js2wasi3_component as component;
 use js2wasi3_frontend::{self as frontend, Allocator};
+use js2wasi3_ir as ir;
 
 #[derive(Parser)]
 #[command(
@@ -27,7 +31,53 @@ enum Cmd {
         /// Write the core Wasm module only (no component wrapping).
         #[arg(long)]
         core: bool,
+        /// WIT world of the component, as <namespace>:<package>/<world>.
+        /// Default: js2wasi3:<name>/<name>, from the entry file name.
+        #[arg(long)]
+        world: Option<String>,
     },
+}
+
+/// Map the IR exports to a WIT world. Naming errors come back as source diagnostics.
+fn plan_world(
+    path: &str,
+    ir: &ir::Module,
+    name: component::WorldName,
+) -> anyhow::Result<component::World> {
+    let ty = |t: ir::Type| match t {
+        ir::Type::F64 => Ok(component::ValType::F64),
+        other => anyhow::bail!("exported functions take and return numbers only (got {other})"),
+    };
+    let mut sigs = Vec::new();
+    for e in &ir.exports {
+        let f = ir.function(e.func);
+        let pos = e.pos.unwrap_or(ir::Pos { line: 1, col: 1 });
+        sigs.push(component::ExportSig {
+            name: e.name.clone(),
+            string_name: e.string_name,
+            local: f.name.clone(),
+            params: f.locals[..f.params as usize]
+                .iter()
+                .map(|l| Ok((l.name.clone(), ty(l.ty)?)))
+                .collect::<anyhow::Result<_>>()?,
+            result: f.result.map(ty).transpose()?,
+            line: pos.line,
+            col: pos.col,
+        });
+    }
+    component::world(name, &sigs).map_err(|errs| {
+        let diags = errs
+            .into_iter()
+            .map(|e| frontend::Diagnostic {
+                path: path.to_string(),
+                line: e.line,
+                col: e.col,
+                message: e.message,
+                help: e.help,
+            })
+            .collect();
+        frontend::Diagnostics(diags).into()
+    })
 }
 
 fn read(path: &str) -> anyhow::Result<String> {
@@ -55,7 +105,12 @@ fn main() -> anyhow::Result<()> {
                     .as_deref()
                     .map(|f| format!(" from {f:?}"))
                     .unwrap_or_default();
-                println!("{line}:{col}\texport {}{local}{from}", e.name);
+                let name = if e.string_name {
+                    format!("{:?}", e.name)
+                } else {
+                    e.name.clone()
+                };
+                println!("{line}:{col}\texport {name}{local}{from}");
             }
         }
         Cmd::Ir { file } => {
@@ -63,15 +118,29 @@ fn main() -> anyhow::Result<()> {
             let program = frontend::parse(&alloc, &file, &source)?;
             print!("{}", js2wasi3_lower::lower(&program)?);
         }
-        Cmd::Build { entry, out, core } => {
+        Cmd::Build {
+            entry,
+            out,
+            core,
+            world,
+        } => {
+            let world = match world {
+                Some(w) => component::WorldName::parse(&w)?,
+                None => component::WorldName::from_path(Path::new(&entry)),
+            };
             let source = read(&entry)?;
             let program = frontend::parse(&alloc, &entry, &source)?;
-            let ir = js2wasi3_lower::lower(&program)?;
-            let module = js2wasi3_backend::emit(&ir)?;
+            let mut ir = js2wasi3_lower::lower(&program)?;
             let bytes = if core {
-                module
+                js2wasi3_backend::emit(&ir)?
             } else {
-                js2wasi3_component::package(&module)?
+                let world = plan_world(&entry, &ir, world)?;
+                // The core module must export each function under its WIT name.
+                for (e, name) in ir.exports.iter_mut().zip(&world.export_names) {
+                    e.name = name.clone();
+                }
+                let module = js2wasi3_backend::emit(&ir)?;
+                component::package(&module, &world)?
             };
             std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
         }

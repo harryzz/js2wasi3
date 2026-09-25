@@ -91,6 +91,9 @@ pub struct Global {
 pub struct Export {
     pub name: String,
     pub func: FuncId,
+    /// `name` was written as a string literal in the source (`export { f as "my-f" }`).
+    pub string_name: bool,
+    pub pos: Option<Pos>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

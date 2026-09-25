@@ -18,6 +18,8 @@ fn add_module() -> Module {
     m.exports.push(Export {
         name: "add".into(),
         func: id,
+        string_name: false,
+        pos: None,
     });
     m
 }
@@ -157,6 +159,8 @@ fn all_kinds_print() {
     m.exports.push(Export {
         name: "sum".into(),
         func: sum,
+        string_name: false,
+        pos: None,
     });
 
     let expected = "\

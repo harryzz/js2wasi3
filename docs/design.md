@@ -63,6 +63,7 @@ The entry module's ES exports become the world's exports. WIT types map to JS:
 `result` ↔ return or throw, `option` ↔ value or `undefined`, `record` ↔ plain object, `variant` ↔ `{tag, val}`,
 `resource` ↔ class, `list<u8>` ↔ `Uint8Array`, `future<T>` ↔ Promise, `stream<T>` ↔ async iterable.
 v0 generates the WIT from the export signatures (all `f64`). Later versions take a user `.wit` world.
+JS names become kebab-case WIT names, and the world is named after the entry file (or `--world`). See [wit-names.md](wit-names.md).
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

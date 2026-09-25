@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T07.** Start with the *Handoff* section in [T07-component-lib.md](T07-component-lib.md).
+**Next up: T08.** The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -17,7 +17,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T04](T04-ir-v0.md) | IR v0 design | done | T02 |
 | [T05](T05-lower-numeric.md) | Lower numeric subset | done | T03, T04 |
 | [T06](T06-backend-v0.md) | Backend v0: IR → core Wasm | done | T04 |
-| [T07](T07-component-lib.md) | Component v0: library world | todo | T06 |
+| [T07](T07-component-lib.md) | Component v0: library world | done | T06 |
 | [T08](T08-jsval.md) | JS values on WasmGC | todo | T07 |
 | [T09](T09-strings.md) | Strings + string boundary | todo | T08 |
 | [T10](T10-command-console.md) | Command world + console.log (P3 stdout) | todo | T09 |
@@ -54,3 +54,5 @@ Each open item names where it came from and which task should pick it up. When i
 | F9 | `>>>` / `>>>=`: needs an unsigned `I32 → F64` convert in the IR | T05 | T08 | [ ] |
 | F10 | Implicit `undefined`: declarations without init, `return;` mixed with values, falling off the end, missing args, void results as values, postfix `++` as value, booleans as values | T05 | T08 | [ ] |
 | F11 | Top-level code and non-literal top-level initializers (module init) | T05 | T10 | [ ] |
+| F12 | `--emit-wit <file>`: write the generated WIT next to the component (component binaries don't keep the world/package name, `wasm-tools component wit` shows `root:component`) | T07 | any, when useful (latest T20) | [ ] |
+| F13 | Export signatures beyond `f64`: map `JsVal`/`Bool` params and results to WIT types at the boundary (`plan_world` rejects them today) | T07 | T08/T09 | [ ] |

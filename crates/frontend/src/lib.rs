@@ -45,6 +45,8 @@ pub struct Export {
     pub local: Option<String>,
     /// Module specifier for re-exports (`export { x } from "./y.js"`).
     pub from: Option<String>,
+    /// The exported name was written as a string literal (`export { f as "my-f" }`).
+    pub string_name: bool,
     pub span: Span,
 }
 
@@ -99,7 +101,7 @@ pub fn parse<'a>(
     if ret.fatal_error || ret.diagnostics.has_errors() {
         return Err(convert(path, source, ret.diagnostics.into_vec()));
     }
-    let exports = collect_exports(&ret.module_record);
+    let exports = collect_exports(&ret.module_record, source);
 
     let ast = alloc.alloc(ret.program);
     let sem = SemanticBuilder::new()
@@ -158,7 +160,7 @@ pub fn statement_kind(stmt: &ast::Statement) -> String {
         .to_string()
 }
 
-fn collect_exports(record: &ModuleRecord) -> Vec<Export> {
+fn collect_exports(record: &ModuleRecord, source: &str) -> Vec<Export> {
     let entries = record
         .local_export_entries
         .iter()
@@ -176,6 +178,15 @@ fn collect_exports(record: &ModuleRecord) -> Vec<Export> {
                 ExportLocalName::Null => None,
             },
             from: e.module_request.as_ref().map(|m| m.name.to_string()),
+            string_name: match &e.export_name {
+                ExportExportName::Name(n) => {
+                    matches!(
+                        source.as_bytes().get(n.span.start as usize),
+                        Some(b'"' | b'\'')
+                    )
+                }
+                _ => false,
+            },
             span: e.span,
         })
         .collect();

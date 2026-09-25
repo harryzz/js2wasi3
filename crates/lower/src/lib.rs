@@ -305,9 +305,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         match e.local.as_deref().and_then(|l| self.names.get(l)).copied() {
             Some(Binding::Func(func)) => {
+                let pos = Some(self.pos(e.span));
                 self.module.exports.push(ir::Export {
                     name: e.name.clone(),
                     func,
+                    string_name: e.string_name,
+                    pos,
                 });
                 Ok(())
             }
