@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T16.** T15 is done: arrays, symbols, the iterator protocol, `for-of`, spread, destructuring and `console.log` of arrays/plain objects (see T15's Notes / Result). T14: functions are values (closures, arrows, methods, `this`, `call`/`apply`). T13: plain objects with prototypes. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T16.** Start with the *Handoff* section in [T16-classes.md](T16-classes.md). T15 is done: arrays, symbols, the iterator protocol, `for-of`, spread, destructuring and `console.log` of arrays/plain objects (see T15's Notes / Result). T14: functions are values (closures, arrows, methods, `this`, `call`/`apply`). T13: plain objects with prototypes. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
