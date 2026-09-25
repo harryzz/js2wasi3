@@ -24,6 +24,9 @@ enum Cmd {
         entry: String,
         #[arg(short, long, default_value = "out.wasm")]
         out: String,
+        /// Write the core Wasm module only (no component wrapping).
+        #[arg(long)]
+        core: bool,
     },
 }
 
@@ -60,13 +63,17 @@ fn main() -> anyhow::Result<()> {
             let program = frontend::parse(&alloc, &file, &source)?;
             print!("{}", js2wasi3_lower::lower(&program)?);
         }
-        Cmd::Build { entry, out } => {
+        Cmd::Build { entry, out, core } => {
             let source = read(&entry)?;
             let program = frontend::parse(&alloc, &entry, &source)?;
             let ir = js2wasi3_lower::lower(&program)?;
-            let core = js2wasi3_backend::emit(&ir)?;
-            let component = js2wasi3_component::package(&core)?;
-            std::fs::write(&out, component).with_context(|| format!("writing {out}"))?;
+            let module = js2wasi3_backend::emit(&ir)?;
+            let bytes = if core {
+                module
+            } else {
+                js2wasi3_component::package(&module)?
+            };
+            std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
         }
     }
     Ok(())

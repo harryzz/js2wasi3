@@ -39,6 +39,9 @@
 use std::fmt;
 
 mod print;
+mod validate;
+
+pub use validate::validate;
 
 /// Value types. Wasm types get chosen in the backend: `Bool` is an `i32` 0/1, `JsVal` is `(ref null eq)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

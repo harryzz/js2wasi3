@@ -9,3 +9,9 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 js2wasi3-ir.workspace = true
+wasm-encoder.workspace = true
+
+[dev-dependencies]
+wasmparser.workspace = true
+js2wasi3-frontend.workspace = true
+js2wasi3-lower.workspace = true

@@ -14,7 +14,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T03](T03-frontend.md) | Frontend: oxc parse + semantic | done | T02 |
 | [T04](T04-ir-v0.md) | IR v0 design | done | T02 |
 | [T05](T05-lower-numeric.md) | Lower numeric subset | done | T03, T04 |
-| [T06](T06-backend-v0.md) | Backend v0: IR → core Wasm | todo | T04 |
+| [T06](T06-backend-v0.md) | Backend v0: IR → core Wasm | done | T04 |
 | [T07](T07-component-lib.md) | Component v0: library world | todo | T06 |
 | [T08](T08-jsval.md) | JS values on WasmGC | todo | T07 |
 | [T09](T09-strings.md) | Strings + string boundary | todo | T08 |
@@ -41,14 +41,14 @@ Each open item names where it came from and which task should pick it up. When i
 
 | # | Item | Found in | Pick up in | Done |
 |---|---|---|---|---|
-| F1 | IR validator: label scoping, `Continue` only to a `Loop`, id ranges, type agreement | T04 | start of T06 | [ ] |
+| F1 | IR validator: label scoping, `Continue` only to a `Loop`, id ranges, type agreement | T04 | start of T06 | [x] T06 (`ir::validate`) |
 | F2 | Source positions per statement in the IR (only `Function.pos` today). T05 didn't need them: its diagnostics use AST spans | T04 | when backend errors need source positions | [ ] |
 | F3 | Static data segments (string literals) in the IR | T04 | T09 | [ ] |
 | F4 | Reject imports / re-exports of other files with a clear "unsupported" diagnostic | T03 | T05 | [x] T05 (`lower`: import, re-export, `export *`) |
 | F5 | Show secondary diagnostic labels (e.g. "first declared here") as notes | T03 | any, when useful | [ ] |
 | F6 | TypeScript input (`.ts`): today it's parsed as `.mjs` | T03 | not planned yet, needs a task | [ ] |
 | F7 | Multi-file ES modules (resolve and link imports) | T03 | not planned yet, needs a task | [ ] |
-| F8 | Peephole: drop `f64->i32(i32->f64(x))` round trips between chained bitwise ops (correct, only wasteful) | T05 | T06 or later | [ ] |
+| F8 | Peephole: drop `f64->i32(i32->f64(x))` round trips between chained bitwise ops (correct, only wasteful; in Wasm each is a `$to_int32` call) | T05 | an optimisation pass, after T11 | [ ] |
 | F9 | `>>>` / `>>>=`: needs an unsigned `I32 → F64` convert in the IR | T05 | T08 | [ ] |
 | F10 | Implicit `undefined`: declarations without init, `return;` mixed with values, falling off the end, missing args, void results as values, postfix `++` as value, booleans as values | T05 | T08 | [ ] |
 | F11 | Top-level code and non-literal top-level initializers (module init) | T05 | T10 | [ ] |
