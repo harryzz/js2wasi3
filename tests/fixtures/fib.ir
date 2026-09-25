@@ -1,0 +1,7 @@
+func fib#0(n.0: f64) -> f64 {
+  if f64.lt(n.0, 2.0) {
+    return n.0
+  }
+  return f64.add(call fib#0(f64.sub(n.0, 1.0)), call fib#0(f64.sub(n.0, 2.0)))
+}
+export "fib" = fib#0

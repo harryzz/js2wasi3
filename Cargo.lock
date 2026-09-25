@@ -324,6 +324,7 @@ dependencies = [
  "js2wasi3-component",
  "js2wasi3-frontend",
  "js2wasi3-ir",
+ "js2wasi3-lower",
 ]
 
 [[package]]
@@ -360,6 +361,18 @@ name = "js2wasi3-ir"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "js2wasi3-lower"
+version = "0.0.1"
+dependencies = [
+ "js2wasi3-frontend",
+ "js2wasi3-ir",
+ "oxc_ast",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
 ]
 
 [[package]]

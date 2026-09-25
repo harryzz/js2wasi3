@@ -15,7 +15,8 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
 | Crate | Owns | Must not |
 |---|---|---|
 | `frontend` | parsing, scopes, early errors, spans, diagnostics | know about Wasm |
-| `ir` | JS-aware IR, AST→IR lowering, IR passes (e.g. the suspension transform) | encode bytes |
+| `ir` | JS-aware IR data types, printer, IR passes (e.g. the suspension transform) | depend on oxc, encode bytes |
+| `lower` | AST (+ semantic) → IR lowering, "unsupported" diagnostics | encode bytes |
 | `backend` | IR → core module: types, functions, runtime helpers, tag | call WASI directly from JS lowering |
 | `component` | WIT world selection/generation, the Canonical ABI glue, packaging | contain JS semantics |
 | `js2wasi3` | CLI | contain logic |

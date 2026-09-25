@@ -30,7 +30,8 @@
 //! - `Unary { op, ty, arg }` / `Binary { op, ty, lhs, rhs }`: machine ops on operands of type
 //!   `ty` (`F64` or `I32`, `Bool` for logical `Not`/`Eq`/`Ne`). Comparisons yield `Bool`.
 //!   These are *not* JS operators. JS `+` on dynamic values arrives in T08 as its own node.
-//! - `Convert { from, to, arg }`: numeric conversion (`F64 → I32` truncates like JS `ToInt32`).
+//! - `Convert { from, to, arg }`: numeric conversion. `F64 → I32` is JS `ToInt32` (modulo 2^32, NaN/±inf → 0),
+//!   not a saturating truncation. `I32 → F64` is signed.
 //! - `Cond { cond, then, els, ty }`: conditional expression (`?:`, `&&`, `||` after lowering).
 //! - `Call { func, args }`: direct call.
 //! - `Suspend { kind, arg }` *(placeholder, T18/T19)*: `await` / `yield` point.
@@ -125,6 +126,8 @@ pub enum Const {
 pub enum UnOp {
     /// `F64`: negate.
     Neg,
+    /// `F64`: absolute value (used for number truthiness: `abs(x) > 0` is false for ±0 and NaN).
+    Abs,
     /// `Bool`: logical not.
     Not,
     /// `I32`: bitwise not.

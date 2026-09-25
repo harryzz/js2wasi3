@@ -17,6 +17,8 @@ struct Cli {
 enum Cmd {
     /// Parse and check a module; print its top-level statements and exports.
     Parse { file: String },
+    /// Lower a module to IR and print it.
+    Ir { file: String },
     /// Compile an entry module to a component.
     Build {
         entry: String,
@@ -53,10 +55,15 @@ fn main() -> anyhow::Result<()> {
                 println!("{line}:{col}\texport {}{local}{from}", e.name);
             }
         }
+        Cmd::Ir { file } => {
+            let source = read(&file)?;
+            let program = frontend::parse(&alloc, &file, &source)?;
+            print!("{}", js2wasi3_lower::lower(&program)?);
+        }
         Cmd::Build { entry, out } => {
             let source = read(&entry)?;
-            let _program = frontend::parse(&alloc, &entry, &source)?;
-            let ir = js2wasi3_ir::Module::default();
+            let program = frontend::parse(&alloc, &entry, &source)?;
+            let ir = js2wasi3_lower::lower(&program)?;
             let core = js2wasi3_backend::emit(&ir)?;
             let component = js2wasi3_component::package(&core)?;
             std::fs::write(&out, component).with_context(|| format!("writing {out}"))?;

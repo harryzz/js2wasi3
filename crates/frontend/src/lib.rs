@@ -147,9 +147,10 @@ pub fn line_col(source: &str, offset: u32) -> (u32, u32) {
     (line as u32, col as u32)
 }
 
+/// Variant name of a statement, e.g. `"WhileStatement"`.
 // The variant name from `Debug` is the only kind name that doesn't need
 // updating whenever oxc adds a statement kind. Used for dumps, not hot paths.
-fn statement_kind(stmt: &ast::Statement) -> String {
+pub fn statement_kind(stmt: &ast::Statement) -> String {
     let dbg = format!("{stmt:?}");
     dbg.split(['(', ' ', '{'])
         .next()

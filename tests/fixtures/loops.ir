@@ -1,0 +1,87 @@
+global @calls: f64 mut = 0.0
+global @LIMIT: f64 = -1.0
+func sumOdd#0(n.0: f64) -> f64 {
+  local s.1: f64
+  local i.2: f64
+  @calls = f64.add(@calls, 1.0)
+  s.1 = 0.0
+  i.2 = 0.0
+  loop L0 {
+    if bool.not(f64.lt(i.2, n.0)) {
+      break L0
+    }
+    block L1 {
+      if f64.eq(f64.rem(i.2, 2.0), 0.0) {
+        break L1
+      }
+      if f64.eq(f64.rem(i.2, 5.0), 0.0) {
+        break L1
+      }
+      s.1 = f64.add(s.1, i.2)
+    }
+    i.2 = f64.add(i.2, 1.0)
+    continue L0
+  }
+  return s.1
+}
+func firstPair#1(target.0: f64) -> f64 {
+  local found.1: f64
+  local i.2: f64
+  local j.3: f64
+  found.1 = @LIMIT
+  i.2 = 0.0
+  loop L0 {
+    if bool.not(f64.lt(i.2, 10.0)) {
+      break L0
+    }
+    j.3 = 0.0
+    loop L1 {
+      if f64.ge(j.3, 10.0) {
+        break L1
+      }
+      if f64.eq(f64.mul(i.2, j.3), target.0) {
+        found.1 = f64.add(f64.mul(i.2, 10.0), j.3)
+        break L0
+      }
+      j.3 = f64.add(j.3, 1.0)
+      continue L1
+    }
+    i.2 = f64.add(i.2, 1.0)
+    continue L0
+  }
+  return found.1
+}
+func mix#2(a.0: f64, b.1: f64) -> f64 {
+  local k.2: f64
+  local acc.3: f64
+  local m.4: f64
+  local tmp.5: f64
+  local tmp.6: f64
+  k.2 = 0.0
+  acc.3 = 0.0
+  loop L0 {
+    block L1 {
+      k.2 = f64.add(k.2, 1.0)
+      if bool.not(f64.gt(f64.abs(i32->f64(i32.and(f64->i32(k.2), f64->i32(1.0)))), 0.0)) {
+        break L1
+      }
+      acc.3 = i32->f64(i32.or(f64->i32(i32->f64(i32.xor(f64->i32(acc.3), f64->i32(i32->f64(i32.shl(f64->i32(k.2), f64->i32(2.0))))))), f64->i32(1.0)))
+    }
+    if cond.bool(f64.lt(k.2, 8.0), f64.gt(a.0, 0.0), false) {
+      continue L0
+    }
+  }
+  m.4 = cond.f64(f64.gt(a.0, b.1), a.0, b.1)
+  return f64.add(f64.add(cond.f64(f64.gt(f64.abs((tmp.5 := acc.3)), 0.0), tmp.5, f64.neg(1.0)), cond.f64(f64.gt(f64.abs((tmp.6 := b.1)), 0.0), m.4, tmp.6)), i32->f64(i32.bitnot(f64->i32(a.0))))
+}
+func helper#3(x.0: f64) {
+  @calls = f64.add(@calls, 1.0)
+}
+func count#4() -> f64 {
+  call helper#3(1.0)
+  return @calls
+}
+export "sumOdd" = sumOdd#0
+export "firstPair" = firstPair#1
+export "mix" = mix#2
+export "count" = count#4

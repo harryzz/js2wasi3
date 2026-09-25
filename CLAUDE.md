@@ -9,6 +9,9 @@ Compiler: JavaScript → a WASI 0.3 Wasm component (WasmGC, native EH, P3 async)
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.
+- **Write progress every iteration, not only at the end.** After each step (build/test run, design choice,
+  blocker), append a dated line to the task file's `## Progress` log. Set the task's status to `in progress`
+  in `tasks/README.md` when you start it. The goal: a new session can pick up the task from the files alone.
 - Tests per iteration: the task's own tests plus `wasm-tools validate` plus one `wasmtime` smoke run. Never the whole suite.
 - At the end of a task:
   1. tick the task file's checklist and write its "Notes / Result" (what changed, commands run, what's unsupported, the next smallest step);

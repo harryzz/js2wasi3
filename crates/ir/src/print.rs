@@ -228,6 +228,7 @@ fn konst(c: &Const) -> String {
 fn unop(op: UnOp) -> &'static str {
     match op {
         UnOp::Neg => "neg",
+        UnOp::Abs => "abs",
         UnOp::Not => "not",
         UnOp::BitNot => "bitnot",
     }

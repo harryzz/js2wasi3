@@ -26,5 +26,6 @@ wit-component = "0.259.0"
 
 js2wasi3-frontend = { path = "crates/frontend" }
 js2wasi3-ir = { path = "crates/ir" }
+js2wasi3-lower = { path = "crates/lower" }
 js2wasi3-backend = { path = "crates/backend" }
 js2wasi3-component = { path = "crates/component" }
