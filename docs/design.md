@@ -82,6 +82,26 @@ Parameter and result types (`f64` / `string`) come from JSDoc or usage (T09). Se
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
 plus built-ins written in JS/TS and compiled by js2wasi3 itself, using intrinsics (T20).
 
+## Testing
+Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
+
+| Layer | Where | Checks |
+|---|---|---|
+| Unit | `cargo test` in each crate | naming, IR validation, runtime helpers, `unsupported` diagnostics (`crates/lower/tests/unsupported.rs`) |
+| IR snapshots | `crates/lower/tests/snapshots.rs` | `tests/fixtures/x.js` lowers to `x.ir` (`UPDATE_SNAPSHOTS=1` rewrites them) |
+| Components | `crates/js2wasi3/tests/build.rs`, `crates/backend/tests/emit.rs` | exports called with `wasmtime run --invoke` and compared with node's results (`x.out`, or values in the test); `console.js` against `console.out`/`.err` so `cargo test` covers a command without node |
+| Commands | `scripts/diff.sh` | node vs js2wasi3 + `wasmtime run -Sp3`: stdout, stderr and exit status |
+
+**Differential harness** (T11): `scripts/diff.sh [-j jobs] [fixture.js | dir]...`
+- The default is `tests/fixtures`, not recursive (`tests/fixtures/unsupported/` holds rejection tests, not diff targets).
+- It builds the compiler once, then runs the fixtures in parallel (10 s timeout each). It prints PASS/FAIL/SKIP with
+  the time per fixture (SLOW at ≥ 2 s), the diffs or build diagnostics of failures, and a summary. Exit 1 on any failure.
+- `x.skip` next to `x.js` skips it; its first line is the reason (e.g. libraries: exports, nothing to run).
+- Fixtures are ES modules for node too (`tests/fixtures/package.json`: `"type": "module"`), so strict mode matches.
+- A command fixture is self-checking: it prints its results, and node's output is the expectation, so no `.out`
+  file is needed. Keep each one under 2 s. Constructs that aren't supported yet show up as build failures.
+- `cargo test` doesn't run it (it needs node, F30).
+
 ## Working rules
 - One task file = one session. Don't start the next task without approval.
 - Each iteration runs only that task's tests, `wasm-tools validate` and one wasmtime smoke run.

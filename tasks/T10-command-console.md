@@ -133,7 +133,7 @@ What changed:
   Fixed: `select_world` now uses `%<name>`, so entry files named like WIT keywords (`stream.js`, `type.js`) build.
 - CLI: builds a command world when the IR has `main`.
 
-Commands run: `cargo test -q` (55 tests, all ok), `cargo clippy --all-targets` (clean), `wasm-tools validate` + `wasmtime run -Sp3`
+Commands run: `cargo test -q` (49 tests, all ok; 43 before T10), `cargo clippy --all-targets` (clean), `wasm-tools validate` + `wasmtime run -Sp3`
 on hello/console/46 MB output/empty/stderr-only/`%` trap, `probes/run.sh` (unchanged).
 
 Unsupported / deferred (Follow-ups F22–F28 in `tasks/README.md`): format strings, objects in `console.log`, TDZ checks

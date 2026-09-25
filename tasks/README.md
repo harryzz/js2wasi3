@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T11.** T10 is done: a file without exports is a `wasi:cli/run` command and `console.log` works (see its Notes / Result). The first milestone (`add.js` runs as a component) is reached. WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T12.** The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -21,7 +21,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T08](T08-jsval.md) | JS values on WasmGC | done | T07 |
 | [T09](T09-strings.md) | Strings + string boundary | done | T08 |
 | [T10](T10-command-console.md) | Command world + console.log (P3 stdout) | done | T09 |
-| [T11](T11-diff-harness.md) | Differential harness node vs wasmtime | todo | T10 |
+| [T11](T11-diff-harness.md) | Differential harness node vs wasmtime | done | T10 |
 | [T12](T12-exceptions.md) | Exceptions (native EH) | todo | T11 |
 | [T13](T13-objects.md) | Objects and prototypes | todo | T12 |
 | [T14](T14-closures.md) | Closures, function values, `this` | todo | T13 |
@@ -57,7 +57,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F12 | `--emit-wit <file>`: write the generated WIT next to the component (component binaries don't keep the world/package name, `wasm-tools component wit` shows `root:component`) | T07 | any, when useful (latest T20) | [ ] |
 | F13 | Export signatures beyond `f64`: map `JsVal`/`Bool` params and results to WIT types at the boundary. T08: `$export` wrappers convert jsval ↔ f64 (ToNumber). T09: `string` done (JSDoc + usage); `bool`, `option`, records etc. remain | T07 | T20 (user WIT) | [ ] |
 | F14 | Inference: `bool`-typed slots (booleans stored in variables are boxed today), int32 ranges | T08 | optimisation pass, after T11 | [ ] |
-| F15 | wasmtime 49 `--invoke` can't call exports whose WIT name is a keyword (`bool`, `use`, `type`…), even as `%bool`. Valid components, CLI-only limit. Avoid such names in tests; maybe warn at build | T08 | T11 (harness) | [ ] |
+| F15 | wasmtime 49 `--invoke` can't call exports whose WIT name is a keyword (`bool`, `use`, `type`…), even as `%bool`. Valid components, CLI-only limit. Avoid such names in tests; maybe warn at build | T08 | T20 (not a harness concern: it runs commands, T11) | [ ] |
 | F16 | Calls with more arguments than parameters (evaluate the extras, then drop them) | T08 | T14 | [ ] |
 | F17 | `typeof x` as a value (a string) | T08 | T09 | [x] T09 (`$typeof_string`, folded when the kind is known) |
 | F18 | Logical assignment `&&=`, `\|\|=`, `??=` | T08 | T13 or any | [ ] |
@@ -69,5 +69,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F24 | `console.log` of objects, arrays, functions (node's `util.inspect` format) | T10 | T13/T15 | [ ] |
 | F25 | Uncaught exception in a command: print it to stderr, flush, `task.return(err)` (`run` in `backend/src/host.rs` must catch `$js`) | T10 | T12 | [ ] |
 | F26 | Event loop: the callback ignores `TASK_CANCELLED`; output is only pumped while JS runs if the host takes writes at once (otherwise buffered until `main` returns) | T10 | T19 | [ ] |
-| F27 | When stdout's reader goes away (`\| head`) `run` returns `err` (exit 1); node exits 0. Decide which the harness expects | T10 | T11 | [ ] |
+| F27 | When stdout's reader goes away (`\| head`) `run` returns `err` (exit 1); node exits 0. Decide which the harness expects | T10 | T11 | [x] T11 (keep `err`: the write failed; not covered by the harness) |
 | F28 | `var` in a nested top-level block (`{ var z }`, `for (var i …)`) is a local of `main`: functions using it are rejected | T10 | T14 | [ ] |
+| F29 | Harness: uncaught exceptions print differently from node (stack traces), so stderr needs a comparison mode for them (e.g. first line only, via a sidecar) | T11 | T12 | [ ] |
+| F30 | `scripts/diff.sh` isn't run by `cargo test` (it needs node); wire it into CI once there is one | T11 | not scheduled | [ ] |
