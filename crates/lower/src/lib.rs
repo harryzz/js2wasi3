@@ -27,8 +27,14 @@
 //!
 //! **Exceptions** (T12): `throw`, `try`/`catch` (with or without a binding)/`finally`. A `finally`
 //! is lowered with a completion local ([`Lowerer::try_stmt`]); `break`/`continue`/`return` that
-//! leave it go through it ([`Lowerer::jump`]). Errors are runtime values until objects exist (T13):
-//! `new E(m)` / `E(m)` for the native error constructors, and `.name` / `.message` reads.
+//! leave it go through it ([`Lowerer::jump`]). `new E(m, options)` / `E(m)` for the native error
+//! constructors.
+//!
+//! **Objects** (T13): literals (identifier/string/number/computed keys, shorthand, spread,
+//! `__proto__: v`), `o.k`, `o[k]`, optional member chains `o?.k`, assignment, compound assignment
+//! and `++`/`--` on properties, `delete`, `in`, `for-in`, `instanceof` with `Object` or a native
+//! error constructor, `Object.create`/`getPrototypeOf`/`hasOwn`, `B.prototype`. The runtime does
+//! the rest (`crates/backend/src/object.rs`); property values are `jsval` of kind `Any`.
 //! Converting a string to a number (`"5" * 2`, `"a" < "b"`) is rejected when the operand is known
 //! to be a string, and traps at run time otherwise (F20).
 //!
@@ -54,8 +60,8 @@ use std::collections::{HashMap, HashSet};
 
 use js2wasi3_frontend::{Diagnostic, Diagnostics, Program, line_col, statement_kind};
 use js2wasi3_ir::{
-    self as ir, BinOp, Const, ErrorKind, Expr, FuncId, GlobalId, Intrinsic, LabelId, LocalId, Pos,
-    Stmt, Type, TypeofTag, UnOp,
+    self as ir, BinOp, Builtin, Const, ErrorKind, Expr, FuncId, GlobalId, Intrinsic, LabelId,
+    LocalId, Pos, Stmt, Type, TypeofTag, UnOp,
 };
 use oxc_ast::ast::*;
 use oxc_semantic::Scoping;
@@ -1064,6 +1070,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Ok(())
             }
             Statement::WhileStatement(w) => self.while_loop(cx, None, w, out),
+            Statement::ForInStatement(f) => self.for_in(cx, None, f, out),
             Statement::DoWhileStatement(w) => self.do_while_loop(cx, None, w, out),
             Statement::ForStatement(f) => self.for_loop(cx, None, f, out),
             Statement::LabeledStatement(l) => {
@@ -1072,6 +1079,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Statement::WhileStatement(w) => self.while_loop(cx, name, w, out),
                     Statement::DoWhileStatement(w) => self.do_while_loop(cx, name, w, out),
                     Statement::ForStatement(f) => self.for_loop(cx, name, f, out),
+                    Statement::ForInStatement(f) => self.for_in(cx, name, f, out),
                     body => {
                         let brk = cx.label();
                         cx.targets.push(Target {
@@ -1438,6 +1446,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
                 result
             }
+            Expression::AssignmentExpression(a) if a.left.as_member_expression().is_some() => {
+                let v = self.member_assign(cx, a)?;
+                out.push(Stmt::Expr(v.e));
+                Ok(())
+            }
+            Expression::UpdateExpression(u) if u.argument.as_member_expression().is_some() => {
+                let v = self.member_update(cx, u)?;
+                out.push(Stmt::Expr(v.e));
+                Ok(())
+            }
             Expression::AssignmentExpression(a) => {
                 let (var, value) = self.assignment(cx, a)?;
                 out.extend(self.write_var(cx, &var, value));
@@ -1448,7 +1466,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.extend(self.write_var(cx, &var, value));
                 Ok(())
             }
-            Expression::CallExpression(c) if self.error_ctor(&c.callee).is_none() => {
+            Expression::CallExpression(c)
+                if self.error_ctor(&c.callee).is_none()
+                    && self.object_static(&c.callee).is_none() =>
+            {
                 let call = self.call(cx, c)?;
                 out.push(Stmt::Expr(call));
                 Ok(())
@@ -1543,7 +1564,43 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     };
                     Ok(Val::js(e, Kind::Str))
                 }
-                UnaryOperator::Delete => Err(self.unsupported(span, "operator `delete`", "T13")),
+                UnaryOperator::Delete => match u.argument.without_parentheses() {
+                    arg @ (Expression::StaticMemberExpression(_)
+                    | Expression::ComputedMemberExpression(_)) => {
+                        let m = arg.as_member_expression().expect("a member expression");
+                        if m.optional() {
+                            return Err(self.unsupported(
+                                span,
+                                "`delete` of an optional chain",
+                                "later",
+                            ));
+                        }
+                        let (obj, key) = self.member(cx, m)?;
+                        Ok(val(
+                            Expr::intrinsic(Intrinsic::DeleteProp, vec![obj, key]),
+                            Type::Bool,
+                        ))
+                    }
+                    Expression::ChainExpression(_) | Expression::PrivateFieldExpression(_) => {
+                        Err(self.unsupported(
+                            span,
+                            "`delete` of an optional chain or private field",
+                            "later",
+                        ))
+                    }
+                    // `delete x` is a syntax error in strict code; anything else is evaluated, then true.
+                    arg => {
+                        let mut body = Vec::new();
+                        self.expr_stmt(cx, arg, &mut body)?;
+                        Ok(val(
+                            Expr::Seq {
+                                body,
+                                value: Box::new(Expr::bool(true)),
+                            },
+                            Type::Bool,
+                        ))
+                    }
+                },
                 op => {
                     let v = self.expr(cx, &u.argument)?;
                     let v = self.num(v, span)?;
@@ -1571,6 +1628,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     ty,
                 };
                 Ok(Val { e, ty, kind })
+            }
+            Expression::AssignmentExpression(a) if a.left.as_member_expression().is_some() => {
+                self.member_assign(cx, a)
+            }
+            Expression::UpdateExpression(u) if u.argument.as_member_expression().is_some() => {
+                self.member_update(cx, u)
             }
             Expression::AssignmentExpression(a) => {
                 let (var, value) = self.assignment(cx, a)?;
@@ -1618,19 +1681,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let k = self.error_ctor(&c.callee).expect("checked by the guard");
                 self.new_error(cx, k, &c.arguments, span)
             }
-            Expression::StaticMemberExpression(m)
-                if !m.optional && matches!(m.property.name.as_str(), "name" | "message") =>
+            Expression::CallExpression(c)
+                if !c.optional && self.object_static(&c.callee).is_some() =>
             {
-                let prop = if m.property.name == "name" {
-                    ir::ErrorProp::Name
-                } else {
-                    ir::ErrorProp::Message
-                };
-                let obj = self.expr(cx, &m.object)?;
-                Ok(Val::js(
-                    Expr::intrinsic(Intrinsic::ErrorProp(prop), vec![jsval_of(obj)]),
-                    Kind::Any,
-                ))
+                self.object_call(cx, c)
             }
             Expression::CallExpression(c) => {
                 let call = self.call(cx, c)?;
@@ -1692,7 +1746,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         vec![jsval_of(obj)],
                     )));
                 }
-                let len = Expr::intrinsic(Intrinsic::Length, vec![jsval_of(obj)]);
+                let len =
+                    Expr::intrinsic(Intrinsic::GetProp, vec![jsval_of(obj), Expr::str("length")]);
                 Ok(match kind {
                     // Not known yet: any f64 will do, this round is thrown away.
                     Kind::Bottom => Val {
@@ -1704,13 +1759,43 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 })
             }
             Expression::BigIntLiteral(_) => Err(self.unsupported(span, "BigInt", "not scheduled")),
-            Expression::ObjectExpression(_) => Err(self.unsupported(span, "object literal", "T13")),
+            Expression::ObjectExpression(o) => self.object_literal(cx, o),
             Expression::ArrayExpression(_) => Err(self.unsupported(span, "array literal", "T15")),
             Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
                 Err(self.unsupported(span, "function expression (closures)", "T14"))
             }
             Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_) => {
-                Err(self.unsupported(span, "property access", "T13"))
+                let m = e.as_member_expression().expect("a member expression");
+                if let Some(b) = self.builtin_prototype(m) {
+                    return Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::Prototype(b), vec![]),
+                        Kind::Any,
+                    ));
+                }
+                if m.optional() {
+                    // oxc wraps optional links in a `ChainExpression`.
+                    return self.chain_member(cx, m);
+                }
+                let (obj, key) = self.member(cx, m)?;
+                Ok(Val::js(
+                    Expr::intrinsic(Intrinsic::GetProp, vec![obj, key]),
+                    Kind::Any,
+                ))
+            }
+            Expression::ChainExpression(c) => match &c.expression {
+                ChainElement::CallExpression(call) => {
+                    Err(self.unsupported(call.span, "optional call `?.()`", "T14"))
+                }
+                ChainElement::TSNonNullExpression(t) => {
+                    Err(self.unsupported(t.span, "TypeScript non-null assertion", "not scheduled"))
+                }
+                el => {
+                    let m = el.as_member_expression().expect("the other chain elements");
+                    self.chain_member(cx, m)
+                }
+            },
+            Expression::PrivateFieldExpression(_) => {
+                Err(self.unsupported(span, "private field", "T16"))
             }
             other => Err(self.unsupported(
                 span,
@@ -1728,9 +1813,29 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         {
             return Ok(v);
         }
+        if b.operator == B::Instanceof {
+            let Some(builtin) = self.builtin_ident(&b.right) else {
+                return Err(self.unsupported(
+                    b.right.span(),
+                    "`instanceof` with something other than `Object` or a native constructor",
+                    "T14/T16",
+                ));
+            };
+            let l = self.expr(cx, &b.left)?;
+            return Ok(Val::new(
+                Expr::intrinsic(Intrinsic::InstanceOf(builtin), vec![jsval_of(l)]),
+                Type::Bool,
+            ));
+        }
         let l = self.expr(cx, &b.left);
         let r = self.expr(cx, &b.right);
         let (l, r) = (l?, r?);
+        if b.operator == B::In {
+            return Ok(Val::new(
+                Expr::intrinsic(Intrinsic::HasProp, vec![jsval_of(l), jsval_of(r)]),
+                Type::Bool,
+            ));
+        }
         let num = Val::num;
         let bitwise = match b.operator {
             B::BitwiseOR => Some(BinOp::Or),
@@ -1784,7 +1889,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             _ => {
                 let planned = match b.operator {
                     B::Exponential => "T21 (Math.pow)",
-                    _ => "T13",
+                    _ => "later",
                 };
                 return Err(self.unsupported(
                     span,
@@ -2016,24 +2121,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         args: &'a [Argument<'a>],
         span: Span,
     ) -> R<Val> {
-        if args.len() > 1 {
-            return Err(self.unsupported(
-                span,
-                "error constructor with an options argument",
-                "T13",
-            ));
-        }
-        let message = match args.first() {
-            None => Expr::undefined(),
-            Some(a) => {
-                let Some(e) = a.as_expression() else {
-                    return Err(self.unsupported(a.span(), "spread argument", "T15"));
-                };
-                jsval_of(self.expr(cx, e)?)
-            }
-        };
+        let _ = span;
+        let args = self.args(cx, args, 2)?;
         Ok(Val::js(
-            Expr::intrinsic(Intrinsic::NewError(k), vec![message]),
+            Expr::intrinsic(Intrinsic::NewError(k), args),
             Kind::Any,
         ))
     }
@@ -2133,27 +2224,501 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         ))
     }
 
+    // ---- objects (T13) -------------------------------------------------------------------
+
+    /// The built-in a global identifier names (`Object`, `Error`, …), if `e` is one.
+    fn builtin_ident(&self, e: &Expression<'a>) -> Option<Builtin> {
+        let Expression::Identifier(id) = e.without_parentheses() else {
+            return None;
+        };
+        let global = self
+            .scoping
+            .get_reference(id.reference_id())
+            .symbol_id()
+            .is_none();
+        global.then(|| Builtin::parse(id.name.as_str())).flatten()
+    }
+
+    /// `B.prototype` for a built-in constructor `B`.
+    fn builtin_prototype(&self, m: &MemberExpression<'a>) -> Option<Builtin> {
+        let MemberExpression::StaticMemberExpression(sm) = m else {
+            return None;
+        };
+        if sm.property.name != "prototype" || sm.optional {
+            return None;
+        }
+        self.builtin_ident(&sm.object)
+    }
+
+    /// `Object.create` / `Object.getPrototypeOf` / `Object.hasOwn` as a callee: the method.
+    fn object_static(&self, callee: &Expression<'a>) -> Option<Intrinsic> {
+        let Expression::StaticMemberExpression(m) = callee else {
+            return None;
+        };
+        if m.optional || self.builtin_ident(&m.object) != Some(Builtin::Object) {
+            return None;
+        }
+        match m.property.name.as_str() {
+            "create" => Some(Intrinsic::ObjectCreate),
+            "getPrototypeOf" => Some(Intrinsic::GetPrototypeOf),
+            "hasOwn" => Some(Intrinsic::HasOwn),
+            _ => None,
+        }
+    }
+
+    fn object_call(&mut self, cx: &mut FnCx, c: &'a CallExpression<'a>) -> R<Val> {
+        let op = self
+            .object_static(&c.callee)
+            .expect("checked by the caller");
+        if op == Intrinsic::ObjectCreate && c.arguments.len() > 1 {
+            return Err(self.unsupported(
+                c.span,
+                "`Object.create` with property descriptors",
+                "not scheduled",
+            ));
+        }
+        let n = op.signature().0.len();
+        let args = self.args(cx, &c.arguments, n)?;
+        let e = Expr::intrinsic(op, args);
+        Ok(if op == Intrinsic::HasOwn {
+            Val::new(e, Type::Bool)
+        } else {
+            Val::js(e, Kind::Any)
+        })
+    }
+
+    /// The arguments of a built-in taking `n` JS values: missing ones are `undefined`, extra ones
+    /// are evaluated (after the others) and dropped.
+    fn args(&mut self, cx: &mut FnCx, args: &'a [Argument<'a>], n: usize) -> R<Vec<Expr>> {
+        let mut out = Vec::new();
+        let mut extra = Vec::new();
+        let mut result = Ok(());
+        for (i, a) in args.iter().enumerate() {
+            let Some(e) = a.as_expression() else {
+                result = Err(self.unsupported(a.span(), "spread argument", "T15"));
+                continue;
+            };
+            match self.expr(cx, e) {
+                Ok(v) if i < n => out.push(jsval_of(v)),
+                Ok(v) => extra.push(Stmt::Expr(v.e)),
+                Err(e) => result = Err(e),
+            }
+        }
+        result?;
+        if !extra.is_empty()
+            && let Some(last) = out.pop()
+        {
+            let t = cx.func.add_local("arg", Type::JsVal);
+            let mut body = vec![Stmt::Set(t, last)];
+            body.extend(extra);
+            out.push(Expr::Seq {
+                body,
+                value: Box::new(Expr::Local(t)),
+            });
+        }
+        while out.len() < n {
+            out.push(Expr::undefined());
+        }
+        Ok(out)
+    }
+
+    /// The object and the key of `o.k` / `o[k]`, as JS values.
+    fn member(&mut self, cx: &mut FnCx, m: &'a MemberExpression<'a>) -> R<(Expr, Expr)> {
+        if let Some(b) = self.builtin_prototype(m) {
+            let _ = b;
+            return Err(self.unsupported(
+                m.span(),
+                "assigning or deleting a built-in constructor's `prototype`",
+                "not scheduled",
+            ));
+        }
+        match m {
+            MemberExpression::StaticMemberExpression(sm) => {
+                let obj = self.expr(cx, &sm.object)?;
+                Ok((jsval_of(obj), Expr::str(sm.property.name.as_str())))
+            }
+            MemberExpression::ComputedMemberExpression(cm) => {
+                let obj = self.expr(cx, &cm.object);
+                let key = self.expr(cx, &cm.expression);
+                let (obj, key) = (obj?, key?);
+                Ok((jsval_of(obj), jsval_of(key)))
+            }
+            MemberExpression::PrivateFieldExpression(p) => {
+                Err(self.unsupported(p.span, "private field", "T16"))
+            }
+        }
+    }
+
+    /// `a?.b.c` (member accesses only): `undefined` as soon as an optional link's object is
+    /// `null` or `undefined`.
+    fn chain_member(&mut self, cx: &mut FnCx, m: &'a MemberExpression<'a>) -> R<Val> {
+        let exit = cx.label();
+        let res = cx.func.add_local("chain", Type::JsVal);
+        let mut body = Vec::new();
+        let v = self.chain_link(cx, m, exit, &mut body)?;
+        body.push(Stmt::Set(res, jsval_of(v)));
+        Ok(Val::js(
+            Expr::Seq {
+                body: vec![
+                    Stmt::Set(res, Expr::undefined()),
+                    Stmt::Block { label: exit, body },
+                ],
+                value: Box::new(Expr::Local(res)),
+            },
+            Kind::Any,
+        ))
+    }
+
+    fn chain_link(
+        &mut self,
+        cx: &mut FnCx,
+        m: &'a MemberExpression<'a>,
+        exit: LabelId,
+        body: &mut Vec<Stmt>,
+    ) -> R<Val> {
+        let obj = match m.object().as_member_expression() {
+            Some(inner) if self.builtin_prototype(inner).is_none() => {
+                self.chain_link(cx, inner, exit, body)?
+            }
+            _ => self.expr(cx, m.object())?,
+        };
+        let mut obj = jsval_of(obj);
+        if m.optional() {
+            let t = cx.func.add_local("tmp", Type::JsVal);
+            body.push(Stmt::Set(t, obj));
+            body.push(Stmt::If {
+                cond: Expr::binary(
+                    BinOp::LooseEq,
+                    Type::JsVal,
+                    Expr::Local(t),
+                    Expr::Const(Const::Null),
+                ),
+                then: vec![Stmt::Break(exit)],
+                els: vec![],
+            });
+            obj = Expr::Local(t);
+        }
+        let key = match m {
+            MemberExpression::StaticMemberExpression(sm) => Expr::str(sm.property.name.as_str()),
+            MemberExpression::ComputedMemberExpression(cm) => {
+                jsval_of(self.expr(cx, &cm.expression)?)
+            }
+            MemberExpression::PrivateFieldExpression(p) => {
+                return Err(self.unsupported(p.span, "private field", "T16"));
+            }
+        };
+        Ok(Val::js(
+            Expr::intrinsic(Intrinsic::GetProp, vec![obj, key]),
+            Kind::Any,
+        ))
+    }
+
+    fn object_literal(&mut self, cx: &mut FnCx, o: &'a ObjectExpression<'a>) -> R<Val> {
+        let t = cx.func.add_local("obj", Type::JsVal);
+        let mut body = vec![Stmt::Set(t, Expr::intrinsic(Intrinsic::NewObject, vec![]))];
+        let mut result = Ok(());
+        for p in &o.properties {
+            let r = match p {
+                ObjectPropertyKind::SpreadProperty(sp) => self.expr(cx, &sp.argument).map(|v| {
+                    body.push(Stmt::Expr(Expr::intrinsic(
+                        Intrinsic::CopyProps,
+                        vec![Expr::Local(t), jsval_of(v)],
+                    )))
+                }),
+                ObjectPropertyKind::ObjectProperty(op) => {
+                    self.literal_property(cx, t, op, &mut body)
+                }
+            };
+            if let Err(e) = r {
+                result = Err(e);
+            }
+        }
+        result?;
+        Ok(Val::js(
+            Expr::Seq {
+                body,
+                value: Box::new(Expr::Local(t)),
+            },
+            Kind::Any,
+        ))
+    }
+
+    /// One `key: value` of a literal: an own property, or the prototype for `__proto__: v`.
+    fn literal_property(
+        &mut self,
+        cx: &mut FnCx,
+        t: LocalId,
+        p: &'a ObjectProperty<'a>,
+        body: &mut Vec<Stmt>,
+    ) -> R<()> {
+        if p.kind != PropertyKind::Init {
+            return Err(self.unsupported(p.span, "getter or setter", "T16"));
+        }
+        if p.method {
+            return Err(self.unsupported(p.span, "method (functions as values)", "T14"));
+        }
+        let (key, proto) = match &p.key {
+            PropertyKey::StaticIdentifier(id) => (
+                Expr::str(id.name.as_str()),
+                id.name == "__proto__" && !p.shorthand,
+            ),
+            PropertyKey::PrivateIdentifier(id) => {
+                return Err(self.unsupported(id.span, "private name", "T16"));
+            }
+            k => {
+                let e = k.as_expression().expect("the other property keys");
+                match e {
+                    Expression::StringLiteral(sl) if !p.computed => (
+                        Expr::Str(utf16(sl.value.as_str(), sl.lone_surrogates)),
+                        sl.value == "__proto__",
+                    ),
+                    _ => (jsval_of(self.expr(cx, e)?), false),
+                }
+            }
+        };
+        let v = jsval_of(self.expr(cx, &p.value)?);
+        body.push(Stmt::Expr(if proto {
+            Expr::intrinsic(Intrinsic::SetProto, vec![Expr::Local(t), v])
+        } else {
+            Expr::intrinsic(Intrinsic::DefineProp, vec![Expr::Local(t), key, v])
+        }));
+        Ok(())
+    }
+
+    /// `o.k = v` / `o[k] op= v`: the stored value.
+    fn member_assign(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<Val> {
+        let m = a
+            .left
+            .as_member_expression()
+            .expect("checked by the caller");
+        let (obj, key) = self.member(cx, m)?;
+        let to = cx.func.add_local("obj", Type::JsVal);
+        let tk = cx.func.add_local("key", Type::JsVal);
+        let tv = cx.func.add_local("value", Type::JsVal);
+        let mut body = vec![Stmt::Set(to, obj), Stmt::Set(tk, key)];
+        let rhs = self.expr(cx, &a.right)?;
+        let old = (a.operator != AssignmentOperator::Assign).then(|| {
+            Val::js(
+                Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(to), Expr::Local(tk)]),
+                Kind::Any,
+            )
+        });
+        let value = self.combine(cx, a.operator, old, rhs, a.span)?;
+        let kind = match value.kind {
+            Kind::Str | Kind::Bool => value.kind,
+            _ => Kind::Any,
+        };
+        body.push(Stmt::Expr(Expr::intrinsic(
+            Intrinsic::SetProp,
+            vec![
+                Expr::Local(to),
+                Expr::Local(tk),
+                Expr::Tee(tv, Box::new(jsval_of(value))),
+            ],
+        )));
+        Ok(Val::js(
+            Expr::Seq {
+                body,
+                value: Box::new(Expr::Local(tv)),
+            },
+            kind,
+        ))
+    }
+
+    /// `o.k++` / `--o[k]`: the old or new value, as a number.
+    fn member_update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<Val> {
+        let m = u
+            .argument
+            .as_member_expression()
+            .expect("checked by the caller");
+        let (obj, key) = self.member(cx, m)?;
+        let to = cx.func.add_local("obj", Type::JsVal);
+        let tk = cx.func.add_local("key", Type::JsVal);
+        let old = cx.func.add_local("old", Type::F64);
+        let new = cx.func.add_local("new", Type::F64);
+        let op = if u.operator == UpdateOperator::Increment {
+            BinOp::Add
+        } else {
+            BinOp::Sub
+        };
+        let get = Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(to), Expr::Local(tk)]);
+        let body = vec![
+            Stmt::Set(to, obj),
+            Stmt::Set(tk, key),
+            Stmt::Set(old, Expr::convert(Type::JsVal, Type::F64, get)),
+            Stmt::Set(
+                new,
+                Expr::binary(op, Type::F64, Expr::Local(old), Expr::f64(1.0)),
+            ),
+            Stmt::Expr(Expr::intrinsic(
+                Intrinsic::SetProp,
+                vec![
+                    Expr::Local(to),
+                    Expr::Local(tk),
+                    Expr::convert(Type::F64, Type::JsVal, Expr::Local(new)),
+                ],
+            )),
+        ];
+        let value = Box::new(Expr::Local(if u.prefix { new } else { old }));
+        Ok(Val::num(Expr::Seq { body, value }))
+    }
+
+    /// `for (k in o) body`: the keys are collected first ([`Intrinsic::ForInKeys`]); a key
+    /// deleted before its turn is skipped.
+    fn for_in(
+        &mut self,
+        cx: &mut FnCx,
+        name: Option<String>,
+        f: &'a ForInStatement<'a>,
+        out: &mut Vec<Stmt>,
+    ) -> R<()> {
+        let right = self.expr(cx, &f.right)?;
+        let obj = cx.func.add_local("for_in", Type::JsVal);
+        let keys = cx.func.add_local("keys", Type::JsVal);
+        let i = cx.func.add_local("i", Type::I32);
+        let n = cx.func.add_local("n", Type::I32);
+        let k = cx.func.add_local("key", Type::JsVal);
+        out.push(Stmt::Set(obj, jsval_of(right)));
+        out.push(Stmt::Set(
+            keys,
+            Expr::intrinsic(Intrinsic::ForInKeys, vec![Expr::Local(obj)]),
+        ));
+        out.push(Stmt::Set(
+            n,
+            Expr::intrinsic(Intrinsic::KeysLen, vec![Expr::Local(keys)]),
+        ));
+        out.push(Stmt::Set(i, Expr::i32(0)));
+        let brk = cx.label();
+        let mut then = Vec::new();
+        let target = self.for_in_target(cx, &f.left, Val::js(Expr::Local(k), Kind::Str), &mut then);
+        cx.targets.push(Target {
+            js_label: name,
+            brk,
+            kind: TargetKind::While,
+        });
+        let body = self.stmt_body(cx, &f.body);
+        cx.targets.pop();
+        target?;
+        then.extend(body);
+        let present = bool_cond(
+            Expr::TypeofIs {
+                arg: Box::new(Expr::Local(obj)),
+                tag: TypeofTag::Object,
+            },
+            Expr::intrinsic(Intrinsic::HasProp, vec![Expr::Local(k), Expr::Local(obj)]),
+            Expr::bool(true),
+        );
+        let inner = vec![
+            Stmt::If {
+                cond: Expr::binary(BinOp::Ge, Type::I32, Expr::Local(i), Expr::Local(n)),
+                then: vec![Stmt::Break(brk)],
+                els: vec![],
+            },
+            Stmt::Set(
+                k,
+                Expr::intrinsic(Intrinsic::KeysGet, vec![Expr::Local(keys), Expr::Local(i)]),
+            ),
+            Stmt::Set(
+                i,
+                Expr::binary(BinOp::Add, Type::I32, Expr::Local(i), Expr::i32(1)),
+            ),
+            Stmt::If {
+                cond: present,
+                then,
+                els: vec![],
+            },
+            Stmt::Continue(brk),
+        ];
+        out.push(Stmt::Loop {
+            label: brk,
+            body: inner,
+        });
+        Ok(())
+    }
+
+    /// Store the key into the `for-in` variable.
+    fn for_in_target(
+        &mut self,
+        cx: &mut FnCx,
+        left: &'a ForStatementLeft<'a>,
+        key: Val,
+        out: &mut Vec<Stmt>,
+    ) -> R<()> {
+        match left {
+            ForStatementLeft::VariableDeclaration(d) => {
+                let decl = &d.declarations[0];
+                let BindingPattern::BindingIdentifier(b) = &decl.id else {
+                    return Err(self.unsupported(decl.span, "destructuring declaration", "T15"));
+                };
+                let sym = b
+                    .symbol_id
+                    .get()
+                    .expect("semantic analysis assigns symbols");
+                let slot = Slot::Var(sym);
+                let ty = self.slot_ty(slot);
+                let local = match cx.locals.get(&sym) {
+                    Some(l) => *l,
+                    None => {
+                        let l = cx.func.add_local(b.name.as_str(), ty);
+                        cx.locals.insert(sym, l);
+                        l
+                    }
+                };
+                let v = self.store(slot, ty, key);
+                out.push(Stmt::Set(local, v));
+                Ok(())
+            }
+            ForStatementLeft::AssignmentTargetIdentifier(id) => {
+                let var = self.resolve(cx, id)?;
+                let v = self.store(Slot::Var(var.sym), var.ty, key);
+                out.extend(self.write_var(cx, &var, v));
+                Ok(())
+            }
+            other => Err(self.unsupported(
+                other.span(),
+                "`for-in` target other than a variable",
+                "later",
+            )),
+        }
+    }
+
     /// `x = e` / `x op= e`: the variable and the converted value to store.
     fn assignment(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<(Var, Expr)> {
         let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
             return Err(self.unsupported(
                 a.left.span(),
-                "assignment to something other than a variable",
-                "T13/T15",
+                "assignment to something other than a variable or a property (destructuring)",
+                "T15",
             ));
         };
         let var = self.resolve(cx, id)?;
         let rhs = self.expr(cx, &a.right)?;
-        let span = a.span;
+        if a.operator == AssignmentOperator::Addition && var.kind == Kind::Str {
+            self.hint_string(cx, &a.right);
+        }
+        let old = (a.operator != AssignmentOperator::Assign).then(|| self.read_var(&var));
+        let value = self.combine(cx, a.operator, old, rhs, a.span)?;
+        Ok((var, self.store(Slot::Var(var.sym), var.ty, value)))
+    }
+
+    /// The value `x op= rhs` stores, given the old value (`None` for `=`).
+    fn combine(
+        &mut self,
+        cx: &mut FnCx,
+        op: AssignmentOperator,
+        old: Option<Val>,
+        rhs: Val,
+        span: Span,
+    ) -> R<Val> {
         use AssignmentOperator as A;
-        let arith = match a.operator {
+        let arith = match op {
             A::Subtraction => Some(BinOp::Sub),
             A::Multiplication => Some(BinOp::Mul),
             A::Division => Some(BinOp::Div),
             A::Remainder => Some(BinOp::Rem),
             _ => None,
         };
-        let bitwise = match a.operator {
+        let bitwise = match op {
             A::BitwiseOR => Some(BinOp::Or),
             A::BitwiseAnd => Some(BinOp::And),
             A::BitwiseXOR => Some(BinOp::Xor),
@@ -2162,38 +2727,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             _ => None,
         };
         let num = Val::num;
-        let value = if a.operator == A::Assign {
-            rhs
-        } else if a.operator == A::Addition {
-            if var.kind == Kind::Str {
-                self.hint_string(cx, &a.right);
-            }
-            add(self.read_var(&var), rhs)
-        } else if let Some(op) = arith {
-            let (l, r) = (self.num(self.read_var(&var), span)?, self.num(rhs, span)?);
-            num(Expr::binary(op, Type::F64, l, r))
-        } else if let Some(op) = bitwise {
-            let (l, r) = (self.num(self.read_var(&var), span)?, self.num(rhs, span)?);
-            num(from_i32(Expr::binary(op, Type::I32, to_i32(l), to_i32(r))))
-        } else if a.operator == A::ShiftRightZeroFill {
-            let (l, r) = (self.num(self.read_var(&var), span)?, self.num(rhs, span)?);
+        let Some(old) = old else {
+            return Ok(rhs);
+        };
+        Ok(if op == A::Addition {
+            add(old, rhs)
+        } else if let Some(bop) = arith {
+            let (l, r) = (self.num(old, span)?, self.num(rhs, span)?);
+            num(Expr::binary(bop, Type::F64, l, r))
+        } else if let Some(bop) = bitwise {
+            let (l, r) = (self.num(old, span)?, self.num(rhs, span)?);
+            num(from_i32(Expr::binary(bop, Type::I32, to_i32(l), to_i32(r))))
+        } else if op == A::ShiftRightZeroFill {
+            let (l, r) = (self.num(old, span)?, self.num(rhs, span)?);
             num(ushr(cx, l, r))
         } else {
-            return Err(self.unsupported(
-                span,
-                &format!("operator `{}`", a.operator.as_str()),
-                "later",
-            ));
-        };
-        Ok((var, self.store(Slot::Var(var.sym), var.ty, value)))
+            return Err(self.unsupported(span, &format!("operator `{}`", op.as_str()), "later"));
+        })
     }
 
     fn update_target(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<(Var, BinOp)> {
         let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument else {
             return Err(self.unsupported(
                 u.argument.span(),
-                "`++`/`--` on something other than a variable",
-                "T13",
+                "`++`/`--` on something other than a variable or a property",
+                "later",
             ));
         };
         let var = self.resolve(cx, id)?;
@@ -2265,9 +2823,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let name = self.scoping.symbol_name(sym);
         let throw = Stmt::Throw(Expr::intrinsic(
             Intrinsic::NewError(ErrorKind::ReferenceError),
-            vec![Expr::str(&format!(
-                "Cannot access '{name}' before initialization"
-            ))],
+            vec![
+                Expr::str(&format!("Cannot access '{name}' before initialization")),
+                Expr::undefined(),
+            ],
         ));
         match guard {
             Guard::Always => throw,

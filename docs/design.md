@@ -30,7 +30,9 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   (T08: integers in [-2^30, 2^30) except -0 are `i31ref`; the singletons are one `$oddball` struct type
   with a kind field. Variables, params and results are `f64` unless a non-number is ever stored in them:
   see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.)
-  (T12: errors are a runtime `$error { name, message }` struct until objects exist (T13); `typeof` is `"object"`.)
+  (T13: objects are `$object` dictionaries: entries in insertion order in GC arrays, a hash index past 8 entries, a
+  prototype. Built-in prototypes are created lazily; their methods are sentinels that trap when read until functions
+  exist (T14/T21). Errors are objects of class `error`. See `crates/backend/src/object.rs`.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.

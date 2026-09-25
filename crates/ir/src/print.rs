@@ -212,6 +212,8 @@ impl Printer<'_> {
                 let args: Vec<String> = args.iter().map(|a| self.expr(func, a)).collect();
                 let name = match op {
                     crate::Intrinsic::NewError(k) => format!("new_{}", k.name()),
+                    crate::Intrinsic::InstanceOf(b) => format!("instanceof_{}", b.name()),
+                    crate::Intrinsic::Prototype(b) => format!("{}_prototype", b.name()),
                     _ => op.name().to_string(),
                 };
                 format!("${name}({})", args.join(", "))

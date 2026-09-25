@@ -111,12 +111,12 @@ fn declarations_and_functions() {
 
 #[test]
 fn all_errors_are_reported() {
-    let e = errors("export function f() {\n  let s = 'a' * 2;\n  delete 1;\n  return 1 ** 2;\n}");
+    let e = errors("export function f() {\n  let s = 'a' * 2;\n  [1];\n  return 1 ** 2;\n}");
     assert_eq!(
         e,
         vec![
             "2:11 unsupported: converting a string to a number (planned: T21)",
-            "3:3 unsupported: operator `delete` (planned: T13)",
+            "3:3 unsupported: array literal (planned: T15)",
             "4:10 unsupported: operator `**` (planned: T21 (Math.pow))",
         ]
     );
@@ -212,15 +212,49 @@ fn exceptions() {
         "1:30 unsupported: `new` (only the native error constructors so far) (planned: T16)"
     );
     assert_eq!(
-        one("export function f() { return new Error('a', 1); }"),
-        "1:30 unsupported: error constructor with an options argument (planned: T13)"
-    );
-    assert_eq!(
         one("export function f() { try { } catch ({ a }) { } }"),
         "1:38 unsupported: destructuring `catch` parameter (planned: T15)"
     );
+}
+
+/// T13: objects lower; what's left for later is rejected.
+#[test]
+fn objects() {
+    for src in [
+        "export function f(k) { const o = { a: 1, [k]: 2, ...{ b: 3 }, __proto__: null }; return o.a + o[k]; }",
+        "export function f() { const o = {}; o.x = 1; o['y'] += 2; o.x++; delete o.x; return 'x' in o; }",
+        "export function f(o) { let n = 0; for (const k in o) n++; return n; }",
+        "export function f(o) { return o?.a?.[1] ?? Object.getPrototypeOf(Object.create(Error.prototype)); }",
+        "export function f(e) { return e instanceof TypeError && Object.hasOwn(e, 'message'); }",
+    ] {
+        lowers(src);
+    }
     assert_eq!(
-        one("export function f(e) { return e.stack; }"),
-        "1:31 unsupported: property access (planned: T13)"
+        one("export function f() { return { get x() { return 1; } }; }"),
+        "1:32 unsupported: getter or setter (planned: T16)"
+    );
+    assert_eq!(
+        one("export function f() { return { m() {} }; }"),
+        "1:32 unsupported: method (functions as values) (planned: T14)"
+    );
+    assert_eq!(
+        one("export function f(o) { return o instanceof Map; }"),
+        "1:44 unsupported: `instanceof` with something other than `Object` or a native constructor (planned: T14/T16)"
+    );
+    assert_eq!(
+        one("export function f(o) { return o?.m(); }"),
+        "1:31 unsupported: optional call `?.()` (planned: T14)"
+    );
+    assert_eq!(
+        one("export function f(o) { return Object.create(o, {}); }"),
+        "1:31 unsupported: `Object.create` with property descriptors (planned: not scheduled)"
+    );
+    assert_eq!(
+        one("export function f(o) { for (o.k in o) {} }"),
+        "1:29 unsupported: `for-in` target other than a variable (planned: later)"
+    );
+    assert_eq!(
+        one("export function f(o) { return o.m(); }"),
+        "1:31 unsupported: call of something other than a named function (planned: T14)"
     );
 }

@@ -242,3 +242,38 @@ fn traps_are_not_caught() {
     assert!(!stderr.contains("Uncaught"), "{stderr}");
     assert_eq!(String::from_utf8(stdout).unwrap(), "before\n");
 }
+
+/// T13: what isn't implemented yet traps instead of giving a wrong value: reading a built-in
+/// method (functions are T14/T21), `console.log` of a plain object (F24), a user `toString` (T14).
+#[test]
+fn unimplemented_object_features_trap() {
+    let dir = out_dir("objtrap");
+    for (name, src, trap) in [
+        (
+            "method",
+            "const o = {};\nconsole.log(\"before\");\nconsole.log(typeof o.toString);\n",
+            "builtin_not_implemented",
+        ),
+        (
+            "inspect",
+            "console.log(\"before\");\nconsole.log({ a: 1 });\n",
+            "inspect_object_not_implemented",
+        ),
+        (
+            "user",
+            "const o = { toString: 1 };\nconsole.log(\"before\");\nconsole.log(\"\" + o);\n",
+            "user_to_primitive_not_implemented",
+        ),
+    ] {
+        let src_path = dir.join(format!("{name}.js"));
+        std::fs::write(&src_path, src).unwrap();
+        let out = dir.join(format!("{name}.wasm"));
+        let b = build(&src_path, &out, &[]);
+        assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+        let (ok, stdout, stderr) = run_command(&out);
+        assert!(!ok, "{name}");
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(stderr.contains(trap), "{name}: {stderr}");
+        assert_eq!(String::from_utf8(stdout).unwrap(), "before\n", "{name}");
+    }
+}

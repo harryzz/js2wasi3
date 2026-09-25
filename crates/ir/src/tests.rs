@@ -285,7 +285,10 @@ fn may_throw_follows_calls() {
     add(vec![call(5)]); // 4, 5: mutual recursion, one throws
     add(vec![
         call(4),
-        Stmt::Expr(Expr::intrinsic(Intrinsic::Length, vec![Expr::undefined()])),
+        Stmt::Expr(Expr::intrinsic(
+            Intrinsic::GetProp,
+            vec![Expr::undefined(), Expr::str("x")],
+        )),
     ]);
     add(vec![call(6)]); // 6: recursion, never throws
     assert_eq!(may_throw(&m), [true, true, false, true, true, true, false]);

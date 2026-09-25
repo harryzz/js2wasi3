@@ -190,19 +190,48 @@ impl ErrorKind {
     }
 }
 
-/// A property of an error value that can be read before objects exist (T13).
+/// A built-in constructor whose prototype object the runtime provides (T13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorProp {
-    Name,
-    Message,
+pub enum Builtin {
+    Object,
+    String,
+    Number,
+    Boolean,
+    Error(ErrorKind),
 }
 
-impl ErrorProp {
-    pub fn as_str(self) -> &'static str {
+impl Builtin {
+    /// All of them; a builtin's index here is its prototype's runtime slot.
+    pub const ALL: [Builtin; 11] = [
+        Builtin::Object,
+        Builtin::String,
+        Builtin::Number,
+        Builtin::Boolean,
+        Builtin::Error(ErrorKind::Error),
+        Builtin::Error(ErrorKind::TypeError),
+        Builtin::Error(ErrorKind::RangeError),
+        Builtin::Error(ErrorKind::ReferenceError),
+        Builtin::Error(ErrorKind::SyntaxError),
+        Builtin::Error(ErrorKind::EvalError),
+        Builtin::Error(ErrorKind::UriError),
+    ];
+
+    pub fn name(self) -> &'static str {
         match self {
-            ErrorProp::Name => "name",
-            ErrorProp::Message => "message",
+            Builtin::Object => "Object",
+            Builtin::String => "String",
+            Builtin::Number => "Number",
+            Builtin::Boolean => "Boolean",
+            Builtin::Error(k) => k.name(),
         }
+    }
+
+    pub fn parse(s: &str) -> Option<Builtin> {
+        Builtin::ALL.into_iter().find(|b| b.name() == s)
+    }
+
+    pub fn index(self) -> u32 {
+        Builtin::ALL.iter().position(|b| *b == self).unwrap() as u32
     }
 }
 
@@ -217,8 +246,6 @@ pub enum Intrinsic {
     ToString,
     /// JS Number::toString of an `f64` (a string).
     NumberToString,
-    /// `v.length` (a TypeError for `undefined` / `null`).
-    Length,
     /// `s.length` of a JS value known to be a string, as an `f64`. Never throws.
     StringLength,
     /// `typeof v` (a string).
@@ -230,12 +257,41 @@ pub enum Intrinsic {
     NoFormat,
     /// Append a JS string to stdout (`stderr: false`) or stderr. No result. Commands only.
     ConsoleWrite { stderr: bool },
-    /// `new E(message)` / `E(message)`: a new error; the message is `""` if the argument is
-    /// `undefined`, else its ToString.
+    /// `new E(message, options)` / `E(…)`: a new error object; an own `message` unless the
+    /// message is `undefined`, an own `cause` if `options` is an object with one.
     NewError(ErrorKind),
-    /// `v.name` / `v.message`: the field of an error; `undefined` on other primitives; a
-    /// TypeError is thrown for `undefined` / `null`.
-    ErrorProp(ErrorProp),
+    /// `{}`: a new plain object (prototype `Object.prototype`).
+    NewObject,
+    /// `v[key]`: property get (a TypeError on `undefined` / `null`).
+    GetProp,
+    /// `v[key] = value` (no result; TypeErrors as in strict mode).
+    SetProp,
+    /// `key: value` in an object literal: define an own property of a new object (no result).
+    DefineProp,
+    /// `delete v[key]` (`bool`).
+    DeleteProp,
+    /// `key in v` (`bool`; a TypeError if `v` isn't an object).
+    HasProp,
+    /// `__proto__: p` in an object literal: set the prototype if `p` is an object or `null`.
+    SetProto,
+    /// `...src` in an object literal: copy `src`'s own enumerable properties into the object.
+    CopyProps,
+    /// The keys `for (k in v)` visits, as an internal list (a `jsval` that never reaches JS).
+    ForInKeys,
+    /// Length of a key list (`i32`).
+    KeysLen,
+    /// Key `i` (`i32`) of a key list (a string).
+    KeysGet,
+    /// `Object.create(p)`.
+    ObjectCreate,
+    /// `Object.getPrototypeOf(v)`.
+    GetPrototypeOf,
+    /// `Object.hasOwn(v, key)` (`bool`).
+    HasOwn,
+    /// `v instanceof B` (`bool`).
+    InstanceOf(Builtin),
+    /// `B.prototype`.
+    Prototype(Builtin),
 }
 
 impl Intrinsic {
@@ -245,12 +301,22 @@ impl Intrinsic {
         match self {
             Intrinsic::JsAdd | Intrinsic::Concat => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::ToString
-            | Intrinsic::Length
             | Intrinsic::TypeofString
             | Intrinsic::Inspect
             | Intrinsic::NoFormat
-            | Intrinsic::NewError(_)
-            | Intrinsic::ErrorProp(_) => (&[JsVal], Some(JsVal)),
+            | Intrinsic::ForInKeys
+            | Intrinsic::ObjectCreate
+            | Intrinsic::GetPrototypeOf => (&[JsVal], Some(JsVal)),
+            Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
+            Intrinsic::SetProp | Intrinsic::DefineProp => (&[JsVal, JsVal, JsVal], None),
+            Intrinsic::DeleteProp | Intrinsic::HasProp | Intrinsic::HasOwn => {
+                (&[JsVal, JsVal], Some(Bool))
+            }
+            Intrinsic::SetProto | Intrinsic::CopyProps => (&[JsVal, JsVal], None),
+            Intrinsic::KeysLen => (&[JsVal], Some(I32)),
+            Intrinsic::KeysGet => (&[JsVal, I32], Some(JsVal)),
+            Intrinsic::InstanceOf(_) => (&[JsVal], Some(Bool)),
             Intrinsic::NumberToString => (&[F64], Some(JsVal)),
             Intrinsic::StringLength => (&[JsVal], Some(F64)),
             Intrinsic::ConsoleWrite { .. } => (&[JsVal], None),
@@ -263,7 +329,6 @@ impl Intrinsic {
             Intrinsic::Concat => "concat",
             Intrinsic::ToString => "to_string",
             Intrinsic::NumberToString => "number_to_string",
-            Intrinsic::Length => "length",
             Intrinsic::StringLength => "string_length",
             Intrinsic::TypeofString => "typeof",
             Intrinsic::Inspect => "inspect",
@@ -271,14 +336,37 @@ impl Intrinsic {
             Intrinsic::ConsoleWrite { stderr: false } => "write_stdout",
             Intrinsic::ConsoleWrite { stderr: true } => "write_stderr",
             Intrinsic::NewError(_) => "new_error",
-            Intrinsic::ErrorProp(ErrorProp::Name) => "get_name",
-            Intrinsic::ErrorProp(ErrorProp::Message) => "get_message",
+            Intrinsic::NewObject => "new_object",
+            Intrinsic::GetProp => "get",
+            Intrinsic::SetProp => "set",
+            Intrinsic::DefineProp => "define",
+            Intrinsic::DeleteProp => "delete",
+            Intrinsic::HasProp => "has",
+            Intrinsic::SetProto => "set_proto",
+            Intrinsic::CopyProps => "copy_props",
+            Intrinsic::ForInKeys => "for_in_keys",
+            Intrinsic::KeysLen => "keys_len",
+            Intrinsic::KeysGet => "keys_get",
+            Intrinsic::ObjectCreate => "object_create",
+            Intrinsic::GetPrototypeOf => "get_prototype_of",
+            Intrinsic::HasOwn => "has_own",
+            Intrinsic::InstanceOf(_) => "instanceof",
+            Intrinsic::Prototype(_) => "prototype",
         }
     }
 
     /// Can it throw a JS value? (Traps don't count.)
     pub fn may_throw(self) -> bool {
-        matches!(self, Intrinsic::Length | Intrinsic::ErrorProp(_))
+        matches!(
+            self,
+            Intrinsic::GetProp
+                | Intrinsic::SetProp
+                | Intrinsic::DeleteProp
+                | Intrinsic::HasProp
+                | Intrinsic::ObjectCreate
+                | Intrinsic::GetPrototypeOf
+                | Intrinsic::HasOwn
+        )
     }
 }
 

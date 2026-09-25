@@ -8,33 +8,41 @@
 //!   immutable globals built with `array.new_fixed` (see [`Cx::string`]).
 //! - `undefined`, `null`, `false`, `true`: four `$oddball` singletons (immutable globals 0–3)
 //!   whose field is the kind below. Identity (`ref.eq`) compares them.
-//! - Errors (T12, until objects exist): `$error { name, message: (ref $string) }`, made by the
-//!   native error constructors. `typeof` is `"object"`, ToString is `Error.prototype.toString`,
-//!   ToPrimitive is that string (so ToNumber is NaN), `console.log` shows `[name: message]`
-//!   (node's format for an error without a stack).
-//! - Types: one `rec` group `[$number, $oddball, $string, $i64s, $error]` at type indices 0–4
-//!   (`$i64s` holds the number → string tables, see [`crate::numstr`]).
+//! - Objects (T13): `$object`, a dictionary with a prototype; errors are objects of class
+//!   `error`. See [`crate::object`] for the layout, the built-in prototypes and the helpers.
+//!   `console.log` shows an error as `[name: message]` (node's format for an error without a stack).
+//! - Types: one `rec` group `[$number, $oddball, $string, $i64s, $object, $keys, $vals, $bytes,
+//!   $i32s]` at type indices 0–8 (`$i64s` holds the number → string tables, see [`crate::numstr`];
+//!   the last four are an object's arrays).
 //! - Exceptions (design D2): one tag, [`TAG`], `(param (ref null eq))`: `throw` throws the JS value.
 //!   Runtime errors (reading a property of `null`) throw a TypeError the same way.
 //!
 //! The helpers know these values. Objects (T13) extend them.
 
-use js2wasi3_ir::{ErrorKind, ErrorProp, TypeofTag};
+use js2wasi3_ir::{ErrorKind, TypeofTag};
 use wasm_encoder::{
     ArrayType, BlockType, CompositeInnerType, CompositeType, ConstExpr, FieldType, Function,
     GlobalSection, GlobalType, HeapType, Instruction, InstructionSink, RefType, StorageType,
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, host, numstr};
+use crate::{abi, host, numstr, object};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
 pub const T_STRING: u32 = 2;
 pub const T_I64S: u32 = 3;
-pub const T_ERROR: u32 = 4;
+pub const T_OBJECT: u32 = 4;
+/// `(array (mut (ref null $string)))`: property keys (also key lists for `for-in`).
+pub const T_KEYS: u32 = 5;
+/// `(array (mut (ref null eq)))`: property values.
+pub const T_VALS: u32 = 6;
+/// `(array (mut i8))`: property attributes.
+pub const T_BYTES: u32 = 7;
+/// `(array (mut i32))`: an object's hash index.
+pub const T_I32S: u32 = 8;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 5;
+pub const TYPES: u32 = 9;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -45,14 +53,19 @@ pub const G_FALSE: u32 = 2;
 pub const G_TRUE: u32 = 3;
 /// `(mut (ref null $i64s))`: the number → string tables, loaded on first use.
 pub const G_TABLES: u32 = 4;
+/// An oddball that stands for a built-in method in a prototype (see [`crate::object`]).
+pub const G_BUILTIN: u32 = 5;
+/// `(mut (ref null $object))` per [`js2wasi3_ir::Builtin`]: its prototype, created on first use.
+pub const G_PROTOS: u32 = 6;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = 5;
+pub const GLOBALS: u32 = G_PROTOS + js2wasi3_ir::Builtin::ALL.len() as u32;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
 const K_NULL: i32 = 1;
 const K_FALSE: i32 = 2;
 const K_TRUE: i32 = 3;
+const K_BUILTIN: i32 = 4;
 
 /// Smallest and one past the largest integer kept as an `i31ref`.
 const I31_MIN: i32 = -(1 << 30);
@@ -106,8 +119,16 @@ fn i31() -> HeapType {
     HeapType::I31
 }
 
-pub fn error() -> HeapType {
-    HeapType::Concrete(T_ERROR)
+pub fn object() -> HeapType {
+    HeapType::Concrete(T_OBJECT)
+}
+
+/// `(ref null? $t)` for a runtime type.
+pub fn rt(nullable: bool, t: u32) -> ValType {
+    ValType::Ref(RefType {
+        nullable,
+        heap_type: HeapType::Concrete(t),
+    })
 }
 
 /// The `typeof` code of a tag: its index in [`TypeofTag::ALL`].
@@ -147,12 +168,34 @@ pub fn types(types: &mut TypeSection) {
             StorageType::Val(ValType::I64),
             false,
         )))),
+        // $object: class, proto, keys, vals, attrs, count, index (see `object.rs`).
         sub(CompositeInnerType::Struct(StructType {
             fields: Box::new([
-                field(StorageType::Val(string_ref()), false),
-                field(StorageType::Val(string_ref()), false),
+                field(StorageType::Val(ValType::I32), false),
+                field(StorageType::Val(rt(true, T_OBJECT)), true),
+                field(StorageType::Val(rt(false, T_KEYS)), true),
+                field(StorageType::Val(rt(false, T_VALS)), true),
+                field(StorageType::Val(rt(false, T_BYTES)), true),
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(rt(true, T_I32S)), true),
             ]),
         })),
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::Val(rt(true, T_STRING)),
+            true,
+        )))),
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::Val(jsval()),
+            true,
+        )))),
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::I8,
+            true,
+        )))),
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::Val(ValType::I32),
+            true,
+        )))),
     ]);
 }
 
@@ -185,6 +228,30 @@ pub fn globals(globals: &mut GlobalSection) {
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_I64S)),
     );
+    globals.global(
+        GlobalType {
+            val_type: ValType::Ref(RefType {
+                nullable: false,
+                heap_type: oddball(),
+            }),
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::extended([
+            Instruction::I32Const(K_BUILTIN),
+            Instruction::StructNew(T_ODDBALL),
+        ]),
+    );
+    for _ in js2wasi3_ir::Builtin::ALL {
+        globals.global(
+            GlobalType {
+                val_type: rt(true, T_OBJECT),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(object()),
+        );
+    }
 }
 
 /// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
@@ -252,19 +319,15 @@ pub enum Helper {
     Concat,
     ToString,
     JsAdd,
-    Length,
     Inspect,
     NoFormat,
-    /// `(message: jsval) -> jsval`: `new E(message)`.
-    NewError(ErrorKind),
-    /// `(v: jsval) -> jsval`: `v.name` / `v.message`.
-    ErrorProp(ErrorProp),
     /// `(v: jsval, prop: (ref $string))`: throw the TypeError for reading `prop` of `undefined`/`null`.
     ThrowRead,
     /// `(v: jsval) -> (ref $string)`: how an uncaught exception is shown: ToString for an
     /// error, the `console.log` text otherwise.
     Describe,
     Num(numstr::Helper),
+    Obj(object::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
 }
@@ -285,15 +348,12 @@ impl Helper {
             Helper::Concat => "concat",
             Helper::ToString => "to_string",
             Helper::JsAdd => "js_add",
-            Helper::Length => "length",
             Helper::Inspect => "inspect",
             Helper::NoFormat => "no_format",
-            Helper::NewError(_) => "new_error",
-            Helper::ErrorProp(ErrorProp::Name) => "get_name",
-            Helper::ErrorProp(ErrorProp::Message) => "get_message",
             Helper::ThrowRead => "throw_read_error",
             Helper::Describe => "describe",
             Helper::Num(h) => h.name(),
+            Helper::Obj(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
         }
@@ -313,12 +373,11 @@ impl Helper {
             Helper::StrEq => (vec![s, s], vec![ValType::I32]),
             Helper::Concat => (vec![s, s], vec![s]),
             Helper::JsAdd => (vec![v, v], vec![v]),
-            Helper::Length | Helper::NoFormat | Helper::NewError(_) | Helper::ErrorProp(_) => {
-                (vec![v], vec![v])
-            }
+            Helper::NoFormat => (vec![v], vec![v]),
             Helper::Inspect | Helper::Describe => (vec![v], vec![s]),
             Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
+            Helper::Obj(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
         }
@@ -327,7 +386,7 @@ impl Helper {
     pub fn body(self, cx: &mut dyn Cx) -> Function {
         match self {
             Helper::Box => box_number(),
-            Helper::ToNumber => to_number(),
+            Helper::ToNumber => to_number(cx),
             Helper::ToBoolean => to_boolean(),
             Helper::IsNumber => is_number(),
             Helper::IsNullish => is_nullish(),
@@ -339,14 +398,12 @@ impl Helper {
             Helper::Concat => concat(),
             Helper::ToString => to_string(cx),
             Helper::JsAdd => js_add(cx),
-            Helper::Length => length(cx),
             Helper::Inspect => inspect(cx),
             Helper::NoFormat => no_format(),
-            Helper::NewError(k) => new_error(cx, k),
-            Helper::ErrorProp(p) => error_prop(cx, p),
             Helper::ThrowRead => throw_read(cx),
             Helper::Describe => describe(cx),
             Helper::Num(h) => h.body(cx),
+            Helper::Obj(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());
                 h.body(cx, base, main)
@@ -401,7 +458,8 @@ fn as_string(s: &mut InstructionSink, v: u32) {
 }
 
 /// `$to_number(v: jsval) -> f64`: JS ToNumber on primitives.
-fn to_number() -> Function {
+fn to_number(cx: &mut dyn Cx) -> Function {
+    let to_primitive_num = cx.helper(Helper::Obj(object::Helper::ObjectToNumber));
     const V: u32 = 0;
     const K: u32 = 1;
     let mut f = Function::new([(1, ValType::I32)]);
@@ -424,10 +482,14 @@ fn to_number() -> Function {
     s.if_(BlockType::Empty);
     s.unreachable();
     s.end();
-    // An error's ToPrimitive is "Name: message", which is never numeric.
-    s.local_get(V).ref_test_non_null(error());
+    // An object's ToPrimitive is a string: "" is 0; one starting with `[` ("[object Object]") or a
+    // letter other than `I` (an error's "Name: message") can't be numeric, so NaN. Others: F20.
+    s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
-    s.f64_const(f64::NAN.into()).return_();
+    s.local_get(V)
+        .ref_cast_non_null(object())
+        .call(to_primitive_num);
+    s.return_();
     s.end();
     // undefined → NaN, null/false → 0, true → 1.
     kind(&mut s, V);
@@ -472,8 +534,8 @@ fn to_boolean() -> Function {
     as_string(&mut s, V);
     s.array_len().i32_const(0).i32_ne();
     s.else_();
-    // Errors (objects) are truthy.
-    s.local_get(V).ref_test_non_null(error());
+    // Objects are truthy.
+    s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(1);
     s.else_();
@@ -549,8 +611,8 @@ fn strict_eq(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$loose_eq(a, b) -> i32`: JS `==`. Two errors compare by identity, one error as its
-/// ToString. Then `null == undefined`; a nullish value equals nothing else; two strings compare
+/// `$loose_eq(a, b) -> i32`: JS `==`. Two objects compare by identity, one object as its
+/// ToPrimitive (a string). Then `null == undefined`; a nullish value equals nothing else; two strings compare
 /// by content; anything else compares as numbers.
 fn loose_eq(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(Helper::IsNullish);
@@ -561,15 +623,15 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
     let mut f = Function::new([(2, ValType::I32)]);
     let mut s = f.instructions();
-    // Two errors (objects) compare by identity; one error compares as its ToPrimitive, a string.
-    s.local_get(0).ref_test_non_null(error());
-    s.local_get(1).ref_test_non_null(error());
+    // Two objects compare by identity; one object compares as its ToPrimitive, a string.
+    s.local_get(0).ref_test_non_null(object());
+    s.local_get(1).ref_test_non_null(object());
     s.i32_and();
     s.if_(BlockType::Empty);
     s.local_get(0).local_get(1).ref_eq().return_();
     s.end();
     for v in [0, 1] {
-        s.local_get(v).ref_test_non_null(error());
+        s.local_get(v).ref_test_non_null(object());
         s.if_(BlockType::Empty);
         s.local_get(v).call(to_string).local_set(v);
         s.end();
@@ -610,7 +672,7 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::String));
     s.else_();
-    s.local_get(V).ref_test_non_null(error());
+    s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Object));
     s.else_();
@@ -725,13 +787,12 @@ fn concat() -> Function {
     f
 }
 
-/// `$to_string(v: jsval) -> (ref $string)`: JS ToString on primitives and errors.
+/// `$to_string(v: jsval) -> (ref $string)`: JS ToString (objects: their ToPrimitive).
 fn to_string(cx: &mut dyn Cx) -> Function {
     let is_number = cx.helper(Helper::IsNumber);
     let to_number = cx.helper(Helper::ToNumber);
     let number_to_string = cx.helper(Helper::Num(numstr::Helper::NumberToString));
-    let concat = cx.helper(Helper::Concat);
-    let colon = cx.str(": ");
+    let to_primitive = cx.helper(Helper::Obj(object::Helper::ToPrimitive));
     let names = [
         cx.str("undefined"),
         cx.str("null"),
@@ -754,35 +815,12 @@ fn to_string(cx: &mut dyn Cx) -> Function {
         .call(number_to_string)
         .return_();
     s.end();
-    // Error.prototype.toString: "name: message", or just one of them if the other is empty.
-    s.local_get(V).ref_test_non_null(error());
+    s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     s.local_get(V)
-        .ref_cast_non_null(error())
-        .struct_get(T_ERROR, 0);
-    s.local_get(V)
-        .ref_cast_non_null(error())
-        .struct_get(T_ERROR, 1);
-    s.array_len().i32_eqz();
-    s.br_if(1);
-    s.drop();
-    s.local_get(V)
-        .ref_cast_non_null(error())
-        .struct_get(T_ERROR, 1);
-    s.local_get(V)
-        .ref_cast_non_null(error())
-        .struct_get(T_ERROR, 0);
-    s.array_len().i32_eqz();
-    s.br_if(1);
-    s.drop();
-    s.local_get(V)
-        .ref_cast_non_null(error())
-        .struct_get(T_ERROR, 0);
-    s.global_get(colon).call(concat);
-    s.local_get(V)
-        .ref_cast_non_null(error())
-        .struct_get(T_ERROR, 1);
-    s.call(concat).return_();
+        .ref_cast_non_null(object())
+        .call(to_primitive)
+        .return_();
     s.end();
     kind(&mut s, V);
     s.local_set(K);
@@ -797,7 +835,7 @@ fn to_string(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$js_add(a, b: jsval) -> jsval`: JS `+`. If either is a string or an error (whose
+/// `$js_add(a, b: jsval) -> jsval`: JS `+`. If either is a string or an object (whose
 /// ToPrimitive is a string), concatenate the ToString of both; otherwise add the ToNumber of both.
 fn js_add(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
@@ -806,10 +844,10 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     let box_ = cx.helper(Helper::Box);
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    // An error's ToPrimitive is a string too.
+    // An object's ToPrimitive is a string too.
     for v in [0, 1] {
         s.local_get(v).ref_test_non_null(string());
-        s.local_get(v).ref_test_non_null(error());
+        s.local_get(v).ref_test_non_null(object());
         s.i32_or();
     }
     s.i32_or();
@@ -826,46 +864,27 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$length(v: jsval) -> jsval`: `v.length`. A string's length; `undefined` for numbers,
-/// booleans and errors. On `undefined`/`null` it throws a TypeError.
-fn length(cx: &mut dyn Cx) -> Function {
-    let is_nullish = cx.helper(Helper::IsNullish);
-    let box_ = cx.helper(Helper::Box);
-    let throw_read = cx.helper(Helper::ThrowRead);
-    let prop = cx.str("length");
-    const V: u32 = 0;
-    let mut f = Function::new([]);
-    let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(string());
-    s.if_(BlockType::Empty);
-    as_string(&mut s, V);
-    s.array_len().f64_convert_i32_u().call(box_).return_();
-    s.end();
-    s.local_get(V).call(is_nullish);
-    s.if_(BlockType::Empty);
-    s.local_get(V).global_get(prop).call(throw_read);
-    s.unreachable();
-    s.end();
-    s.global_get(G_UNDEFINED);
-    s.end();
-    f
-}
-
 /// `$inspect(v) -> (ref $string)`: how `console.log` shows a primitive: ToString, except
 /// that `-0` shows as `-0`. An error shows as `[<ToString>]` (node, for an error without a stack).
+/// Other objects trap (`inspect_object`): node's `util.inspect` format isn't implemented (F24).
 fn inspect(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
     let concat = cx.helper(Helper::Concat);
+    let trap = cx.helper(Helper::Obj(object::Helper::InspectTrap));
     let minus_zero = cx.str("-0");
     let (open, close) = (cx.str("["), cx.str("]"));
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(error());
+    s.local_get(V).ref_test_non_null(object());
+    s.if_(BlockType::Empty);
+    object::is_error(&mut s, V);
     s.if_(BlockType::Empty);
     s.global_get(open);
     s.local_get(V).call(to_string).call(concat);
     s.global_get(close).call(concat).return_();
+    s.end();
+    s.call(trap);
     s.end();
     // -0 is never an i31.
     s.local_get(V).ref_test_non_null(number());
@@ -914,63 +933,12 @@ fn no_format() -> Function {
     f
 }
 
-/// `$new_error(message: jsval) -> jsval`: `new E(message)`: the message is `""` for
-/// `undefined`, otherwise its ToString.
-fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
-    let to_string = cx.helper(Helper::ToString);
-    let name = cx.str(k.name());
-    let empty = cx.str("");
-    const M: u32 = 0;
-    let mut f = Function::new([]);
-    let mut s = f.instructions();
-    s.global_get(name);
-    s.local_get(M).global_get(G_UNDEFINED).ref_eq();
-    s.if_(BlockType::Result(string_ref()));
-    s.global_get(empty);
-    s.else_();
-    s.local_get(M).call(to_string);
-    s.end();
-    s.struct_new(T_ERROR);
-    s.end();
-    f
-}
-
-/// `$get_name(v)` / `$get_message(v) -> jsval`: the field of an error; `undefined` for other
-/// primitives; a TypeError for `undefined` / `null`.
-fn error_prop(cx: &mut dyn Cx, p: ErrorProp) -> Function {
-    let is_nullish = cx.helper(Helper::IsNullish);
-    let throw_read = cx.helper(Helper::ThrowRead);
-    let prop = cx.str(p.as_str());
-    let field = match p {
-        ErrorProp::Name => 0,
-        ErrorProp::Message => 1,
-    };
-    const V: u32 = 0;
-    let mut f = Function::new([]);
-    let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(error());
-    s.if_(BlockType::Empty);
-    s.local_get(V)
-        .ref_cast_non_null(error())
-        .struct_get(T_ERROR, field)
-        .return_();
-    s.end();
-    s.local_get(V).call(is_nullish);
-    s.if_(BlockType::Empty);
-    s.local_get(V).global_get(prop).call(throw_read);
-    s.unreachable();
-    s.end();
-    s.global_get(G_UNDEFINED);
-    s.end();
-    f
-}
-
 /// `$throw_read_error(v: jsval, prop: (ref $string))`: throw node's TypeError for reading a
 /// property of `undefined` / `null`: "Cannot read properties of null (reading 'prop')".
 fn throw_read(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
     let concat = cx.helper(Helper::Concat);
-    let name = cx.str(ErrorKind::TypeError.name());
+    let throw = cx.helper(Helper::Obj(object::Helper::Throw(ErrorKind::TypeError)));
     let parts = [
         cx.str("Cannot read properties of "),
         cx.str(" (reading '"),
@@ -980,14 +948,12 @@ fn throw_read(cx: &mut dyn Cx) -> Function {
     const PROP: u32 = 1;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.global_get(name);
     s.global_get(parts[0]);
     s.local_get(V).call(to_string).call(concat);
     s.global_get(parts[1]).call(concat);
     s.local_get(PROP).call(concat);
     s.global_get(parts[2]).call(concat);
-    s.struct_new(T_ERROR);
-    s.throw(TAG);
+    s.call(throw);
     s.end();
     f
 }
@@ -999,7 +965,7 @@ fn describe(cx: &mut dyn Cx) -> Function {
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(error());
+    object::is_error(&mut s, V);
     s.if_(BlockType::Result(string_ref()));
     s.local_get(V).call(to_string);
     s.else_();

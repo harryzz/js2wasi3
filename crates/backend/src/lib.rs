@@ -28,6 +28,7 @@
 mod abi;
 mod host;
 mod numstr;
+mod object;
 mod runtime;
 
 use std::collections::HashMap;
@@ -872,7 +873,7 @@ impl Emitter<'_> {
                 {
                     bail!("internal error: console output in a module that isn't a command");
                 }
-                for a in args {
+                for (i, a) in args.iter().enumerate() {
                     self.expr(s, frames, a)?;
                     if matches!(
                         op,
@@ -882,26 +883,59 @@ impl Emitter<'_> {
                     ) {
                         s.ref_cast_non_null(runtime::string());
                     }
+                    if matches!(op, Intrinsic::KeysLen | Intrinsic::KeysGet) && i == 0 {
+                        s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_KEYS));
+                    }
                 }
-                if *op == Intrinsic::StringLength {
-                    s.array_len().f64_convert_i32_u();
-                    return Ok(true);
+                // Inline.
+                match op {
+                    Intrinsic::StringLength => {
+                        s.array_len().f64_convert_i32_u();
+                        return Ok(true);
+                    }
+                    Intrinsic::KeysLen => {
+                        s.array_len();
+                        return Ok(true);
+                    }
+                    Intrinsic::KeysGet => {
+                        s.array_get(runtime::T_KEYS);
+                        return Ok(true);
+                    }
+                    Intrinsic::Prototype(b) => {
+                        s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::Proto(*b)))));
+                        return Ok(true);
+                    }
+                    _ => {}
                 }
                 let h = match op {
                     Intrinsic::JsAdd => H::JsAdd,
                     Intrinsic::Concat => H::Concat,
                     Intrinsic::ToString => H::ToString,
                     Intrinsic::NumberToString => H::Num(numstr::Helper::NumberToString),
-                    Intrinsic::Length => H::Length,
-                    Intrinsic::StringLength => unreachable!("inline"),
+                    Intrinsic::StringLength
+                    | Intrinsic::KeysLen
+                    | Intrinsic::KeysGet
+                    | Intrinsic::Prototype(_) => unreachable!("inline"),
                     Intrinsic::TypeofString => H::TypeofString,
                     Intrinsic::Inspect => H::Inspect,
                     Intrinsic::NoFormat => H::NoFormat,
                     Intrinsic::ConsoleWrite { stderr } => {
                         H::Host(host::Helper::Append(*stderr as u32))
                     }
-                    Intrinsic::NewError(k) => H::NewError(*k),
-                    Intrinsic::ErrorProp(p) => H::ErrorProp(*p),
+                    Intrinsic::NewError(k) => H::Obj(object::Helper::NewError(*k)),
+                    Intrinsic::NewObject => H::Obj(object::Helper::NewObject),
+                    Intrinsic::GetProp => H::Obj(object::Helper::Get),
+                    Intrinsic::SetProp => H::Obj(object::Helper::Set),
+                    Intrinsic::DefineProp => H::Obj(object::Helper::DefineProp),
+                    Intrinsic::DeleteProp => H::Obj(object::Helper::Delete),
+                    Intrinsic::HasProp => H::Obj(object::Helper::Has),
+                    Intrinsic::SetProto => H::Obj(object::Helper::SetProto),
+                    Intrinsic::CopyProps => H::Obj(object::Helper::CopyProps),
+                    Intrinsic::ForInKeys => H::Obj(object::Helper::ForInKeys),
+                    Intrinsic::ObjectCreate => H::Obj(object::Helper::Create),
+                    Intrinsic::GetPrototypeOf => H::Obj(object::Helper::GetPrototypeOf),
+                    Intrinsic::HasOwn => H::Obj(object::Helper::HasOwn),
+                    Intrinsic::InstanceOf(b) => H::Obj(object::Helper::InstanceOf(*b)),
                 };
                 s.call(self.helper_index(Helper::Js(h)));
                 return Ok(op.signature().1.is_some());

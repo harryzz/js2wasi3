@@ -17,6 +17,7 @@
 use js2wasi3_ir::{AbiSig, AbiType};
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType};
 
+use crate::object;
 use crate::runtime::{self, Cx, T_STRING};
 
 /// First address the allocator hands out (keeps 0 an invalid pointer).
@@ -168,7 +169,10 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
     }
     let to_utf8 = to_utf8.expect("errors carry strings");
     let describe = cx.helper(runtime::Helper::Describe);
+    let get = cx.helper(runtime::Helper::Obj(object::Helper::Get));
+    let to_string = cx.helper(runtime::Helper::ToString);
     let empty = cx.str("");
+    let (name, message) = (cx.str("name"), cx.str("message"));
     // result<T, js-error>: payload offset (= alignment) and size.
     let payload: u64 = if sig.result == Some(AbiType::F64) {
         8
@@ -209,20 +213,19 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
     s.local_set(exc);
     alloc(&mut s, payload as i32, size);
     s.local_get(ret).i32_const(1).i32_store8(mem(0, 0));
-    s.local_get(exc).ref_test_non_null(runtime::error());
+    object::is_error(&mut s, exc);
     s.if_(BlockType::Result(runtime::string_ref()));
-    s.local_get(exc)
-        .ref_cast_non_null(runtime::error())
-        .struct_get(runtime::T_ERROR, 0);
+    s.local_get(exc).global_get(name).call(get).call(to_string);
     s.else_();
     s.global_get(empty);
     s.end();
     store_string(&mut s, to_utf8, payload);
-    s.local_get(exc).ref_test_non_null(runtime::error());
+    object::is_error(&mut s, exc);
     s.if_(BlockType::Result(runtime::string_ref()));
     s.local_get(exc)
-        .ref_cast_non_null(runtime::error())
-        .struct_get(runtime::T_ERROR, 1);
+        .global_get(message)
+        .call(get)
+        .call(to_string);
     s.else_();
     s.local_get(exc).call(describe);
     s.end();
