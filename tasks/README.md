@@ -7,6 +7,8 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
+**Next up: T07.** Start with the *Handoff* section in [T07-component-lib.md](T07-component-lib.md).
+
 | Task | Title | Status | Depends on |
 |---|---|---|---|
 | [T01](T01-toolchain-probes.md) | Pin toolchain, prove features | done | - |
