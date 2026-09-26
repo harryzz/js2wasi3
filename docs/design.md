@@ -146,7 +146,16 @@ consistent comparator). Prelude code is typed by the same inference as user code
 sentinels like the others, so ToPrimitive calls the prelude's `toString`) and `builtins/json.js` (`JSON.stringify`: the
 spec's algorithm writing pieces into one array joined at the end; node's circular-structure message). The intrinsic
 `define(o, k, v)` is CreateDataProperty. A static of a global the prelude has statics for but not this one
-(`JSON.parse`) is rejected by name.)
+(`JSON.rawJSON`) is rejected by name.)
+(T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude
+globals (no user code runs while parsing), members stored with `define` (`__proto__` is an own key), numbers other
+than short integers through `$$StringToNumber`, then the reviver walk; node 20's SyntaxError messages and context
+excerpts reproduced exactly.)
+(T25 slice 2: `Map`/`Set` keep their storage native and their methods in the prelude: `$map` (a subtype of `$object`)
+holds an ordered SameValueZero hash table (`crates/backend/src/mapset.rs`: insertion order, deleted entries as holes,
+objects hashed by an identity hash in `class`'s high bits); `builtins/map.js` implements the methods over
+`__intrinsic_map_*`. Iterators survive rehash and `clear` by V8's obsolete-table transitions. `new Map(…)` is a
+direct call of `$$Map`; `Map` itself isn't a value yet.)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

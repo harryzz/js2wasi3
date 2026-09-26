@@ -43,6 +43,7 @@ mod generator;
 mod host;
 mod inspect;
 mod iter;
+mod mapset;
 mod numstr;
 mod object;
 mod pow;
@@ -659,6 +660,10 @@ impl runtime::Cx for Emitter<'_> {
 
     fn string_to_number(&mut self) -> Option<u32> {
         self.m.string_to_number.map(|f| self.func_base + f.0)
+    }
+
+    fn has_maps(&mut self) -> bool {
+        self.m.maps
     }
 
     fn builtin_methods(&mut self, b: ir::Builtin) -> Vec<(String, u32, u32)> {
@@ -1312,6 +1317,7 @@ impl Emitter<'_> {
                     Intrinsic::PromiseCtor => H::Prom(promise::Helper::Ctor),
                     Intrinsic::QueueMicrotask => H::Prom(promise::Helper::QueueMicrotask),
                     Intrinsic::Timer(k) => H::Timer(timers::Helper::Fn(*k)),
+                    Intrinsic::Map(op) => H::Map(mapset::Helper::Op(*op)),
                     Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
                     Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
                     Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),

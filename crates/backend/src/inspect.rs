@@ -20,7 +20,7 @@ use crate::array::{self, F_ELEMS, F_LENGTH};
 use crate::runtime::{
     self, Cx, T_ARRAY, T_KEYS, T_NUMBER, T_STRING, T_VALS, jsval, rt, string, string_ref,
 };
-use crate::{func, object, promise, props};
+use crate::{func, mapset, object, promise, props};
 
 const BREAK_LENGTH: i32 = 80;
 
@@ -49,6 +49,9 @@ pub enum Helper {
     Pad,
     /// `(entries, n, sep) -> (ref $string)`.
     Join,
+    /// `(m: (ref $map), depth, indent) -> (ref $string)`: `Map(n) { k => v, … }` / `Set(n) { … }`
+    /// (T25).
+    MapSet,
 }
 
 impl Helper {
@@ -64,6 +67,7 @@ impl Helper {
             Helper::Spaces => "spaces",
             Helper::Pad => "pad",
             Helper::Join => "join_strings",
+            Helper::MapSet => "inspect_map",
         }
     }
 
@@ -75,6 +79,7 @@ impl Helper {
         match self {
             Helper::Format => (vec![v, I32, I32, I32], vec![s]),
             Helper::Array => (vec![rt(false, T_ARRAY), I32, I32], vec![s]),
+            Helper::MapSet => (vec![rt(false, runtime::T_MAP), I32, I32], vec![s]),
             Helper::Object => (
                 vec![rt(false, runtime::T_OBJECT), I32, I32, rt(true, T_STRING)],
                 vec![s],
@@ -100,6 +105,7 @@ impl Helper {
             Helper::Spaces => spaces(),
             Helper::Pad => pad(cx),
             Helper::Join => join(cx),
+            Helper::MapSet => format_mapset(cx),
         }
     }
 }
@@ -122,6 +128,7 @@ fn format(cx: &mut dyn Cx) -> Function {
     let concat = cx.helper(runtime::Helper::Concat);
     let quote = ih(cx, Helper::Quote);
     let f_array = ih(cx, Helper::Array);
+    let f_mapset = cx.has_maps().then(|| ih(cx, Helper::MapSet));
     let f_object = ih(cx, Helper::Object);
     let own_keys = oh(cx, object::Helper::OwnKeys);
     let get = oh(cx, object::Helper::Get);
@@ -288,6 +295,22 @@ fn format(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(array::array());
     s.local_get(DEPTH).local_get(INDENT).call(f_array).return_();
     s.end();
+    if let Some(f_mapset) = f_mapset {
+        s.local_get(V).ref_test_non_null(mapset::map());
+        s.if_(BlockType::Empty);
+        s.local_get(V).ref_cast_non_null(mapset::map());
+        s.local_get(DEPTH)
+            .local_get(INDENT)
+            .call(f_mapset)
+            .return_();
+        s.end();
+        // Map/Set iterators (`[Map Iterator] { … }`) aren't implemented (F24).
+        s.local_get(V)
+            .ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_MAPITER));
+        s.if_(BlockType::Empty);
+        trap(cx, &mut s);
+        s.end();
+    }
     s.local_get(V).ref_test_non_null(runtime::object());
     s.if_(BlockType::Empty);
     object::is_error(&mut s, V);
@@ -432,6 +455,124 @@ fn format_array(cx: &mut dyn Cx) -> Function {
         .local_get(INDENT);
     s.global_get(open).global_get(close);
     s.i32_const(1).local_get(NUMBERS).call(layout);
+    s.end();
+    f
+}
+
+/// node's `formatMap` / `formatSet` in `formatRaw`: `Map(n) {`, the entries in order (keys and
+/// values formatted one level deeper), laid out like an object's. Past depth 2, `[Map]` / `[Set]`
+/// unless empty. Own properties and more than 100 entries aren't implemented (a trap, F24).
+fn format_mapset(cx: &mut dyn Cx) -> Function {
+    use crate::mapset::{T_KEYS_F, T_SIZE, T_USED, T_VALS_F};
+    let format = ih(cx, Helper::Format);
+    let layout = ih(cx, Helper::Layout);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let own_keys = oh(cx, object::Helper::OwnKeys);
+    let symbols = oh(cx, object::Helper::SymbolKeys);
+    let (map_open, set_open) = (cx.str("Map("), cx.str("Set("));
+    let (map_deep, set_deep) = (cx.str("[Map]"), cx.str("[Set]"));
+    let (paren, close, arrow) = (cx.str(") {"), cx.str("}"), cx.str(" => "));
+    let empty = cx.str("");
+    const M: u32 = 0;
+    const DEPTH: u32 = 1;
+    const INDENT: u32 = 2;
+    const SET: u32 = 3;
+    const E: u32 = 4;
+    const N: u32 = 5;
+    const T: u32 = 6;
+    const OUT: u32 = 7;
+    const K: u32 = 8;
+    let mut f = Function::new([
+        (3, ValType::I32),
+        (1, rt(true, runtime::T_MTABLE)),
+        (1, rt(true, T_KEYS)),
+        (1, jsval()),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(M)
+        .struct_get(runtime::T_MAP, object::F_CLASS)
+        .i32_const(object::CLASS_MASK)
+        .i32_and()
+        .i32_const(mapset::CLASS_SET)
+        .i32_eq()
+        .local_set(SET);
+    s.local_get(M)
+        .struct_get(runtime::T_MAP, mapset::M_TABLE)
+        .local_tee(T);
+    s.struct_get(runtime::T_MTABLE, T_SIZE).local_set(N);
+    // Too deep (node: only when there is something to show).
+    s.local_get(DEPTH).i32_const(2).i32_gt_s();
+    s.local_get(N).i32_const(0).i32_ne();
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(set_deep).global_get(map_deep);
+    s.local_get(SET).typed_select(string_ref());
+    s.return_();
+    s.end();
+    s.local_get(N).i32_const(100).i32_gt_u();
+    s.local_get(M)
+        .call(own_keys)
+        .array_len()
+        .i32_const(0)
+        .i32_ne();
+    s.i32_or();
+    s.local_get(M).call(symbols).i32_or();
+    s.if_(BlockType::Empty);
+    trap(cx, &mut s);
+    s.end();
+    s.local_get(N).array_new_default(T_KEYS).local_set(OUT);
+    s.i32_const(0).local_set(N);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(E)
+        .local_get(T)
+        .struct_get(runtime::T_MTABLE, T_USED)
+        .i32_ge_u()
+        .br_if(1);
+    s.local_get(T)
+        .struct_get(runtime::T_MTABLE, T_KEYS_F)
+        .local_get(E)
+        .array_get(T_VALS)
+        .local_tee(K);
+    s.ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(OUT).local_get(N);
+    s.local_get(K);
+    s.local_get(DEPTH).i32_const(1).i32_add();
+    s.local_get(INDENT).i32_const(2).i32_add();
+    s.i32_const(1).call(format);
+    // A map's ` => value`.
+    s.local_get(SET);
+    s.if_(BlockType::Result(string_ref()));
+    s.global_get(empty);
+    s.else_();
+    s.global_get(arrow);
+    s.local_get(T)
+        .struct_get(runtime::T_MTABLE, T_VALS_F)
+        .local_get(E)
+        .array_get(T_VALS);
+    s.local_get(DEPTH).i32_const(1).i32_add();
+    s.local_get(INDENT).i32_const(2).i32_add();
+    s.i32_const(1).call(format);
+    s.call(concat);
+    s.end();
+    s.call(concat);
+    s.array_set(T_KEYS);
+    s.local_get(N).i32_const(1).i32_add().local_set(N);
+    s.end();
+    s.local_get(E).i32_const(1).i32_add().local_set(E);
+    s.br(0).end().end();
+    s.local_get(OUT)
+        .ref_as_non_null()
+        .local_get(N)
+        .local_get(INDENT);
+    s.global_get(set_open).global_get(map_open);
+    s.local_get(SET).typed_select(string_ref());
+    s.local_get(N).f64_convert_i32_u().call(number_to_string);
+    s.call(concat);
+    s.global_get(paren).call(concat);
+    s.global_get(close);
+    s.i32_const(0).i32_const(0).call(layout);
     s.end();
     f
 }

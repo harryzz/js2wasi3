@@ -23,7 +23,7 @@ table in [`tasks/README.md`](../tasks/README.md).
 | Built-in objects, properties, methods (20) | 11 | 6 | 3 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
-What's most needed, in order: the rest of the built-in library (`JSON.parse`, `Map`/`Set`: T25; `Date`: T26; regex: T27), `arguments` (F42), spread into `console.log` and calls through `console.log`
+What's most needed, in order: the rest of the built-in library (`Date`: T26; regex: T27; built-ins as values: T25), `arguments` (F42), spread into `console.log` and calls through `console.log`
 as a value, `typeof` of an undeclared name, then the language gaps below (async generators, `for await`, tagged
 templates, regex, multi-file `import`).
 
@@ -115,6 +115,7 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 | `isNaN` | ✅ | T21 (also `Number.isNaN`). |
 | `isPrototypeOf` | ✅ | T21. |
 | `length` | ✅ | Strings, arrays, functions. |
+| `Map` / `Set` | 🟡 | T25: `new Map(iterable)`/`new Set(iterable)`, every method (`get`/`set`/`has`/`delete`/`clear`/`size`/`forEach`/`keys`/`values`/`entries`/`add`), SameValueZero keys, insertion order, iteration that sees changes, `instanceof`, printed like node. Missing: as values / subclassing (F97), `WeakMap`/`WeakSet`, `Map.groupBy` (F98), printing their iterators (F99). |
 | `Math` | 🟡 | T21: every function and constant, matching node bit for bit except `pow`/`**` (last-bit differences on some inexact results: F77). `Math` itself as a value (`console.log(Math)`, `const M = Math`) is rejected (F81); `Math.random` only in commands (F83). |
 | `NaN` | ✅ | |
 | `name` | ✅ | Functions, classes, methods, accessors (`get x`), inferred names. |

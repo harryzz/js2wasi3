@@ -1,6 +1,6 @@
 # T25: Built-ins, second batch
 
-Status: todo | Depends on: T21
+Status: in progress | Depends on: T21
 
 ## Goal
 Close the built-in gaps T21 left open, on T21's prelude pipeline (D5: JS in `crates/lower/builtins/*.js`,
@@ -43,10 +43,10 @@ Every open follow-up whose "Pick up in" is T25 belongs to one of the slices abov
 | Slice | Follow-ups |
 |---|---|
 | 1 | F93 |
-| 2 | (none yet: `Map`/`Set` had no follow-up) |
+| 2 | (none: `Map`/`Set` had no follow-up; slice 2 found F97–F100) |
 | 3 | F42, F43, F47, F59 |
-| 4 | F37, F81, F87 (`localeCompare`, `normalize`), F88, F91, F95 |
-| 5 | F23, F24, F51, F52, F53, F62, F70, F94 |
+| 4 | F37, F81, F87 (`localeCompare`, `normalize`), F88, F91, F95, F97 |
+| 5 | F23, F24, F51, F52, F53, F62, F70, F94, F99 |
 | 6 | F64, F67, F74 |
 
 ## Out of scope
@@ -61,6 +61,94 @@ Every open follow-up whose "Pick up in" is T25 belongs to one of the slices abov
       written in its row (`tasks/README.md`) and in Notes / Result.
 
 ## Notes / Result
+
+### Slice 1: `JSON.parse` (done 2026-09-26)
+**What changed**
+- `crates/lower/builtins/json.js`: `$$JSON_parse` (`JSON.parse(text, reviver)`). ToString of the argument
+  (`__intrinsic_to_string`: a symbol throws), then a recursive-descent parser over code units. Its state
+  (`$$jsonSrc`, `$$jsonLen`, `$$jsonPos`) is in prelude globals: no user code runs while parsing (the reviver runs
+  after), and `$$jsonSrc` is reset to `null` (not `""`: string literals aren't global initializers) on every exit.
+  Strings: a fast path returns one substring when there are no escapes, else a validating pass counts the length and
+  a second builds it (`str_new`/`str_set`). Numbers: the grammar is checked by hand; integers of ≤ 15 digits are
+  accumulated directly, anything else goes through `$$StringToNumber` (correctly rounded). Members are stored with
+  `__intrinsic_define` (CreateDataProperty: `__proto__` is an own key; a repeated key keeps its first position,
+  the last value wins). Arrays: `[]` + native `push`. The reviver walk (`$$jsonInternalize`/`$$jsonRevive`):
+  depth first, holder as `this`, array length read once, keys from `Object.keys` read before the walk, `undefined`
+  deletes (holes in arrays), the root is called with `""` on a `{"": value}` wrapper.
+- node 20's messages, all reproduced exactly (probed with node 20.19.2): the position form (`… in JSON at position
+  n`), "Unexpected end of JSON input", "Unexpected string/number in JSON at position n" (a token starting with `"`,
+  a digit or `-` where it doesn't fit), `"undefined" is not valid JSON` (whole source `undefined`, `NaN`,
+  `Infinity` or `[object Object]`), and "Unexpected token 'c', <context> is not valid JSON": the whole source if it
+  is shorter than 21 code units, else 10 units on each side of the position with `...` on a cut side
+  (V8's `kMaxContextCharacters`/`kMinOriginalSourceLengthForContext`). V8 quirk: only an object's *first* property
+  gets "Expected ':' after property name" / "Expected property name or '}'"; later ones get the generic token error
+  / "Expected double-quoted property name". The specific messages keep the position form at the end of the input
+  (`{` → position 1), the generic ones say "Unexpected end of JSON input".
+- Tests: `tests/fixtures/builtins/json-parse.js` (values, escapes incl. surrogates, numbers incl. `-0`/`1e400`/
+  17+ digits, duplicate keys, `__proto__`, ToString of the argument, ~140 error inputs incl. every context case,
+  the reviver: call order, `this`, deletion, holes, root wrapper, added properties not visited, round trips);
+  `builtins/lib.js` gets `reparse` (+ a `build.rs::builtins_in_a_library` ok and err case); `unsupported.rs` uses
+  `JSON.rawJSON` as the unimplemented static.
+
+**Commands run:** `scripts/diff.sh -j 4 tests/fixtures/builtins` (9 passed, 1 skipped), `cargo test -q
+--no-fail-fast` (all ok), `wasm-tools validate` + `wasmtime run --invoke` on the library.
+
+**Size:** `hello.js` is 52335 bytes both at `2e216b2` and after this slice (byte-identical; the handoff's 52177 was
+stale). **Speed:** a 5.1 MB array of 40k small objects: ~0.8–1.4 s per parse vs node's ~0.05 s (15–25×; this
+machine is noisy), recorded as F96.
+
+**Unsupported / left:** `JSON.rawJSON`/`isRawJSON`, `JSON` as a value (slice 4, F93); the reviver's third
+`context` argument (not in node 20); deep nesting recurses (Wasm stack trap, F33); speed (F96).
+
+**Next smallest step:** slice 2, `Map`/`Set`: decide native helpers vs prelude over intrinsics (D5) and start with
+the backend hash table keyed by SameValueZero.
+
+### Slice 2: `Map` / `Set` (done 2026-09-26)
+**Decision (D5):** native storage, prelude methods. The hash table and iterator stepping are backend helpers
+(`crates/backend/src/mapset.rs`); every JS-visible method is prelude JS (`crates/lower/builtins/map.js`) over
+`__intrinsic_map_*` (`ir::Intrinsic::Map(MapOp)`: `new_map/new_set`, `kind`, `get`, `has`, `set`, `delete`, `clear`,
+`size`, `iter_keys/values/entries`, `iter_kind`, `step`, `key`, `value`), so receiver checks, node's messages and
+callbacks stay in JS.
+
+**What changed**
+- Runtime types: `$map` (a final subtype of `$object`, class 2/3, with a `$mtable`), `$mtable` (entries in insertion
+  order, deleted = Wasm null key, open-addressing index, `next`/`removed` for obsolete tables), `$mapiter` (a
+  subtype of `$object`: table, position, mode). SameValueZero hashing: numbers by value (`i31` and boxed alike, `-0`
+  = `+0`, one NaN), strings/symbols by content (symbols then by identity), objects by an identity hash assigned
+  lazily into `class` bits ≥ 12 (`G_ID_HASH`); a `-0` key is stored as `+0`.
+- Iterators that survive changes: V8's OrderedHashTable scheme. A rehash (grow/compact) or `clear` makes a new table
+  and marks the old one obsolete with the ascending list of dropped entries (null: cleared); an iterator on an
+  obsolete table walks to the newest, mapping its position. So for-of/forEach see entries added meanwhile, skip
+  deleted ones, and survive `clear` + adds (tested).
+- `ir::Builtin::{Map, Set, MapIterator, SetIterator}` (prototypes with sentinels; iterator prototypes have no
+  `constructor`); `Builtin::parse_prelude` maps `$$MapIterator_prototype_next` to `%MapIteratorPrototype%`. The
+  backend installs `Map.prototype.entries` also as `[Symbol.iterator]`, `Set.prototype.values` also as `keys` and
+  `[Symbol.iterator]` (the same function objects), and `size` as a getter (`get size`).
+- Reachability (`builtins.rs`): `IMPLIED` deps (a constructed Map needs `entries` + its iterator's `next`, never
+  named by user code) and `ALIASES` (`.keys` keeps `$$Set_prototype_values`).
+- Lowering: `new Map(…)`/`new Set(…)` direct-call `$$Map`/`$$Set` (like `new Array`); `Map(…)`/`Set(…)` evaluate
+  the arguments and throw node's `Constructor Map requires 'new'`; `instanceof Map` and `Map.prototype` come from
+  `Builtin::Map`. `array.js`'s `$$describe` names maps `#<Map>`/`#<Set>` (their prototypes' `constructor` is a
+  sentinel).
+- `console.log`: `Map(n) { k => v, … }` / `Set(n) { … }`, `[Map]`/`[Set]` past depth 2, laid out like objects;
+  linked only when the module can make a map (`ir::Module::maps`). Iterators, own properties, > 100 entries trap.
+- Tests: `tests/fixtures/builtins/map-set.js` (SameValueZero keys incl. NaN/±0/objects/symbols/concatenated strings,
+  order, constructors incl. generators/strings/maps, mutation during for-of/forEach incl. rehash and `clear`, a
+  waiting iterator, 5000-entry rehash/identity-hash run, every error message, printing); `builtins/lib.js`
+  `distinct` + `build.rs`; `unsupported.rs` (Map/Set lower; `WeakMap` is the example of an unsupported global now).
+
+**Commands run:** `scripts/diff.sh -j 4` (75 passed, 0 failed, 10 skipped), `cargo test -q --no-fail-fast` (all ok).
+
+**Size:** `hello.js` 52335 → 52534 bytes (+199): the three new struct types in the runtime's rec group and five
+globals (four prototypes, `G_ID_HASH`), which every module has. Map printing and `define_accessor` are linked only
+when used. **Speed:** 300k string-keyed set/get/delete + 300k numeric for-of + 300k object adds: ~4.3–5.1 s vs node
+0.76 s (~6×, F100).
+
+**Unsupported / left:** `Map`/`Set` as values and subclassing (F97, slice 4), `WeakMap`/`WeakSet`, `Map.groupBy`
+(not in node 20) (F98), printing iterators / own properties / > 100 entries (F99, slice 5), speed (F100).
+
+**Next smallest step:** slice 3: `Function.prototype.bind` (a bound-function object kind in `func.rs`: target, bound
+`this`, bound args; `name` `bound f`, `length`, `new` through it).
 
 ## Handoff for slice 1: `JSON.parse` (written 2026-09-26, end of the T21 session)
 
@@ -151,3 +239,10 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 `rawJSON` — is slice 4), docs (D5, `docs/keywords.md`, README).
 
 ## Progress
+- 2026-09-26: slice 1 (`JSON.parse`) started. Baseline: tools ok, cargo test all ok, diff.sh 73 passed / 0 failed / 10 skipped.
+- 2026-09-26: `$$JSON_parse` in `builtins/json.js` (recursive descent over code units, parser state in prelude globals `$$jsonSrc/Len/Pos`; `$$jsonSrc` starts `null`: string literals aren't global initializers). node 20's messages probed (incl. V8's quirk: only an object's *first* property gets "Expected ':' after property name", later ones the generic unexpected-token error; context window: sources ≥ 21 units, 10 units each side). `tests/fixtures/builtins/json-parse.js` PASS; `unsupported.rs` now uses `JSON.rawJSON` as the unimplemented static.
+- 2026-09-26: library case (`reparse` in `builtins/lib.js`, ok + err via `--invoke`) passes; `hello.js` 52335 bytes, identical to HEAD (handoff's 52177 was stale). 5 MB parse ~15–25× node (F96). cargo test all ok; diff.sh builtins 9 passed. Slice 1 done: Notes / Result, README (F93 partial, F96, Next up), D5, keywords.md, README.md updated.
+- 2026-09-26: slice 2 (`Map`/`Set`) started (slice 1 still uncommitted in the working tree).
+- 2026-09-26: slice 2 design: native storage `backend/src/mapset.rs` (`$map`/`$mtable`/`$mapiter`, SameValueZero hash table in insertion order, V8-style obsolete-table transitions for live iterators, identity hashes in `class` bits ≥ 12 from `G_ID_HASH`), JS-visible methods in `builtins/map.js` over `__intrinsic_map_*` (`Intrinsic::Map(MapOp)`); `new Map/Set(…)` direct-calls `$$Map/$$Set`, `Map(…)` throws; `instanceof Map`/`Map.prototype` via `Builtin::Map`; `Map` as a value deferred (slice 4); `Map.groupBy` skipped (node 20 lacks it). Smoke test (get/set/has/delete, -0/NaN keys, for-of, spread, forEach) matches node.
+- 2026-09-26: slice 2 done: map-set.js PASS, lib `distinct` ok, unsupported.rs updated (WeakMap as the unsupported example), full diff.sh 75/0/10, cargo test ok; hello.js 52534 (+199, types/globals); console.log map printing gated on `ir::Module::maps`; Map/Set iterators print as a trap (was `{}`). F97–F100 recorded.
+- 2026-09-26: tools: node oracle pinned to v24.21.0 (latest LTS; was 20.19.2) in TOOLS.md, check-tools.sh, CLAUDE.md. Other tools already latest. With node 24, diff.sh: 70 passed / 5 failed (json-parse: '(line 1 column n)' suffix; array-methods: 'not a function' texts, sort comparator message; map-set: '[object Map Iterator]' receiver; exponent: pow last digits; async/timers: TimeoutNegativeWarning/TimeoutNaNWarning on stderr).

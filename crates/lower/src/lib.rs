@@ -860,7 +860,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let Some((b, key)) = name[2..].split_once("_prototype_") else {
                 continue;
             };
-            let proto = Builtin::parse(b).expect("a built-in prototype");
+            let proto = Builtin::parse_prelude(b).expect("a built-in prototype");
             let length = builtins::length(name).unwrap_or(self.fn_length[&func]);
             // Called through the prototype: any arguments.
             for p in self.func_params[&func].clone().into_iter().flatten() {
@@ -3529,6 +3529,27 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if c.arguments.iter().any(|a| a.is_spread()) {
             return self.spread_call(cx, c);
         }
+        if let Some(b) = ["Map", "Set"]
+            .into_iter()
+            .find(|b| self.is_global(callee, b))
+        {
+            // `Map(…)` without `new` (T25): the arguments, then node's TypeError.
+            let mut body: Vec<Stmt> = self
+                .value_args(cx, &c.arguments)?
+                .into_iter()
+                .map(Stmt::Expr)
+                .collect();
+            let msg = Expr::str(&format!("Constructor {b} requires 'new'"));
+            body.push(Stmt::Throw(Expr::intrinsic(
+                Intrinsic::NewError(ErrorKind::TypeError),
+                vec![msg, Expr::undefined()],
+            )));
+            let e = Expr::Seq {
+                body,
+                value: Box::new(Expr::undefined()),
+            };
+            return Ok((e, Call::Intrinsic(Some(Kind::Any))));
+        }
         if let Some(func) = self
             .builtin_static(callee)
             .or_else(|| self.builtin_global(callee))
@@ -4130,6 +4151,45 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Ok(())
     }
 
+    /// `__intrinsic_map_<op>(…)` (T25): `Map`/`Set` storage. JS-value arguments, then `i32`s.
+    fn map_intrinsic(
+        &mut self,
+        cx: &mut FnCx,
+        c: &'a CallExpression<'a>,
+        name: &str,
+        op: ir::MapOp,
+    ) -> R<(Expr, Call)> {
+        let i = Intrinsic::Map(op);
+        let (params, result) = i.signature();
+        if c.arguments.len() != params.len() {
+            return Err(self.unsupported(c.span, &format!("intrinsic `{name}` arity"), "T25"));
+        }
+        let mut args = Vec::new();
+        for (a, ty) in c.arguments.iter().zip(params) {
+            let Some(e) = a.as_expression() else {
+                return Err(self.unsupported(a.span(), "spread argument", "T25"));
+            };
+            let v = self.expr(cx, e)?;
+            args.push(match ty {
+                Type::JsVal => jsval_of(v),
+                _ => to_i32(self.num(v, e.span())?),
+            });
+        }
+        if matches!(op, ir::MapOp::New(_)) {
+            self.module.maps = true;
+        }
+        let e = Expr::intrinsic(i, args);
+        Ok(match result {
+            None => (e, Call::Intrinsic(None)),
+            Some(Type::I32) => (from_i32(e), Call::Intrinsic(Some(Kind::Num))),
+            Some(Type::Bool) => (
+                jsval_of(Val::new(e, Type::Bool)),
+                Call::Intrinsic(Some(Kind::Bool)),
+            ),
+            Some(_) => (e, Call::Intrinsic(Some(Kind::Any))),
+        })
+    }
+
     /// `__intrinsic_<name>(…)` in the prelude (T21): an IR operation on numbers.
     fn intrinsic_call(
         &mut self,
@@ -4137,6 +4197,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         c: &'a CallExpression<'a>,
         name: &str,
     ) -> R<(Expr, Call)> {
+        if let Some(op) = map_op(name) {
+            return self.map_intrinsic(cx, c, name, op);
+        }
         let arity = match name {
             "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
             "min" | "max" | "copysign" | "imul" | "from_words" => 2,
@@ -5768,4 +5831,28 @@ fn expression_kind(e: &Expression) -> String {
         .next()
         .unwrap_or("Expression")
         .to_string()
+}
+
+/// The [`ir::MapOp`] of `__intrinsic_<name>` (T25): `map_new_map`, `map_iter_entries`, ….
+fn map_op(name: &str) -> Option<ir::MapOp> {
+    use ir::MapOp as M;
+    Some(match name.strip_prefix("map_")? {
+        "new_map" => M::New(ir::MAP_KIND_MAP),
+        "new_set" => M::New(ir::MAP_KIND_SET),
+        "kind" => M::Kind,
+        "get" => M::Get,
+        "has" => M::Has,
+        "set" => M::Set,
+        "delete" => M::Delete,
+        "clear" => M::Clear,
+        "size" => M::Size,
+        "iter_keys" => M::Iter(ir::MAP_ITER_KEYS),
+        "iter_values" => M::Iter(ir::MAP_ITER_VALUES),
+        "iter_entries" => M::Iter(ir::MAP_ITER_ENTRIES),
+        "iter_kind" => M::IterKind,
+        "step" => M::Step,
+        "key" => M::Key,
+        "value" => M::Value,
+        _ => return None,
+    })
 }

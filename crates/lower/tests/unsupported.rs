@@ -120,13 +120,24 @@ fn builtins_prelude() {
     lowers(
         "export function f(o) { return o.hasOwnProperty('a') && Object.prototype.isPrototypeOf(o); }",
     );
+    // T25 slice 1: JSON.parse.
+    lowers("export function f(s) { return JSON.parse(s, (k, v) => v).length; }");
     assert_eq!(
-        one("export function f(s) { return JSON.parse(s); }"),
-        "1:31 unsupported: `JSON.parse` (planned: T21)"
+        one("export function f(s) { return JSON.rawJSON(s); }"),
+        "1:31 unsupported: `JSON.rawJSON` (planned: T21)"
     );
     assert_eq!(
         one("export function f() { const j = JSON; return 1; }"),
         "1:33 unsupported: global `JSON` (planned: T21)"
+    );
+    // T25 slice 2: Map and Set; as values (and subclassing) not yet.
+    lowers(
+        "export function f(a) { const m = new Map([[1, a]]); m.set(2, 3); return new Set(m.keys()).size + m.get(1); }",
+    );
+    lowers("export function f(m) { return m instanceof Map && Map.prototype.has.call(m, 1); }");
+    assert_eq!(
+        one("export function f() { const M = Map; return 1; }"),
+        "1:33 unsupported: global `Map` (planned: T21)"
     );
 }
 
@@ -201,12 +212,13 @@ fn declarations_and_functions() {
 
 #[test]
 fn all_errors_are_reported() {
-    let e = errors("export function f() {\n  let s = new.target;\n  new Map();\n  return /a/;\n}");
+    let e =
+        errors("export function f() {\n  let s = new.target;\n  new WeakMap();\n  return /a/;\n}");
     assert_eq!(
         e,
         vec![
             "2:11 unsupported: `new.target` outside a class constructor (planned: later)",
-            "3:7 unsupported: global `Map` (planned: T21)",
+            "3:7 unsupported: global `WeakMap` (planned: T21)",
             "4:10 unsupported: expression `RegExpLiteral` (planned: later)",
         ]
     );
@@ -298,8 +310,8 @@ fn exceptions() {
     assert!(!ir.contains("$init"), "{ir}");
 
     assert_eq!(
-        one("export function f() { return new Map(); }"),
-        "1:34 unsupported: global `Map` (planned: T21)"
+        one("export function f() { return new WeakMap(); }"),
+        "1:34 unsupported: global `WeakMap` (planned: T21)"
     );
     lowers("export function f() { try { } catch ({ a }) { } }");
 }
@@ -320,8 +332,8 @@ fn objects() {
         lowers(src);
     }
     assert_eq!(
-        one("export function f(o) { return o instanceof Map; }"),
-        "1:44 unsupported: global `Map` (planned: T21)"
+        one("export function f(o) { return o instanceof WeakMap; }"),
+        "1:44 unsupported: global `WeakMap` (planned: T21)"
     );
     assert_eq!(
         one("export function f(o) { return Object.create(o, {}); }"),

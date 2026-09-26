@@ -1,9 +1,10 @@
 // JSON (T21 slice 4). Conventions: crates/lower/src/builtins.rs.
 // `$$JSON_stringify` is `JSON.stringify`: the spec's algorithm (toJSON, replacer function or
 // property list, gap), writing the pieces into one array that is joined at the end. Circular
-// structures throw node's TypeError (the path to the cycle). Not implemented: wrapper objects
-// (`new Number(1)`, F88), `rawJSON`, `JSON.parse`.
-// Uses string.js's `$$toInteger`, `$$String`.
+// structures throw node's TypeError (the path to the cycle). `$$JSON_parse` is `JSON.parse`
+// (T25 slice 1): a recursive-descent parser over code units with node 20's SyntaxError messages,
+// then the reviver walk. Not implemented: wrapper objects (`new Number(1)`, F88), `rawJSON`.
+// Uses string.js's `$$toInteger`, `$$String`, `$$fromUnit`, `$$StringToNumber`.
 
 // The state of one `JSON.stringify` call.
 function $$jsonState(replacerFn, propertyList, gap) {
@@ -309,4 +310,418 @@ function $$jsonCircular(state, value, key, index) {
       "'";
   }
   return msg + "\n    --- " + $$jsonKeyText(key, index) + " closes the circle";
+}
+
+// ---- JSON.parse ----------------------------------------------------------------------------
+
+// The text being parsed and the index of the next code unit. No user code runs while parsing
+// (the reviver runs after), so one parse at a time.
+let $$jsonSrc = null;
+let $$jsonLen = 0;
+let $$jsonPos = 0;
+
+function $$JSON_parse(text, reviver) {
+  const src = __intrinsic_to_string(text);
+  $$jsonSrc = src;
+  $$jsonLen = __intrinsic_str_len(src);
+  $$jsonPos = 0;
+  const value = $$jsonParseValue();
+  $$jsonSkipSpace();
+  if ($$jsonPos < $$jsonLen) {
+    $$jsonSrc = null;
+    throw new SyntaxError("Unexpected non-whitespace character after JSON at position " + $$jsonPos);
+  }
+  $$jsonSrc = null;
+  if (typeof reviver === "function") {
+    const root = {};
+    __intrinsic_define(root, "", value);
+    return $$jsonInternalize(root, "", reviver);
+  }
+  return value;
+}
+
+function $$jsonFail(msg, pos) {
+  $$jsonSrc = null;
+  throw new SyntaxError(msg + " in JSON at position " + pos);
+}
+
+// V8's error for an unexpected token at `pos` (or the end of the input).
+function $$jsonUnexpected(pos) {
+  const src = $$jsonSrc;
+  const len = $$jsonLen;
+  if (pos >= len) {
+    $$jsonSrc = null;
+    throw new SyntaxError("Unexpected end of JSON input");
+  }
+  const c = __intrinsic_unit(src, pos);
+  if (c === 34) {
+    $$jsonFail("Unexpected string", pos);
+  }
+  if (c === 45 || (c >= 48 && c <= 57)) {
+    $$jsonFail("Unexpected number", pos);
+  }
+  $$jsonSrc = null;
+  if (src === "undefined" || src === "NaN" || src === "Infinity" || src === "[object Object]") {
+    throw new SyntaxError('"' + src + '" is not valid JSON');
+  }
+  // Sources of 21 code units or more show 10 units of context on each side of `pos`.
+  const token = "Unexpected token '" + $$fromUnit(c) + "', ";
+  let context = '"' + src + '"';
+  if (len >= 21) {
+    if (pos < 10) {
+      context = '"' + __intrinsic_sub(src, 0, pos + 10) + '"...';
+    } else if (pos < len - 10) {
+      context = '..."' + __intrinsic_sub(src, pos - 10, pos + 10) + '"...';
+    } else {
+      context = '..."' + __intrinsic_sub(src, pos - 10, len) + '"';
+    }
+  }
+  throw new SyntaxError(token + context + " is not valid JSON");
+}
+
+// Skip JSON whitespace (tab, LF, CR, space).
+function $$jsonSkipSpace() {
+  const src = $$jsonSrc;
+  const len = $$jsonLen;
+  let i = $$jsonPos;
+  while (i < len) {
+    const c = __intrinsic_unit(src, i);
+    if (c !== 32 && c !== 10 && c !== 13 && c !== 9) {
+      break;
+    }
+    i++;
+  }
+  $$jsonPos = i;
+}
+
+// The code unit at `i`, or -1 at the end.
+function $$jsonAt(i) {
+  return i < $$jsonLen ? __intrinsic_unit($$jsonSrc, i) : -1;
+}
+
+function $$jsonIsDigit(c) {
+  return c >= 48 && c <= 57;
+}
+
+function $$jsonParseValue() {
+  $$jsonSkipSpace();
+  const pos = $$jsonPos;
+  const c = $$jsonAt(pos);
+  if (c === 34) {
+    return $$jsonParseString();
+  }
+  if (c === 123) {
+    return $$jsonParseObject();
+  }
+  if (c === 91) {
+    return $$jsonParseArray();
+  }
+  if (c === 45 || $$jsonIsDigit(c)) {
+    return $$jsonParseNumber();
+  }
+  if (c === 116) {
+    $$jsonLiteral("true");
+    return true;
+  }
+  if (c === 102) {
+    $$jsonLiteral("false");
+    return false;
+  }
+  if (c === 110) {
+    $$jsonLiteral("null");
+    return null;
+  }
+  return $$jsonUnexpected(pos);
+}
+
+// `true`, `false` or `null` at the current position (its first unit already checked).
+function $$jsonLiteral(word) {
+  const pos = $$jsonPos;
+  const n = __intrinsic_str_len(word);
+  for (let i = 1; i < n; i++) {
+    if ($$jsonAt(pos + i) !== __intrinsic_unit(word, i)) {
+      $$jsonUnexpected(pos + i);
+    }
+  }
+  $$jsonPos = pos + n;
+}
+
+function $$jsonParseNumber() {
+  const src = $$jsonSrc;
+  const start = $$jsonPos;
+  let i = start;
+  let c = $$jsonAt(i);
+  const neg = c === 45;
+  if (neg) {
+    i++;
+    c = $$jsonAt(i);
+    if (!$$jsonIsDigit(c)) {
+      $$jsonFail("No number after minus sign", i);
+    }
+  }
+  // An integer of up to 15 digits is exact in a double: no need for StringToNumber.
+  let simple = true;
+  let v = 0;
+  if (c === 48) {
+    i++;
+    if ($$jsonIsDigit($$jsonAt(i))) {
+      $$jsonFail("Unexpected number", i);
+    }
+  } else {
+    const digits = i;
+    while ($$jsonIsDigit(c)) {
+      v = v * 10 + (c - 48);
+      i++;
+      c = $$jsonAt(i);
+    }
+    simple = i - digits <= 15;
+  }
+  c = $$jsonAt(i);
+  if (c === 46) {
+    simple = false;
+    i++;
+    if (!$$jsonIsDigit($$jsonAt(i))) {
+      $$jsonFail("Unterminated fractional number", i);
+    }
+    while ($$jsonIsDigit($$jsonAt(i))) {
+      i++;
+    }
+    c = $$jsonAt(i);
+  }
+  if (c === 101 || c === 69) {
+    simple = false;
+    i++;
+    c = $$jsonAt(i);
+    if (c === 43 || c === 45) {
+      i++;
+    }
+    if (!$$jsonIsDigit($$jsonAt(i))) {
+      $$jsonFail("Exponent part is missing a number", i);
+    }
+    while ($$jsonIsDigit($$jsonAt(i))) {
+      i++;
+    }
+  }
+  $$jsonPos = i;
+  if (simple) {
+    return neg ? -v : v;
+  }
+  return $$StringToNumber(__intrinsic_sub(src, start, i));
+}
+
+// A string literal at the current position (a `"`).
+function $$jsonParseString() {
+  const src = $$jsonSrc;
+  const len = $$jsonLen;
+  const start = $$jsonPos + 1;
+  // Fast path: no escapes.
+  let i = start;
+  for (;;) {
+    if (i >= len) {
+      $$jsonFail("Unterminated string", len);
+    }
+    const u = __intrinsic_unit(src, i);
+    if (u === 34) {
+      $$jsonPos = i + 1;
+      return __intrinsic_sub(src, start, i);
+    }
+    if (u === 92) {
+      break;
+    }
+    if (u < 32) {
+      $$jsonFail("Bad control character in string literal", i);
+    }
+    i++;
+  }
+  // Validate the rest and count the result's length, then build it.
+  let n = i - start;
+  for (;;) {
+    if (i >= len) {
+      $$jsonFail("Unterminated string", len);
+    }
+    const u = __intrinsic_unit(src, i);
+    if (u === 34) {
+      break;
+    }
+    if (u < 32) {
+      $$jsonFail("Bad control character in string literal", i);
+    }
+    if (u === 92) {
+      if (i + 1 >= len) {
+        $$jsonUnexpected(len);
+      }
+      const e = __intrinsic_unit(src, i + 1);
+      if (e === 117) {
+        for (let k = i + 2; k < i + 6; k++) {
+          if ($$jsonHex($$jsonAt(k)) < 0) {
+            $$jsonFail("Bad Unicode escape", k);
+          }
+        }
+        i += 6;
+      } else if (
+        e === 34 ||
+        e === 92 ||
+        e === 47 ||
+        e === 98 ||
+        e === 102 ||
+        e === 110 ||
+        e === 114 ||
+        e === 116
+      ) {
+        i += 2;
+      } else {
+        $$jsonFail("Bad escaped character", i + 1);
+      }
+    } else {
+      i++;
+    }
+    n++;
+  }
+  const end = i;
+  const r = __intrinsic_str_new(n);
+  let j = 0;
+  i = start;
+  while (i < end) {
+    let u = __intrinsic_unit(src, i);
+    i++;
+    if (u === 92) {
+      const e = __intrinsic_unit(src, i);
+      i++;
+      if (e === 117) {
+        u =
+          ($$jsonHex(__intrinsic_unit(src, i)) << 12) |
+          ($$jsonHex(__intrinsic_unit(src, i + 1)) << 8) |
+          ($$jsonHex(__intrinsic_unit(src, i + 2)) << 4) |
+          $$jsonHex(__intrinsic_unit(src, i + 3));
+        i += 4;
+      } else if (e === 98) {
+        u = 8;
+      } else if (e === 102) {
+        u = 12;
+      } else if (e === 110) {
+        u = 10;
+      } else if (e === 114) {
+        u = 13;
+      } else if (e === 116) {
+        u = 9;
+      } else {
+        u = e;
+      }
+    }
+    __intrinsic_str_set(r, j++, u);
+  }
+  $$jsonPos = end + 1;
+  return r;
+}
+
+// The value of a hex digit, or -1.
+function $$jsonHex(c) {
+  if (c >= 48 && c <= 57) {
+    return c - 48;
+  }
+  if (c >= 97 && c <= 102) {
+    return c - 87;
+  }
+  if (c >= 65 && c <= 70) {
+    return c - 55;
+  }
+  return -1;
+}
+
+function $$jsonParseArray() {
+  const arr = [];
+  $$jsonPos++;
+  $$jsonSkipSpace();
+  if ($$jsonAt($$jsonPos) === 93) {
+    $$jsonPos++;
+    return arr;
+  }
+  for (;;) {
+    arr.push($$jsonParseValue());
+    $$jsonSkipSpace();
+    const c = $$jsonAt($$jsonPos);
+    if (c === 93) {
+      $$jsonPos++;
+      return arr;
+    }
+    if (c !== 44) {
+      $$jsonFail("Expected ',' or ']' after array element", $$jsonPos);
+    }
+    $$jsonPos++;
+  }
+  return arr;
+}
+
+// V8 reports a missing `:` after the first property name with its own message, after the
+// others as an unexpected token.
+function $$jsonParseObject() {
+  const obj = {};
+  $$jsonPos++;
+  $$jsonSkipSpace();
+  if ($$jsonAt($$jsonPos) === 125) {
+    $$jsonPos++;
+    return obj;
+  }
+  let first = true;
+  for (;;) {
+    if ($$jsonAt($$jsonPos) !== 34) {
+      $$jsonFail(
+        first ? "Expected property name or '}'" : "Expected double-quoted property name",
+        $$jsonPos,
+      );
+    }
+    const key = $$jsonParseString();
+    $$jsonSkipSpace();
+    if ($$jsonAt($$jsonPos) !== 58) {
+      if (first) {
+        $$jsonFail("Expected ':' after property name", $$jsonPos);
+      }
+      $$jsonUnexpected($$jsonPos);
+    }
+    $$jsonPos++;
+    // CreateDataProperty: `__proto__` is an own key; a repeated key keeps its first position.
+    __intrinsic_define(obj, key, $$jsonParseValue());
+    $$jsonSkipSpace();
+    const c = $$jsonAt($$jsonPos);
+    if (c === 125) {
+      $$jsonPos++;
+      return obj;
+    }
+    if (c !== 44) {
+      $$jsonFail("Expected ',' or '}' after property value", $$jsonPos);
+    }
+    $$jsonPos++;
+    $$jsonSkipSpace();
+    first = false;
+  }
+  return obj;
+}
+
+// InternalizeJSONProperty: the reviver walk, depth first; `undefined` deletes.
+function $$jsonInternalize(holder, name, reviver) {
+  const val = holder[name];
+  if (typeof val === "object" && val !== null) {
+    if (Array.isArray(val)) {
+      const len = +val.length;
+      for (let i = 0; i < len; i++) {
+        $$jsonRevive(val, $$String(i), reviver);
+      }
+    } else {
+      const keys = Object.keys(val);
+      const n = +keys.length;
+      for (let i = 0; i < n; i++) {
+        $$jsonRevive(val, keys[i], reviver);
+      }
+    }
+  }
+  return reviver.call(holder, name, val);
+}
+
+function $$jsonRevive(val, key, reviver) {
+  const v = $$jsonInternalize(val, key, reviver);
+  if (v === undefined) {
+    delete val[key];
+  } else {
+    __intrinsic_define(val, key, v);
+  }
 }

@@ -30,8 +30,8 @@ use wasm_encoder::{
 };
 
 use crate::{
-    abi, array, asyncfn, func, generator, host, inspect, iter, numstr, object, promise, props,
-    timers,
+    abi, array, asyncfn, func, generator, host, inspect, iter, mapset, numstr, object, promise,
+    props, timers,
 };
 
 pub const T_NUMBER: u32 = 0;
@@ -81,8 +81,15 @@ pub const T_RESUME: u32 = 20;
 /// `$timer`: a final subtype of `$object` (the Timeout object) with `deadline: mut i64`,
 /// `interval: i64`, `callback: eqref`, `args: (ref $vals)` (T19, see [`crate::timers`]).
 pub const T_TIMER: u32 = 21;
+/// `$map`: a final subtype of `$object` with `table: mut (ref $mtable)` (T25, see [`crate::mapset`]).
+pub const T_MAP: u32 = 22;
+/// `$mtable`: a `Map`/`Set` hash table (T25). Never a JS value.
+pub const T_MTABLE: u32 = 23;
+/// `$mapiter`: a final subtype of `$object` with `table: mut (ref null $mtable)`, `pos: mut i32`,
+/// `mode: i32` (T25).
+pub const T_MAPITER: u32 = 24;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 22;
+pub const TYPES: u32 = 25;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -128,8 +135,10 @@ pub const G_LOOP_NOW: u32 = G_TIMERS_N + 1;
 /// `(mut i32)`: the outstanding `wait-until` subtask (0: none), and `(mut i64)`: its deadline.
 pub const G_WAIT: u32 = G_LOOP_NOW + 1;
 pub const G_WAIT_AT: u32 = G_WAIT + 1;
+/// `(mut i32)`: the last identity hash handed out (T25, see [`crate::mapset`]).
+pub const G_ID_HASH: u32 = G_WAIT_AT + 1;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_WAIT_AT + 1;
+pub const GLOBALS: u32 = G_ID_HASH + 1;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -163,6 +172,8 @@ pub trait Cx {
     fn string_to_number(&mut self) -> Option<u32>;
     /// The prelude methods of a built-in prototype (T21): (key, `$code` function index, length).
     fn builtin_methods(&mut self, b: js2wasi3_ir::Builtin) -> Vec<(String, u32, u32)>;
+    /// Can the module make a `Map`/`Set` (T25)?
+    fn has_maps(&mut self) -> bool;
 
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -276,6 +287,12 @@ pub fn types(types: &mut TypeSection) {
     timer_fields.push(field(StorageType::Val(ValType::I64), false));
     timer_fields.push(field(StorageType::Val(jsval()), false));
     timer_fields.push(field(StorageType::Val(rt(false, T_VALS)), false));
+    let mut map_fields = object_fields.clone();
+    map_fields.push(field(StorageType::Val(rt(false, T_MTABLE)), true));
+    let mut mapiter_fields = object_fields.clone();
+    mapiter_fields.push(field(StorageType::Val(rt(true, T_MTABLE)), true));
+    mapiter_fields.push(field(StorageType::Val(ValType::I32), true));
+    mapiter_fields.push(field(StorageType::Val(ValType::I32), false));
     let mut promise_fields = object_fields.clone();
     promise_fields.push(field(StorageType::Val(ValType::I32), true));
     promise_fields.push(field(StorageType::Val(jsval()), true));
@@ -393,6 +410,32 @@ pub fn types(types: &mut TypeSection) {
         sub_of(
             CompositeInnerType::Struct(StructType {
                 fields: timer_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: map_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        // $mtable: keys, vals, index, used, size, next, removed (see `mapset.rs`).
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(rt(false, T_VALS)), true),
+                field(StorageType::Val(rt(false, T_VALS)), true),
+                field(StorageType::Val(rt(false, T_I32S)), true),
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(rt(true, T_MTABLE)), true),
+                field(StorageType::Val(rt(true, T_I32S)), true),
+            ]),
+        })),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: mapiter_fields.into_boxed_slice(),
             }),
             true,
             Some(T_OBJECT),
@@ -519,6 +562,8 @@ pub fn globals(globals: &mut GlobalSection) {
     globals.global(long, &ConstExpr::i64_const(0));
     globals.global(int, &ConstExpr::i32_const(0));
     globals.global(long, &ConstExpr::i64_const(0));
+    // T25: the identity hash counter.
+    globals.global(int, &ConstExpr::i32_const(0));
 }
 
 /// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
@@ -616,6 +661,7 @@ pub enum Helper {
     Gen(generator::Helper),
     Async(asyncfn::Helper),
     Timer(timers::Helper),
+    Map(mapset::Helper),
     Fmt(inspect::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
@@ -656,6 +702,7 @@ impl Helper {
             Helper::Gen(h) => h.name(),
             Helper::Async(h) => h.name(),
             Helper::Timer(h) => h.name(),
+            Helper::Map(h) => h.name(),
             Helper::Fmt(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
@@ -693,6 +740,7 @@ impl Helper {
             Helper::Gen(h) => h.signature(),
             Helper::Async(h) => h.signature(),
             Helper::Timer(h) => h.signature(),
+            Helper::Map(h) => h.signature(),
             Helper::Fmt(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
@@ -733,6 +781,7 @@ impl Helper {
             Helper::Gen(h) => h.body(cx),
             Helper::Async(h) => h.body(cx),
             Helper::Timer(h) => h.body(cx),
+            Helper::Map(h) => h.body(cx),
             Helper::Fmt(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());

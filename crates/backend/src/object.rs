@@ -194,6 +194,14 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         ],
         Builtin::Symbol => &["toString", "valueOf", "description"],
         Builtin::ArrayIterator | Builtin::Promise | Builtin::Generator => &[],
+        // T25. `size` is a getter: no sentinel (a data sentinel would keep its attributes).
+        Builtin::Map => &[
+            "get", "set", "has", "delete", "clear", "entries", "forEach", "keys", "values",
+        ],
+        Builtin::Set => &[
+            "has", "add", "delete", "clear", "entries", "forEach", "values", "keys",
+        ],
+        Builtin::MapIterator | Builtin::SetIterator => &["next"],
     }
 }
 
@@ -319,6 +327,10 @@ impl Helper {
                 Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
                 Builtin::Promise => "Promise.prototype",
                 Builtin::Generator => "%GeneratorPrototype%",
+                Builtin::Map => "Map.prototype",
+                Builtin::Set => "Set.prototype",
+                Builtin::MapIterator => "%MapIteratorPrototype%",
+                Builtin::SetIterator => "%SetIteratorPrototype%",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -1032,7 +1044,13 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     let define = h(cx, Helper::Define);
     let parent = parent(b).map(|p| h(cx, Helper::Proto(p)));
     let g = G_PROTOS + b.index();
-    let mut props: Vec<(u32, Option<u32>)> = vec![(cx.str("constructor"), None)];
+    // (%MapIteratorPrototype% and %SetIteratorPrototype% have no `constructor`, T25.)
+    let mut props: Vec<(u32, Option<u32>)> =
+        if matches!(b, Builtin::MapIterator | Builtin::SetIterator) {
+            vec![]
+        } else {
+            vec![(cx.str("constructor"), None)]
+        };
     for m in methods(b) {
         props.push((cx.str(m), None));
     }
@@ -1128,28 +1146,52 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
                 ),
             ]
         }
+        Builtin::MapIterator | Builtin::SetIterator => vec![(
+            runtime::Helper::Iter(crate::iter::Helper::This),
+            None,
+            "[Symbol.iterator]",
+            0,
+        )],
         _ => Vec::new(),
     };
-    let mut real: Vec<(u32, u32, u32, i32)> = real
+    // (keys, name, code, length, getter): one function object defined under each key.
+    let mut real: Vec<(Vec<u32>, u32, u32, i32, bool)> = real
         .into_iter()
         .map(|(h, key, name, len)| {
             let code = cx.helper(h);
             cx.declare_func(code);
             let key = key.map_or(runtime::G_SYM_ITERATOR, |k| cx.str(k));
-            (key, cx.str(name), code, len)
+            (vec![key], cx.str(name), code, len, false)
         })
         .collect();
-    // Methods written in the prelude (T21).
+    // Methods written in the prelude (T21). T25: `Map.prototype[Symbol.iterator]` is `entries`,
+    // `Set.prototype[Symbol.iterator]` and `keys` are `values`; `size` is a getter.
     for (key, code, len) in cx.builtin_methods(b) {
         cx.declare_func(code);
-        let key = cx.str(&key);
-        real.push((key, key, code, len as i32));
+        let getter = matches!(b, Builtin::Map | Builtin::Set) && key == "size";
+        let name = cx.str(&if getter {
+            format!("get {key}")
+        } else {
+            key.clone()
+        });
+        let mut keys = vec![cx.str(&key)];
+        match (b, key.as_str()) {
+            (Builtin::Map, "entries") => keys.push(runtime::G_SYM_ITERATOR),
+            (Builtin::Set, "values") => keys.extend([cx.str("keys"), runtime::G_SYM_ITERATOR]),
+            _ => {}
+        }
+        real.push((keys, name, code, len as i32, getter));
     }
+    let define_accessor = real
+        .iter()
+        .any(|r| r.4)
+        .then(|| cx.helper(runtime::Helper::Prop(props::Helper::DefineAccessor)));
     let new_function = cx.helper(runtime::Helper::Func(func::Helper::New));
     // `length: 0` (Function.prototype, Array.prototype).
     let length = matches!(b, Builtin::Function | Builtin::Array).then(|| cx.str("length"));
     const O: u32 = 0;
-    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    const M: u32 = 1;
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (1, jsval())]);
     let mut s = f.instructions();
     s.global_get(g).local_tee(O).ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
@@ -1174,16 +1216,26 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.i32_const(0).ref_i31();
         s.i32_const(HIDDEN).call(define);
     }
-    for (key, name, code, len) in real {
-        s.local_get(O).ref_as_non_null().global_get(key);
+    for (keys, name, code, len, getter) in real {
         s.ref_func(code);
         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
         s.ref_null(func::vals());
         s.global_get(name)
             .i32_const(len)
             .i32_const(0)
-            .call(new_function);
-        s.i32_const(HIDDEN).call(define);
+            .call(new_function)
+            .local_set(M);
+        for key in keys {
+            s.local_get(O)
+                .ref_as_non_null()
+                .global_get(key)
+                .local_get(M);
+            if let Some(define_accessor) = define_accessor.filter(|_| getter) {
+                s.i32_const(0).i32_const(HIDDEN).call(define_accessor);
+            } else {
+                s.i32_const(HIDDEN).call(define);
+            }
+        }
     }
     if let Builtin::Error(k) = b {
         // `constructor`: the function object (T16).

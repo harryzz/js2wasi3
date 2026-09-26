@@ -1,5 +1,5 @@
 // Built-ins in a library (T21): string → number through the runtime, string and array methods,
-// JSON.stringify and Object statics.
+// JSON.stringify/parse, Object statics, Map/Set.
 export function times(n) {
   const s = "5";
   return s * n;
@@ -33,4 +33,21 @@ export function evens(n) {
 export function json(n) {
   const o = Object.assign({ n }, Object.fromEntries([["list", [n, "x", null]]]));
   return JSON.stringify(o);
+}
+
+/**
+ * @param {string} s
+ * @returns {string}
+ */
+export function reparse(s) {
+  return JSON.stringify(JSON.parse(s, (k, v) => (typeof v === "number" ? v + 1 : v)));
+}
+
+/** @param {string} s */
+export function distinct(s) {
+  const counts = new Map();
+  for (const c of s) {
+    counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  return new Set(s).size * 100 + counts.get("l");
 }

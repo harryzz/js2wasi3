@@ -259,9 +259,18 @@ fn builtins_in_a_library() {
         ("shout(\"  hi \")", "ok(\"HI!!!!\")"),
         ("parse(\"2.5e1\")", "ok(27)"),
         ("evens(7)", "ok(56)"),
+        ("distinct(\"hello\")", "ok(402)"),
         (
             "json(2)",
             "ok(\"{\\\"n\\\":2,\\\"list\\\":[2,\\\"x\\\",null]}\")",
+        ),
+        (
+            "reparse(\"{\\\"a\\\":[1,2.5,\\\"x\\\"]}\")",
+            "ok(\"{\\\"a\\\":[2,3.5,\\\"x\\\"]}\")",
+        ),
+        (
+            "reparse(\"[1,]\")",
+            "err({name: \"SyntaxError\", message: \"Unexpected token \\']\\', \\\"[1,]\\\" is not valid JSON\"})",
         ),
     ] {
         assert_eq!(invoke(&out, call), want, "{call}");

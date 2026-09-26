@@ -31,7 +31,34 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/array.js"),
     include_str!("../builtins/object.js"),
     include_str!("../builtins/json.js"),
+    include_str!("../builtins/map.js"),
 );
+
+/// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
+/// `[Symbol.iterator]` (installed with `entries`/`values`) and its iterator's `next`, which the
+/// user's code never names.
+const IMPLIED: &[(&str, &[&str])] = &[
+    (
+        "$$Map",
+        &["$$Map_prototype_entries", "$$MapIterator_prototype_next"],
+    ),
+    (
+        "$$Map_groupBy",
+        &["$$Map_prototype_entries", "$$MapIterator_prototype_next"],
+    ),
+    (
+        "$$Set",
+        &["$$Set_prototype_values", "$$SetIterator_prototype_next"],
+    ),
+    ("$$Map_prototype_keys", &["$$MapIterator_prototype_next"]),
+    ("$$Map_prototype_values", &["$$MapIterator_prototype_next"]),
+    ("$$Map_prototype_entries", &["$$MapIterator_prototype_next"]),
+    ("$$Set_prototype_values", &["$$SetIterator_prototype_next"]),
+    ("$$Set_prototype_entries", &["$$SetIterator_prototype_next"]),
+];
+
+/// Prototype methods installed under another name too (T25): `Set.prototype.keys` is `values`.
+const ALIASES: &[(&str, &str)] = &[("keys", "$$Set_prototype_values")];
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
 pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
@@ -105,7 +132,25 @@ impl Prelude {
                 methods.entry(m.to_string()).or_default().push(item_of[sym]);
             }
         }
+        for (prop, name) in ALIASES {
+            if let Some(sym) = out.names.get(*name) {
+                methods
+                    .entry(prop.to_string())
+                    .or_default()
+                    .push(item_of[sym]);
+            }
+        }
         let mut deps: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (from, tos) in IMPLIED {
+            let Some(from) = out.names.get(*from) else {
+                continue;
+            };
+            for to in *tos {
+                if let Some(to) = out.names.get(*to) {
+                    deps.entry(item_of[from]).or_default().push(item_of[to]);
+                }
+            }
+        }
         let mut add = |target: usize, span: Span, roots: &mut Vec<usize>| {
             if !p.in_prelude(span.start) {
                 roots.push(target);
@@ -248,7 +293,9 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$Array_prototype_flatMap"
         | "$$Array_prototype_indexOf"
         | "$$Array_prototype_includes"
-        | "$$Array_prototype_fill" => Some(1),
+        | "$$Array_prototype_fill"
+        | "$$Map_prototype_forEach"
+        | "$$Set_prototype_forEach" => Some(1),
         "$$Object_assign"
         | "$$Array_prototype_copyWithin"
         | "$$Array_prototype_splice"

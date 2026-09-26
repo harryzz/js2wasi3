@@ -46,6 +46,11 @@ function $$describe(v) {
     if (Array.isArray(v)) {
       return "[object Array]";
     }
+    // Map/Set (T25): their prototypes' `constructor` is still a sentinel.
+    const kind = __intrinsic_map_kind(v);
+    if (kind >= 0) {
+      return kind === 0 ? "#<Map>" : "#<Set>";
+    }
     let p = Object.getPrototypeOf(v);
     if (p === null) {
       return "[object Object]";

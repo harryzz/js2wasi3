@@ -111,6 +111,8 @@ pub struct Module {
     /// The prelude's StringToNumber `(JsVal) -> F64` (T21), called by the runtime's ToNumber on a
     /// string; without it, that traps.
     pub string_to_number: Option<FuncId>,
+    /// The module can make a `Map`/`Set` (T25): `console.log` links their formatting.
+    pub maps: bool,
 }
 
 /// A prototype method implemented in the prelude: `proto.prototype[key]` is a function object
@@ -237,11 +239,17 @@ pub enum Builtin {
     Promise,
     /// `%GeneratorPrototype%` (T18, not a global name).
     Generator,
+    /// T25.
+    Map,
+    Set,
+    /// `%MapIteratorPrototype%`, `%SetIteratorPrototype%` (T25, not global names).
+    MapIterator,
+    SetIterator,
 }
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 17] = [
+    pub const ALL: [Builtin; 21] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -259,6 +267,10 @@ impl Builtin {
         Builtin::ArrayIterator,
         Builtin::Promise,
         Builtin::Generator,
+        Builtin::Map,
+        Builtin::Set,
+        Builtin::MapIterator,
+        Builtin::SetIterator,
     ];
 
     pub fn name(self) -> &'static str {
@@ -274,6 +286,19 @@ impl Builtin {
             Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
             Builtin::Promise => "Promise",
             Builtin::Generator => "%GeneratorPrototype%",
+            Builtin::Map => "Map",
+            Builtin::Set => "Set",
+            Builtin::MapIterator => "%MapIteratorPrototype%",
+            Builtin::SetIterator => "%SetIteratorPrototype%",
+        }
+    }
+
+    /// The built-in whose prototype methods the prelude names `$$<name>_prototype_…` (T21).
+    pub fn parse_prelude(s: &str) -> Option<Builtin> {
+        match s {
+            "MapIterator" => Some(Builtin::MapIterator),
+            "SetIterator" => Some(Builtin::SetIterator),
+            _ => Builtin::parse(s),
         }
     }
 
@@ -529,7 +554,47 @@ pub enum Intrinsic {
     },
     /// A Wasm trap: a built-in case the prelude doesn't implement yet. No result.
     Trap,
+    /// `Map`/`Set` storage for the prelude (T25).
+    Map(MapOp),
 }
+
+/// [`Intrinsic::Map`] operations. `m` is a `$map` and `it` a `$mapiter` (the prelude checks
+/// them with `Kind`/`IterKind` first: anything else traps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MapOp {
+    /// `() -> jsval`: a new empty map ([`MAP_KIND_MAP`] …), prototype `Map.prototype` / ….
+    New(u8),
+    /// `(v) -> i32`: the kind of a `$map`, or -1.
+    Kind,
+    /// `(m, key) -> jsval`: the value, or `undefined`.
+    Get,
+    /// `(m, key) -> bool`.
+    Has,
+    /// `(m, key, value)`: add or update (a `-0` key is stored as `+0`).
+    Set,
+    /// `(m, key) -> bool`: was it there?
+    Delete,
+    /// `(m)`.
+    Clear,
+    /// `(m) -> i32`: the number of entries.
+    Size,
+    /// `(m) -> jsval`: a new iterator ([`MAP_ITER_KEYS`] …), prototype `%MapIteratorPrototype%`
+    /// or `%SetIteratorPrototype%`.
+    Iter(u8),
+    /// `(v) -> i32`: `mode + 3 * map kind` of a `$mapiter`, or -1.
+    IterKind,
+    /// `(it) -> i32`: advance to the next entry and give its index, or -1 at the end (for good).
+    Step,
+    /// `(it, index) -> jsval`: the key / value of the entry `Step` gave.
+    Key,
+    Value,
+}
+
+pub const MAP_KIND_MAP: u8 = 0;
+pub const MAP_KIND_SET: u8 = 1;
+pub const MAP_ITER_KEYS: u8 = 0;
+pub const MAP_ITER_VALUES: u8 = 1;
+pub const MAP_ITER_ENTRIES: u8 = 2;
 
 /// [`Intrinsic::Timer`] functions.
 pub const TIMER_SET_TIMEOUT: u8 = 0;
@@ -636,6 +701,16 @@ impl Intrinsic {
             Intrinsic::StrSet => (&[JsVal, I32, I32], None),
             Intrinsic::JsLess { .. } => (&[JsVal, JsVal], Some(Bool)),
             Intrinsic::Trap => (&[], None),
+            Intrinsic::Map(op) => match op {
+                MapOp::New(_) => (&[], Some(JsVal)),
+                MapOp::Kind | MapOp::Size | MapOp::IterKind | MapOp::Step => (&[JsVal], Some(I32)),
+                MapOp::Get => (&[JsVal, JsVal], Some(JsVal)),
+                MapOp::Has | MapOp::Delete => (&[JsVal, JsVal], Some(Bool)),
+                MapOp::Set => (&[JsVal, JsVal, JsVal], None),
+                MapOp::Clear => (&[JsVal], None),
+                MapOp::Iter(_) => (&[JsVal], Some(JsVal)),
+                MapOp::Key | MapOp::Value => (&[JsVal, I32], Some(JsVal)),
+            },
         }
     }
 
@@ -745,6 +820,21 @@ impl Intrinsic {
             Intrinsic::StrSet => "str_set",
             Intrinsic::JsLess { .. } => "js_less",
             Intrinsic::Trap => "trap",
+            Intrinsic::Map(op) => match op {
+                MapOp::New(_) => "map_new",
+                MapOp::Kind => "map_kind",
+                MapOp::Get => "map_get",
+                MapOp::Has => "map_has",
+                MapOp::Set => "map_set",
+                MapOp::Delete => "map_delete",
+                MapOp::Clear => "map_clear",
+                MapOp::Size => "map_size",
+                MapOp::Iter(_) => "map_iter",
+                MapOp::IterKind => "map_iter_kind",
+                MapOp::Step => "map_step",
+                MapOp::Key => "map_key",
+                MapOp::Value => "map_value",
+            },
         }
     }
 
