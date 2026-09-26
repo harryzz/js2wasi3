@@ -55,3 +55,4 @@ jobs (a `$reaction` with no derived promise is already supported by the job code
   like node; `Object`/`Array` not being function objects needed a fallback for "an instance of X".
 - 2026-09-26: end of task: cargo test ok, clippy clean, diff.sh 49 passed / 0 failed / 9 skipped. hello.js grows
   38.5 KB → 41.3 KB (promise runtime always linked, F68). Status done.
+- 2026-09-26: user approved the commit ("T17: promises + microtasks", 005a3a0), no attribution lines, not pushed. Handoff for T18 written in its task file. Next: T18.
