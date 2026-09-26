@@ -18,7 +18,7 @@ Compiler: JavaScript → a WASI 0.3 Wasm component (WasmGC, native EH, P3 async)
   2. set the status in the table in `tasks/README.md`;
   3. add every deferred item to the **Follow-ups** table in `tasks/README.md` (next free `F<n>`, found in, pick up in),
      and tick any follow-up this task resolved.
-- The only test host is wasmtime 49.0.1. The JS oracle is `node`.
+- The only test host is wasmtime 49.0.1. The JS oracle is `node` 24.21.0 (latest LTS; pinned in `TOOLS.md`).
 - Differential tests: `scripts/diff.sh [fixture.js | dir]` runs node and js2wasi3 + wasmtime and compares
   stdout, stderr and exit status (default: all of `tests/fixtures`; `x.skip` skips `x.js` with a reason).
   Run it on the fixtures you touch; a new command fixture needs no expected-output file (node is the oracle).

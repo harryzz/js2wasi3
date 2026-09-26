@@ -1,6 +1,7 @@
 # Pinned tools
 
-Checked 2026-09-25 against the latest GitHub releases. Verify with `scripts/check-tools.sh`.
+Checked 2026-09-25 against the latest GitHub releases (node: 2026-09-26, latest LTS). Rule: always the latest
+version of every tool. Verify with `scripts/check-tools.sh`.
 
 | Tool | Version | Used for |
 |---|---|---|
@@ -14,7 +15,7 @@ Checked 2026-09-25 against the latest GitHub releases. Verify with `scripts/chec
 | wac | 0.11.0 | composing components in tests (later) |
 | binaryen (wasm-opt) | 133 | optional optimisation experiments only |
 | rustc/cargo | 1.98.1 | pinned in `rust-toolchain.toml` |
-| node | 20.19.2 | differential oracle for JS behaviour |
+| node | 24.21.0 | differential oracle for JS behaviour (latest LTS; was 20.19.2 until 2026-09-26) |
 
 ## Wasm feature status on wasmtime 49.0.1 (verified by `probes/run.sh`)
 

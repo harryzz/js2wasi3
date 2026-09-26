@@ -12,4 +12,5 @@ check wit-bindgen 0.62.0
 check wac 0.11.0
 check wasm-opt "version 133"
 check rustc 1.98.1
+check node v24.21.0
 exit $fail
