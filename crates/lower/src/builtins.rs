@@ -86,6 +86,9 @@ pub(crate) struct Prelude {
     /// Does the user's code name a property `bind` (T25: `Function.prototype.bind` is installed
     /// only then)?
     pub bind: bool,
+    /// Does it name a property `toString` (T25: functions keep their source text for
+    /// `Function.prototype.toString` only then)?
+    pub to_string: bool,
 }
 
 impl Prelude {
@@ -176,8 +179,9 @@ impl Prelude {
                 _ => None,
             };
             if let Some((name, span)) = prop {
-                if name == "bind" && !p.in_prelude(span.start) {
-                    out.bind = true;
+                if !p.in_prelude(span.start) {
+                    out.bind |= name == "bind";
+                    out.to_string |= name == "toString";
                 }
                 for &t in methods.get(name).into_iter().flatten() {
                     add(t, span, &mut roots);

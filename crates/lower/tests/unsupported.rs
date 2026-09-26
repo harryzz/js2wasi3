@@ -401,10 +401,8 @@ fn closures() {
         one("export function f() { function g() {} g = 1; return 0; }"),
         "1:39 unsupported: assignment to function `g` (planned: later)"
     );
-    assert_eq!(
-        one("export function f(k) { return { [k]: () => 1 }; }"),
-        "1:33 unsupported: function with a computed key (its `name` comes from the key at run time) (planned: later)"
-    );
+    // F59: a function under a computed key is named at run time.
+    lowers("export function f(k) { return { [k]: () => 1 }; }");
 }
 
 /// T16: classes lower; what's left for later is rejected.

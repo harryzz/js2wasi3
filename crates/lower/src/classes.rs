@@ -114,6 +114,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 kind: FnKind::Class { construct },
                 env,
                 shared: false,
+                source: self.source_text(c.span),
             })),
         ));
         let proto = cx.func.add_local("prototype", Type::JsVal);
@@ -235,33 +236,34 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Ok(());
         }
         let (key, name) = self.member_key(cx, &m.key, m.computed, body)?;
-        let Some(name) = name else {
-            return Err(self.unsupported(
-                m.span,
-                "method with a computed key (its `name` comes from the key at run time)",
-                "later",
-            ));
-        };
-        let (fname, op) = match m.kind {
+        let (prefix, op) = match m.kind {
             MethodDefinitionKind::Get => (
-                format!("get {name}"),
+                "get ",
                 Intrinsic::DefineAccessor {
                     setter: false,
                     enumerable: false,
                 },
             ),
             MethodDefinitionKind::Set => (
-                format!("set {name}"),
+                "set ",
                 Intrinsic::DefineAccessor {
                     setter: true,
                     enumerable: false,
                 },
             ),
-            _ => (name, Intrinsic::DefineMethod),
+            _ => ("", Intrinsic::DefineMethod),
         };
+        let fname = name.as_ref().map(|name| format!("{prefix}{name}"));
         let scope = m.value.scope_id.get().expect("functions have scopes");
         cx.home = Some(target);
-        let f = self.closure(cx, scope, Some(&fname), m.span)?;
+        let mut f = self.closure(cx, scope, fname.as_deref(), m.span)?;
+        if name.is_none() {
+            // A computed key: the name comes from it at run time (F59).
+            f = Expr::intrinsic(
+                Intrinsic::SetFunctionName,
+                vec![f, key.clone(), Expr::str(prefix)],
+            );
+        }
         body.push(Stmt::Expr(Expr::intrinsic(
             op,
             vec![Expr::Local(target), key, f],
@@ -341,21 +343,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let (key, name) = self.member_key(cx, &p.key, p.computed, body)?;
         let value = match &p.value {
             Some(v) => {
-                if name.is_none()
-                    && matches!(
-                        v.without_parentheses(),
-                        Expression::FunctionExpression(_)
-                            | Expression::ArrowFunctionExpression(_)
-                            | Expression::ClassExpression(_)
+                let f = jsval_of(self.named(cx, v, name.as_deref())?);
+                if name.is_none() && crate::anonymous_function(v) {
+                    // A computed key: the name comes from it at run time (F59).
+                    Expr::intrinsic(
+                        Intrinsic::SetFunctionName,
+                        vec![f, key.clone(), Expr::str("")],
                     )
-                {
-                    return Err(self.unsupported(
-                        p.span,
-                        "function in a field with a computed key (its `name` comes from the key at run time)",
-                        "later",
-                    ));
+                } else {
+                    f
                 }
-                jsval_of(self.named(cx, v, name.as_deref())?)
             }
             None => Expr::undefined(),
         };

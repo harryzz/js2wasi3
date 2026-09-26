@@ -294,7 +294,8 @@ fn traps_are_not_caught() {
 
 /// T13: what isn't implemented yet traps instead of giving a wrong value: reading a built-in
 /// method (functions are T14/T21), `console.log` of an object with a symbol key (F24), a built-in
-/// `toString` that isn't implemented (`Function.prototype.toString`, F43).
+/// `toString` that isn't implemented (`Function.prototype.toString` when the code never names
+/// `toString`: functions then carry no source text, T25).
 #[test]
 fn unimplemented_object_features_trap() {
     let dir = out_dir("objtrap");

@@ -13,8 +13,8 @@
 //!   the function. (Read-only attributes: F36.)
 //!
 //! # Function.prototype
-//! Built like the other prototypes ([`crate::object`]): `length: 0`, `name: ""`, sentinels for
-//! `apply`, `bind`, `toString`, and a real `call` ([`Helper::Call`]).
+//! Built like the other prototypes ([`crate::object`]), but a `$function` itself (F47): callable
+//! ([`Helper::Empty`]), not a constructor; `length: 0`, `name: ""`, real `call`, `apply`, `bind`.
 
 use js2wasi3_ir::{Builtin, ErrorKind};
 use wasm_encoder::{BlockType, Function, HeapType, ValType};
@@ -33,6 +33,9 @@ pub const F_ENV: u32 = 8;
 pub const F_CONSTRUCT: u32 = 9;
 /// `kind: i32` (T16): [`KIND_FUNCTION`] or [`KIND_CLASS`].
 pub const F_KIND: u32 = 10;
+/// `source: (mut (ref null $string))` (T25): the source text for `Function.prototype.toString`;
+/// null: a built-in (`function f() { [native code] }`).
+pub const F_SOURCE: u32 = 11;
 
 pub const KIND_FUNCTION: i32 = 0;
 pub const KIND_CLASS: i32 = 1;
@@ -123,6 +126,16 @@ pub enum Helper {
     /// A bound function's construct code: `new` the target (`new_target` the target when it's the
     /// bound function itself).
     BoundConstruct,
+    /// The code of `Function.prototype` itself (F47): returns `undefined`.
+    Empty,
+    /// `(f: jsval (a function), source: (ref $string)) -> jsval`: set `f`'s source text (T25).
+    SetSource,
+    /// `(f, key, prefix: jsval (a string)) -> jsval`: `f.name = prefix + key` (a symbol key:
+    /// `[description]`, none for an empty one), F59.
+    SetName,
+    /// The code of `Function.prototype.toString` (T25): the source text, or
+    /// `function name() { [native code] }`.
+    ToString,
 }
 
 impl Helper {
@@ -151,6 +164,10 @@ impl Helper {
             Helper::Bind => "Function.prototype.bind",
             Helper::BoundCall => "bound_call",
             Helper::BoundConstruct => "bound_construct",
+            Helper::Empty => "Function.prototype",
+            Helper::SetSource => "set_function_source",
+            Helper::SetName => "set_function_name",
+            Helper::ToString => "Function.prototype.toString",
         }
     }
 
@@ -185,7 +202,11 @@ impl Helper {
             | Helper::Apply
             | Helper::Bind
             | Helper::BoundCall
-            | Helper::BoundConstruct => (vec![v, v, v], vec![v]),
+            | Helper::BoundConstruct
+            | Helper::Empty
+            | Helper::ToString => (vec![v, v, v], vec![v]),
+            Helper::SetSource => (vec![v, s], vec![v]),
+            Helper::SetName => (vec![v, v, v], vec![v]),
             Helper::CallList => (vec![v, v, v, s], vec![v]),
             Helper::ListFromArrayLike => (vec![v], vec![rt(false, T_VALS)]),
         }
@@ -252,6 +273,21 @@ impl Helper {
             Helper::Bind => bind(cx),
             Helper::BoundCall => bound_call(cx, false),
             Helper::BoundConstruct => bound_call(cx, true),
+            Helper::Empty => {
+                let mut f = Function::new([]);
+                f.instructions().global_get(G_UNDEFINED).end();
+                f
+            }
+            Helper::SetSource => {
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(0).ref_cast_non_null(function()).local_get(1);
+                s.struct_set(T_FUNCTION, F_SOURCE);
+                s.local_get(0).end();
+                f
+            }
+            Helper::ToString => to_string(cx),
+            Helper::SetName => set_name(cx),
         }
     }
 }
@@ -312,6 +348,7 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.select();
     s.local_get(FLAGS).i32_const(NEW_CLASS).i32_and();
     s.select();
+    s.ref_null(HeapType::Concrete(runtime::T_STRING));
     s.struct_new(T_FUNCTION).local_set(F);
     // `length` and `name`: read-only, configurable.
     s.local_get(F).ref_as_non_null().global_get(length);
@@ -1033,5 +1070,94 @@ fn bound_call(cx: &mut dyn Cx, construct: bool) -> Function {
         s.call(call_value);
     }
     s.end();
+    f
+}
+
+/// `Function.prototype.toString` (a `$code`, T25): `this`'s source text, else (built-ins, bound
+/// functions) `function name() { [native code] }` with its `name` (none for a bound function).
+fn to_string(cx: &mut dyn Cx) -> Function {
+    let get = oh(cx, object::Helper::Get);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let not_function = cx.str("Function.prototype.toString requires that 'this' be a Function");
+    let (open, close, anonymous) = (
+        cx.str("function "),
+        cx.str("() { [native code] }"),
+        cx.str("function () { [native code] }"),
+    );
+    let name = cx.str("name");
+    const THIS: u32 = 1;
+    const F: u32 = 3;
+    const N: u32 = 4;
+    let mut f = Function::new([(1, rt(true, T_FUNCTION)), (1, jsval())]);
+    let mut s = f.instructions();
+    s.local_get(THIS).ref_test_non_null(function()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.global_get(not_function).call(throw);
+    s.end();
+    s.local_get(THIS).ref_cast_non_null(function()).local_tee(F);
+    s.struct_get(T_FUNCTION, F_SOURCE);
+    s.br_on_non_null(0);
+    s.local_get(F)
+        .struct_get(T_FUNCTION, F_KIND)
+        .i32_const(KIND_BOUND)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(anonymous).return_();
+    s.end();
+    s.local_get(THIS).global_get(name).call(get).local_set(N);
+    runtime::is_string(&mut s, N);
+    s.if_(BlockType::Result(string_ref()));
+    s.global_get(open);
+    s.local_get(N)
+        .ref_cast_non_null(runtime::string())
+        .call(concat);
+    s.global_get(close).call(concat);
+    s.else_();
+    s.global_get(anonymous);
+    s.end();
+    s.end();
+    f
+}
+
+/// SetFunctionName (F59): `f.name = prefix + key`, a symbol key as `[description]` (empty for no
+/// description).
+fn set_name(cx: &mut dyn Cx) -> Function {
+    let to_string = cx.helper(runtime::Helper::ToString);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let define = oh(cx, object::Helper::Define);
+    let name = cx.str("name");
+    let (open, close) = (cx.str("["), cx.str("]"));
+    const F: u32 = 0;
+    const KEY: u32 = 1;
+    const PREFIX: u32 = 2;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(F).ref_cast_non_null(runtime::object());
+    s.global_get(name);
+    s.local_get(PREFIX).ref_cast_non_null(runtime::string());
+    s.local_get(KEY).ref_test_non_null(runtime::symbol());
+    s.if_(BlockType::Result(string_ref()));
+    {
+        s.local_get(KEY)
+            .ref_cast_non_null(runtime::string())
+            .array_len()
+            .i32_eqz();
+        s.if_(BlockType::Result(string_ref()));
+        s.array_new_fixed(runtime::T_STRING, 0);
+        s.else_();
+        s.global_get(open);
+        s.local_get(KEY)
+            .ref_cast_non_null(runtime::string())
+            .call(concat);
+        s.global_get(close).call(concat);
+        s.end();
+    }
+    s.else_();
+    s.local_get(KEY).call(to_string);
+    s.end();
+    s.call(concat);
+    s.i32_const(object::HIDDEN | object::READONLY).call(define);
+    s.local_get(F).end();
     f
 }

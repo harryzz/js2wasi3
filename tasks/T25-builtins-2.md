@@ -150,8 +150,8 @@ when used. **Speed:** 300k string-keyed set/get/delete + 300k numeric for-of + 3
 **Next smallest step:** slice 3: `Function.prototype.bind` (a bound-function object kind in `func.rs`: target, bound
 `this`, bound args; `name` `bound f`, `length`, `new` through it).
 
-### Slice 3 (in progress): `bind`, `arguments`
-**Done so far (2026-09-26):**
+### Slice 3: functions and `arguments` (done 2026-09-26)
+**First session:**
 - `Function.prototype.bind` (native, `func.rs` `Helper::Bind`): a `$function` of kind `KIND_BOUND` whose env is
   `[target, bound this, ...bound args]`; its code calls the target with the bound arguments first, its construct
   entry (only if the target has one) `new`s the target (`new_target` = the target when it's the bound function
@@ -169,10 +169,34 @@ when used. **Speed:** 300k string-keyed set/get/delete + 300k numeric for-of + 3
 - Tests: `tests/fixtures/builtins/functions.js`, `tests/fixtures/syntax/callee-text.js`, `unsupported.rs`.
 - `hello.js`: 52740 bytes (+206: the iterator's array-like branch and the `[Arguments]` check in existing helpers).
 
-**Left in slice 3:** `Function.prototype.toString` (source text), `Function.prototype` as a function (F47),
-F59 (computed keys whose value is a function: SetFunctionName at run time).
+**Second session (the rest):**
+- F47: `Function.prototype` is a `$function` (built in `object.rs` `proto()`; its code `func::Helper::Empty` returns
+  `undefined`, not a constructor, `name: ""`, `length: 0`). `console.log` prints it `[Function (anonymous)] Object`
+  like node (a function whose prototype is `Object.prototype` gets node's constructor-name suffix); a class's
+  `extends` printing skips it.
+- `Function.prototype.toString` (F43): `$function` has a new field `source: (mut (ref null $string))` (`F_SOURCE`).
+  The lowerer records each function's span (`Lowerer::fn_source`: a method's from its key without `static`, an
+  accessor's from `get`/`set`, a class's `c.span`) and `ir::Closure::source` carries the text; the backend sets it
+  after `New` (`func::Helper::SetSource`). Only when the user's code names a `toString` property
+  (`ir::Module::to_string`, like `bind`): then the real `toString` (`func::Helper::ToString`) replaces the sentinel,
+  so ToPrimitive (`"" + f`, templates, `String(f)`) works too. No source (prelude functions, built-ins, bound
+  functions): `function name() { [native code] }` / `function () { [native code] }`. A non-function `this`:
+  node's TypeError.
+- F59: anonymous functions/classes under a computed (or numeric) key get their `name` at run time
+  (`Intrinsic::SetFunctionName` → `func::Helper::SetName`: prefix `get `/`set ` + the key, a symbol as `[desc]`):
+  object literal values, methods, accessors; class methods, accessors, static fields.
+- Tests: `tests/fixtures/builtins/function-source.js` (new), `unsupported.rs` (the computed-key case now lowers),
+  `build.rs` comment. `cargo test` ok; `scripts/diff.sh -j 4`: 77 passed, 0 failed, 11 skipped.
+- `hello.js`: 52865 bytes (+125 over 52740: the `$function` field, the `Function.prototype` code, two inspect checks).
 
-## Handoff for the rest of slice 3 (written 2026-09-26, end of the slices 1–3 session)
+**Not done (follow-ups):** F104 (sources only when `toString` is named; implicit conversion otherwise traps), F105
+(SetFunctionName edge cases), F103 (`arguments` limits).
+
+**Next smallest step:** slice 4 (built-ins as values) or T20, the user's choice. Slice 4's first piece: `Math`/`JSON`
+as values (F81), then `String`/`Number`/`Array`/`Object` as function values with their prototypes' `constructor`
+(F37), which F95's circular-JSON message needs.
+
+## Handoff for the rest of slice 3 (written 2026-09-26, end of the slices 1–3 session; done, kept for reference)
 
 **State:** `main`, committed, not pushed. Slices 1 (`JSON.parse`) and 2 (`Map`/`Set`, `Map.groupBy`) are done; slice 3
 is half done (`bind`, `arguments`: see "Slice 3 (in progress)" above). The oracle is node **24.21.0** (latest LTS,
@@ -323,3 +347,8 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 - 2026-09-26: arguments done: a function using it is lowered as f(...all) (params bound in the prologue from all[i], like default params; no call-site change), Intrinsic::MakeArguments -> object class CLASS_ARGUMENTS (indices, hidden length, hidden @@iterator = Array.prototype.values), printed '[Arguments] {…}'; Array.prototype.values now iterates any object as an array-like (iter.rs ARRAY_LIKE). Rejected: arguments in arrows/class ctors, rest param + arguments. Smoke test matches node (strict).
 - 2026-09-26: checkpoint: bind + arguments done, functions.js/callee-text.js PASS, full diff.sh 76/0/11, cargo test ok; bind gated on a `bind` property name (hello.js 52740, +206). F42 ticked, F43 partial, F103 recorded.
 - 2026-09-26: handoff for the rest of slice 3 written (toString, F47, F59).
+- 2026-09-26: rest of slice 3 started (F47, toString, F59).
+- 2026-09-26: F47 done: `Function.prototype` is a `$function` (func::Helper::Empty code returns undefined, no construct, KIND_FUNCTION) built in object.rs proto(); console.log appends ' Object' to a function whose proto is Object.prototype (node's constructor name), class 'extends' printing skips Function.prototype. Full diff.sh 76/0/11; hello.js 52851 (+111: inspect checks).
+- 2026-09-26: Function.prototype.toString done: `$function` gets field 11 `source` (mut, null = native); ir::Closure::source (lowerer fn_source spans: methods from the key without `static`, accessors from get/set, classes c.span), set after New via func::Helper::SetSource; real toString (func::Helper::ToString) installed and sources emitted only when user code names `toString` (ir::Module::to_string); else sentinel/trap as before. Probes (methods, accessors, static, arrows, class exprs, bound, built-ins, template/String/+ conversion) match node.
+- 2026-09-26: F59 done: Intrinsic::SetFunctionName (func::Helper::SetName: prefix + ToString(key), a symbol as [desc], empty desc -> ''), applied to anonymous functions/classes under computed or numeric keys: object literal values/methods/accessors, class methods/accessors, class fields (instance computed field keys stay unsupported). Probe matches node.
+- 2026-09-26: slice 3 done: function-source.js fixture PASS, cargo test ok, diff.sh 77/0/11, hello.js 52865. Notes / Result, README (F43, F47, F59 ticked; F104, F105), D5, keywords.md updated.

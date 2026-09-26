@@ -176,6 +176,8 @@ pub trait Cx {
     fn has_maps(&mut self) -> bool;
     /// Does the code name a property `bind` (T25)?
     fn has_bind(&mut self) -> bool;
+    /// Does the code name a property `toString` (T25: `Function.prototype.toString`)?
+    fn has_to_string(&mut self) -> bool;
 
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -278,6 +280,7 @@ pub fn types(types: &mut TypeSection) {
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
     function_fields.push(field(StorageType::Val(rt(true, T_CODE)), false));
     function_fields.push(field(StorageType::Val(ValType::I32), false));
+    function_fields.push(field(StorageType::Val(rt(true, T_STRING)), true));
     let mut generator_fields = object_fields.clone();
     generator_fields.push(field(StorageType::Val(rt(false, T_RESUME)), false));
     generator_fields.push(field(StorageType::Val(rt(false, T_VALS)), false));

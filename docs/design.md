@@ -156,6 +156,12 @@ holds an ordered SameValueZero hash table (`crates/backend/src/mapset.rs`: inser
 objects hashed by an identity hash in `class`'s high bits); `builtins/map.js` implements the methods over
 `__intrinsic_map_*`. Iterators survive rehash and `clear` by V8's obsolete-table transitions. `new Map(…)` is a
 direct call of `$$Map`; `Map` itself isn't a value yet.)
+(T25 slice 3: `Function.prototype.bind` is native (`func.rs`, bound functions are `$function`s of kind `KIND_BOUND`);
+`arguments` makes a function lower as `f(...args)`. `Function.prototype` is itself a `$function` (returns `undefined`).
+`$function` has a nullable `source` field: user functions get their source text (the span, methods from the key)
+only when the code names a `toString` property, and `Function.prototype.toString` is installed only then; otherwise
+functions print as native code and `"" + f` traps (F104). Anonymous functions under computed keys are named at run
+time (`Intrinsic::SetFunctionName`).)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

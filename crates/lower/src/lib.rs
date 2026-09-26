@@ -135,6 +135,7 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             scoping: program.semantic.scoping(),
             module: ir::Module {
                 bind: prelude.bind,
+                to_string: prelude.to_string,
                 ..ir::Module::default()
             },
             funcs: HashMap::new(),
@@ -158,6 +159,7 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             lowered: HashSet::new(),
             hidden: HashMap::new(),
             fn_scope: HashMap::new(),
+            fn_source: HashMap::new(),
             rest_param: HashSet::new(),
             fn_length: HashMap::new(),
             classes: HashMap::new(),
@@ -293,6 +295,8 @@ struct Lowerer<'p, 'a> {
     /// Hidden leading params of each JS function.
     hidden: HashMap<FuncId, Hidden>,
     fn_scope: HashMap<FuncId, ScopeId>,
+    /// The source span of each function (T25: `Function.prototype.toString`).
+    fn_source: HashMap<FuncId, Span>,
     /// Functions with a rest parameter (their last IR parameter, an array).
     rest_param: HashSet<FuncId>,
     /// Top-level functions' `length`.
@@ -1028,6 +1032,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         self.module.add_function(func);
         self.hidden.insert(id, hidden);
         self.fn_scope.insert(id, scope);
+        self.fn_source.insert(id, f.span);
         if let Some(text) = self.p.jsdoc(doc_at) {
             self.jsdoc.insert(id, parse_jsdoc(text));
         }
@@ -1594,6 +1599,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             self.module.add_function(func);
             self.hidden.insert(id, hidden);
             self.fn_scope.insert(id, scope);
+            // `toString` text: a method's from its key (without `static`), an accessor's from
+            // `get`/`set`.
+            let source = match nodes.parent_kind(node.id()) {
+                AstKind::MethodDefinition(m) => {
+                    let mut s = m.span;
+                    if m.r#static {
+                        let text = &self.p.source[s.start as usize..s.end as usize];
+                        let rest = text["static".len()..].trim_start();
+                        s.start += (text.len() - rest.len()) as u32;
+                    }
+                    s
+                }
+                AstKind::ObjectProperty(p) if method => p.span,
+                _ => f.span(),
+            };
+            self.fn_source.insert(id, source);
             self.func_params.insert(id, params);
             if let FnAst::Func(func) = f
                 && func.is_declaration()
@@ -2011,7 +2032,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             },
             env,
             shared: false,
+            source: self.source_text(self.fn_source[&id]),
         })))
+    }
+
+    /// The source text of `span` for `Function.prototype.toString` (T25): only when the code names
+    /// `toString`, and not for the prelude's functions.
+    pub(crate) fn source_text(&self, span: Span) -> Option<String> {
+        (self.module.to_string && !self.p.in_prelude(span.start))
+            .then(|| self.p.source[span.start as usize..span.end as usize].to_string())
     }
 
     /// The environment of a new closure of function (or class) `scope`: what it captures, from `cx`.
@@ -2090,6 +2119,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             },
             env: Vec::new(),
             shared: true,
+            source: self.fn_source.get(&func).and_then(|s| self.source_text(*s)),
         }))
     }
 
@@ -4801,34 +4831,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             _ => None,
         };
-        if name.is_none()
-            && matches!(
-                p.value.without_parentheses(),
-                Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
-            )
-        {
-            return Err(self.unsupported(
-                p.span,
-                "function with a computed key (its `name` comes from the key at run time)",
-                "later",
-            ));
-        }
+        // An anonymous function under a computed key: named from the key at run time (F59).
+        let key = if name.is_none() && anonymous_function(&p.value) {
+            let tk = cx.func.add_local("key", Type::JsVal);
+            body.push(Stmt::Set(tk, key));
+            Expr::Local(tk)
+        } else {
+            key
+        };
+        let runtime_name = |f: Expr, prefix: &str| match name {
+            None if anonymous_function(&p.value) => Expr::intrinsic(
+                Intrinsic::SetFunctionName,
+                vec![f, key.clone(), Expr::str(prefix)],
+            ),
+            _ => f,
+        };
         if p.kind != PropertyKind::Init {
             // A getter or setter (T16): named `get x` / `set x`.
-            let Some(name) = name else {
-                return Err(self.unsupported(
-                    p.span,
-                    "getter or setter with a computed key (its `name` comes from the key at run time)",
-                    "later",
-                ));
-            };
             let setter = p.kind == PropertyKind::Set;
-            let fname = format!("{} {name}", if setter { "set" } else { "get" });
+            let prefix = if setter { "set " } else { "get " };
+            let fname = name.map(|name| format!("{prefix}{name}"));
             let saved_home = cx.home;
             cx.home = Some(t);
-            let f = self.named(cx, &p.value, Some(&fname));
+            let f = self.named(cx, &p.value, fname.as_deref());
             cx.home = saved_home;
-            let f = jsval_of(f?);
+            let f = runtime_name(jsval_of(f?), prefix);
             body.push(Stmt::Expr(Expr::intrinsic(
                 Intrinsic::DefineAccessor {
                     setter,
@@ -4845,7 +4872,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let v = self.named(cx, &p.value, name);
         cx.home = saved_home;
-        let v = jsval_of(v?);
+        let v = runtime_name(jsval_of(v?), "");
         body.push(Stmt::Expr(if proto {
             Expr::intrinsic(Intrinsic::SetProto, vec![Expr::Local(t), v])
         } else {
@@ -5939,4 +5966,14 @@ fn map_op(name: &str) -> Option<ir::MapOp> {
         "value" => M::Value,
         _ => return None,
     })
+}
+
+/// An anonymous function or class expression: it takes its `name` from where it's defined.
+fn anonymous_function(e: &Expression) -> bool {
+    match e.without_parentheses() {
+        Expression::FunctionExpression(f) => f.id.is_none(),
+        Expression::ArrowFunctionExpression(_) => true,
+        Expression::ClassExpression(c) => c.id.is_none(),
+        _ => false,
+    }
 }

@@ -155,6 +155,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         cx.str("[AsyncFunction (anonymous)]"),
     );
     let empty = cx.str("");
+    let object_suffix = cx.str(" Object");
     const V: u32 = 0;
     const DEPTH: u32 = 1;
     const INDENT: u32 = 2;
@@ -217,6 +218,12 @@ fn format(cx: &mut dyn Cx) -> Function {
                 .struct_get(runtime::T_OBJECT, object::F_PROTO)
                 .local_tee(P);
             s.ref_test_non_null(func::function());
+            // (`Function.prototype` is a function too, F47.)
+            s.local_get(P)
+                .global_get(runtime::G_PROTOS + js2wasi3_ir::Builtin::Function.index())
+                .ref_eq()
+                .i32_eqz()
+                .i32_and();
             s.if_(BlockType::Result(string_ref()));
             s.global_get(extends);
             s.local_get(P).global_get(name).call(get).local_set(N);
@@ -268,6 +275,17 @@ fn format(cx: &mut dyn Cx) -> Function {
         }
         s.end();
         s.local_set(B);
+        // A function whose prototype is `Object.prototype` (`Function.prototype` itself, F47): node
+        // names its constructor, `Object`.
+        s.local_get(V)
+            .ref_cast_non_null(runtime::object())
+            .struct_get(runtime::T_OBJECT, object::F_PROTO)
+            .global_get(runtime::G_PROTOS + js2wasi3_ir::Builtin::Object.index())
+            .ref_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(B).ref_as_non_null();
+        s.global_get(object_suffix).call(concat).local_set(B);
+        s.end();
         s.local_get(V)
             .ref_cast_non_null(runtime::object())
             .call(own_keys)

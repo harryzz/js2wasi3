@@ -1095,6 +1095,13 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             "bind",
             1,
         )))
+        // `toString` only when the code names it: user functions then carry their source.
+        .chain(cx.has_to_string().then_some((
+            runtime::Helper::Func(func::Helper::ToString),
+            Some("toString"),
+            "toString",
+            0,
+        )))
         .collect(),
         Builtin::Array => array::proto_methods()
             .into_iter()
@@ -1219,7 +1226,25 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         Some(p) => s.call(p),
         None => s.ref_null(object()),
     };
-    s.call(alloc).local_tee(O).global_set(g);
+    if b == Builtin::Function {
+        // `Function.prototype` is a function (F47): `$function` fields after the object's.
+        let empty = cx.helper(runtime::Helper::Func(func::Helper::Empty));
+        cx.declare_func(empty);
+        s.i32_const(0).array_new_default(T_KEYS);
+        s.i32_const(0).array_new_default(T_VALS);
+        s.i32_const(0).array_new_default(T_BYTES);
+        s.i32_const(0);
+        s.ref_null(wasm_encoder::HeapType::Concrete(T_I32S));
+        s.ref_func(empty);
+        s.ref_null(func::vals());
+        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.i32_const(func::KIND_FUNCTION);
+        s.ref_null(wasm_encoder::HeapType::Concrete(T_STRING));
+        s.struct_new(runtime::T_FUNCTION);
+    } else {
+        s.call(alloc);
+    }
+    s.local_tee(O).global_set(g);
     for (key, value) in props {
         s.local_get(O).ref_as_non_null().global_get(key);
         match value {

@@ -670,6 +670,10 @@ impl runtime::Cx for Emitter<'_> {
         self.m.bind
     }
 
+    fn has_to_string(&mut self) -> bool {
+        self.m.to_string
+    }
+
     fn builtin_methods(&mut self, b: ir::Builtin) -> Vec<(String, u32, u32)> {
         let base = self.func_base;
         self.m
@@ -1323,6 +1327,7 @@ impl Emitter<'_> {
                     Intrinsic::Timer(k) => H::Timer(timers::Helper::Fn(*k)),
                     Intrinsic::Map(op) => H::Map(mapset::Helper::Op(*op)),
                     Intrinsic::MakeArguments => H::Obj(object::Helper::MakeArguments),
+                    Intrinsic::SetFunctionName => H::Func(func::Helper::SetName),
                     Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
                     Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
                     Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),
@@ -1416,6 +1421,15 @@ impl Emitter<'_> {
                 s.global_get(name);
                 s.i32_const(c.length as i32).i32_const(flags);
                 s.call(self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::New))));
+                if let Some(src) = &c.source {
+                    let src = runtime::Cx::str(self, src);
+                    s.global_get(src);
+                    s.call(
+                        self.helper_index(Helper::Js(runtime::Helper::Func(
+                            func::Helper::SetSource,
+                        ))),
+                    );
+                }
                 if let Some(g) = shared {
                     s.global_set(g);
                     frames.pop();

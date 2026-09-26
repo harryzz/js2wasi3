@@ -115,6 +115,9 @@ pub struct Module {
     pub maps: bool,
     /// The code names a property `bind` (T25): `Function.prototype.bind` is installed.
     pub bind: bool,
+    /// The code names a property `toString` (T25): `Function.prototype.toString` is installed and
+    /// user functions carry their source text ([`Closure::source`]).
+    pub to_string: bool,
 }
 
 /// A prototype method implemented in the prelude: `proto.prototype[key]` is a function object
@@ -561,6 +564,9 @@ pub enum Intrinsic {
     /// `(args: an array of every argument) -> jsval`: a function's `arguments` object (T25,
     /// unmapped: strict mode).
     MakeArguments,
+    /// `(f, key, prefix: a string) -> f`: SetFunctionName at run time (F59, a computed key): `name`
+    /// becomes `prefix` + the key (a symbol: `[description]`).
+    SetFunctionName,
 }
 
 /// [`Intrinsic::Map`] operations. `m` is a `$map` and `it` a `$mapiter` (the prelude checks
@@ -707,6 +713,7 @@ impl Intrinsic {
             Intrinsic::JsLess { .. } => (&[JsVal, JsVal], Some(Bool)),
             Intrinsic::Trap => (&[], None),
             Intrinsic::MakeArguments => (&[JsVal], Some(JsVal)),
+            Intrinsic::SetFunctionName => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => (&[], Some(JsVal)),
                 MapOp::Kind | MapOp::Size | MapOp::IterKind | MapOp::Step => (&[JsVal], Some(I32)),
@@ -827,6 +834,7 @@ impl Intrinsic {
             Intrinsic::JsLess { .. } => "js_less",
             Intrinsic::Trap => "trap",
             Intrinsic::MakeArguments => "make_arguments",
+            Intrinsic::SetFunctionName => "set_function_name",
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => "map_new",
                 MapOp::Kind => "map_kind",
@@ -1177,6 +1185,9 @@ pub struct Closure {
     pub env: Vec<Expr>,
     /// One object per module, made on first use (a top-level function declaration): `env` is empty.
     pub shared: bool,
+    /// Its source text, for `Function.prototype.toString` (T25; only with [`Module::to_string`],
+    /// never for the prelude's functions: those print as native code).
+    pub source: Option<String>,
 }
 
 /// What a [`Closure`] makes (T16).

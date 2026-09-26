@@ -41,7 +41,7 @@ templates, regex, multi-file `import`).
 | `case` | ✅ | T24: lazy strict-equality tests, fall-through, TDZ across cases. |
 | `catch` | ✅ | With or without a binding, destructuring binding; native Wasm EH (T12). |
 | `char` | ➖ | Removed in ES5. |
-| `class` | 🟡 | T16: fields, statics, private `#x` fields and methods, `extends` (also native errors), `super`, accessors. Missing: private getters/setters, `static {}` blocks, `accessor` fields, computed instance field keys (F58, F80); methods/accessors with computed keys whose value is a function (F59); `Symbol.hasInstance` (T21); a class used before its declaration throws at build time, not at run time (F63). |
+| `class` | 🟡 | T16: fields, statics, private `#x` fields and methods, `extends` (also native errors), `super`, accessors. Missing: private getters/setters, `static {}` blocks, `accessor` fields, computed instance field keys (F58, F80); `Symbol.hasInstance` (T21); a class used before its declaration throws at build time, not at run time (F63). |
 | `const` | ✅ | TDZ checks; writes throw `TypeError: Assignment to constant variable.` (fixed in T24). |
 | `continue` | ✅ | Plain and labeled, through `finally`. |
 | `debugger` | ✅ | A no-op (T24). |
@@ -59,7 +59,7 @@ templates, regex, multi-file `import`).
 | `finally` | ✅ | Completion dispatch for every jump, also around `yield`/`await` (T12, T18, T19). |
 | `float` | ➖ | Removed in ES5. |
 | `for` | 🟡 | `for`, `for-in`, `for-of` (iterator protocol, destructuring) work. Missing: `for await` (F72). Arrays/strings iterate without looking up a replaced `Symbol.iterator` (F51). |
-| `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments` (T25). Missing: `toString` (F43); `new.target` outside class constructors (F57); assigning to a function declaration's name (F45). |
+| `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments`, `toString` (source text, T25), names from computed keys (T25). Missing: `"" + f` in code that never names `toString` traps (F104); `new.target` outside class constructors (F57); assigning to a function declaration's name (F45). |
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
 | `implements` | ➖ | Reserved in strict mode; a syntax error in node too. |
