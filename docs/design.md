@@ -95,6 +95,13 @@ futures before `task.return`. The WASI 0.3.1 WIT is vendored in `crates/componen
 (T17: promises are `$promise` objects; every job (reaction, resolve-thenable, `queueMicrotask`) goes into one FIFO in
 globals. `run` drains it after `main`, then reports the first rejection still unhandled (node's text) and fails. See
 `crates/backend/src/promise.rs`.)
+(T18: generators are the first user of the state machine. `ir::suspend` (run at the end of the lowering) turns a
+`function*` into a start function (makes a `$generator`, runs the prologue) and a resume function
+`(gen, mode, value)`: all locals are saved to a `$vals` frame at each `yield`; re-entry keeps the structured IR
+(a dispatch on the saved point at the head of each statement list, `if` conditions skipped while resuming, a `try`
+re-entered as a fresh `try_table`, a `catch` body entered by skipping it). `return()`/`throw()` resume with a mode
+the lowering checks after each `yield`, so `return()` runs `finally` blocks through the D2 completion dispatch.
+See the `ir::suspend` crate docs and `crates/backend/src/generator.rs`.)
 
 ### D4. The WIT boundary follows jco/componentize-js conventions
 The entry module's ES exports become the world's exports. WIT types map to JS:

@@ -293,3 +293,81 @@ fn may_throw_follows_calls() {
     add(vec![call(6)]); // 6: recursion, never throws
     assert_eq!(may_throw(&m), [true, true, false, true, true, true, false]);
 }
+
+/// The suspension transform (T18) on a hand-built generator: yields in an expression (with an
+/// earlier operand to spill), an `if` condition inside a loop, a `try` body and a `catch` body.
+#[test]
+fn suspend_transform_validates() {
+    let mut m = Module::default();
+    let mut f = Function::new("g", &[("n", Type::F64)], Some(Type::JsVal));
+    f.flags.is_generator = true;
+    let n = f.param(0);
+    let x = f.add_local("x", Type::JsVal);
+    let e = f.add_local("e", Type::JsVal);
+    let y = |arg: Expr| Expr::Suspend {
+        kind: SuspendKind::Yield,
+        arg: Box::new(arg),
+    };
+    let lp = LabelId(0);
+    f.body = vec![
+        Stmt::Expr(y(Expr::undefined())),
+        // x = n + (yield n)
+        Stmt::Set(
+            x,
+            Expr::intrinsic(
+                Intrinsic::JsAdd,
+                vec![
+                    Expr::convert(Type::F64, Type::JsVal, Expr::local(n)),
+                    y(Expr::convert(Type::F64, Type::JsVal, Expr::local(n))),
+                ],
+            ),
+        ),
+        Stmt::Loop {
+            label: lp,
+            body: vec![
+                Stmt::If {
+                    cond: Expr::convert(Type::JsVal, Type::Bool, y(Expr::Local(x))),
+                    then: vec![Stmt::Break(lp)],
+                    els: vec![],
+                },
+                Stmt::Continue(lp),
+            ],
+        },
+        Stmt::Try {
+            body: vec![
+                Stmt::Expr(y(Expr::str("in try"))),
+                Stmt::Throw(Expr::Local(x)),
+            ],
+            catch_local: Some(e),
+            catch_body: vec![Stmt::Set(x, y(Expr::Local(e)))],
+        },
+        Stmt::Return(Some(Expr::Local(x))),
+    ];
+    m.add_function(f);
+    suspend::lower_generators(&mut m);
+    validate(&m).unwrap_or_else(|errs| panic!("{}\n{m}", errs.join("\n")));
+    assert_eq!(m.functions.len(), 2);
+    let (start, resume) = (&m.functions[0], &m.functions[1]);
+    assert!(!start.flags.is_generator);
+    assert_eq!((start.params, start.locals[0].ty), (1, Type::F64));
+    assert_eq!(resume.name, "g$resume");
+    assert_eq!(resume.params, 3);
+    let text = m.to_string();
+    assert!(
+        !text.contains("yield(") && !text.contains("resume_mode"),
+        "{text}"
+    );
+    // Five points, the one in the catch body entered by skipping the `try_table`.
+    assert!(text.contains("$gen_suspend(gen.0, 5_i32)"), "{text}");
+    let st = resume
+        .locals
+        .iter()
+        .position(|l| l.name == "state")
+        .unwrap();
+    assert!(
+        text.contains(&format!("if i32.eq(state.{st}, 5_i32)")),
+        "{text}"
+    );
+    // The spilled operand is taken before the yield.
+    assert!(text.contains("spill"), "{text}");
+}

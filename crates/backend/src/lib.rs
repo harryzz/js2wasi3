@@ -38,6 +38,7 @@
 mod abi;
 mod array;
 mod func;
+mod generator;
 mod host;
 mod inspect;
 mod iter;
@@ -140,6 +141,9 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         // Functions with the `$code` signature use the runtime's type (`call_ref` needs it).
         let v = runtime::jsval();
         e.type_ids.insert((vec![v, v, v], vec![v]), runtime::T_CODE);
+        // Generators' resume functions (T18): `call_ref` from `next`.
+        e.type_ids
+            .insert((vec![v, ValType::I32, v], vec![v]), runtime::T_RESUME);
     }
 
     let mut imports = ImportSection::new();
@@ -424,8 +428,12 @@ fn check_supported(m: &ir::Module) -> anyhow::Result<()> {
                 f.name
             ))
         };
-        if f.flags.is_async || f.flags.is_generator {
-            report("async/generator function", "T18/T19");
+        // Generators are rewritten by `ir::suspend::lower_generators` (run by the lowering, T18).
+        if f.flags.is_async {
+            report("async function", "T19");
+        }
+        if f.flags.is_generator {
+            report("generator function before `ir::suspend`", "T18");
         }
         let mut kinds = Vec::new();
         unsupported_stmts(&f.body, &mut kinds);
@@ -469,7 +477,10 @@ fn unsupported_stmts(list: &[Stmt], out: &mut Vec<(&'static str, &'static str)>)
 fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
     match e {
         Expr::Suspend { arg, .. } => {
-            out.push(("Suspend", "T18/T19"));
+            out.push((
+                "Suspend",
+                "T19; a `yield` must go through `ir::suspend` first",
+            ));
             unsupported_expr(arg, out);
         }
         Expr::Const(_) | Expr::Local(_) | Expr::Global(_) => {}
@@ -1038,6 +1049,9 @@ impl Emitter<'_> {
             }
             Expr::Intrinsic { op, args } => {
                 use runtime::Helper as H;
+                if self.generator_op(s, frames, op, args)? {
+                    return Ok(op.signature().1.is_some());
+                }
                 if let Intrinsic::ConsoleWrite { .. } = op
                     && self.m.main.is_none()
                 {
@@ -1262,6 +1276,14 @@ impl Emitter<'_> {
                         H::Prop(props::Helper::PrivateAdd { method: *method })
                     }
                     Intrinsic::Hole | Intrinsic::IsHole => unreachable!("inline"),
+                    Intrinsic::ResumeMode
+                    | Intrinsic::NewGenerator { .. }
+                    | Intrinsic::GenLoad(_)
+                    | Intrinsic::GenStore(_)
+                    | Intrinsic::GenPoint
+                    | Intrinsic::GenSuspend { .. }
+                    | Intrinsic::DelegateOpen
+                    | Intrinsic::DelegateStep => unreachable!("generator_op"),
                 };
                 s.call(self.helper_index(Helper::Js(h)));
                 return Ok(op.signature().1.is_some());
@@ -1310,6 +1332,10 @@ impl Emitter<'_> {
                     ir::FnKind::Ordinary => {
                         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
                         func::NEW_ORDINARY
+                    }
+                    ir::FnKind::Generator => {
+                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        func::NEW_GENERATOR
                     }
                     ir::FnKind::Class { construct } => {
                         let construct = self.func_base + construct.0;
@@ -1392,6 +1418,69 @@ impl Emitter<'_> {
                 s.global_get(what);
                 s.call(self.helper_index(Helper::Js(runtime::Helper::Func(h))));
             }
+        }
+        Ok(true)
+    }
+
+    /// The generator intrinsics (T18); `false` for the others.
+    fn generator_op(
+        &mut self,
+        s: &mut InstructionSink,
+        frames: &mut Vec<Frame>,
+        op: &Intrinsic,
+        args: &[Expr],
+    ) -> anyhow::Result<bool> {
+        use runtime::Helper as H;
+        let gen_arg = |this: &mut Self, s: &mut InstructionSink, frames: &mut Vec<Frame>| {
+            this.expr(s, frames, &args[0])?;
+            s.ref_cast_non_null(generator::generator());
+            anyhow::Ok(())
+        };
+        match op {
+            Intrinsic::ResumeMode => {
+                bail!("internal error: ResumeMode after the suspension transform")
+            }
+            Intrinsic::NewGenerator { resume, slots } => {
+                let code = self.func_base + resume.0;
+                runtime::Cx::declare_func(self, code);
+                s.ref_func(code).i32_const(*slots as i32);
+                s.call(self.helper_index(Helper::Js(H::Gen(generator::Helper::New))));
+            }
+            Intrinsic::GenLoad(i) => {
+                gen_arg(self, s, frames)?;
+                s.struct_get(runtime::T_GENERATOR, generator::F_FRAME)
+                    .i32_const(*i as i32)
+                    .array_get(runtime::T_VALS);
+            }
+            Intrinsic::GenStore(i) => {
+                gen_arg(self, s, frames)?;
+                s.struct_get(runtime::T_GENERATOR, generator::F_FRAME)
+                    .i32_const(*i as i32);
+                self.expr(s, frames, &args[1])?;
+                s.array_set(runtime::T_VALS);
+            }
+            Intrinsic::GenPoint => {
+                gen_arg(self, s, frames)?;
+                s.struct_get(runtime::T_GENERATOR, generator::F_POINT);
+            }
+            Intrinsic::GenSuspend { raw } => {
+                self.expr(s, frames, &args[0])?;
+                self.expr(s, frames, &args[1])?;
+                s.i32_const(if *raw { 2 } else { 1 });
+                s.call(self.helper_index(Helper::Js(H::Gen(generator::Helper::Suspend))));
+            }
+            Intrinsic::DelegateOpen | Intrinsic::DelegateStep => {
+                for a in args {
+                    self.expr(s, frames, a)?;
+                }
+                let h = if *op == Intrinsic::DelegateOpen {
+                    generator::Helper::DelegateOpen
+                } else {
+                    generator::Helper::DelegateStep
+                };
+                s.call(self.helper_index(Helper::Js(H::Gen(h))));
+            }
+            _ => return Ok(false),
         }
         Ok(true)
     }

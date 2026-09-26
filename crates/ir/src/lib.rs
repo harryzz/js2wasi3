@@ -54,11 +54,15 @@
 //!   `Intrinsic::NewCell` and used by `CellGet`/`CellSet`. A function object's captured cells and
 //!   values are its environment (`EnvGet`), and a function called through a value gets its
 //!   arguments as an internal array (`ArgGet`).
-//! - `Suspend { kind, arg }` *(placeholder, T18/T19)*: `await` / `yield` point.
+//! - `Suspend { kind, arg }` (T18): a `yield` (T19: `await`) of `arg` in a generator. It evaluates to
+//!   the value the generator is resumed with; `Intrinsic::ResumeMode`, read right after it, says how
+//!   (next / throw / return: the lowering emits the throw and the return path itself). The
+//!   suspension transform ([`suspend`]) removes every `Suspend` before the IR reaches the backend.
 
 use std::fmt;
 
 mod print;
+pub mod suspend;
 mod throws;
 mod validate;
 
@@ -215,11 +219,13 @@ pub enum Builtin {
     ArrayIterator,
     /// T17.
     Promise,
+    /// `%GeneratorPrototype%` (T18, not a global name).
+    Generator,
 }
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 16] = [
+    pub const ALL: [Builtin; 17] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -236,6 +242,7 @@ impl Builtin {
         Builtin::Symbol,
         Builtin::ArrayIterator,
         Builtin::Promise,
+        Builtin::Generator,
     ];
 
     pub fn name(self) -> &'static str {
@@ -250,6 +257,7 @@ impl Builtin {
             Builtin::Symbol => "Symbol",
             Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
             Builtin::Promise => "Promise",
+            Builtin::Generator => "%GeneratorPrototype%",
         }
     }
 
@@ -428,7 +436,37 @@ pub enum Intrinsic {
     /// Add a private field (or method: read-only) to a new object (no result): args: object, private
     /// symbol, value, the TypeError message if it's already there.
     PrivateAdd { method: bool },
+    /// How a generator was resumed after the `Suspend` just before (`i32`): [`RESUME_NEXT`],
+    /// [`RESUME_THROW`] or [`RESUME_RETURN`]. Only in generators, before the suspension transform.
+    ResumeMode,
+    /// From the suspension transform (T18) on: a new generator object (prototype
+    /// `%GeneratorPrototype%`) whose frame has `slots` slots and which runs `resume`, a function
+    /// `(gen, mode: i32, value) -> jsval` (see [`suspend`]).
+    NewGenerator { resume: FuncId, slots: u32 },
+    /// Slot `i` of a generator's frame (args: the generator).
+    GenLoad(u32),
+    /// Store into slot `i` of a generator's frame (args: the generator, the value). No result.
+    GenStore(u32),
+    /// The point a generator is suspended at (0: its start) (`i32`; args: the generator).
+    GenPoint,
+    /// Record that the generator suspends at a point (args: the generator, the point, an `i32`);
+    /// the resume function then returns the value to yield (`raw`: an iterator result object
+    /// passed out as is, `yield*`). No result.
+    GenSuspend { raw: bool },
+    /// `yield* v`: start iterating `v` (a TypeError like node's if it isn't iterable): an internal
+    /// iteration state, as `IterOpen` gives.
+    DelegateOpen,
+    /// One step of `yield*` (args: state, mode (`i32`, as `ResumeMode`), received value): the
+    /// inner iterator's result object of `next(received)` / `throw(received)` / `return(received)`
+    /// (TypeErrors as in the spec), or the uninitialized marker (`Hole`) for a `return` when the
+    /// inner iterator has no `return` method.
+    DelegateStep,
 }
+
+/// [`Intrinsic::ResumeMode`] values.
+pub const RESUME_NEXT: i32 = 0;
+pub const RESUME_THROW: i32 = 1;
+pub const RESUME_RETURN: i32 = 2;
 
 impl Intrinsic {
     /// Parameter types and result type (`None`: no result).
@@ -503,6 +541,14 @@ impl Intrinsic {
             Intrinsic::CtorReturn { .. } | Intrinsic::GetOwnPropertyDescriptor => {
                 (&[JsVal, JsVal], Some(JsVal))
             }
+            Intrinsic::ResumeMode => (&[], Some(I32)),
+            Intrinsic::NewGenerator { .. } => (&[], Some(JsVal)),
+            Intrinsic::GenLoad(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::GenStore(_) => (&[JsVal, JsVal], None),
+            Intrinsic::GenPoint => (&[JsVal], Some(I32)),
+            Intrinsic::GenSuspend { .. } => (&[JsVal, I32], None),
+            Intrinsic::DelegateOpen => (&[JsVal], Some(JsVal)),
+            Intrinsic::DelegateStep => (&[JsVal, I32, JsVal], Some(JsVal)),
         }
     }
 
@@ -590,6 +636,15 @@ impl Intrinsic {
             Intrinsic::PrivateHas => "private_has",
             Intrinsic::PrivateAdd { method: false } => "private_add_field",
             Intrinsic::PrivateAdd { method: true } => "private_add_method",
+            Intrinsic::ResumeMode => "resume_mode",
+            Intrinsic::NewGenerator { .. } => "new_generator",
+            Intrinsic::GenLoad(_) => "gen_load",
+            Intrinsic::GenStore(_) => "gen_store",
+            Intrinsic::GenPoint => "gen_point",
+            Intrinsic::GenSuspend { raw: false } => "gen_suspend",
+            Intrinsic::GenSuspend { raw: true } => "gen_suspend_raw",
+            Intrinsic::DelegateOpen => "delegate_open",
+            Intrinsic::DelegateStep => "delegate_step",
         }
     }
 
@@ -632,6 +687,8 @@ impl Intrinsic {
                 | Intrinsic::PrivateSet
                 | Intrinsic::PrivateHas
                 | Intrinsic::PrivateAdd { .. }
+                | Intrinsic::DelegateOpen
+                | Intrinsic::DelegateStep
         )
     }
 }
@@ -788,6 +845,8 @@ impl BinOp {
 pub enum SuspendKind {
     Await,
     Yield,
+    /// `yield*`: the operand is the inner iterator's result object, passed out as is.
+    YieldDelegate,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -918,6 +977,8 @@ pub enum FnKind {
     /// `(self, new_target, args) -> jsval` (the `$code` shape). Its `prototype` comes from
     /// [`Intrinsic::ClassSetup`].
     Class { construct: FuncId },
+    /// A generator function (T18): not a constructor.
+    Generator,
 }
 
 impl Expr {

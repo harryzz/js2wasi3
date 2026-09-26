@@ -12,7 +12,8 @@
 //!   `error`. See [`crate::object`] for the layout, the built-in prototypes and the helpers.
 //!   `console.log` shows an error as `[name: message]` (node's format for an error without a stack).
 //! - Types: one `rec` group `[$number, $oddball, $string, $i64s, $object, $keys, $vals, $bytes,
-//!   $i32s, $code, $function, $cell_f64, $cell, $symbol, $array, $iter, $accessor]` at type indices 0–16 (`$i64s` holds the number → string
+//!   $i32s, $code, $function, $cell_f64, $cell, $symbol, $array, $iter, $accessor, $promise,
+//!   $reaction, $generator, $resume]` at type indices 0–20 (`$i64s` holds the number → string
 //!   tables, see [`crate::numstr`]; `$keys`…`$i32s` are an object's arrays).
 //! - Functions (T14): `$function` is a subtype of `$object` (so every object helper takes it) with
 //!   the code to run and the environment (captured cells and values). See [`crate::func`].
@@ -28,7 +29,7 @@ use wasm_encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, array, func, host, inspect, iter, numstr, object, promise, props};
+use crate::{abi, array, func, generator, host, inspect, iter, numstr, object, promise, props};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
@@ -69,8 +70,13 @@ pub const T_PROMISE: u32 = 17;
 /// `$reaction { derived: (ref null $promise), on_fulfilled: eqref, on_rejected: eqref }`: a
 /// PromiseReaction pair (T17). Never a JS value.
 pub const T_REACTION: u32 = 18;
+/// `$generator`: a final subtype of `$object` with `resume: (ref $resume)`, `frame: (ref $vals)`,
+/// `point`, `status` and `yielded` (`mut i32`s) (T18, see [`crate::generator`]).
+pub const T_GENERATOR: u32 = 19;
+/// `(func (param eqref i32 eqref) (result eqref))`: a generator's resume function (T18).
+pub const T_RESUME: u32 = 20;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 19;
+pub const TYPES: u32 = 21;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -236,6 +242,12 @@ pub fn types(types: &mut TypeSection) {
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
     function_fields.push(field(StorageType::Val(rt(true, T_CODE)), false));
     function_fields.push(field(StorageType::Val(ValType::I32), false));
+    let mut generator_fields = object_fields.clone();
+    generator_fields.push(field(StorageType::Val(rt(false, T_RESUME)), false));
+    generator_fields.push(field(StorageType::Val(rt(false, T_VALS)), false));
+    generator_fields.push(field(StorageType::Val(ValType::I32), true));
+    generator_fields.push(field(StorageType::Val(ValType::I32), true));
+    generator_fields.push(field(StorageType::Val(ValType::I32), true));
     let mut promise_fields = object_fields.clone();
     promise_fields.push(field(StorageType::Val(ValType::I32), true));
     promise_fields.push(field(StorageType::Val(jsval()), true));
@@ -339,6 +351,17 @@ pub fn types(types: &mut TypeSection) {
                 field(StorageType::Val(jsval()), false),
             ]),
         })),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: generator_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        sub(CompositeInnerType::Func(wasm_encoder::FuncType::new(
+            [jsval(), ValType::I32, jsval()],
+            [jsval()],
+        ))),
     ]);
 }
 
@@ -527,6 +550,7 @@ pub enum Helper {
     Iter(iter::Helper),
     Prop(props::Helper),
     Prom(promise::Helper),
+    Gen(generator::Helper),
     Fmt(inspect::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
@@ -562,6 +586,7 @@ impl Helper {
             Helper::Iter(h) => h.name(),
             Helper::Prop(h) => h.name(),
             Helper::Prom(h) => h.name(),
+            Helper::Gen(h) => h.name(),
             Helper::Fmt(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
@@ -594,6 +619,7 @@ impl Helper {
             Helper::Iter(h) => h.signature(),
             Helper::Prop(h) => h.signature(),
             Helper::Prom(h) => h.signature(),
+            Helper::Gen(h) => h.signature(),
             Helper::Fmt(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
@@ -629,6 +655,7 @@ impl Helper {
             Helper::Iter(h) => h.body(cx),
             Helper::Prop(h) => h.body(cx),
             Helper::Prom(h) => h.body(cx),
+            Helper::Gen(h) => h.body(cx),
             Helper::Fmt(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());

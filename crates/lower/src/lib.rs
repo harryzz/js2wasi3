@@ -60,6 +60,10 @@
 //! in literals (with `super.x` in literal methods), `Object.defineProperty` / `getOwnPropertyDescriptor`
 //! / `freeze` / `seal` / `preventExtensions` / `is*`, and the native error constructors as values.
 //!
+//! **Generators** (T18): `function*` (declarations, expressions, methods), `yield`, `yield*`: see
+//! [`generators`]. [`lower`] finishes with `ir::suspend::lower_generators`, so its IR has no
+//! `Suspend` left. Exported generator functions are rejected (T20).
+//!
 //! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
 //! that converts (box an `f64`, ToNumber / ToString of the result).
 //!
@@ -80,6 +84,7 @@
 
 mod classes;
 mod closures;
+mod generators;
 mod patterns;
 
 use std::collections::{HashMap, HashSet};
@@ -147,6 +152,8 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
         }
         return if l.diags.is_empty() {
             l.wrap_exports();
+            // Generators become resumable frames (T18).
+            ir::suspend::lower_generators(&mut l.module);
             Ok(l.module)
         } else {
             l.diags.sort_by_key(|d| (d.line, d.col));
@@ -688,21 +695,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
         }
         for func in self.exported.clone() {
-            if self.rest_param.contains(&func) {
-                let pos = self
-                    .module
-                    .function(func)
-                    .pos
-                    .expect("declared functions have a position");
-                self.diags.push(Diagnostic {
-                    path: self.p.path.clone(),
-                    line: pos.line,
-                    col: pos.col,
-                    message: "unsupported: rest parameter in an exported function (planned: T20)"
-                        .to_string(),
-                    help: None,
-                });
-            }
+            let f = self.module.function(func);
+            let pos = f.pos.expect("declared functions have a position");
+            let what = if f.flags.is_generator {
+                "exported generator function (the boundary needs an iterator type)"
+            } else if self.rest_param.contains(&func) {
+                "rest parameter in an exported function"
+            } else {
+                continue;
+            };
+            self.diags.push(Diagnostic {
+                path: self.p.path.clone(),
+                line: pos.line,
+                col: pos.col,
+                message: format!("unsupported: {what} (planned: T20)"),
+                help: None,
+            });
         }
         // Boundary facts: string parameters (JSDoc or earlier usage) hold strings.
         for func in self.exported.clone() {
@@ -823,9 +831,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if f.r#async {
             return Err(self.unsupported(f.span, "async function", "T19"));
         }
-        if f.generator {
-            return Err(self.unsupported(f.span, "generator function", "T18"));
-        }
         // Simple parameters are typed; the others (defaults, patterns: `None`) are `jsval`s bound
         // in the body's prologue, and a rest parameter is one more `jsval` (an array).
         let mut params = Vec::new();
@@ -842,8 +847,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let id = FuncId(self.module.functions.len() as u32);
         let result = Slot::Result(id);
         // A function has a result if it returns a value, or if its (undefined) result is used.
-        let returns_value =
-            body.statements.iter().any(has_value_return) || self.slot_ty(result) == Type::JsVal;
+        let returns_value = f.generator
+            || body.statements.iter().any(has_value_return)
+            || self.slot_ty(result) == Type::JsVal;
         let scope = f.scope_id.get().expect("functions have scopes");
         let hidden = Hidden {
             self_: false,
@@ -868,6 +874,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             &sig,
             returns_value.then(|| self.slot_ty(result)),
         );
+        if f.generator {
+            self.generator_sig(&mut func, result);
+        }
         func.pos = Some(self.pos(f.span));
         self.module.add_function(func);
         self.hidden.insert(id, hidden);
@@ -1400,7 +1409,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.rest_param.insert(id);
             }
             let result = Slot::Result(id);
-            let returns_value = f.expression().is_some()
+            let generator = matches!(f, FnAst::Func(func) if func.generator);
+            let returns_value = generator
+                || f.expression().is_some()
                 || f.statements().iter().any(has_value_return)
                 || self.slot_ty(result) == Type::JsVal;
             let name = match f {
@@ -1413,6 +1424,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 &sig_refs,
                 returns_value.then(|| self.slot_ty(result)),
             );
+            if generator {
+                self.generator_sig(&mut func, result);
+            }
             func.pos = Some(self.pos(f.span()));
             self.module.add_function(func);
             self.hidden.insert(id, hidden);
@@ -1430,7 +1444,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     id,
                     f,
                     name: name.unwrap_or_default(),
-                    constructor: !arrow && !method,
+                    constructor: !arrow && !method && !generator,
                     value: match f {
                         FnAst::Func(func) if func.is_declaration() => func
                             .id
@@ -1517,15 +1531,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Ok(());
         }
         let mut bad = None;
-        let (is_async, is_generator) = match f {
-            FnAst::Func(func) => (func.r#async, func.generator),
-            FnAst::Arrow(a) => (a.r#async, false),
+        let is_async = match f {
+            FnAst::Func(func) => func.r#async,
+            FnAst::Arrow(a) => a.r#async,
         };
         if is_async {
             bad = Some(self.unsupported(f.span(), "async function", "T19"));
-        }
-        if is_generator {
-            bad = Some(self.unsupported(f.span(), "generator function", "T18"));
         }
         self.lowered.insert(id);
         if let Some(e) = bad {
@@ -1573,7 +1584,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
         } else {
             let body = f.statements();
-            stmts = self.stmts(&mut cx, body);
+            if cx.func.flags.is_generator {
+                // The prologue runs when the generator is made, the body on the first `next()`.
+                let y = self.suspend(&mut cx, ir::SuspendKind::Yield, Expr::undefined());
+                stmts.push(Stmt::Expr(y));
+            }
+            stmts.extend(self.stmts(&mut cx, body));
             if let Some(ty) = cx.func.result
                 && !always_returns(body)
             {
@@ -1791,7 +1807,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             code,
             name,
             length: js_length(f.params()),
-            kind: if constructor {
+            kind: if self.module.function(id).flags.is_generator {
+                ir::FnKind::Generator
+            } else if constructor {
                 ir::FnKind::Ordinary
             } else {
                 ir::FnKind::Plain
@@ -1862,7 +1880,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             code,
             name: f.name.clone(),
             length: self.fn_length[&func],
-            kind: ir::FnKind::Ordinary,
+            kind: if f.flags.is_generator {
+                ir::FnKind::Generator
+            } else {
+                ir::FnKind::Ordinary
+            },
             env: Vec::new(),
             shared: true,
         }))
@@ -2945,6 +2967,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
             },
             Expression::PrivateFieldExpression(pf) => self.private_get(cx, pf),
+            Expression::YieldExpression(y) => {
+                let arg = match &y.argument {
+                    Some(a) => jsval_of(self.expr(cx, a)?),
+                    None => Expr::undefined(),
+                };
+                let e = if y.delegate {
+                    self.yield_star(cx, arg)
+                } else {
+                    self.suspend(cx, ir::SuspendKind::Yield, arg)
+                };
+                Ok(Val::js(e, Kind::Any))
+            }
             Expression::PrivateInExpression(p) => {
                 let (sym, _) = self.private_sym(cx, &p.left)?;
                 let o = jsval_of(self.expr(cx, &p.right)?);

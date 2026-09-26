@@ -184,7 +184,7 @@ fn unsupported_ir_is_reported_with_kind_function_and_position() {
     let err = js2wasi3_backend::emit(&m).unwrap_err().to_string();
     assert_eq!(
         err,
-        "unsupported IR `Suspend` in function g at 3:1 (planned: T18/T19)"
+        "unsupported IR `Suspend` in function g at 3:1 (planned: T19; a `yield` must go through `ir::suspend` first)"
     );
 }
 

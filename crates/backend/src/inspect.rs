@@ -139,6 +139,10 @@ fn format(cx: &mut dyn Cx) -> Function {
         cx.str(" extends "),
         cx.str(" "),
     );
+    let (gen_named, gen_anonymous) = (
+        cx.str("[GeneratorFunction: "),
+        cx.str("[GeneratorFunction (anonymous)]"),
+    );
     let empty = cx.str("");
     const V: u32 = 0;
     const DEPTH: u32 = 1;
@@ -227,12 +231,23 @@ fn format(cx: &mut dyn Cx) -> Function {
             s.else_();
             s.i32_const(0);
             s.end();
+            let is_gen = |s: &mut InstructionSink| {
+                s.local_get(V)
+                    .ref_cast_non_null(func::function())
+                    .struct_get(runtime::T_FUNCTION, func::F_KIND)
+                    .i32_const(func::KIND_GENERATOR)
+                    .i32_eq();
+            };
             s.if_(BlockType::Result(string_ref()));
-            s.global_get(named);
+            s.global_get(gen_named).global_get(named);
+            is_gen(&mut s);
+            s.typed_select(string_ref());
             s.local_get(N).ref_cast_non_null(string()).call(concat);
             s.global_get(close).call(concat);
             s.else_();
-            s.global_get(anonymous);
+            s.global_get(gen_anonymous).global_get(anonymous);
+            is_gen(&mut s);
+            s.typed_select(string_ref());
             s.end();
         }
         s.end();
@@ -427,6 +442,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         cx.str("[Object: null prototype] "),
         cx.str("[Object: null prototype]"),
     );
+    let generator_prefix = cx.str("Object [Generator] ");
     let (lbracket, rbracket, space, object_) =
         (cx.str("["), cx.str("]"), cx.str(" "), cx.str("Object"));
     let (getter, setter, both) = (
@@ -465,6 +481,14 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.local_get(O).call(symbols);
     s.if_(BlockType::Empty);
     trap(cx, &mut s);
+    s.end();
+    // A generator object (T18): `Object [Generator] ` (node's `Symbol.toStringTag` form).
+    s.local_get(PREFIX).ref_is_null();
+    s.local_get(O)
+        .ref_test_non_null(crate::generator::generator());
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(generator_prefix).local_set(PREFIX);
     s.end();
     // The prefix: `Name ` from the constructor on the chain; none for `Object`; for no constructor,
     // `[Object: null prototype] ` unless the chain reaches Object.prototype.

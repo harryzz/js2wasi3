@@ -26,9 +26,9 @@ pub const STRING: i32 = 1;
 pub const PROTOCOL: i32 = 2;
 pub const DONE: i32 = 3;
 
-const F_KIND: u32 = 0;
-const F_OBJ: u32 = 1;
-const F_NEXT: u32 = 2;
+pub const F_KIND: u32 = 0;
+pub const F_OBJ: u32 = 1;
+pub const F_NEXT: u32 = 2;
 const F_INDEX: u32 = 3;
 pub const F_VALUE: u32 = 4;
 

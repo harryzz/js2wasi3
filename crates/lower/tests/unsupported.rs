@@ -103,6 +103,14 @@ fn declarations_and_functions() {
         one("export function f() { return x; }"),
         "1:30 unsupported: global `x` (planned: T21)"
     );
+    assert_eq!(
+        one("export function* f() { yield 1; }"),
+        "1:8 unsupported: exported generator function (the boundary needs an iterator type) (planned: T20)"
+    );
+    // A generator used inside a library is fine.
+    lowers(
+        "function* g() { yield 1; } export function f() { let n = 0; for (const x of g()) n += x; return n; }",
+    );
 }
 
 #[test]

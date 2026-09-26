@@ -193,7 +193,7 @@ fn methods(b: Builtin) -> &'static [&'static str] {
             "with",
         ],
         Builtin::Symbol => &["toString", "valueOf", "description"],
-        Builtin::ArrayIterator | Builtin::Promise => &[],
+        Builtin::ArrayIterator | Builtin::Promise | Builtin::Generator => &[],
     }
 }
 
@@ -318,6 +318,7 @@ impl Helper {
                 Builtin::Symbol => "Symbol.prototype",
                 Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
                 Builtin::Promise => "Promise.prototype",
+                Builtin::Generator => "%GeneratorPrototype%",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -1097,6 +1098,36 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         .into_iter()
         .map(|(h, name, len)| (runtime::Helper::Prom(h), Some(name), name, len))
         .collect(),
+        Builtin::Generator => {
+            use crate::generator::Helper as G;
+            use js2wasi3_ir::{RESUME_NEXT, RESUME_RETURN, RESUME_THROW};
+            vec![
+                (
+                    runtime::Helper::Gen(G::Method(RESUME_NEXT)),
+                    Some("next"),
+                    "next",
+                    1,
+                ),
+                (
+                    runtime::Helper::Gen(G::Method(RESUME_RETURN)),
+                    Some("return"),
+                    "return",
+                    1,
+                ),
+                (
+                    runtime::Helper::Gen(G::Method(RESUME_THROW)),
+                    Some("throw"),
+                    "throw",
+                    1,
+                ),
+                (
+                    runtime::Helper::Iter(crate::iter::Helper::This),
+                    None,
+                    "[Symbol.iterator]",
+                    0,
+                ),
+            ]
+        }
         _ => Vec::new(),
     };
     let real: Vec<(u32, u32, u32, i32)> = real

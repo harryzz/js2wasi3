@@ -36,11 +36,15 @@ pub const F_KIND: u32 = 10;
 
 pub const KIND_FUNCTION: i32 = 0;
 pub const KIND_CLASS: i32 = 1;
+/// A generator function (T18): `console.log` shows `[GeneratorFunction: f]`.
+pub const KIND_GENERATOR: i32 = 2;
 
 /// [`Helper::New`] flags: an ordinary `function` (a `prototype` object, the ordinary construct).
 pub const NEW_ORDINARY: i32 = 1;
 /// [`Helper::New`] flags: a class (its `prototype` comes from [`Helper::ClassSetup`]).
 pub const NEW_CLASS: i32 = 2;
+/// [`Helper::New`] flags: a generator function (T18; not a constructor).
+pub const NEW_GENERATOR: i32 = 4;
 
 pub fn function() -> HeapType {
     HeapType::Concrete(T_FUNCTION)
@@ -269,7 +273,10 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.else_();
     s.local_get(CONSTRUCT);
     s.end();
-    s.i32_const(KIND_CLASS).i32_const(KIND_FUNCTION);
+    s.i32_const(KIND_CLASS);
+    s.i32_const(KIND_GENERATOR).i32_const(KIND_FUNCTION);
+    s.local_get(FLAGS).i32_const(NEW_GENERATOR).i32_and();
+    s.select();
     s.local_get(FLAGS).i32_const(NEW_CLASS).i32_and();
     s.select();
     s.struct_new(T_FUNCTION).local_set(F);

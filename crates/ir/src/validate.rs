@@ -5,7 +5,7 @@
 //! returns, conditions, operand types allowed for each op, call arity/argument types, and
 //! no value-less call used as a value, `Break`/`Continue` never leaving a `Seq`.
 //! `Try` catches into a `jsval` local and `Throw` throws a `jsval`.
-//! The placeholder `Suspend` is checked structurally only.
+//! `Suspend` (only before the suspension transform, [`crate::suspend`]) is checked structurally only.
 
 use crate::{BinOp, Expr, Function, Module, Stmt, Type, UnOp};
 
