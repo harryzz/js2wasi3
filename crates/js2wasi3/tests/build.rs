@@ -264,7 +264,8 @@ fn traps_are_not_caught() {
 }
 
 /// T13: what isn't implemented yet traps instead of giving a wrong value: reading a built-in
-/// method (functions are T14/T21), `console.log` of a plain object (F24), a user `toString` (T14).
+/// method (functions are T14/T21), `console.log` of an object with a symbol key (F24), a built-in
+/// `toString` that isn't implemented (`Function.prototype.toString`, F43).
 #[test]
 fn unimplemented_object_features_trap() {
     let dir = out_dir("objtrap");
@@ -276,12 +277,12 @@ fn unimplemented_object_features_trap() {
         ),
         (
             "inspect",
-            "console.log(\"before\");\nconsole.log(Object.create(null));\n",
+            "const o = { [Symbol()]: 1 };\nconsole.log(\"before\");\nconsole.log(o);\n",
             "inspect_object_not_implemented",
         ),
         (
             "user",
-            "const o = { toString: 1 };\nconsole.log(\"before\");\nconsole.log(\"\" + o);\n",
+            "const f = function () {};\nconsole.log(\"before\");\nconsole.log(\"\" + f);\n",
             "user_to_primitive_not_implemented",
         ),
     ] {

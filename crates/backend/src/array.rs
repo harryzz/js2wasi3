@@ -109,7 +109,7 @@ impl Helper {
             Helper::New => new(cx),
             Helper::OwnGet => own_get(cx),
             Helper::Define => define(cx),
-            Helper::SetIndex => set_index(),
+            Helper::SetIndex => set_index(cx),
             Helper::SetLength => set_length(cx),
             Helper::Push => push(cx),
             Helper::Join => join(cx),
@@ -271,7 +271,18 @@ fn ensure(s: &mut InstructionSink, a: u32, i: u32, tmp_cap: u32, tmp_new: u32) {
     s.end();
 }
 
-fn set_index() -> Function {
+fn set_index(cx: &mut dyn Cx) -> Function {
+    let concat = cx.helper(runtime::Helper::Concat);
+    let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let (read_only, of_array) = (
+        cx.str("Cannot assign to read only property '"),
+        cx.str("' of object '[object Array]'"),
+    );
+    let (add, not_ext) = (
+        cx.str("Cannot add property "),
+        cx.str(", object is not extensible"),
+    );
     const A: u32 = 0;
     const I: u32 = 1;
     const V: u32 = 2;
@@ -282,6 +293,46 @@ fn set_index() -> Function {
     s.local_get(I).i32_const(MAX_DENSE).i32_ge_u();
     s.if_(BlockType::Empty);
     s.unreachable();
+    s.end();
+    // Frozen: elements are read-only; not extensible: no new elements (T16).
+    s.local_get(A)
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::NO_EXTEND | object::FROZEN)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(I)
+        .local_get(A)
+        .struct_get(T_ARRAY, F_LENGTH)
+        .i32_lt_u();
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(A)
+        .struct_get(T_ARRAY, F_ELEMS)
+        .local_get(I)
+        .array_get(T_VALS)
+        .ref_is_null()
+        .i32_eqz();
+    s.else_();
+    s.i32_const(0);
+    s.end();
+    s.if_(BlockType::Empty);
+    s.local_get(A)
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::FROZEN)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(read_only);
+    s.local_get(I).f64_convert_i32_u().call(number_to_string);
+    s.call(concat);
+    s.global_get(of_array).call(concat);
+    s.call(throw);
+    s.end();
+    s.else_();
+    s.global_get(add);
+    s.local_get(I).f64_convert_i32_u().call(number_to_string);
+    s.call(concat);
+    s.global_get(not_ext).call(concat);
+    s.call(throw);
+    s.end();
     s.end();
     ensure(&mut s, A, I, CAP, NEW);
     s.local_get(A)
@@ -313,8 +364,18 @@ fn set_length(cx: &mut dyn Cx) -> Function {
     const N: u32 = 2;
     const L: u32 = 3;
     const NEW: u32 = 4;
+    let type_error = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let read_only =
+        cx.str("Cannot assign to read only property 'length' of object '[object Array]'");
     let mut f = Function::new([(1, ValType::F64), (1, ValType::I32), (1, rt(true, T_VALS))]);
     let mut s = f.instructions();
+    s.local_get(A)
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::FROZEN)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(read_only).call(type_error);
+    s.end();
     s.local_get(V).call(to_number).local_tee(N);
     // A valid length: an integer in [0, 2^32).
     s.local_get(N).f64_trunc().f64_ne();
@@ -525,6 +586,13 @@ fn proto_push(cx: &mut dyn Cx) -> Function {
 }
 
 fn proto_pop(cx: &mut dyn Cx) -> Function {
+    let concat = cx.helper(runtime::Helper::Concat);
+    let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let (cannot, of_array) = (
+        cx.str("Cannot delete property '"),
+        cx.str("' of [object Array]"),
+    );
     const L: u32 = 3;
     const V: u32 = 4;
     let mut f = Function::new([(1, ValType::I32), (1, jsval())]);
@@ -539,6 +607,19 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
     s.global_get(G_UNDEFINED).return_();
     s.end();
     s.local_get(L).i32_const(1).i32_sub().local_set(L);
+    // A sealed or frozen array's elements can't be deleted (T16).
+    s.local_get(1)
+        .ref_cast_non_null(array())
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::SEALED)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(cannot);
+    s.local_get(L).f64_convert_i32_u().call(number_to_string);
+    s.call(concat);
+    s.global_get(of_array).call(concat);
+    s.call(throw);
+    s.end();
     s.local_get(1)
         .ref_cast_non_null(array())
         .struct_get(T_ARRAY, F_ELEMS)

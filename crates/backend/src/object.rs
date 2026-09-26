@@ -32,21 +32,38 @@ use crate::runtime::{
     self, Cx, G_BUILTIN, G_NULL, G_PROTOS, G_UNDEFINED, T_ARRAY, T_BYTES, T_I32S, T_KEYS, T_OBJECT,
     T_STRING, T_VALS, TAG, jsval, object, rt, string, string_ref,
 };
-use crate::{array, func, numstr};
+use crate::{array, func, numstr, props};
 
-const F_CLASS: u32 = 0;
+pub const F_CLASS: u32 = 0;
 pub const F_PROTO: u32 = 1;
-const F_KEYS: u32 = 2;
-const F_VALS: u32 = 3;
-const F_ATTRS: u32 = 4;
-const F_COUNT: u32 = 5;
+pub const F_KEYS: u32 = 2;
+pub const F_VALS: u32 = 3;
+pub const F_ATTRS: u32 = 4;
+pub const F_COUNT: u32 = 5;
 const F_INDEX: u32 = 6;
 
 pub const CLASS_PLAIN: i32 = 0;
 pub const CLASS_ERROR: i32 = 1;
+/// The bits of `class` that hold the class (the others are flags, T16).
+pub const CLASS_MASK: i32 = 0xff;
+/// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
+pub const NO_EXTEND: i32 = 0x100;
+/// `class` flag of an array: its elements are not configurable (`seal`, `freeze`).
+pub const SEALED: i32 = 0x200;
+/// `class` flag of an array: its elements and `length` are read-only too (`freeze`).
+pub const FROZEN: i32 = 0x400;
 
 /// Attribute bit: not enumerable.
 pub const HIDDEN: i32 = 1;
+/// Attribute bit: not writable (T16).
+pub const READONLY: i32 = 2;
+/// Attribute bit: not configurable (T16).
+pub const FIXED: i32 = 4;
+/// Attribute bit: an accessor property; the value slot holds an `$accessor` (T16).
+pub const ACCESSOR: i32 = 8;
+/// Attribute bit: a private member (`#x`, T16); its key is a private symbol. Invisible to
+/// everything but the private-name helpers (not frozen, not listed).
+pub const PRIVATE: i32 = 16;
 
 /// Objects with more entries than this get a hash index.
 const SMALL: i32 = 8;
@@ -129,6 +146,7 @@ fn methods(b: Builtin) -> &'static [&'static str] {
             "toLocaleString",
         ],
         Builtin::Boolean => &["toString", "valueOf"],
+        // `toString` is a real function (T16).
         Builtin::Error(ErrorKind::Error) => &["toString"],
         Builtin::Error(_) => &[],
         // `call` and `apply` are replaced by real functions (`crate::func`).
@@ -246,17 +264,19 @@ pub enum Helper {
     InstanceOf(Builtin),
     /// `(message, options: jsval) -> jsval`: `new E(message, options)`.
     NewError(ErrorKind),
-    /// `(o: (ref $object)) -> (ref $string)`: ToPrimitive.
+    /// `(o: (ref $object), hint: i32) -> jsval`: ToPrimitive (hint 0 default, 1 number, 2 string).
     ToPrimitive,
     /// `(o: (ref $object)) -> f64`: ToNumber of an object.
     ObjectToNumber,
+    /// The code (a `$code`) of `Error.prototype.toString` (T16).
+    ErrorToString,
     /// `(message: (ref $string))`: throw a new error of this kind.
     Throw(ErrorKind),
     /// `()`: trap: a built-in method was read.
     BuiltinTrap,
     /// `()`: trap: `console.log` of an object (F24).
     InspectTrap,
-    /// `()`: trap: ToPrimitive needs a user `valueOf`/`toString` (T14).
+    /// `()`: trap: ToPrimitive reached a built-in method that isn't implemented (T21).
     UserPrimitiveTrap,
     /// `(src, excluded: jsval (an array of keys)) -> jsval`: `{...rest}` in a pattern (T15).
     ObjectRest,
@@ -317,6 +337,7 @@ impl Helper {
             Helper::NewError(_) => "new_error",
             Helper::ToPrimitive => "to_primitive",
             Helper::ObjectToNumber => "object_to_number",
+            Helper::ErrorToString => "Error.prototype.toString",
             Helper::Throw(_) => "throw_error",
             Helper::BuiltinTrap => "builtin_not_implemented",
             Helper::InspectTrap => "inspect_object_not_implemented",
@@ -359,8 +380,9 @@ impl Helper {
             Helper::ForInKeys | Helper::Create | Helper::GetPrototypeOf => (vec![v], vec![v]),
             Helper::InstanceOf(_) => (vec![v], vec![I32]),
             Helper::NewError(_) => (vec![v, v], vec![v]),
-            Helper::ToPrimitive => (vec![o], vec![s]),
+            Helper::ToPrimitive => (vec![o, I32], vec![v]),
             Helper::ObjectToNumber => (vec![o], vec![F64]),
+            Helper::ErrorToString => (vec![v, v, v], vec![v]),
             Helper::Throw(_) => (vec![s], vec![]),
             Helper::BuiltinTrap | Helper::InspectTrap | Helper::UserPrimitiveTrap => {
                 (vec![], vec![])
@@ -417,6 +439,7 @@ impl Helper {
             Helper::NewError(k) => new_error(cx, k),
             Helper::ToPrimitive => to_primitive(cx),
             Helper::ObjectToNumber => object_to_number(cx),
+            Helper::ErrorToString => error_to_string(cx),
             Helper::Throw(k) => throw(cx, k),
             Helper::BuiltinTrap | Helper::InspectTrap | Helper::UserPrimitiveTrap => {
                 let mut f = Function::new([]);
@@ -446,6 +469,8 @@ pub fn is_error(s: &mut InstructionSink, v: u32) {
     s.local_get(v)
         .ref_cast_non_null(object())
         .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(CLASS_MASK)
+        .i32_and()
         .i32_const(CLASS_ERROR)
         .i32_eq();
     s.else_();
@@ -454,13 +479,18 @@ pub fn is_error(s: &mut InstructionSink, v: u32) {
 }
 
 /// Push local `v` (a jsval) cast to `(ref $object)`.
-fn as_obj(s: &mut InstructionSink, v: u32) {
+pub fn as_obj(s: &mut InstructionSink, v: u32) {
     s.local_get(v).ref_cast_non_null(object());
 }
 
 /// `for (i = 0; i < n; i++) body`, with `i` and `n` locals already holding values
 /// (`i` is set to 0 here). `body` may `br 1` to exit or `br 0` after incrementing itself.
-fn count_loop(s: &mut InstructionSink, i: u32, n: u32, body: impl FnOnce(&mut InstructionSink)) {
+pub fn count_loop(
+    s: &mut InstructionSink,
+    i: u32,
+    n: u32,
+    body: impl FnOnce(&mut InstructionSink),
+) {
     s.i32_const(0).local_set(i);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(i).local_get(n).i32_ge_s().br_if(1);
@@ -679,6 +709,15 @@ fn define(cx: &mut dyn Cx) -> Function {
         .local_get(E)
         .local_get(V)
         .array_set(T_VALS);
+    // Now a data property (the other attributes stay).
+    s.local_get(O).struct_get(T_OBJECT, F_ATTRS).local_get(E);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .array_get_u(T_BYTES)
+        .i32_const(!ACCESSOR)
+        .i32_and();
+    s.array_set(T_BYTES);
     s.return_();
     s.end();
     // A new entry at `count`.
@@ -1029,6 +1068,12 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             ])
             .collect(),
         Builtin::String => vec![(values, None, "[Symbol.iterator]", 0)],
+        Builtin::Error(ErrorKind::Error) => vec![(
+            runtime::Helper::Obj(Helper::ErrorToString),
+            Some("toString"),
+            "toString",
+            0,
+        )],
         Builtin::ArrayIterator => vec![
             (
                 runtime::Helper::Iter(crate::iter::Helper::Next),
@@ -1086,12 +1131,18 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     for (key, name, code, len) in real {
         s.local_get(O).ref_as_non_null().global_get(key);
         s.ref_func(code);
+        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
         s.ref_null(func::vals());
         s.global_get(name)
             .i32_const(len)
             .i32_const(0)
             .call(new_function);
         s.i32_const(HIDDEN).call(define);
+    }
+    if let Builtin::Error(k) = b {
+        // `constructor`: the function object (T16).
+        let ctor = cx.helper(runtime::Helper::Func(func::Helper::ErrorCtor(k)));
+        s.call(ctor).drop();
     }
     s.local_get(O).ref_as_non_null();
     s.end();
@@ -1222,7 +1273,7 @@ fn get(cx: &mut dyn Cx) -> Function {
     let str_eq = rh(cx, runtime::Helper::StrEq);
     let index = h(cx, Helper::ArrayIndex);
     let box_ = rh(cx, runtime::Helper::Box);
-    let trap = h(cx, Helper::BuiltinTrap);
+    let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
     let length = cx.str("length");
     const V: u32 = 0;
     const KEY: u32 = 1;
@@ -1309,23 +1360,15 @@ fn get(cx: &mut dyn Cx) -> Function {
     primitive_proto(cx, &mut s, V);
     s.local_get(K).ref_as_non_null().call(lookup);
     s.end();
-    s.local_tee(R);
-    s.ref_is_null();
-    s.if_(BlockType::Empty);
-    s.global_get(G_UNDEFINED).return_();
-    s.end();
-    s.local_get(R).global_get(G_BUILTIN).ref_eq();
-    s.if_(BlockType::Empty);
-    s.call(trap);
-    s.end();
-    s.local_get(R);
+    s.local_get(V);
+    s.call(value);
     s.end();
     f
 }
 
 fn set(cx: &mut dyn Cx) -> Function {
     let to_key = h(cx, Helper::ToKey);
-    let define = h(cx, Helper::Define);
+    let prop_set = rh(cx, runtime::Helper::Prop(props::Helper::Set));
     let holder = h(cx, Helper::Holder);
     let set_proto = h(cx, Helper::SetProto);
     let obj_proto = h(cx, Helper::Proto(Builtin::Object));
@@ -1401,7 +1444,7 @@ fn set(cx: &mut dyn Cx) -> Function {
         s.end();
         as_obj(&mut s, V);
         k(&mut s);
-        s.local_get(VAL).i32_const(0).call(define).return_();
+        s.local_get(VAL).call(prop_set).return_();
     }
     s.end();
     runtime::is_string(&mut s, V);
@@ -1433,6 +1476,9 @@ fn set(cx: &mut dyn Cx) -> Function {
 fn delete(cx: &mut dyn Cx) -> Function {
     let to_key = h(cx, Helper::ToKey);
     let remove = h(cx, Helper::Remove);
+    let find = h(cx, Helper::FindOwn);
+    let desc = rh(cx, runtime::Helper::Prop(props::Helper::Desc));
+    let of_obj = cx.str("' of ");
     let is_nullish = rh(cx, runtime::Helper::IsNullish);
     let concat = rh(cx, runtime::Helper::Concat);
     let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
@@ -1447,7 +1493,8 @@ fn delete(cx: &mut dyn Cx) -> Function {
     const V: u32 = 0;
     const KEY: u32 = 1;
     const K: u32 = 2;
-    let mut f = Function::new([(1, rt(true, T_STRING))]);
+    const E: u32 = 3;
+    let mut f = Function::new([(1, rt(true, T_STRING)), (1, ValType::I32)]);
     let mut s = f.instructions();
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
@@ -1475,6 +1522,18 @@ fn delete(cx: &mut dyn Cx) -> Function {
         .ref_is_null()
         .i32_eqz();
     s.if_(BlockType::Empty);
+    // A sealed or frozen array's elements can't be deleted.
+    s.local_get(V)
+        .ref_cast_non_null(object())
+        .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(SEALED)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(cannot);
+    s.local_get(K).ref_as_non_null().call(concat);
+    s.global_get(of_array).call(concat);
+    s.call(throw);
+    s.end();
     s.local_get(V)
         .ref_cast_non_null(array::array())
         .struct_get(T_ARRAY, array::F_ELEMS);
@@ -1486,6 +1545,26 @@ fn delete(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
+    // A non-configurable property can't be deleted.
+    as_obj(&mut s, V);
+    s.local_get(K).ref_as_non_null().call(find).local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .array_get_u(T_BYTES)
+        .i32_const(FIXED)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(cannot);
+    s.local_get(K).ref_as_non_null().call(concat);
+    s.global_get(of_obj).call(concat);
+    as_obj(&mut s, V);
+    s.call(desc).call(concat);
+    s.call(throw);
+    s.end();
+    s.end();
     as_obj(&mut s, V);
     s.local_get(K).ref_as_non_null().call(remove);
     s.i32_const(1).return_();
@@ -1599,6 +1678,7 @@ fn set_proto() -> Function {
 fn copy_props(cx: &mut dyn Cx) -> Function {
     let own_keys = h(cx, Helper::OwnKeys);
     let own = h(cx, Helper::OwnGet);
+    let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
     let define = h(cx, Helper::Define);
     let number_to_string = rh(cx, runtime::Helper::Num(numstr::Helper::NumberToString));
     const T: u32 = 0;
@@ -1628,6 +1708,7 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
             s.ref_as_non_null();
             as_obj(s, SRC);
             s.local_get(KK).ref_as_non_null().call(own);
+            s.local_get(SRC).call(value);
             s.i32_const(0).call(define);
         });
         s.return_();
@@ -2059,86 +2140,139 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     f
 }
 
-/// `$to_primitive(o)`: OrdinaryToPrimitive with the built-in `valueOf` (which returns the
-/// object, so it's skipped) and `toString`.
+/// `$to_primitive(o, hint)`: OrdinaryToPrimitive (hint 0 default, 1 number, 2 string): `valueOf`
+/// then `toString` (`toString` first for hint string), each called if it's a function, the first
+/// primitive result wins (T16: user methods). Built-in sentinels: `Object.prototype.valueOf`
+/// returns the object (skipped), `Object.prototype.toString` gives `[object Tag]`; any other
+/// built-in traps.
 fn to_primitive(cx: &mut dyn Cx) -> Function {
     let holder = h(cx, Helper::Holder);
-    let get = h(cx, Helper::Get);
+    let own = h(cx, Helper::OwnGet);
     let obj_proto = h(cx, Helper::Proto(Builtin::Object));
-    let err_proto = h(cx, Helper::Proto(Builtin::Error(ErrorKind::Error)));
-    let array_proto = h(cx, Helper::Proto(Builtin::Array));
-    let join = cx.helper(runtime::Helper::Arr(array::Helper::Join));
-    let comma = cx.str(",");
     let user = h(cx, Helper::UserPrimitiveTrap);
+    let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
+    let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
+    let call_value = rh(cx, runtime::Helper::Func(func::Helper::CallValue));
+    let value_of = cx.str("valueOf");
+    let to_string_key = cx.str("toString");
+    let tags = [
+        cx.str("[object Object]"),
+        cx.str("[object Error]"),
+        cx.str("[object Array]"),
+        cx.str("[object Function]"),
+    ];
+    let no_prim = cx.str("Cannot convert object to primitive value");
+    const O: u32 = 0;
+    const HINT: u32 = 1;
+    const HD: u32 = 2;
+    const T: u32 = 3;
+    const R: u32 = 4;
+    const I: u32 = 5;
+    const KEY: u32 = 6;
+    let mut f = Function::new([
+        (1, rt(true, T_OBJECT)),
+        (2, jsval()),
+        (1, ValType::I32),
+        (1, rt(true, T_STRING)),
+    ]);
+    let mut s = f.instructions();
+    // Two rounds: I = 0, 1. The key of round I: toString when (I == 0) == (hint == string).
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).i32_const(2).i32_ge_u().br_if(1);
+    s.global_get(to_string_key).global_get(value_of);
+    s.local_get(I).i32_eqz();
+    s.local_get(HINT).i32_const(2).i32_eq();
+    s.i32_eq();
+    s.typed_select(string_ref()).local_set(KEY);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.local_get(O)
+        .local_get(KEY)
+        .ref_as_non_null()
+        .call(holder)
+        .local_tee(HD);
+    s.ref_is_null().br_if(0);
+    s.local_get(HD)
+        .ref_as_non_null()
+        .local_get(KEY)
+        .ref_as_non_null()
+        .call(own)
+        .local_tee(R);
+    s.global_get(G_BUILTIN).ref_eq();
+    s.if_(BlockType::Empty);
+    {
+        s.local_get(KEY).global_get(value_of).ref_eq();
+        s.if_(BlockType::Empty);
+        // Object.prototype.valueOf returns the object: try the other method.
+        s.local_get(HD).call(obj_proto).ref_eq().br_if(2);
+        s.call(user);
+        s.end();
+        s.local_get(HD).call(obj_proto).ref_eq();
+        s.if_(BlockType::Empty);
+        // Object.prototype.toString: `[object Tag]`.
+        s.local_get(O).ref_test_non_null(func::function());
+        s.if_(BlockType::Empty);
+        s.global_get(tags[3]).return_();
+        s.end();
+        s.local_get(O).ref_test_non_null(array::array());
+        s.if_(BlockType::Empty);
+        s.global_get(tags[2]).return_();
+        s.end();
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_CLASS)
+            .i32_const(CLASS_MASK)
+            .i32_and()
+            .i32_const(CLASS_ERROR)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(tags[1]).return_();
+        s.end();
+        s.global_get(tags[0]).return_();
+        s.end();
+        s.call(user);
+    }
+    s.end();
+    // A user method (or an accessor's value).
+    s.local_get(R).local_get(O).call(value).local_tee(T);
+    s.ref_test_non_null(func::function());
+    s.if_(BlockType::Empty);
+    s.local_get(T).local_get(O);
+    s.i32_const(0).array_new_default(T_VALS);
+    s.local_get(KEY).ref_as_non_null();
+    s.call(call_value).local_tee(T);
+    s.ref_test_non_null(object()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(T).return_();
+    s.end();
+    s.end();
+    s.br(0).end().end();
+    s.global_get(no_prim).call(throw);
+    s.unreachable();
+    s.end();
+    f
+}
+
+/// `Error.prototype.toString` (a `$code`): `name: message`, `name` defaulting to "Error" and
+/// `message` to "" (either alone when the other is empty).
+fn error_to_string(cx: &mut dyn Cx) -> Function {
+    let get = h(cx, Helper::Get);
     let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
     let to_string = rh(cx, runtime::Helper::ToString);
     let concat = rh(cx, runtime::Helper::Concat);
-    let value_of = cx.str("valueOf");
-    let to_string_key = cx.str("toString");
     let (name, message) = (cx.str("name"), cx.str("message"));
     let (error, empty, colon) = (cx.str("Error"), cx.str(""), cx.str(": "));
-    let (tag_object, tag_error) = (cx.str("[object Object]"), cx.str("[object Error]"));
-    let no_prim = cx.str("Cannot convert object to primitive value");
-    const O: u32 = 0;
-    const HD: u32 = 1;
-    const N: u32 = 2;
-    const M: u32 = 3;
-    const T: u32 = 4;
-    let mut f = Function::new([
-        (1, rt(true, T_OBJECT)),
-        (2, rt(true, T_STRING)),
-        (1, jsval()),
-    ]);
+    let not_obj = cx.str("Error.prototype.toString requires that 'this' be an Object");
+    const THIS: u32 = 1;
+    const N: u32 = 3;
+    const M: u32 = 4;
+    const T: u32 = 5;
+    let mut f = Function::new([(2, rt(true, T_STRING)), (1, jsval())]);
     let mut s = f.instructions();
-    s.local_get(O)
-        .global_get(value_of)
-        .call(holder)
-        .local_tee(HD);
-    s.ref_is_null().i32_eqz();
-    s.local_get(HD).call(obj_proto).ref_eq().i32_eqz();
-    s.i32_and();
+    s.local_get(THIS).ref_test_non_null(object()).i32_eqz();
     s.if_(BlockType::Empty);
-    s.call(user);
+    s.global_get(not_obj).call(throw);
     s.end();
-    s.local_get(O)
-        .global_get(to_string_key)
-        .call(holder)
-        .local_tee(HD);
-    s.ref_is_null();
-    s.if_(BlockType::Empty);
-    s.global_get(no_prim).call(throw);
-    s.end();
-    s.local_get(HD).call(obj_proto).ref_eq();
-    s.if_(BlockType::Empty);
-    s.local_get(O)
-        .struct_get(T_OBJECT, F_CLASS)
-        .i32_const(CLASS_ERROR)
-        .i32_eq();
-    s.if_(BlockType::Result(string_ref()));
-    s.global_get(tag_error);
-    s.else_();
-    s.global_get(tag_object);
-    s.end();
-    s.return_();
-    s.end();
-    // Array.prototype.toString: `join()`.
-    s.local_get(HD).call(array_proto).ref_eq();
-    s.local_get(O).ref_test_non_null(array::array());
-    s.i32_and();
-    s.if_(BlockType::Empty);
-    s.local_get(O)
-        .ref_cast_non_null(array::array())
-        .global_get(comma)
-        .call(join)
-        .return_();
-    s.end();
-    s.local_get(HD).call(err_proto).ref_eq().i32_eqz();
-    s.if_(BlockType::Empty);
-    s.call(user);
-    s.end();
-    // Error.prototype.toString.
     for (key, local, default) in [(name, N, error), (message, M, empty)] {
-        s.local_get(O).global_get(key).call(get).local_tee(T);
+        s.local_get(THIS).global_get(key).call(get).local_tee(T);
         s.global_get(G_UNDEFINED).ref_eq();
         s.if_(BlockType::Result(string_ref()));
         s.global_get(default);
@@ -2164,22 +2298,32 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$object_to_number(o)`: ToNumber of ToPrimitive(o). `""` is 0; a string starting with `[` or
-/// a letter other than `I` can't be numeric: NaN. Anything else would need string parsing (F20): trap.
+/// `$object_to_number(o)`: ToNumber of ToPrimitive(o, number). A string result: `""` is 0; one
+/// starting with `[` or a letter other than `I` can't be numeric: NaN. Other strings would need
+/// string parsing (F20): trap.
 fn object_to_number(cx: &mut dyn Cx) -> Function {
     let to_primitive = h(cx, Helper::ToPrimitive);
+    let to_number = rh(cx, runtime::Helper::ToNumber);
     const O: u32 = 0;
     const P: u32 = 1;
     const C: u32 = 2;
-    let mut f = Function::new([(1, rt(true, T_STRING)), (1, ValType::I32)]);
+    let mut f = Function::new([(1, jsval()), (1, ValType::I32)]);
     let mut s = f.instructions();
-    s.local_get(O).call(to_primitive).local_tee(P);
-    s.array_len().i32_eqz();
+    s.local_get(O).i32_const(1).call(to_primitive).local_set(P);
+    runtime::is_string(&mut s, P);
+    s.i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(P).call(to_number).return_();
+    s.end();
+    s.local_get(P)
+        .ref_cast_non_null(string())
+        .array_len()
+        .i32_eqz();
     s.if_(BlockType::Empty);
     s.f64_const(0.0.into()).return_();
     s.end();
     s.local_get(P)
-        .ref_as_non_null()
+        .ref_cast_non_null(string())
         .i32_const(0)
         .array_get_u(T_STRING)
         .local_set(C);
@@ -2342,7 +2486,7 @@ fn symbol_keys() -> Function {
             .struct_get(T_OBJECT, F_ATTRS)
             .local_get(E)
             .array_get_u(T_BYTES)
-            .i32_const(HIDDEN)
+            .i32_const(HIDDEN | PRIVATE)
             .i32_and()
             .i32_eqz();
         s.i32_and();

@@ -48,6 +48,8 @@
 //! - `Array(elems)` (T15): a new array of the `jsval` elements (`None`: a hole).
 //! - `CallRef { callee, this, args, what }` (T14): call the JS value `callee` with `this` and the
 //!   arguments (all `jsval`), a `jsval`. A TypeError "`what` is not a function" if it isn't one.
+//! - `New { callee, new_target, args, what }` (T16): `new callee(...args)` (`new_target` defaults to
+//!   the callee), a `jsval`. A TypeError "`what` is not a constructor" if it isn't one.
 //! - Cells (T14): a captured variable lives in a cell, an internal `jsval` made by
 //!   `Intrinsic::NewCell` and used by `CellGet`/`CellSet`. A function object's captured cells and
 //!   values are its environment (`EnvGet`), and a function called through a value gets its
@@ -367,6 +369,57 @@ pub enum Intrinsic {
     ObjectValues,
     /// `Object.entries(v)`.
     ObjectEntries,
+    /// `f(...args)` for `new` (T16): args: callee, array-like, new target, what (the TypeError
+    /// text if it isn't a constructor).
+    ConstructList,
+    /// A new object whose prototype is `new_target.prototype` (`Object.prototype` if that isn't an
+    /// object): a base class constructor's `this`.
+    CreateThis,
+    /// Check a class heritage value (node's TypeErrors): the class prototype's parent.
+    ClassHeritage,
+    /// args: class, heritage (`undefined`: none), prototype parent (from `ClassHeritage`, or
+    /// `Object.prototype`): the class's new `prototype` object; the class inherits from the heritage.
+    ClassSetup,
+    /// `v instanceof f` for any value `f` (`bool`).
+    InstanceOfValue,
+    /// A method: a non-enumerable data property (args: object, key, value). No result.
+    DefineMethod,
+    /// A field: an enumerable data property replacing any existing one (args: object, key,
+    /// value). No result.
+    DefineField,
+    /// A getter (`setter: false`) or setter of an object literal (`enumerable`) or a class. Args:
+    /// object, key, function. No result.
+    DefineAccessor { setter: bool, enumerable: bool },
+    /// `super[key]`: args: home object, key, `this`.
+    SuperGet,
+    /// `super[key] = v` (no result): args: home object, key, value, `this`.
+    SuperSet,
+    /// The uninitialized marker (a Wasm null): a derived constructor's `this` before `super()`.
+    Hole,
+    /// Is the value the uninitialized marker? (`bool`)
+    IsHole,
+    /// What a constructor returning `value` gives (args: value, `this`).
+    CtorReturn { derived: bool },
+    /// `Object.defineProperty(o, key, desc)`.
+    DefineProperty,
+    /// `Object.getOwnPropertyDescriptor(o, key)`.
+    GetOwnPropertyDescriptor,
+    /// `Object.preventExtensions` (0), `seal` (1), `freeze` (2).
+    Integrity(u8),
+    /// `Object.isExtensible` (0), `isSealed` (1), `isFrozen` (2) (`bool`).
+    TestIntegrity(u8),
+    /// A native error constructor as a value (`class E extends Error`).
+    ErrorCtor(ErrorKind),
+    /// `o.#x`: args: object, private symbol, the TypeError message if `o` doesn't have it.
+    PrivateGet,
+    /// `o.#x = v` (no result): args: object, private symbol, value, the TypeError message if `o`
+    /// doesn't have it.
+    PrivateSet,
+    /// `#x in o` (`bool`): args: private symbol, object.
+    PrivateHas,
+    /// Add a private field (or method: read-only) to a new object (no result): args: object, private
+    /// symbol, value, the TypeError message if it's already there.
+    PrivateAdd { method: bool },
 }
 
 impl Intrinsic {
@@ -418,6 +471,27 @@ impl Intrinsic {
             Intrinsic::CallList => (&[JsVal, JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::CheckDestructure => (&[JsVal, JsVal], None),
             Intrinsic::SymbolIterator => (&[], Some(JsVal)),
+            Intrinsic::ConstructList => (&[JsVal, JsVal, JsVal, JsVal], Some(JsVal)),
+            Intrinsic::CreateThis | Intrinsic::ClassHeritage | Intrinsic::Integrity(_) => {
+                (&[JsVal], Some(JsVal))
+            }
+            Intrinsic::ClassSetup | Intrinsic::SuperGet | Intrinsic::DefineProperty => {
+                (&[JsVal, JsVal, JsVal], Some(JsVal))
+            }
+            Intrinsic::InstanceOfValue => (&[JsVal, JsVal], Some(Bool)),
+            Intrinsic::DefineMethod | Intrinsic::DefineField | Intrinsic::DefineAccessor { .. } => {
+                (&[JsVal, JsVal, JsVal], None)
+            }
+            Intrinsic::Hole | Intrinsic::ErrorCtor(_) => (&[], Some(JsVal)),
+            Intrinsic::PrivateGet => (&[JsVal, JsVal, JsVal], Some(JsVal)),
+            Intrinsic::PrivateSet | Intrinsic::PrivateAdd { .. } | Intrinsic::SuperSet => {
+                (&[JsVal, JsVal, JsVal, JsVal], None)
+            }
+            Intrinsic::PrivateHas => (&[JsVal, JsVal], Some(Bool)),
+            Intrinsic::IsHole | Intrinsic::TestIntegrity(_) => (&[JsVal], Some(Bool)),
+            Intrinsic::CtorReturn { .. } | Intrinsic::GetOwnPropertyDescriptor => {
+                (&[JsVal, JsVal], Some(JsVal))
+            }
         }
     }
 
@@ -474,6 +548,35 @@ impl Intrinsic {
             Intrinsic::ObjectKeys => "object_keys",
             Intrinsic::ObjectValues => "object_values",
             Intrinsic::ObjectEntries => "object_entries",
+            Intrinsic::ConstructList => "construct_list",
+            Intrinsic::CreateThis => "create_this",
+            Intrinsic::ClassHeritage => "class_heritage",
+            Intrinsic::ClassSetup => "class_setup",
+            Intrinsic::InstanceOfValue => "instanceof_value",
+            Intrinsic::DefineMethod => "define_method",
+            Intrinsic::DefineField => "define_field",
+            Intrinsic::DefineAccessor { setter: false, .. } => "define_getter",
+            Intrinsic::DefineAccessor { setter: true, .. } => "define_setter",
+            Intrinsic::SuperGet => "super_get",
+            Intrinsic::SuperSet => "super_set",
+            Intrinsic::Hole => "hole",
+            Intrinsic::IsHole => "is_hole",
+            Intrinsic::CtorReturn { derived: false } => "base_ctor_return",
+            Intrinsic::CtorReturn { derived: true } => "derived_ctor_return",
+            Intrinsic::DefineProperty => "define_property",
+            Intrinsic::GetOwnPropertyDescriptor => "get_own_property_descriptor",
+            Intrinsic::Integrity(0) => "prevent_extensions",
+            Intrinsic::Integrity(1) => "seal",
+            Intrinsic::Integrity(_) => "freeze",
+            Intrinsic::TestIntegrity(0) => "is_extensible",
+            Intrinsic::TestIntegrity(1) => "is_sealed",
+            Intrinsic::TestIntegrity(_) => "is_frozen",
+            Intrinsic::ErrorCtor(_) => "error_constructor",
+            Intrinsic::PrivateGet => "private_get",
+            Intrinsic::PrivateSet => "private_set",
+            Intrinsic::PrivateHas => "private_has",
+            Intrinsic::PrivateAdd { method: false } => "private_add_field",
+            Intrinsic::PrivateAdd { method: true } => "private_add_method",
         }
     }
 
@@ -501,6 +604,21 @@ impl Intrinsic {
                 | Intrinsic::ObjectKeys
                 | Intrinsic::ObjectValues
                 | Intrinsic::ObjectEntries
+                | Intrinsic::ConstructList
+                | Intrinsic::CreateThis
+                | Intrinsic::ClassHeritage
+                | Intrinsic::InstanceOfValue
+                | Intrinsic::SuperGet
+                | Intrinsic::SuperSet
+                | Intrinsic::CtorReturn { .. }
+                | Intrinsic::DefineProperty
+                | Intrinsic::GetOwnPropertyDescriptor
+                | Intrinsic::Integrity(_)
+                | Intrinsic::TestIntegrity(_)
+                | Intrinsic::PrivateGet
+                | Intrinsic::PrivateSet
+                | Intrinsic::PrivateHas
+                | Intrinsic::PrivateAdd { .. }
         )
     }
 }
@@ -747,6 +865,15 @@ pub enum Expr {
         /// How the callee is shown in the TypeError when it isn't a function (node's text).
         what: String,
     },
+    /// `new callee(...args)` (T16).
+    New {
+        callee: Box<Expr>,
+        /// `new.target` (`None`: the callee), for `super(…)`.
+        new_target: Option<Box<Expr>>,
+        args: Vec<Expr>,
+        /// How the callee is shown in the TypeError when it isn't a constructor (node's text).
+        what: String,
+    },
 }
 
 /// A new function object (T14).
@@ -759,12 +886,25 @@ pub struct Closure {
     pub name: String,
     /// The `length` property.
     pub length: u32,
-    /// Has an own `prototype` object (a `function`, not an arrow function or a method).
-    pub constructor: bool,
+    /// What kind of function object (constructor or not).
+    pub kind: FnKind,
     /// The environment: captured cells and values (`jsval`s), read back with `Intrinsic::EnvGet`.
     pub env: Vec<Expr>,
     /// One object per module, made on first use (a top-level function declaration): `env` is empty.
     pub shared: bool,
+}
+
+/// What a [`Closure`] makes (T16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FnKind {
+    /// Not a constructor: an arrow function, a method, an accessor.
+    Plain,
+    /// A `function`: an own `prototype` object, `new` makes an object and calls the code.
+    Ordinary,
+    /// A class: calling it throws (its code does), `new` runs `construct`, a function
+    /// `(self, new_target, args) -> jsval` (the `$code` shape). Its `prototype` comes from
+    /// [`Intrinsic::ClassSetup`].
+    Class { construct: FuncId },
 }
 
 impl Expr {
@@ -835,7 +975,9 @@ impl Expr {
             Expr::Str(_) => Type::JsVal,
             Expr::Intrinsic { op, .. } => return op.signature().1,
             Expr::Seq { value, .. } => return value.ty(func, module),
-            Expr::Closure(_) | Expr::CallRef { .. } | Expr::Array(_) => Type::JsVal,
+            Expr::Closure(_) | Expr::CallRef { .. } | Expr::Array(_) | Expr::New { .. } => {
+                Type::JsVal
+            }
         })
     }
 }

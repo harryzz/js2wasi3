@@ -20,7 +20,7 @@ use crate::array::{self, F_ELEMS, F_LENGTH};
 use crate::runtime::{
     self, Cx, T_ARRAY, T_KEYS, T_NUMBER, T_STRING, T_VALS, jsval, rt, string, string_ref,
 };
-use crate::{func, object};
+use crate::{func, object, props};
 
 const BREAK_LENGTH: i32 = 80;
 
@@ -30,7 +30,8 @@ pub enum Helper {
     Format,
     /// `(a: (ref $array), depth, indent) -> (ref $string)`.
     Array,
-    /// `(o: (ref $object), depth, indent) -> (ref $string)`.
+    /// `(o: (ref $object), depth, indent, prefix: (ref null $string)) -> (ref $string)`: `prefix`
+    /// (a function's `[Function: f] `) replaces the constructor-name prefix (`Point `).
     Object,
     /// `(s: (ref $string)) -> (ref $string)`: a string in quotes (traps if it needs escapes).
     Quote,
@@ -74,7 +75,10 @@ impl Helper {
         match self {
             Helper::Format => (vec![v, I32, I32, I32], vec![s]),
             Helper::Array => (vec![rt(false, T_ARRAY), I32, I32], vec![s]),
-            Helper::Object => (vec![rt(false, runtime::T_OBJECT), I32, I32], vec![s]),
+            Helper::Object => (
+                vec![rt(false, runtime::T_OBJECT), I32, I32, rt(true, T_STRING)],
+                vec![s],
+            ),
             Helper::Quote | Helper::Key => (vec![s], vec![s]),
             Helper::Layout => (vec![k, I32, I32, s, s, I32, I32], vec![s]),
             Helper::Group => (vec![k, I32, I32, I32], vec![rt(true, T_KEYS)]),
@@ -129,12 +133,25 @@ fn format(cx: &mut dyn Cx) -> Function {
         cx.str("[Function: "),
         cx.str("[Function (anonymous)]"),
     );
+    let (class_open, anon_class, extends, space) = (
+        cx.str("[class "),
+        cx.str("(anonymous)"),
+        cx.str(" extends "),
+        cx.str(" "),
+    );
+    let empty = cx.str("");
     const V: u32 = 0;
     const DEPTH: u32 = 1;
     const INDENT: u32 = 2;
     const NESTED: u32 = 3;
     const N: u32 = 4;
-    let mut f = Function::new([(1, jsval())]);
+    const P: u32 = 5;
+    const B: u32 = 6;
+    let mut f = Function::new([
+        (1, jsval()),
+        (1, rt(true, runtime::T_OBJECT)),
+        (1, rt(true, T_STRING)),
+    ]);
     let mut s = f.instructions();
     runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
@@ -153,27 +170,94 @@ fn format(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(string()).call(concat);
     s.global_get(sym_close).call(concat).return_();
     s.end();
-    // A function: `[Function: name]`; with own enumerable properties node shows them too (F24).
+    // A function: `[Function: name]` / `[class Name extends Parent]`, then its own enumerable
+    // properties like an object's.
     s.local_get(V).ref_test_non_null(func::function());
     s.if_(BlockType::Empty);
-    s.local_get(V)
-        .ref_cast_non_null(runtime::object())
-        .call(own_keys)
-        .array_len();
-    s.if_(BlockType::Empty);
-    trap(cx, &mut s);
-    s.end();
-    s.local_get(V).global_get(name).call(get).local_tee(N);
-    s.ref_test_non_null(string());
-    s.if_(BlockType::Empty);
-    s.local_get(N).ref_cast_non_null(string()).array_len();
-    s.if_(BlockType::Empty);
-    s.global_get(named);
-    s.local_get(N).ref_cast_non_null(string()).call(concat);
-    s.global_get(close).call(concat).return_();
-    s.end();
-    s.end();
-    s.global_get(anonymous).return_();
+    {
+        s.local_get(V)
+            .ref_cast_non_null(func::function())
+            .struct_get(runtime::T_FUNCTION, func::F_KIND)
+            .i32_const(func::KIND_CLASS)
+            .i32_eq();
+        s.if_(BlockType::Result(string_ref()));
+        {
+            s.global_get(class_open);
+            s.local_get(V).global_get(name).call(get).local_set(N);
+            runtime::is_string(&mut s, N);
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(N).ref_cast_non_null(string()).array_len();
+            s.else_();
+            s.i32_const(0);
+            s.end();
+            s.if_(BlockType::Result(string_ref()));
+            s.local_get(N).ref_cast_non_null(string());
+            s.else_();
+            s.global_get(anon_class);
+            s.end();
+            s.call(concat);
+            // Derived: ` extends Parent`.
+            s.local_get(V)
+                .ref_cast_non_null(runtime::object())
+                .struct_get(runtime::T_OBJECT, object::F_PROTO)
+                .local_tee(P);
+            s.ref_test_non_null(func::function());
+            s.if_(BlockType::Result(string_ref()));
+            s.global_get(extends);
+            s.local_get(P).global_get(name).call(get).local_set(N);
+            runtime::is_string(&mut s, N);
+            s.if_(BlockType::Result(string_ref()));
+            s.local_get(N).ref_cast_non_null(string());
+            s.else_();
+            s.global_get(anon_class);
+            s.end();
+            s.call(concat);
+            s.else_();
+            s.global_get(empty);
+            s.end();
+            s.call(concat);
+            s.global_get(close).call(concat);
+        }
+        s.else_();
+        {
+            s.local_get(V).global_get(name).call(get).local_set(N);
+            runtime::is_string(&mut s, N);
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(N).ref_cast_non_null(string()).array_len();
+            s.else_();
+            s.i32_const(0);
+            s.end();
+            s.if_(BlockType::Result(string_ref()));
+            s.global_get(named);
+            s.local_get(N).ref_cast_non_null(string()).call(concat);
+            s.global_get(close).call(concat);
+            s.else_();
+            s.global_get(anonymous);
+            s.end();
+        }
+        s.end();
+        s.local_set(B);
+        s.local_get(V)
+            .ref_cast_non_null(runtime::object())
+            .call(own_keys)
+            .array_len()
+            .i32_const(0)
+            .i32_ne();
+        s.local_get(DEPTH).i32_const(2).i32_le_s();
+        s.i32_and();
+        s.if_(BlockType::Result(string_ref()));
+        s.local_get(V).ref_cast_non_null(runtime::object());
+        s.local_get(DEPTH).local_get(INDENT);
+        s.local_get(B)
+            .ref_as_non_null()
+            .global_get(space)
+            .call(concat);
+        s.call(f_object);
+        s.else_();
+        s.local_get(B).ref_as_non_null();
+        s.end();
+        s.return_();
+    }
     s.end();
     s.local_get(V).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
@@ -194,10 +278,9 @@ fn format(cx: &mut dyn Cx) -> Function {
     s.global_get(close).call(concat).return_();
     s.end();
     s.local_get(V).ref_cast_non_null(runtime::object());
-    s.local_get(DEPTH)
-        .local_get(INDENT)
-        .call(f_object)
-        .return_();
+    s.local_get(DEPTH).local_get(INDENT);
+    s.ref_null(string());
+    s.call(f_object).return_();
     s.end();
     // -0 is never an i31.
     s.local_get(V)
@@ -241,7 +324,13 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     const E: u32 = 9;
     let mut f = Function::new([(5, ValType::I32), (1, rt(true, T_KEYS)), (1, jsval())]);
     let mut s = f.instructions();
+    // Too deep (node: only when there is something to show).
     s.local_get(DEPTH).i32_const(2).i32_gt_s();
+    s.local_get(A)
+        .struct_get(T_ARRAY, F_LENGTH)
+        .i32_const(0)
+        .i32_ne();
+    s.i32_and();
     s.if_(BlockType::Empty);
     s.global_get(deep).return_();
     s.end();
@@ -329,36 +418,121 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     let key = ih(cx, Helper::Key);
     let concat = cx.helper(runtime::Helper::Concat);
     let own_keys = oh(cx, object::Helper::OwnKeys);
-    let get = oh(cx, object::Helper::Get);
+    let own = oh(cx, object::Helper::OwnGet);
     let obj_proto = oh(cx, object::Helper::Proto(js2wasi3_ir::Builtin::Object));
     let symbols = oh(cx, object::Helper::SymbolKeys);
+    let ctor_name = cx.helper(runtime::Helper::Prop(props::Helper::CtorName));
     let (open, close, deep, colon) = (cx.str("{"), cx.str("}"), cx.str("[Object]"), cx.str(": "));
+    let (null_proto, deep_null) = (
+        cx.str("[Object: null prototype] "),
+        cx.str("[Object: null prototype]"),
+    );
+    let (lbracket, rbracket, space, object_) =
+        (cx.str("["), cx.str("]"), cx.str(" "), cx.str("Object"));
+    let (getter, setter, both) = (
+        cx.str("[Getter]"),
+        cx.str("[Setter]"),
+        cx.str("[Getter/Setter]"),
+    );
+    let str_eq = cx.helper(runtime::Helper::StrEq);
     const O: u32 = 0;
     const DEPTH: u32 = 1;
     const INDENT: u32 = 2;
-    const KS: u32 = 3;
-    const N: u32 = 4;
-    const I: u32 = 5;
-    const OUT: u32 = 6;
+    const PREFIX: u32 = 3;
+    const KS: u32 = 4;
+    const N: u32 = 5;
+    const I: u32 = 6;
+    const OUT: u32 = 7;
+    const NAME: u32 = 8;
+    const Q: u32 = 9;
+    const R: u32 = 10;
+    const PLAIN: u32 = 11;
     let mut f = Function::new([
         (1, rt(true, T_KEYS)),
         (2, ValType::I32),
         (1, rt(true, T_KEYS)),
+        (1, rt(true, T_STRING)),
+        (1, rt(true, runtime::T_OBJECT)),
+        (1, jsval()),
+        (1, ValType::I32),
     ]);
     let mut s = f.instructions();
-    // Plain objects only: other prototypes (class instances, null) print a prefix (F24).
-    s.local_get(O)
-        .struct_get(runtime::T_OBJECT, object::F_PROTO)
-        .call(obj_proto)
-        .ref_eq()
-        .i32_eqz();
-    s.local_get(O).call(symbols).i32_or();
+    // Symbol keys aren't shown yet (F24).
+    s.local_get(O).call(symbols);
     s.if_(BlockType::Empty);
     trap(cx, &mut s);
     s.end();
-    s.local_get(DEPTH).i32_const(2).i32_gt_s();
+    // The prefix: `Name ` from the constructor on the chain; none for `Object`; for no constructor,
+    // `[Object: null prototype] ` unless the chain reaches Object.prototype.
+    s.local_get(PREFIX).ref_is_null();
     s.if_(BlockType::Empty);
-    s.global_get(deep).return_();
+    {
+        s.local_get(O).call(ctor_name).local_tee(NAME).ref_is_null();
+        s.if_(BlockType::Empty);
+        {
+            s.local_get(O).local_set(Q);
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(Q).ref_is_null().br_if(1);
+            s.local_get(Q).call(obj_proto).ref_eq();
+            s.if_(BlockType::Empty);
+            s.i32_const(1).local_set(PLAIN);
+            s.br(2);
+            s.end();
+            s.local_get(Q)
+                .ref_as_non_null()
+                .struct_get(runtime::T_OBJECT, object::F_PROTO)
+                .local_set(Q);
+            s.br(0).end().end();
+            s.local_get(PLAIN).i32_eqz();
+            s.if_(BlockType::Empty);
+            s.global_get(null_proto).local_set(PREFIX);
+            s.end();
+        }
+        s.else_();
+        {
+            s.local_get(NAME)
+                .ref_as_non_null()
+                .global_get(object_)
+                .call(str_eq)
+                .i32_eqz();
+            s.if_(BlockType::Empty);
+            s.local_get(NAME)
+                .ref_as_non_null()
+                .global_get(space)
+                .call(concat)
+                .local_set(PREFIX);
+            s.end();
+        }
+        s.end();
+    }
+    s.end();
+    // Too deep (node: only when there is something to show).
+    s.local_get(DEPTH).i32_const(2).i32_gt_s();
+    s.local_get(O)
+        .call(own_keys)
+        .array_len()
+        .i32_const(0)
+        .i32_ne();
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    {
+        s.local_get(PREFIX).ref_is_null();
+        s.if_(BlockType::Empty);
+        s.global_get(deep).return_();
+        s.end();
+        s.local_get(PREFIX).global_get(null_proto).ref_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(deep_null).return_();
+        s.end();
+        // (A function's own properties aren't shown that deep: `format` stops first.)
+        s.local_get(NAME).ref_is_null();
+        s.if_(BlockType::Empty);
+        s.global_get(deep).return_();
+        s.end();
+        s.global_get(lbracket);
+        s.local_get(NAME).ref_as_non_null().call(concat);
+        s.global_get(rbracket).call(concat).return_();
+    }
     s.end();
     s.local_get(O)
         .call(own_keys)
@@ -376,11 +550,44 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         .call(key);
     s.global_get(colon).call(concat);
     s.local_get(O);
-    s.local_get(KS).local_get(I).array_get(T_KEYS);
-    s.call(get);
+    s.local_get(KS)
+        .local_get(I)
+        .array_get(T_KEYS)
+        .ref_as_non_null()
+        .call(own)
+        .local_tee(R);
+    s.ref_test_non_null(props::accessor());
+    s.if_(BlockType::Result(string_ref()));
+    {
+        // `[Getter]`, `[Setter]` or `[Getter/Setter]`.
+        s.global_get(getter).global_get(setter);
+        s.local_get(R)
+            .ref_cast_non_null(props::accessor())
+            .struct_get(runtime::T_ACCESSOR, 0)
+            .global_get(runtime::G_UNDEFINED)
+            .ref_eq()
+            .i32_eqz();
+        s.typed_select(string_ref());
+        s.global_get(both);
+        s.local_get(R)
+            .ref_cast_non_null(props::accessor())
+            .struct_get(runtime::T_ACCESSOR, 0)
+            .global_get(runtime::G_UNDEFINED)
+            .ref_eq()
+            .local_get(R)
+            .ref_cast_non_null(props::accessor())
+            .struct_get(runtime::T_ACCESSOR, 1)
+            .global_get(runtime::G_UNDEFINED)
+            .ref_eq()
+            .i32_or();
+        s.typed_select(string_ref());
+    }
+    s.else_();
+    s.local_get(R);
     s.local_get(DEPTH).i32_const(1).i32_add();
     s.local_get(INDENT).i32_const(2).i32_add();
     s.i32_const(1).call(format);
+    s.end();
     s.call(concat);
     s.array_set(T_KEYS);
     s.local_get(I).i32_const(1).i32_add().local_set(I);
@@ -389,9 +596,19 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         .ref_as_non_null()
         .local_get(N)
         .local_get(INDENT);
-    s.global_get(open).global_get(close);
+    s.local_get(PREFIX).ref_is_null();
+    s.if_(BlockType::Result(string_ref()));
+    s.global_get(open);
+    s.else_();
+    s.local_get(PREFIX)
+        .ref_as_non_null()
+        .global_get(open)
+        .call(concat);
+    s.end();
+    s.global_get(close);
     s.i32_const(0).i32_const(0).call(layout);
     s.end();
+    let _ = lbracket;
     f
 }
 

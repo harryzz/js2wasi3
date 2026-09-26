@@ -349,6 +349,22 @@ impl V<'_> {
                     }
                     None => self.err(format!("closure of missing function #{}", c.code.0)),
                 }
+                if let crate::FnKind::Class { construct } = c.kind {
+                    match self.m.functions.get(construct.0 as usize) {
+                        Some(f) => {
+                            let ok = f.params == 3
+                                && f.locals[..3].iter().all(|l| l.ty == Type::JsVal)
+                                && f.result == Some(Type::JsVal);
+                            if !ok {
+                                self.err(format!(
+                                    "class construct {} doesn't have the (jsval, jsval, jsval) -> jsval signature",
+                                    f.name
+                                ));
+                            }
+                        }
+                        None => self.err(format!("class of missing function #{}", construct.0)),
+                    }
+                }
                 if c.shared && !c.env.is_empty() {
                     self.err("a shared closure with an environment".to_string());
                 }
@@ -371,6 +387,22 @@ impl V<'_> {
                 for a in [&**callee, &**this].into_iter().chain(args) {
                     let t = self.value("call_ref operand", a);
                     self.expect("call_ref operand", t, Type::JsVal);
+                }
+                Some(Type::JsVal)
+            }
+            Expr::New {
+                callee,
+                new_target,
+                args,
+                ..
+            } => {
+                for a in [&**callee]
+                    .into_iter()
+                    .chain(new_target.as_deref())
+                    .chain(args)
+                {
+                    let t = self.value("new operand", a);
+                    self.expect("new operand", t, Type::JsVal);
                 }
                 Some(Type::JsVal)
             }

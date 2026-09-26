@@ -49,12 +49,16 @@
 //! and its parameters become `Any`. Other calls (`o.m()` with `this = o`, `f()()`, `o?.m()`) are
 //! `CallRef`s. Extra arguments are evaluated and dropped. A `let`/`const` a closure may read before
 //! its declaration gets an uninitialized cell and TDZ checks. Not yet: `arguments`, `apply`/`bind`
-//! (T15/T21), `new` of user functions (T16), assigning to a function's binding.
+//! (T15/T21), assigning to a function's binding.
 //!
 //! **Arrays and iteration** (T15): array literals (holes, spread), `for-of`, spread calls, and
 //! destructuring everywhere (declarations, assignments, parameters with defaults/patterns/rest,
 //! `catch`, `for-in`/`for-of` heads): see [`patterns`]. `Symbol()`, `Symbol.iterator`,
 //! `Array.isArray`, `Object.keys/values/entries`.
+//!
+//! **Classes** (T16): see [`classes`]. Also `new` and `instanceof` with any value, getters and setters
+//! in literals (with `super.x` in literal methods), `Object.defineProperty` / `getOwnPropertyDescriptor`
+//! / `freeze` / `seal` / `preventExtensions` / `is*`, and the native error constructors as values.
 //!
 //! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
 //! that converts (box an `f64`, ToNumber / ToString of the result).
@@ -74,6 +78,7 @@
 //! position. The lowering never guesses: a construct it can't lower exactly is rejected.
 //! All diagnostics of a file are collected, not just the first.
 
+mod classes;
 mod closures;
 mod patterns;
 
@@ -130,6 +135,8 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             fn_scope: HashMap::new(),
             rest_param: HashSet::new(),
             fn_length: HashMap::new(),
+            classes: HashMap::new(),
+            class_adapters: HashMap::new(),
         };
         l.run();
         if let Some(next) = l.next_facts() {
@@ -259,6 +266,19 @@ struct Lowerer<'p, 'a> {
     rest_param: HashSet<FuncId>,
     /// Top-level functions' `length`.
     fn_length: HashMap<FuncId, u32>,
+    /// Classes (T16), by their scope.
+    classes: HashMap<ScopeId, ClassFn<'a>>,
+    /// Each class's `$code` functions: (call trap, construct adapter).
+    class_adapters: HashMap<ScopeId, (FuncId, FuncId)>,
+}
+
+/// A class (T16): its constructor as an IR function `(self, this?, new_target?, params…) -> jsval`
+/// (see [`Hidden`]); a derived class's `this` is a local.
+struct ClassFn<'a> {
+    id: FuncId,
+    class: &'a Class<'a>,
+    /// The explicit constructor, if any.
+    ctor: Option<&'a Function<'a>>,
 }
 
 /// A function other than a top-level declaration (T14).
@@ -314,16 +334,18 @@ impl<'a> FnAst<'a> {
 }
 
 /// The parameters a JS function's IR function takes before the JS ones (T14): the function
-/// object (`self`: its environment and own name) and `this`, each only if used.
+/// object (`self`: its environment and own name), `this` and (class constructors, T16)
+/// `new.target`, each only if used.
 #[derive(Clone, Copy, Default)]
 struct Hidden {
     self_: bool,
     this: bool,
+    new_target: bool,
 }
 
 impl Hidden {
     fn count(self) -> u32 {
-        self.self_ as u32 + self.this as u32
+        self.self_ as u32 + self.this as u32 + self.new_target as u32
     }
 }
 
@@ -412,6 +434,20 @@ struct FnCx {
     self_local: Option<LocalId>,
     /// Captured values (`Cap::Value`) and the function's own name: the local holding them.
     values: HashMap<SymbolId, LocalId>,
+    /// The home object for `super.x` (T16).
+    home: Option<LocalId>,
+    /// `new.target` (a class constructor's param).
+    new_target: Option<LocalId>,
+    /// A class constructor: `Some(derived)`.
+    ctor: Option<bool>,
+    /// `this` may be uninitialized (a derived constructor before `super()`): reads check it.
+    this_checked: bool,
+    /// A class constructor's instance fields, initialized after each `super()` (derived).
+    class: Option<ScopeId>,
+    /// Private names' symbols (by [`closures::Analysis::privates`] index): their locals.
+    privates: HashMap<u32, LocalId>,
+    /// Instance private methods' cells: their locals.
+    priv_cells: HashMap<u32, LocalId>,
 }
 
 impl FnCx {
@@ -431,6 +467,13 @@ impl FnCx {
             this: None,
             self_local: None,
             values: HashMap::new(),
+            home: None,
+            new_target: None,
+            ctor: None,
+            this_checked: false,
+            class: None,
+            privates: HashMap::new(),
+            priv_cells: HashMap::new(),
         }
     }
 
@@ -603,6 +646,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     // ---- module ------------------------------------------------------------------------
 
     fn run(&mut self) {
+        for (span, what) in self.an.unsupported.clone() {
+            self.unsupported(span, what, "later");
+        }
         let body = &self.p.ast.body;
         // Pass 1: declare every top-level function and global so bodies can refer to them in any order.
         let mut fns: Vec<(&'a Function<'a>, FuncId)> = Vec::new();
@@ -615,6 +661,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             {
                 if let Statement::VariableDeclaration(d) = stmt {
                     let _ = self.declare_command_globals(d, &top);
+                }
+                if let Statement::ClassDeclaration(c) = stmt {
+                    self.declare_class_global(c);
                 }
                 top.push(stmt);
                 continue;
@@ -720,7 +769,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 _ => Err(self.unsupported(
                     e.span,
                     "exported declaration other than a function",
-                    "T16/T20",
+                    "T20",
                 )),
             },
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
@@ -799,6 +848,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let hidden = Hidden {
             self_: false,
             this: self.an.uses_this.contains(&scope),
+            new_target: false,
         };
         let mut sig: Vec<(&str, Type)> = Vec::new();
         if hidden.this {
@@ -928,6 +978,29 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         result
     }
 
+    /// A command's top-level class declaration (T16): a global like a `let`, set where the class is
+    /// defined (before its static fields run). Reading it earlier, including in the heritage, is a
+    /// TDZ error.
+    fn declare_class_global(&mut self, c: &'a Class<'a>) {
+        let Some(b) = &c.id else { return };
+        let sym = b
+            .symbol_id
+            .get()
+            .expect("semantic analysis assigns symbols");
+        let slot = Slot::Var(sym);
+        self.observe(slot, Kind::Any);
+        self.module.globals.push(ir::Global {
+            name: b.name.to_string(),
+            ty: self.slot_ty(slot),
+            mutable: true,
+            init: Const::Undefined,
+        });
+        let id = GlobalId(self.module.globals.len() as u32 - 1);
+        self.globals.insert(sym, id);
+        self.names.insert(b.name.to_string(), Binding::Global);
+        self.lexical_end.insert(sym, c.body.span.start);
+    }
+
     /// F28: a `var` in a nested block of a command's top-level code (`{ var z }`, `for (var i …)`)
     /// belongs to the module scope too: a global, `undefined` until assigned.
     fn nested_vars(&mut self) {
@@ -985,6 +1058,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     .map(|s| s.span().start),
                 AstKind::Function(f) => Some(f.span.start),
                 AstKind::ArrowFunctionExpression(a) => Some(a.span.start),
+                AstKind::Class(c) => Some(c.span.start),
                 _ => None,
             })
             .filter(in_top);
@@ -1268,6 +1342,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let f = match node.kind() {
                 AstKind::Function(f) => FnAst::Func(f),
                 AstKind::ArrowFunctionExpression(a) => FnAst::Arrow(a),
+                AstKind::Class(c) => {
+                    self.declare_class(c);
+                    continue;
+                }
                 _ => continue,
             };
             let scope = match f {
@@ -1281,19 +1359,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             {
                 continue; // top-level: `declare_function`
             }
-            // Class members and accessors are rejected where they appear (T16).
+            if self.an.ctor_class.contains_key(&scope) {
+                continue; // a class constructor: `declare_class`
+            }
+            // Methods and accessors aren't constructors.
             let method = match nodes.parent_kind(node.id()) {
-                AstKind::MethodDefinition(_) => continue,
-                AstKind::ObjectProperty(p) if p.kind != PropertyKind::Init => continue,
-                AstKind::ObjectProperty(p) => p.method,
+                AstKind::MethodDefinition(_) => true,
+                AstKind::ObjectProperty(p) => p.method || p.kind != PropertyKind::Init,
                 _ => false,
             };
-            let _ = method;
             let arrow = matches!(f, FnAst::Arrow(_));
             let hidden = Hidden {
                 self_: self.an.captures.get(&scope).is_some_and(|c| !c.is_empty())
                     || self.an.self_ref.contains(&scope),
                 this: !arrow && self.an.uses_this.contains(&scope),
+                new_target: false,
             };
             let id = FuncId(self.module.functions.len() as u32);
             let mut sig: Vec<(String, Type)> = Vec::new();
@@ -1364,6 +1444,71 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// Declare a class's constructor function (T16): `(self, this, new_target?, params…) -> jsval`
+    /// for a base class, `(self, new_target, params…) -> jsval` for a derived one. An implicit
+    /// derived constructor takes a rest parameter (the arguments it passes to `super`).
+    fn declare_class(&mut self, c: &'a Class<'a>) {
+        let scope = c.scope_id.get().expect("classes have scopes");
+        let ctor = c.body.body.iter().find_map(|e| match e {
+            ClassElement::MethodDefinition(m) if m.kind == MethodDefinitionKind::Constructor => {
+                Some(&*m.value)
+            }
+            _ => None,
+        });
+        let derived = c.heritage.is_some();
+        let hidden = Hidden {
+            self_: true,
+            this: !derived,
+            new_target: derived || self.an.uses_new_target.contains(&scope),
+        };
+        let id = FuncId(self.module.functions.len() as u32);
+        let mut sig: Vec<(String, Type)> = vec![("self".into(), Type::JsVal)];
+        if hidden.this {
+            sig.push(("this".into(), Type::JsVal));
+        }
+        if hidden.new_target {
+            sig.push(("new.target".into(), Type::JsVal));
+        }
+        let mut params = Vec::new();
+        match ctor {
+            Some(f) => {
+                for p in &f.params.items {
+                    let (name, sym) = match (&p.pattern, &p.initializer) {
+                        (BindingPattern::BindingIdentifier(b), None) => {
+                            (b.name.to_string(), b.symbol_id.get())
+                        }
+                        _ => ("param".to_string(), None),
+                    };
+                    let ty = sym.map_or(Type::JsVal, |s| self.slot_ty(Slot::Var(s)));
+                    sig.push((name, ty));
+                    params.push(sym);
+                }
+                if f.params.rest.is_some() {
+                    sig.push(("rest".to_string(), Type::JsVal));
+                    self.rest_param.insert(id);
+                }
+            }
+            None if derived => {
+                sig.push(("args".to_string(), Type::JsVal));
+                self.rest_param.insert(id);
+            }
+            None => {}
+        }
+        let name = c.id.as_ref().map(|i| i.name.to_string());
+        let sig_refs: Vec<(&str, Type)> = sig.iter().map(|(n, t)| (n.as_str(), *t)).collect();
+        let mut func = ir::Function::new(
+            name.unwrap_or_else(|| format!("anonymous{}", id.0)),
+            &sig_refs,
+            Some(Type::JsVal),
+        );
+        func.pos = Some(self.pos(c.span));
+        self.module.add_function(func);
+        self.hidden.insert(id, hidden);
+        self.fn_scope.insert(id, scope);
+        self.func_params.insert(id, params);
+        self.classes.insert(scope, ClassFn { id, class: c, ctor });
+    }
+
     /// Lower a nested function's body (once per round).
     fn lower_nested(&mut self, scope: ScopeId) -> R<()> {
         let n = &self.nested[&scope];
@@ -1396,132 +1541,27 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let func = self.module.functions[id.0 as usize].clone();
         let mut cx = FnCx::new(id, func);
         cx.scope = Some(scope);
-        let hidden = self.hidden[&id];
         let mut prologue = Vec::new();
-        let mut k = 0;
-        if hidden.self_ {
-            cx.self_local = Some(LocalId(0));
-            k += 1;
-        }
-        if hidden.this {
-            cx.this = Some(LocalId(k));
-            k += 1;
-        }
-        if let Some(self_local) = cx.self_local {
-            for (sym, s) in &self.an.self_names {
-                if *s == scope {
-                    cx.values.insert(*sym, self_local);
-                }
-            }
-        }
-        let captures = self.an.captures.get(&scope).cloned().unwrap_or_default();
-        for (i, cap) in captures.iter().enumerate() {
-            let name = match cap {
-                Cap::This => "this".to_string(),
-                Cap::Cell(sym) | Cap::Value(sym) => self.scoping.symbol_name(*sym).to_string(),
-            };
-            let Some(self_local) = cx.self_local else {
-                return Err(self.unsupported(
-                    f.span(),
-                    "internal: a closure without its function object",
-                    "T14",
-                ));
-            };
-            let l = cx.func.add_local(name, Type::JsVal);
-            prologue.push(Stmt::Set(
-                l,
-                Expr::intrinsic(Intrinsic::EnvGet(i as u32), vec![Expr::Local(self_local)]),
-            ));
-            match cap {
-                Cap::This => cx.this = Some(l),
-                Cap::Cell(sym) => {
-                    cx.cells.insert(*sym, (l, self.an.tdz.contains(sym)));
-                }
-                Cap::Value(sym) => {
-                    cx.values.insert(*sym, l);
-                }
-            }
-        }
-        let mut params = Vec::new();
-        let mut complex = Vec::new();
-        for (i, p) in f.params().items.iter().enumerate() {
-            if p.initializer.is_some() || !matches!(p.pattern, BindingPattern::BindingIdentifier(_))
-            {
-                complex.push((cx.func.param(k + i as u32), p));
-                continue;
-            }
-            if let BindingPattern::BindingIdentifier(b) = &p.pattern
-                && let Some(sym) = b.symbol_id.get()
-            {
-                let param = cx.func.param(k + i as u32);
-                params.push(sym);
-                if self.an.captured.contains(&sym) {
-                    let ty = cx.func.local(param).ty;
-                    let cell = cx.func.add_local(format!("{}.cell", b.name), Type::JsVal);
-                    prologue.push(Stmt::Set(
-                        cell,
-                        Expr::intrinsic(Intrinsic::NewCell(ty), vec![Expr::Local(param)]),
-                    ));
-                    cx.cells.insert(sym, (cell, false));
-                } else {
-                    cx.locals.insert(sym, param);
-                }
-            }
-        }
-        // Captured `var`s: one cell for the whole call, `undefined` until assigned.
-        let mut vars: Vec<SymbolId> = self.scoping.get_bindings(scope).values().copied().collect();
-        vars.sort();
-        for sym in vars {
-            if self
-                .scoping
-                .symbol_flags(sym)
-                .is_function_scoped_declaration()
-                && self.an.captured.contains(&sym)
-                && !params.contains(&sym)
-                && !self.nested_decl.contains_key(&sym)
-            {
-                let slot = Slot::Var(sym);
-                let ty = self.slot_ty(slot);
-                let v = self.undefined_val();
-                let v = self.store(slot, ty, v);
-                let cell = cx.func.add_local(
-                    format!("{}.cell", self.scoping.symbol_name(sym)),
-                    Type::JsVal,
-                );
-                prologue.push(Stmt::Set(
-                    cell,
-                    Expr::intrinsic(Intrinsic::NewCell(ty), vec![v]),
-                ));
-                cx.cells.insert(sym, (cell, false));
-            }
-        }
         let before = self.diags.len();
-        // Parameters with defaults or patterns, then the rest parameter.
-        for (param, p) in complex {
-            let mode = Mode::Decl { fresh: false };
-            let v = Expr::Local(param);
-            let _ = match &p.initializer {
-                Some(init) => self.param_default(&mut cx, &p.pattern, init, v, &mut prologue),
-                None => self.pattern(
-                    &mut cx,
-                    Pat::Bind(&p.pattern),
-                    v,
-                    mode,
-                    Some(Src::Value),
-                    &mut prologue,
-                ),
-            };
-        }
-        if let Some(rest) = &f.params().rest {
-            let param = cx.func.param(cx.func.params - 1);
-            let _ = self.pattern(
-                &mut cx,
-                Pat::Bind(&rest.rest.argument),
-                Expr::Local(param),
-                Mode::Decl { fresh: false },
-                None,
-                &mut prologue,
-            );
+        self.prologue(
+            &mut cx,
+            scope,
+            scope,
+            Some(f.params()),
+            f.span(),
+            &mut prologue,
+        )?;
+        if matches!(f, FnAst::Arrow(_)) {
+            // `this` captured from a derived constructor may be uninitialized.
+            let mut owner = self.an.parent.get(&scope).copied().flatten();
+            while let Some(o) = owner
+                && self.an.is_arrow(o)
+            {
+                owner = self.an.parent.get(&o).copied().flatten();
+            }
+            cx.this_checked = owner
+                .and_then(|o| self.an.classes.get(&o))
+                .is_some_and(|c| c.derived);
         }
         let mut stmts = Vec::new();
         if let Some(e) = f.expression() {
@@ -1546,6 +1586,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if self.diags.len() > before {
             return Err(Unsupported);
         }
+        self.finish(cx, prologue, stmts);
+        Ok(())
+    }
+
+    /// Store a lowered function: prologue, `var`s set to `undefined`, statements.
+    fn finish(&mut self, mut cx: FnCx, prologue: Vec<Stmt>, stmts: Vec<Stmt>) {
         let mut body = prologue;
         body.extend(
             cx.var_undefined
@@ -1554,7 +1600,163 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         );
         body.extend(stmts);
         cx.func.body = body;
+        let id = cx.id;
         self.module.functions[id.0 as usize] = cx.func;
+    }
+
+    /// The start of a function (`scope`: the function, or a class): the hidden params, the
+    /// environment (captured cells and values), the parameters (cells for captured ones, then
+    /// defaults and patterns, then the rest parameter), cells for the captured `var`s of `vars`
+    /// (the scope declaring them).
+    fn prologue(
+        &mut self,
+        cx: &mut FnCx,
+        scope: ScopeId,
+        vars: ScopeId,
+        params: Option<&'a FormalParameters<'a>>,
+        span: Span,
+        prologue: &mut Vec<Stmt>,
+    ) -> R<()> {
+        let hidden = self.hidden[&cx.id];
+        let mut k = 0;
+        if hidden.self_ {
+            cx.self_local = Some(LocalId(0));
+            k += 1;
+        }
+        if hidden.this {
+            cx.this = Some(LocalId(k));
+            k += 1;
+        }
+        if hidden.new_target {
+            cx.new_target = Some(LocalId(k));
+            k += 1;
+        }
+        if let Some(self_local) = cx.self_local {
+            for (sym, s) in &self.an.self_names {
+                if *s == scope {
+                    cx.values.insert(*sym, self_local);
+                }
+            }
+        }
+        let captures = self.an.captures.get(&scope).cloned().unwrap_or_default();
+        for (i, cap) in captures.iter().enumerate() {
+            let name = match cap {
+                Cap::This => "this".to_string(),
+                Cap::Home => "home".to_string(),
+                Cap::Private(i) => self.an.privates[*i as usize].name.clone(),
+                Cap::PrivMethod(i) => format!("{}.cell", self.an.privates[*i as usize].name),
+                Cap::Cell(sym) | Cap::Value(sym) => self.scoping.symbol_name(*sym).to_string(),
+            };
+            let Some(self_local) = cx.self_local else {
+                return Err(self.unsupported(
+                    span,
+                    "internal: a closure without its function object",
+                    "T14",
+                ));
+            };
+            let l = cx.func.add_local(name, Type::JsVal);
+            prologue.push(Stmt::Set(
+                l,
+                Expr::intrinsic(Intrinsic::EnvGet(i as u32), vec![Expr::Local(self_local)]),
+            ));
+            match cap {
+                Cap::This => cx.this = Some(l),
+                Cap::Home => cx.home = Some(l),
+                Cap::Private(i) => {
+                    cx.privates.insert(*i, l);
+                }
+                Cap::PrivMethod(i) => {
+                    cx.priv_cells.insert(*i, l);
+                }
+                Cap::Cell(sym) => {
+                    cx.cells.insert(*sym, (l, self.an.tdz.contains(sym)));
+                }
+                Cap::Value(sym) => {
+                    cx.values.insert(*sym, l);
+                }
+            }
+        }
+        let mut param_syms = Vec::new();
+        let mut complex = Vec::new();
+        for (i, p) in params.map_or(&[][..], |ps| &ps.items).iter().enumerate() {
+            if p.initializer.is_some() || !matches!(p.pattern, BindingPattern::BindingIdentifier(_))
+            {
+                complex.push((cx.func.param(k + i as u32), p));
+                continue;
+            }
+            if let BindingPattern::BindingIdentifier(b) = &p.pattern
+                && let Some(sym) = b.symbol_id.get()
+            {
+                let param = cx.func.param(k + i as u32);
+                param_syms.push(sym);
+                if self.an.captured.contains(&sym) {
+                    let ty = cx.func.local(param).ty;
+                    let cell = cx.func.add_local(format!("{}.cell", b.name), Type::JsVal);
+                    prologue.push(Stmt::Set(
+                        cell,
+                        Expr::intrinsic(Intrinsic::NewCell(ty), vec![Expr::Local(param)]),
+                    ));
+                    cx.cells.insert(sym, (cell, false));
+                } else {
+                    cx.locals.insert(sym, param);
+                }
+            }
+        }
+        // Captured `var`s: one cell for the whole call, `undefined` until assigned.
+        let mut var_syms: Vec<SymbolId> =
+            self.scoping.get_bindings(vars).values().copied().collect();
+        var_syms.sort();
+        for sym in var_syms {
+            if self
+                .scoping
+                .symbol_flags(sym)
+                .is_function_scoped_declaration()
+                && self.an.captured.contains(&sym)
+                && !param_syms.contains(&sym)
+                && !self.nested_decl.contains_key(&sym)
+            {
+                let slot = Slot::Var(sym);
+                let ty = self.slot_ty(slot);
+                let v = self.undefined_val();
+                let v = self.store(slot, ty, v);
+                let cell = cx.func.add_local(
+                    format!("{}.cell", self.scoping.symbol_name(sym)),
+                    Type::JsVal,
+                );
+                prologue.push(Stmt::Set(
+                    cell,
+                    Expr::intrinsic(Intrinsic::NewCell(ty), vec![v]),
+                ));
+                cx.cells.insert(sym, (cell, false));
+            }
+        }
+        // Parameters with defaults or patterns, then the rest parameter.
+        for (param, p) in complex {
+            let mode = Mode::Decl { fresh: false };
+            let v = Expr::Local(param);
+            let _ = match &p.initializer {
+                Some(init) => self.param_default(cx, &p.pattern, init, v, prologue),
+                None => self.pattern(
+                    cx,
+                    Pat::Bind(&p.pattern),
+                    v,
+                    mode,
+                    Some(Src::Value),
+                    prologue,
+                ),
+            };
+        }
+        if let Some(rest) = params.and_then(|ps| ps.rest.as_ref()) {
+            let param = cx.func.param(cx.func.params - 1);
+            let _ = self.pattern(
+                cx,
+                Pat::Bind(&rest.rest.argument),
+                Expr::Local(param),
+                Mode::Decl { fresh: false },
+                None,
+                prologue,
+            );
+        }
         Ok(())
     }
 
@@ -1579,10 +1781,52 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         body?;
         let code = self.adapter(id);
+        let env = self.env_for(cx, scope, span)?;
+        let name = if own.is_empty() {
+            name.unwrap_or_default().to_string()
+        } else {
+            own
+        };
+        Ok(Expr::Closure(Box::new(ir::Closure {
+            code,
+            name,
+            length: js_length(f.params()),
+            kind: if constructor {
+                ir::FnKind::Ordinary
+            } else {
+                ir::FnKind::Plain
+            },
+            env,
+            shared: false,
+        })))
+    }
+
+    /// The environment of a new closure of function (or class) `scope`: what it captures, from `cx`.
+    fn env_for(&mut self, cx: &FnCx, scope: ScopeId, span: Span) -> R<Vec<Expr>> {
         let mut env = Vec::new();
         for cap in self.an.captures.get(&scope).cloned().unwrap_or_default() {
             env.push(match cap {
                 Cap::This => cx.this.map_or_else(Expr::undefined, Expr::Local),
+                Cap::Home => cx.home.map_or_else(Expr::undefined, Expr::Local),
+                Cap::Private(i) | Cap::PrivMethod(i) => {
+                    let found = match cap {
+                        Cap::Private(_) => cx.privates.get(&i),
+                        _ => cx.priv_cells.get(&i),
+                    };
+                    match found {
+                        Some(l) => Expr::Local(*l),
+                        None => {
+                            return Err(self.unsupported(
+                                span,
+                                &format!(
+                                    "internal: private name `{}` not in scope",
+                                    self.an.privates[i as usize].name
+                                ),
+                                "T16",
+                            ));
+                        }
+                    }
+                }
                 Cap::Cell(sym) | Cap::Value(sym) => {
                     let found = match cap {
                         Cap::Cell(_) => cx.cells.get(&sym).map(|(l, _)| *l),
@@ -1604,19 +1848,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
             });
         }
-        let name = if own.is_empty() {
-            name.unwrap_or_default().to_string()
-        } else {
-            own
-        };
-        Ok(Expr::Closure(Box::new(ir::Closure {
-            code,
-            name,
-            length: js_length(f.params()),
-            constructor,
-            env,
-            shared: false,
-        })))
+        Ok(env)
     }
 
     /// The object of a top-level function (one per module).
@@ -1630,7 +1862,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             code,
             name: f.name.clone(),
             length: self.fn_length[&func],
-            constructor: true,
+            kind: ir::FnKind::Ordinary,
             env: Vec::new(),
             shared: true,
         }))
@@ -1693,6 +1925,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// closure may read before their declaration (TDZ), then the function declarations' objects.
     fn hoist(&mut self, cx: &mut FnCx, list: &'a [Statement<'a>], out: &mut Vec<Stmt>) {
         for s in list {
+            // A class declaration is like a `let` (T16).
+            if let Statement::ClassDeclaration(c) = s
+                && let Some(b) = &c.id
+                && let Some(sym) = b.symbol_id.get()
+                && self.an.tdz.contains(&sym)
+                && self.an.captured.contains(&sym)
+                && !self.globals.contains_key(&sym)
+            {
+                self.observe(Slot::Var(sym), Kind::Any);
+                let l = cx.func.add_local(format!("{}.cell", b.name), Type::JsVal);
+                out.push(Stmt::Set(
+                    l,
+                    Expr::intrinsic(Intrinsic::NewCellUninit, vec![]),
+                ));
+                cx.cells.insert(sym, (l, false));
+                cx.pending.insert(sym);
+            }
             let Statement::VariableDeclaration(d) = s else {
                 continue;
             };
@@ -1812,7 +2061,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                             Some(a) => self.expr(cx, a)?,
                             None => self.undefined_val(),
                         };
-                        Some(self.store(Slot::Result(cx.id), ty, v))
+                        if cx.ctor.is_some() {
+                            Some(self.ctor_result(cx, jsval_of(v)))
+                        } else {
+                            Some(self.store(Slot::Result(cx.id), ty, v))
+                        }
                     }
                 };
                 out.extend(self.jump(cx, Jump::Return, v));
@@ -1886,6 +2139,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Statement::TryStatement(t) => self.try_stmt(cx, t, out),
             // Hoisted to the start of its statement list (`hoist`).
             Statement::FunctionDeclaration(_) => Ok(()),
+            Statement::ClassDeclaration(c) => {
+                let sym = c.id.as_ref().and_then(|i| i.symbol_id.get());
+                let e = self.class_value(cx, c, None, sym)?;
+                out.push(Stmt::Expr(e));
+                Ok(())
+            }
             other => Err(self.unsupported(
                 other.span(),
                 &format!("statement `{}`", statement_kind(other)),
@@ -2359,6 +2618,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 {
                     return Ok(Val::js(self.func_value(func), Kind::Any));
                 }
+                if let Some(k) = self.error_ctor(e) {
+                    // A native error constructor as a value (T16).
+                    return Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::ErrorCtor(k), vec![]),
+                        Kind::Any,
+                    ));
+                }
                 let var = self.resolve(cx, id)?;
                 Ok(self.read_var(&var))
             }
@@ -2502,12 +2768,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Expression::NewExpression(n) => match self.error_ctor(&n.callee) {
                 Some(k) => self.new_error(cx, k, &n.arguments, span),
-                None => Err(self.unsupported(
-                    span,
-                    "`new` (only the native error constructors so far)",
-                    "T16",
-                )),
+                None => self.new_expr(cx, n),
             },
+            Expression::CallExpression(c) if matches!(c.callee, Expression::Super(_)) => {
+                self.super_call(cx, c)
+            }
             Expression::CallExpression(c)
                 if !c.optional && self.error_ctor(&c.callee).is_some() =>
             {
@@ -2613,10 +2878,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
                 self.named(cx, e, None)
             }
-            Expression::ThisExpression(_) => Ok(Val::js(
-                cx.this.map_or_else(Expr::undefined, Expr::Local),
+            Expression::ThisExpression(_) => Ok(Val::js(self.this_value(cx), Kind::Any)),
+            Expression::NewTarget(_) => Ok(Val::js(
+                cx.new_target.map_or_else(Expr::undefined, Expr::Local),
                 Kind::Any,
             )),
+            Expression::ClassExpression(c) => {
+                Ok(Val::js(self.class_value(cx, c, None, None)?, Kind::Any))
+            }
             Expression::StaticMemberExpression(sm)
                 if !sm.optional && self.builtin_ident(&sm.object) == Some(Builtin::Symbol) =>
             {
@@ -2633,6 +2902,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     ));
                 }
                 Err(self.unsupported(span, &format!("`Symbol.{}`", sm.property.name), "T21"))
+            }
+            Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_)
+                if matches!(
+                    e.as_member_expression().map(|m| m.object()),
+                    Some(Expression::Super(_))
+                ) =>
+            {
+                let m = e.as_member_expression().expect("a member expression");
+                let (get, _) = self.super_member(cx, m)?;
+                Ok(Val::js(get, Kind::Any))
             }
             Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_) => {
                 let m = e.as_member_expression().expect("a member expression");
@@ -2662,8 +2941,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     self.chain_member(cx, m)
                 }
             },
-            Expression::PrivateFieldExpression(_) => {
-                Err(self.unsupported(span, "private field", "T16"))
+            Expression::PrivateFieldExpression(pf) => self.private_get(cx, pf),
+            Expression::PrivateInExpression(p) => {
+                let (sym, _) = self.private_sym(cx, &p.left)?;
+                let o = jsval_of(self.expr(cx, &p.right)?);
+                Ok(Val::new(
+                    Expr::intrinsic(Intrinsic::PrivateHas, vec![sym, o]),
+                    Type::Bool,
+                ))
             }
             other => Err(self.unsupported(
                 span,
@@ -2683,10 +2968,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if b.operator == B::Instanceof {
             let Some(builtin) = self.builtin_ident(&b.right) else {
-                return Err(self.unsupported(
-                    b.right.span(),
-                    "`instanceof` with something other than `Object` or a native constructor",
-                    "T16",
+                let l = self.expr(cx, &b.left);
+                let r = self.expr(cx, &b.right);
+                let (l, r) = (l?, r?);
+                return Ok(Val::new(
+                    Expr::intrinsic(Intrinsic::InstanceOfValue, vec![jsval_of(l), jsval_of(r)]),
+                    Type::Bool,
                 ));
             };
             let l = self.expr(cx, &b.left)?;
@@ -2913,6 +3200,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Some(stderr) = self.console_method(&c.callee) {
             return Ok((self.console(cx, c, stderr)?, Call::Console));
         }
+        if matches!(c.callee, Expression::Super(_)) {
+            return Ok((self.super_call(cx, c)?.e, Call::Value));
+        }
         let callee = c.callee.without_parentheses();
         if c.arguments.iter().any(|a| a.is_spread()) {
             return self.spread_call(cx, c);
@@ -2934,6 +3224,52 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 };
                 return self.direct_call(cx, func, this, &c.arguments);
             }
+        }
+        if let Some(MemberExpression::PrivateFieldExpression(pf)) = callee.as_member_expression() {
+            // `o.#m(…)`: `this` is `o`.
+            if pf.optional {
+                return Err(self.unsupported(
+                    pf.span,
+                    "optional chain with a private field",
+                    "later",
+                ));
+            }
+            let obj = jsval_of(self.expr(cx, &pf.object)?);
+            let (sym, msg) = self.private_sym(cx, &pf.field)?;
+            let t = cx.func.add_local("this", Type::JsVal);
+            let f = Expr::Seq {
+                body: vec![Stmt::Set(t, obj)],
+                value: Box::new(Expr::intrinsic(
+                    Intrinsic::PrivateGet,
+                    vec![Expr::Local(t), sym, Expr::str(&msg)],
+                )),
+            };
+            let args = self.value_args(cx, &c.arguments)?;
+            return Ok((
+                Expr::CallRef {
+                    callee: Box::new(f),
+                    this: Box::new(Expr::Local(t)),
+                    args,
+                    what: self.callee_text(&c.callee),
+                },
+                Call::Value,
+            ));
+        }
+        if let Some(m) = callee.as_member_expression()
+            && matches!(m.object(), Expression::Super(_))
+        {
+            // `super.m(…)`: `this` is the current `this`.
+            let (f, this) = self.super_member(cx, m)?;
+            let args = self.value_args(cx, &c.arguments)?;
+            return Ok((
+                Expr::CallRef {
+                    callee: Box::new(f),
+                    this: Box::new(this),
+                    args,
+                    what: self.callee_text(&c.callee),
+                },
+                Call::Value,
+            ));
         }
         if let Some(m) = callee.as_member_expression()
             && !matches!(m, MemberExpression::PrivateFieldExpression(_))
@@ -3126,6 +3462,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         match e {
             Expression::Identifier(id) => id.name.to_string(),
             Expression::ThisExpression(_) => "this".to_string(),
+            Expression::FunctionExpression(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::ClassExpression(_) => "(intermediate value)".to_string(),
             Expression::CallExpression(c) => format!("{}(...)", self.callee_text(&c.callee)),
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(c) => {
@@ -3353,6 +3692,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             (Builtin::Object, "keys") => Some(Intrinsic::ObjectKeys),
             (Builtin::Object, "values") => Some(Intrinsic::ObjectValues),
             (Builtin::Object, "entries") => Some(Intrinsic::ObjectEntries),
+            (Builtin::Object, "defineProperty") => Some(Intrinsic::DefineProperty),
+            (Builtin::Object, "getOwnPropertyDescriptor") => {
+                Some(Intrinsic::GetOwnPropertyDescriptor)
+            }
+            (Builtin::Object, "preventExtensions") => Some(Intrinsic::Integrity(0)),
+            (Builtin::Object, "seal") => Some(Intrinsic::Integrity(1)),
+            (Builtin::Object, "freeze") => Some(Intrinsic::Integrity(2)),
+            (Builtin::Object, "isExtensible") => Some(Intrinsic::TestIntegrity(0)),
+            (Builtin::Object, "isSealed") => Some(Intrinsic::TestIntegrity(1)),
+            (Builtin::Object, "isFrozen") => Some(Intrinsic::TestIntegrity(2)),
             (Builtin::Array, "isArray") => Some(Intrinsic::IsArray),
             _ => None,
         }
@@ -3372,11 +3721,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let n = op.signature().0.len();
         let args = self.args(cx, &c.arguments, n)?;
         let e = Expr::intrinsic(op, args);
-        Ok(if matches!(op, Intrinsic::HasOwn | Intrinsic::IsArray) {
-            Val::new(e, Type::Bool)
-        } else {
-            Val::js(e, Kind::Any)
-        })
+        Ok(
+            if matches!(
+                op,
+                Intrinsic::HasOwn | Intrinsic::IsArray | Intrinsic::TestIntegrity(_)
+            ) {
+                Val::new(e, Type::Bool)
+            } else {
+                Val::js(e, Kind::Any)
+            },
+        )
     }
 
     /// The arguments of a built-in taking `n` JS values: missing ones are `undefined`, extra ones
@@ -3439,6 +3793,50 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Err(self.unsupported(p.span, "private field", "T16"))
             }
         }
+    }
+
+    /// The object and key of a member expression that is assigned to, and for a private field
+    /// (`o.#x`, T16) the messages for reading and writing it on an object without it.
+    fn member_ref(
+        &mut self,
+        cx: &mut FnCx,
+        m: &'a MemberExpression<'a>,
+    ) -> R<(Expr, Expr, Member)> {
+        if matches!(m.object(), Expression::Super(_)) {
+            // `super.x = v`: the home object's prototype, `this` as the receiver.
+            let Some(home) = cx.home else {
+                return Err(self.unsupported(m.span(), "`super` outside a method", "never"));
+            };
+            let key = match m {
+                MemberExpression::StaticMemberExpression(sm) => {
+                    Expr::str(sm.property.name.as_str())
+                }
+                MemberExpression::ComputedMemberExpression(cm) => {
+                    jsval_of(self.expr(cx, &cm.expression)?)
+                }
+                MemberExpression::PrivateFieldExpression(p) => {
+                    return Err(self.unsupported(p.span, "private field", "never"));
+                }
+            };
+            let t = cx.func.add_local("this", Type::JsVal);
+            let this = self.this_value(cx);
+            let home = Expr::Seq {
+                body: vec![Stmt::Set(t, this)],
+                value: Box::new(Expr::Local(home)),
+            };
+            return Ok((home, key, Member::Super(t)));
+        }
+        let MemberExpression::PrivateFieldExpression(pf) = m else {
+            let (obj, key) = self.member(cx, m)?;
+            return Ok((obj, key, Member::Plain));
+        };
+        let obj = jsval_of(self.expr(cx, &pf.object)?);
+        let (sym, read) = self.private_sym(cx, &pf.field)?;
+        let write = format!(
+            "Cannot write private member #{} to an object whose class did not declare it",
+            pf.field.name
+        );
+        Ok((obj, sym, Member::Private(read, write)))
     }
 
     /// `a?.b.c` (member accesses only): `undefined` as soon as an optional link's object is
@@ -3641,9 +4039,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         p: &'a ObjectProperty<'a>,
         body: &mut Vec<Stmt>,
     ) -> R<()> {
-        if p.kind != PropertyKind::Init {
-            return Err(self.unsupported(p.span, "getter or setter", "T16"));
-        }
         let (key, proto) = match &p.key {
             PropertyKey::StaticIdentifier(id) => (
                 Expr::str(id.name.as_str()),
@@ -3688,7 +4083,39 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 "later",
             ));
         }
-        let v = jsval_of(self.named(cx, &p.value, name)?);
+        if p.kind != PropertyKind::Init {
+            // A getter or setter (T16): named `get x` / `set x`.
+            let Some(name) = name else {
+                return Err(self.unsupported(
+                    p.span,
+                    "getter or setter with a computed key (its `name` comes from the key at run time)",
+                    "later",
+                ));
+            };
+            let setter = p.kind == PropertyKind::Set;
+            let fname = format!("{} {name}", if setter { "set" } else { "get" });
+            let saved_home = cx.home;
+            cx.home = Some(t);
+            let f = self.named(cx, &p.value, Some(&fname));
+            cx.home = saved_home;
+            let f = jsval_of(f?);
+            body.push(Stmt::Expr(Expr::intrinsic(
+                Intrinsic::DefineAccessor {
+                    setter,
+                    enumerable: true,
+                },
+                vec![Expr::Local(t), key, f],
+            )));
+            return Ok(());
+        }
+        // A method's home object (`super.x`) is the literal.
+        let saved_home = cx.home;
+        if p.method {
+            cx.home = Some(t);
+        }
+        let v = self.named(cx, &p.value, name);
+        cx.home = saved_home;
+        let v = jsval_of(v?);
         body.push(Stmt::Expr(if proto {
             Expr::intrinsic(Intrinsic::SetProto, vec![Expr::Local(t), v])
         } else {
@@ -3703,7 +4130,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .left
             .as_member_expression()
             .expect("checked by the caller");
-        let (obj, key) = self.member(cx, m)?;
+        let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
         let tk = cx.func.add_local("key", Type::JsVal);
         let tv = cx.func.add_local("value", Type::JsVal);
@@ -3711,7 +4138,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let rhs = self.expr(cx, &a.right)?;
         let old = (a.operator != AssignmentOperator::Assign).then(|| {
             Val::js(
-                Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(to), Expr::Local(tk)]),
+                member_get(&private, Expr::Local(to), Expr::Local(tk)),
                 Kind::Any,
             )
         });
@@ -3720,13 +4147,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Kind::Str | Kind::Bool => value.kind,
             _ => Kind::Any,
         };
-        body.push(Stmt::Expr(Expr::intrinsic(
-            Intrinsic::SetProp,
-            vec![
-                Expr::Local(to),
-                Expr::Local(tk),
-                Expr::Tee(tv, Box::new(jsval_of(value))),
-            ],
+        body.push(Stmt::Expr(member_set(
+            &private,
+            Expr::Local(to),
+            Expr::Local(tk),
+            Expr::Tee(tv, Box::new(jsval_of(value))),
         )));
         Ok(Val::js(
             Expr::Seq {
@@ -3743,7 +4168,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .argument
             .as_member_expression()
             .expect("checked by the caller");
-        let (obj, key) = self.member(cx, m)?;
+        let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
         let tk = cx.func.add_local("key", Type::JsVal);
         let old = cx.func.add_local("old", Type::F64);
@@ -3753,7 +4178,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         } else {
             BinOp::Sub
         };
-        let get = Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(to), Expr::Local(tk)]);
+        let get = member_get(&private, Expr::Local(to), Expr::Local(tk));
         let body = vec![
             Stmt::Set(to, obj),
             Stmt::Set(tk, key),
@@ -3762,13 +4187,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 new,
                 Expr::binary(op, Type::F64, Expr::Local(old), Expr::f64(1.0)),
             ),
-            Stmt::Expr(Expr::intrinsic(
-                Intrinsic::SetProp,
-                vec![
-                    Expr::Local(to),
-                    Expr::Local(tk),
-                    Expr::convert(Type::F64, Type::JsVal, Expr::Local(new)),
-                ],
+            Stmt::Expr(member_set(
+                &private,
+                Expr::Local(to),
+                Expr::Local(tk),
+                Expr::convert(Type::F64, Type::JsVal, Expr::Local(new)),
             )),
         ];
         let value = Box::new(Expr::Local(if u.prefix { new } else { old }));
@@ -4181,6 +4604,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let scope = match e.without_parentheses() {
             Expression::FunctionExpression(f) => f.scope_id.get(),
             Expression::ArrowFunctionExpression(a) => a.scope_id.get(),
+            Expression::ClassExpression(c) => {
+                return Ok(Val::js(self.class_value(cx, c, name, None)?, Kind::Any));
+            }
             _ => return self.expr(cx, e),
         };
         let scope = scope.expect("functions have scopes");
@@ -4255,6 +4681,41 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 }
 
 // ---- conversions -----------------------------------------------------------------------
+
+/// What an assigned member expression is (T16).
+enum Member {
+    Plain,
+    /// A private field: the messages for reading and writing it on an object without it.
+    Private(String, String),
+    /// `super.x`: the object is the home object; the local holding `this`.
+    Super(LocalId),
+}
+
+/// Read a member.
+fn member_get(m: &Member, obj: Expr, key: Expr) -> Expr {
+    match m {
+        Member::Private(read, _) => {
+            Expr::intrinsic(Intrinsic::PrivateGet, vec![obj, key, Expr::str(read)])
+        }
+        Member::Super(this) => {
+            Expr::intrinsic(Intrinsic::SuperGet, vec![obj, key, Expr::Local(*this)])
+        }
+        Member::Plain => Expr::intrinsic(Intrinsic::GetProp, vec![obj, key]),
+    }
+}
+
+/// Write a member (no result).
+fn member_set(m: &Member, obj: Expr, key: Expr, v: Expr) -> Expr {
+    match m {
+        Member::Private(_, write) => {
+            Expr::intrinsic(Intrinsic::PrivateSet, vec![obj, key, v, Expr::str(write)])
+        }
+        Member::Super(this) => {
+            Expr::intrinsic(Intrinsic::SuperSet, vec![obj, key, v, Expr::Local(*this)])
+        }
+        Member::Plain => Expr::intrinsic(Intrinsic::SetProp, vec![obj, key, v]),
+    }
+}
 
 /// The text of a string literal or a template literal without substitutions.
 fn static_string<'x>(e: &'x Expression) -> Option<&'x str> {

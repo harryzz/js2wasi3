@@ -12,7 +12,7 @@
 //!   `error`. See [`crate::object`] for the layout, the built-in prototypes and the helpers.
 //!   `console.log` shows an error as `[name: message]` (node's format for an error without a stack).
 //! - Types: one `rec` group `[$number, $oddball, $string, $i64s, $object, $keys, $vals, $bytes,
-//!   $i32s, $code, $function, $cell_f64, $cell]` at type indices 0–12 (`$i64s` holds the number → string
+//!   $i32s, $code, $function, $cell_f64, $cell, $symbol, $array, $iter, $accessor]` at type indices 0–16 (`$i64s` holds the number → string
 //!   tables, see [`crate::numstr`]; `$keys`…`$i32s` are an object's arrays).
 //! - Functions (T14): `$function` is a subtype of `$object` (so every object helper takes it) with
 //!   the code to run and the environment (captured cells and values). See [`crate::func`].
@@ -28,7 +28,7 @@ use wasm_encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, array, func, host, inspect, iter, numstr, object};
+use crate::{abi, array, func, host, inspect, iter, numstr, object, props};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
@@ -59,8 +59,11 @@ pub const T_SYMBOL: u32 = 13;
 pub const T_ARRAY: u32 = 14;
 /// `$iter`: the state of an iteration (T15, see [`crate::iter`]).
 pub const T_ITER: u32 = 15;
+/// `$accessor { get: mut eqref, set: mut eqref }`: the value slot of an accessor property (T16,
+/// see [`crate::object`]). Never a JS value. Absent functions are `undefined`.
+pub const T_ACCESSOR: u32 = 16;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 16;
+pub const TYPES: u32 = 17;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -79,8 +82,11 @@ pub const G_PROTOS: u32 = 6;
 pub const G_SYM_ITERATOR: u32 = G_PROTOS + js2wasi3_ir::Builtin::ALL.len() as u32;
 /// `(ref $string)`: a private symbol keying an iterator object's state (T15, see [`crate::iter`]).
 pub const G_SYM_STATE: u32 = G_SYM_ITERATOR + 1;
+/// `(mut (ref null $object))` per [`js2wasi3_ir::ErrorKind`]: the native error constructor as a
+/// function object (T16), created on first use.
+pub const G_ERROR_CTORS: u32 = G_SYM_STATE + 1;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_SYM_STATE + 1;
+pub const GLOBALS: u32 = G_ERROR_CTORS + js2wasi3_ir::ErrorKind::ALL.len() as u32;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -194,7 +200,8 @@ pub fn types(types: &mut TypeSection) {
         }))
     };
     let object_fields = vec![
-        field(StorageType::Val(ValType::I32), false),
+        // `class` is mutable: it also holds the extensibility bits (T16).
+        field(StorageType::Val(ValType::I32), true),
         field(StorageType::Val(rt(true, T_OBJECT)), true),
         field(StorageType::Val(rt(false, T_KEYS)), true),
         field(StorageType::Val(rt(false, T_VALS)), true),
@@ -208,6 +215,8 @@ pub fn types(types: &mut TypeSection) {
     let mut function_fields = object_fields.clone();
     function_fields.push(field(StorageType::Val(rt(false, T_CODE)), false));
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
+    function_fields.push(field(StorageType::Val(rt(true, T_CODE)), false));
+    function_fields.push(field(StorageType::Val(ValType::I32), false));
     types.ty().rec([
         st(ValType::F64),
         st(ValType::I32),
@@ -285,6 +294,12 @@ pub fn types(types: &mut TypeSection) {
                 field(StorageType::Val(jsval()), true),
             ]),
         })),
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(jsval()), true),
+                field(StorageType::Val(jsval()), true),
+            ]),
+        })),
     ]);
 }
 
@@ -357,6 +372,16 @@ pub fn globals(globals: &mut GlobalSection) {
                 shared: false,
             },
             &ConstExpr::extended(insns),
+        );
+    }
+    for _ in js2wasi3_ir::ErrorKind::ALL {
+        globals.global(
+            GlobalType {
+                val_type: rt(true, T_OBJECT),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(object()),
         );
     }
 }
@@ -435,11 +460,16 @@ pub enum Helper {
     Describe,
     /// `(description: jsval) -> jsval`: `Symbol(description)` (T15).
     NewSymbol,
+    /// `(hay, needle: (ref $string), pos: i32) -> i32`: does `needle` occur in `hay` at `pos`?
+    StrAt,
+    /// `(s: (ref $string), from: i32) -> (ref $string)`: `s.slice(from)`.
+    StrSlice,
     Num(numstr::Helper),
     Obj(object::Helper),
     Func(func::Helper),
     Arr(array::Helper),
     Iter(iter::Helper),
+    Prop(props::Helper),
     Fmt(inspect::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
@@ -465,12 +495,15 @@ impl Helper {
             Helper::NoFormat => "no_format",
             Helper::ThrowRead => "throw_read_error",
             Helper::Describe => "describe",
+            Helper::StrAt => "string_at",
+            Helper::StrSlice => "string_slice",
             Helper::NewSymbol => "new_symbol",
             Helper::Num(h) => h.name(),
             Helper::Obj(h) => h.name(),
             Helper::Func(h) => h.name(),
             Helper::Arr(h) => h.name(),
             Helper::Iter(h) => h.name(),
+            Helper::Prop(h) => h.name(),
             Helper::Fmt(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
@@ -493,12 +526,15 @@ impl Helper {
             Helper::JsAdd => (vec![v, v], vec![v]),
             Helper::NoFormat | Helper::NewSymbol => (vec![v], vec![v]),
             Helper::Inspect | Helper::Describe => (vec![v], vec![s]),
+            Helper::StrAt => (vec![s, s, ValType::I32], vec![ValType::I32]),
+            Helper::StrSlice => (vec![s, ValType::I32], vec![s]),
             Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
             Helper::Obj(h) => h.signature(),
             Helper::Func(h) => h.signature(),
             Helper::Arr(h) => h.signature(),
             Helper::Iter(h) => h.signature(),
+            Helper::Prop(h) => h.signature(),
             Helper::Fmt(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
@@ -524,12 +560,15 @@ impl Helper {
             Helper::NoFormat => no_format(),
             Helper::ThrowRead => throw_read(cx),
             Helper::Describe => describe(cx),
+            Helper::StrAt => str_at(),
+            Helper::StrSlice => str_slice(),
             Helper::NewSymbol => new_symbol(cx),
             Helper::Num(h) => h.body(cx),
             Helper::Obj(h) => h.body(cx),
             Helper::Func(h) => h.body(cx),
             Helper::Arr(h) => h.body(cx),
             Helper::Iter(h) => h.body(cx),
+            Helper::Prop(h) => h.body(cx),
             Helper::Fmt(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());
@@ -746,8 +785,8 @@ fn strict_eq(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$loose_eq(a, b) -> i32`: JS `==`. Two objects compare by identity, one object as its
-/// ToPrimitive (a string). Then `null == undefined`; a nullish value equals nothing else; two strings compare
+/// `$loose_eq(a, b) -> i32`: JS `==`. Two objects compare by identity. `null == undefined`; a
+/// nullish value equals nothing else. An object compares as its ToPrimitive. Two strings compare
 /// by content; anything else compares as numbers.
 fn loose_eq(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(Helper::IsNullish);
@@ -755,28 +794,33 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
     let str_eq = cx.helper(Helper::StrEq);
     const NA: u32 = 2;
     const NB: u32 = 3;
-    let to_string = cx.helper(Helper::ToString);
+    let to_primitive = cx.helper(Helper::Obj(object::Helper::ToPrimitive));
     let mut f = Function::new([(2, ValType::I32)]);
     let mut s = f.instructions();
-    // Two objects compare by identity; one object compares as its ToPrimitive, a string.
+    // Two objects compare by identity; one object compares as its ToPrimitive.
     s.local_get(0).ref_test_non_null(object());
     s.local_get(1).ref_test_non_null(object());
     s.i32_and();
     s.if_(BlockType::Empty);
     s.local_get(0).local_get(1).ref_eq().return_();
     s.end();
-    for v in [0, 1] {
-        s.local_get(v).ref_test_non_null(object());
-        s.if_(BlockType::Empty);
-        s.local_get(v).call(to_string).local_set(v);
-        s.end();
-    }
     s.local_get(0).call(is_nullish).local_set(NA);
     s.local_get(1).call(is_nullish).local_set(NB);
     s.local_get(NA).local_get(NB).i32_or();
-    s.if_(BlockType::Result(ValType::I32));
-    s.local_get(NA).local_get(NB).i32_and();
-    s.else_();
+    s.if_(BlockType::Empty);
+    s.local_get(NA).local_get(NB).i32_and().return_();
+    s.end();
+    for v in [0, 1] {
+        s.local_get(v).ref_test_non_null(object());
+        s.if_(BlockType::Empty);
+        s.local_get(v)
+            .ref_cast_non_null(object())
+            .i32_const(0)
+            .call(to_primitive)
+            .local_set(v);
+        s.end();
+    }
+    s.block(BlockType::Result(ValType::I32));
     both_strings(&mut s, 0, 1);
     s.if_(BlockType::Result(ValType::I32));
     as_string(&mut s, 0);
@@ -939,8 +983,9 @@ fn concat() -> Function {
     f
 }
 
-/// `$to_string(v: jsval) -> (ref $string)`: JS ToString (objects: their ToPrimitive).
+/// `$to_string(v: jsval) -> (ref $string)`: JS ToString (objects: ToString of ToPrimitive, hint string).
 fn to_string(cx: &mut dyn Cx) -> Function {
+    let to_string = cx.helper(Helper::ToString);
     let is_number = cx.helper(Helper::IsNumber);
     let to_number = cx.helper(Helper::ToNumber);
     let number_to_string = cx.helper(Helper::Num(numstr::Helper::NumberToString));
@@ -977,7 +1022,9 @@ fn to_string(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(V)
         .ref_cast_non_null(object())
+        .i32_const(2)
         .call(to_primitive)
+        .call(to_string)
         .return_();
     s.end();
     kind(&mut s, V);
@@ -993,21 +1040,28 @@ fn to_string(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$js_add(a, b: jsval) -> jsval`: JS `+`. If either is a string or an object (whose
-/// ToPrimitive is a string), concatenate the ToString of both; otherwise add the ToNumber of both.
+/// `$js_add(a, b: jsval) -> jsval`: JS `+`. Objects become their ToPrimitive first. If either is
+/// then a string, concatenate the ToString of both; otherwise add the ToNumber of both.
 fn js_add(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
     let concat = cx.helper(Helper::Concat);
     let to_number = cx.helper(Helper::ToNumber);
     let box_ = cx.helper(Helper::Box);
+    let to_primitive = cx.helper(Helper::Obj(object::Helper::ToPrimitive));
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    // An object's ToPrimitive is a string too.
     for v in [0, 1] {
-        s.local_get(v).ref_test_non_null(string());
         s.local_get(v).ref_test_non_null(object());
-        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.local_get(v)
+            .ref_cast_non_null(object())
+            .i32_const(0)
+            .call(to_primitive)
+            .local_set(v);
+        s.end();
     }
+    s.local_get(0).ref_test_non_null(string());
+    s.local_get(1).ref_test_non_null(string());
     s.i32_or();
     s.if_(BlockType::Result(jsval()));
     s.local_get(0).call(to_string);
@@ -1128,15 +1182,184 @@ fn new_symbol(cx: &mut dyn Cx) -> Function {
 fn describe(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(Helper::ToString);
     let inspect = cx.helper(Helper::Inspect);
+    let get = cx.helper(Helper::Obj(object::Helper::Get));
+    let is_nullish = cx.helper(Helper::IsNullish);
+    let ctor_name = cx.helper(Helper::Prop(crate::props::Helper::CtorName));
+    let str_at = cx.helper(Helper::StrAt);
+    let str_eq = cx.helper(Helper::StrEq);
+    let slice = cx.helper(Helper::StrSlice);
+    let concat = cx.helper(Helper::Concat);
+    let (name_key, error, open, close) =
+        (cx.str("name"), cx.str("Error"), cx.str(" ["), cx.str("]"));
     const V: u32 = 0;
-    let mut f = Function::new([]);
+    const H: u32 = 1;
+    const N: u32 = 2;
+    const C: u32 = 3;
+    const LEN: u32 = 4;
+    const I: u32 = 5;
+    const T: u32 = 6;
+    let mut f = Function::new([(3, rt(true, T_STRING)), (2, ValType::I32), (1, jsval())]);
     let mut s = f.instructions();
     object::is_error(&mut s, V);
-    s.if_(BlockType::Result(string_ref()));
-    s.local_get(V).call(to_string);
-    s.else_();
-    s.local_get(V).call(inspect);
+    s.i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(V).call(inspect).return_();
     s.end();
+    s.local_get(V).call(to_string).local_set(H);
+    // node's `improveStack`: an error whose constructor isn't named like it shows both,
+    // `Ctor [name]: message` (or `Ctor: message` when the constructor's name contains it).
+    s.local_get(V).global_get(name_key).call(get).local_tee(T);
+    s.call(is_nullish);
+    s.if_(BlockType::Result(string_ref()));
+    s.global_get(error);
+    s.else_();
+    s.local_get(T).call(to_string);
+    s.end();
+    s.local_tee(N).ref_as_non_null().array_len().local_set(LEN);
+    s.local_get(V)
+        .ref_cast_non_null(object())
+        .call(ctor_name)
+        .local_tee(C);
+    s.ref_is_null();
+    s.if_(BlockType::Empty);
+    s.local_get(H).ref_as_non_null().return_();
+    s.end();
+    // name ends with "Error", the header starts with name followed by ':' or nothing.
+    s.local_get(LEN).i32_const(5).i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(H).ref_as_non_null().return_();
+    s.end();
+    s.local_get(N).ref_as_non_null().global_get(error);
+    s.local_get(LEN).i32_const(5).i32_sub();
+    s.call(str_at);
+    s.local_get(H)
+        .ref_as_non_null()
+        .local_get(N)
+        .ref_as_non_null();
+    s.i32_const(0).call(str_at);
+    s.i32_and();
+    s.local_get(H)
+        .ref_as_non_null()
+        .array_len()
+        .local_get(LEN)
+        .i32_eq();
+    s.local_get(H)
+        .ref_as_non_null()
+        .array_len()
+        .local_get(LEN)
+        .i32_gt_u();
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(H)
+        .ref_as_non_null()
+        .local_get(LEN)
+        .array_get_u(T_STRING)
+        .i32_const(':' as i32)
+        .i32_eq();
+    s.else_();
+    s.i32_const(0);
+    s.end();
+    s.i32_or();
+    s.i32_and();
+    s.i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(H).ref_as_non_null().return_();
+    s.end();
+    s.local_get(N)
+        .ref_as_non_null()
+        .local_get(C)
+        .ref_as_non_null()
+        .call(str_eq);
+    s.if_(BlockType::Empty);
+    s.local_get(H).ref_as_non_null().return_();
+    s.end();
+    // Does the constructor's name contain `name`?
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I)
+        .local_get(LEN)
+        .i32_add()
+        .local_get(C)
+        .ref_as_non_null()
+        .array_len()
+        .i32_gt_u()
+        .br_if(1);
+    s.local_get(C)
+        .ref_as_non_null()
+        .local_get(N)
+        .ref_as_non_null()
+        .local_get(I)
+        .call(str_at);
+    s.if_(BlockType::Empty);
+    s.local_get(C).ref_as_non_null();
+    s.local_get(H).ref_as_non_null().local_get(LEN).call(slice);
+    s.call(concat).return_();
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(C)
+        .ref_as_non_null()
+        .global_get(open)
+        .call(concat);
+    s.local_get(N).ref_as_non_null().call(concat);
+    s.global_get(close).call(concat);
+    s.local_get(H).ref_as_non_null().local_get(LEN).call(slice);
+    s.call(concat);
+    s.end();
+    f
+}
+
+fn str_at() -> Function {
+    const H: u32 = 0;
+    const N: u32 = 1;
+    const P: u32 = 2;
+    const I: u32 = 3;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(P)
+        .local_get(N)
+        .array_len()
+        .i32_add()
+        .local_get(H)
+        .array_len()
+        .i32_gt_u();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).array_len().i32_ge_u().br_if(1);
+    s.local_get(H)
+        .local_get(P)
+        .local_get(I)
+        .i32_add()
+        .array_get_u(T_STRING);
+    s.local_get(N).local_get(I).array_get_u(T_STRING);
+    s.i32_ne();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.i32_const(1);
+    s.end();
+    f
+}
+
+fn str_slice() -> Function {
+    const S: u32 = 0;
+    const FROM: u32 = 1;
+    const R: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_STRING))]);
+    let mut s = f.instructions();
+    s.local_get(S)
+        .array_len()
+        .local_get(FROM)
+        .i32_sub()
+        .array_new_default(T_STRING)
+        .local_set(R);
+    s.local_get(R).ref_as_non_null().i32_const(0);
+    s.local_get(S).local_get(FROM);
+    s.local_get(S).array_len().local_get(FROM).i32_sub();
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(R).ref_as_non_null();
     s.end();
     f
 }

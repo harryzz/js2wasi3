@@ -43,6 +43,7 @@ mod inspect;
 mod iter;
 mod numstr;
 mod object;
+mod props;
 mod runtime;
 
 use std::collections::HashMap;
@@ -386,7 +387,7 @@ fn uses_jsval(m: &ir::Module) -> bool {
             Expr::Tee(_, a) | Expr::Unary { arg: a, .. } => expr(a),
             Expr::Call { args, .. } => args.iter().any(expr),
             Expr::Seq { body, value } => stmts(body) || expr(value),
-            Expr::Closure(_) | Expr::CallRef { .. } | Expr::Array(_) => true,
+            Expr::Closure(_) | Expr::CallRef { .. } | Expr::Array(_) | Expr::New { .. } => true,
         }
     }
     fn stmts(list: &[Stmt]) -> bool {
@@ -505,6 +506,16 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
             unsupported_expr(this, out);
             args.iter().for_each(|a| unsupported_expr(a, out));
         }
+        Expr::New {
+            callee,
+            new_target,
+            args,
+            ..
+        } => {
+            unsupported_expr(callee, out);
+            new_target.iter().for_each(|a| unsupported_expr(a, out));
+            args.iter().for_each(|a| unsupported_expr(a, out));
+        }
     }
 }
 
@@ -544,6 +555,16 @@ fn visit_exprs(list: &[Stmt], f: &mut dyn FnMut(&Expr)) {
             } => {
                 expr(callee, f);
                 expr(this, f);
+                args.iter().for_each(|a| expr(a, f));
+            }
+            Expr::New {
+                callee,
+                new_target,
+                args,
+                ..
+            } => {
+                expr(callee, f);
+                new_target.iter().for_each(|a| expr(a, f));
                 args.iter().for_each(|a| expr(a, f));
             }
         }
@@ -1034,7 +1055,14 @@ impl Emitter<'_> {
                     if matches!(op, Intrinsic::KeysLen | Intrinsic::KeysGet) && i == 0 {
                         s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_KEYS));
                     }
-                    if (op == &Intrinsic::CallList && i == 3)
+                    if (matches!(
+                        op,
+                        Intrinsic::CallList
+                            | Intrinsic::ConstructList
+                            | Intrinsic::PrivateSet
+                            | Intrinsic::PrivateAdd { .. }
+                    ) && i == 3)
+                        || (op == &Intrinsic::PrivateGet && i == 2)
                         || (op == &Intrinsic::CheckDestructure && i == 1)
                     {
                         s.ref_cast_non_null(runtime::string());
@@ -1134,6 +1162,17 @@ impl Emitter<'_> {
                         s.ref_test_non_null(array::array());
                         return Ok(true);
                     }
+                    Intrinsic::Hole => {
+                        s.ref_null(wasm_encoder::HeapType::Abstract {
+                            shared: false,
+                            ty: wasm_encoder::AbstractHeapType::Eq,
+                        });
+                        return Ok(true);
+                    }
+                    Intrinsic::IsHole => {
+                        s.ref_is_null();
+                        return Ok(true);
+                    }
                     _ => {}
                 }
                 let h = match op {
@@ -1189,6 +1228,37 @@ impl Emitter<'_> {
                     Intrinsic::GetPrototypeOf => H::Obj(object::Helper::GetPrototypeOf),
                     Intrinsic::HasOwn => H::Obj(object::Helper::HasOwn),
                     Intrinsic::InstanceOf(b) => H::Obj(object::Helper::InstanceOf(*b)),
+                    Intrinsic::ConstructList => H::Func(func::Helper::ConstructList),
+                    Intrinsic::CreateThis => H::Func(func::Helper::CreateThis),
+                    Intrinsic::ClassHeritage => H::Func(func::Helper::ClassHeritage),
+                    Intrinsic::ClassSetup => H::Func(func::Helper::ClassSetup),
+                    Intrinsic::InstanceOfValue => H::Func(func::Helper::InstanceOfValue),
+                    Intrinsic::CtorReturn { derived } => {
+                        H::Func(func::Helper::CtorReturn { derived: *derived })
+                    }
+                    Intrinsic::DefineMethod => H::Prop(props::Helper::DefineData(object::HIDDEN)),
+                    Intrinsic::DefineField => H::Prop(props::Helper::DefineData(0)),
+                    Intrinsic::DefineAccessor { setter, enumerable } => {
+                        s.i32_const(*setter as i32);
+                        s.i32_const(if *enumerable { 0 } else { object::HIDDEN });
+                        H::Prop(props::Helper::DefineAccessor)
+                    }
+                    Intrinsic::SuperGet => H::Prop(props::Helper::SuperGet),
+                    Intrinsic::SuperSet => H::Prop(props::Helper::SuperSet),
+                    Intrinsic::DefineProperty => H::Prop(props::Helper::DefineProperty),
+                    Intrinsic::GetOwnPropertyDescriptor => {
+                        H::Prop(props::Helper::GetOwnPropertyDescriptor)
+                    }
+                    Intrinsic::Integrity(op) => H::Prop(props::Helper::Integrity(*op)),
+                    Intrinsic::TestIntegrity(op) => H::Prop(props::Helper::TestIntegrity(*op)),
+                    Intrinsic::ErrorCtor(k) => H::Func(func::Helper::ErrorCtor(*k)),
+                    Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
+                    Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
+                    Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),
+                    Intrinsic::PrivateAdd { method } => {
+                        H::Prop(props::Helper::PrivateAdd { method: *method })
+                    }
+                    Intrinsic::Hole | Intrinsic::IsHole => unreachable!("inline"),
                 };
                 s.call(self.helper_index(Helper::Js(h)));
                 return Ok(op.signature().1.is_some());
@@ -1229,6 +1299,22 @@ impl Emitter<'_> {
                 let code = self.func_base + c.code.0;
                 runtime::Cx::declare_func(self, code);
                 s.ref_func(code);
+                let flags = match c.kind {
+                    ir::FnKind::Plain => {
+                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        0
+                    }
+                    ir::FnKind::Ordinary => {
+                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        func::NEW_ORDINARY
+                    }
+                    ir::FnKind::Class { construct } => {
+                        let construct = self.func_base + construct.0;
+                        runtime::Cx::declare_func(self, construct);
+                        s.ref_func(construct);
+                        func::NEW_CLASS
+                    }
+                };
                 if c.env.is_empty() {
                     s.ref_null(func::vals());
                 } else {
@@ -1239,7 +1325,7 @@ impl Emitter<'_> {
                 }
                 let name = runtime::Cx::str(self, &c.name);
                 s.global_get(name);
-                s.i32_const(c.length as i32).i32_const(c.constructor as i32);
+                s.i32_const(c.length as i32).i32_const(flags);
                 s.call(self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::New))));
                 if let Some(g) = shared {
                     s.global_set(g);
@@ -1280,6 +1366,28 @@ impl Emitter<'_> {
                 s.call(
                     self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::CallValue))),
                 );
+            }
+            Expr::New {
+                callee,
+                new_target,
+                args,
+                what,
+            } => {
+                self.expr(s, frames, callee)?;
+                for a in args {
+                    self.expr(s, frames, a)?;
+                }
+                s.array_new_fixed(runtime::T_VALS, args.len() as u32);
+                let h = match new_target {
+                    Some(nt) => {
+                        self.expr(s, frames, nt)?;
+                        func::Helper::Construct
+                    }
+                    None => func::Helper::ConstructSame,
+                };
+                let what = runtime::Cx::str(self, what);
+                s.global_get(what);
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Func(h))));
             }
         }
         Ok(true)

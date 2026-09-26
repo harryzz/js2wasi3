@@ -248,7 +248,12 @@ impl Printer<'_> {
                     self.func_name(c.code.0),
                     c.name,
                     c.length,
-                    if c.constructor { ", ctor" } else { "" },
+                    match c.kind {
+                        crate::FnKind::Plain => String::new(),
+                        crate::FnKind::Ordinary => ", ctor".to_string(),
+                        crate::FnKind::Class { construct } =>
+                            format!(", class {}", self.func_name(construct.0)),
+                    },
                     env.join(", ")
                 )
             }
@@ -269,6 +274,19 @@ impl Printer<'_> {
                     self.expr(func, this),
                     args.join(", ")
                 )
+            }
+            Expr::New {
+                callee,
+                new_target,
+                args,
+                ..
+            } => {
+                let args: Vec<String> = args.iter().map(|a| self.expr(func, a)).collect();
+                let nt = match new_target {
+                    Some(t) => format!("[new.target = {}]", self.expr(func, t)),
+                    None => String::new(),
+                };
+                format!("new {}{nt}({})", self.expr(func, callee), args.join(", "))
             }
             Expr::Suspend { kind, arg } => {
                 let k = match kind {

@@ -112,7 +112,7 @@ fn all_errors_are_reported() {
         e,
         vec![
             "2:11 unsupported: converting a string to a number (planned: T21)",
-            "3:3 unsupported: `new` (only the native error constructors so far) (planned: T16)",
+            "3:7 unsupported: global `Map` (planned: T21)",
             "4:10 unsupported: operator `**` (planned: T21 (Math.pow))",
         ]
     );
@@ -205,7 +205,7 @@ fn exceptions() {
 
     assert_eq!(
         one("export function f() { return new Map(); }"),
-        "1:30 unsupported: `new` (only the native error constructors so far) (planned: T16)"
+        "1:34 unsupported: global `Map` (planned: T21)"
     );
     lowers("export function f() { try { } catch ({ a }) { } }");
 }
@@ -219,16 +219,15 @@ fn objects() {
         "export function f(o) { let n = 0; for (const k in o) n++; return n; }",
         "export function f(o) { return o?.a?.[1] ?? Object.getPrototypeOf(Object.create(Error.prototype)); }",
         "export function f(e) { return e instanceof TypeError && Object.hasOwn(e, 'message'); }",
+        // T16: accessors, `instanceof` with any value.
+        "export function f() { return { get x() { return 1; }, set x(v) {} }; }",
+        "export function f(o, g) { return o instanceof g; }",
     ] {
         lowers(src);
     }
     assert_eq!(
-        one("export function f() { return { get x() { return 1; } }; }"),
-        "1:32 unsupported: getter or setter (planned: T16)"
-    );
-    assert_eq!(
         one("export function f(o) { return o instanceof Map; }"),
-        "1:44 unsupported: `instanceof` with something other than `Object` or a native constructor (planned: T16)"
+        "1:44 unsupported: global `Map` (planned: T21)"
     );
     assert_eq!(
         one("export function f(o) { return Object.create(o, {}); }"),
@@ -286,5 +285,53 @@ fn closures() {
     assert_eq!(
         one("export function f(k) { return { [k]: () => 1 }; }"),
         "1:33 unsupported: function with a computed key (its `name` comes from the key at run time) (planned: later)"
+    );
+}
+
+/// T16: classes lower; what's left for later is rejected.
+#[test]
+fn classes() {
+    for src in [
+        "class A { x = 1; constructor(a) { this.a = a; } m() { return this.x; } static s() {} get g() { return 1; } set g(v) {} }\nconsole.log(new A(1).m());",
+        "class A {}\nclass B extends A { constructor() { super(); } m() { return super.toString(); } }\nnew B();",
+        "const C = class D { static n = D.name; constructor() { this.t = new.target; } };\nconsole.log(C.n);",
+        "export function f(x) { class P { v = x; } return new P().v; }",
+        "export function f(o) { return Object.isFrozen(Object.freeze(Object.defineProperty(o, 'k', { value: 1 }))); }",
+        "export function f(F) { return new F(1, ...[2]); }",
+        "class P { #x = 1; static #n = 0; #m() { return this.#x; } static has(o) { return #x in o; } static get(o) { return o.#m() + P.#n++; } }\nconsole.log(P.get(new P()));",
+    ] {
+        lowers(src);
+    }
+    for (src, err) in [
+        (
+            "class A { get #x() { return 1; } }",
+            "1:11 unsupported: private getter or setter (planned: later)",
+        ),
+        (
+            "class A { static { } }",
+            "1:11 unsupported: class `static` block (planned: later)",
+        ),
+        (
+            "const k = 'a';\nclass A { [k] = 1; }",
+            "2:11 unsupported: computed instance field key (planned: later)",
+        ),
+        (
+            "function f() { return new.target; }",
+            "1:23 unsupported: `new.target` outside a class constructor (planned: later)",
+        ),
+        (
+            "class A {}\nclass B extends A { constructor() { const f = () => super(); f(); } }",
+            "2:53 unsupported: `super()` in an arrow function (planned: later)",
+        ),
+        (
+            "export class A {}",
+            "1:1 unsupported: exported declaration other than a function (planned: T20)",
+        ),
+    ] {
+        assert_eq!(one(src), err, "{src}");
+    }
+    assert!(
+        one("class A {}\nexport function f() { return 1; }")
+            .starts_with("1:1 unsupported: top-level ClassDeclaration in a module with exports")
     );
 }

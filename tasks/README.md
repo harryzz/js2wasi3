@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T16.** Start with the *Handoff* section in [T16-classes.md](T16-classes.md). T15 is done: arrays, symbols, the iterator protocol, `for-of`, spread, destructuring and `console.log` of arrays/plain objects (see T15's Notes / Result). T14: functions are values (closures, arrows, methods, `this`, `call`/`apply`). T13: plain objects with prototypes. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T17** (promises + microtasks). T16 is done: classes (fields, statics, private `#x` fields/methods, `extends` incl. native errors, `super`, `new.target`), `new`/`instanceof` with any function, accessors and property attributes (`defineProperty`, freeze/seal), user `valueOf`/`toString` (see T16's Notes / Result). T15: arrays, symbols, the iterator protocol, `for-of`, spread, destructuring and `console.log` of arrays/plain objects (see T15's Notes / Result). T14: functions are values (closures, arrows, methods, `this`, `call`/`apply`). T13: plain objects with prototypes. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -26,7 +26,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T13](T13-objects.md) | Objects and prototypes | done | T12 |
 | [T14](T14-closures.md) | Closures, function values, `this` | done | T13 |
 | [T15](T15-arrays-iteration.md) | Arrays and iteration | done | T14 |
-| [T16](T16-classes.md) | Classes | todo | T15 |
+| [T16](T16-classes.md) | Classes | done | T15 |
 | [T17](T17-promises-microtasks.md) | Promises + microtask queue | todo | T16 |
 | [T18](T18-generators-state-machine.md) | Suspension transform: generators | todo | T17 |
 | [T19](T19-async-await-event-loop.md) | async/await + P3 event loop + timers | todo | T18 |
@@ -78,24 +78,31 @@ Each open item names where it came from and which task should pick it up. When i
 | F33 | Deep recursion is a Wasm trap (uncatchable); node throws a catchable `RangeError: Maximum call stack size exceeded` | T12 | not scheduled | [ ] |
 | F34 | `ir::may_throw` is conservative (e.g. `.length` of a value not known to be a string), so some exports get `result<T, js-error>` needlessly | T12 | T20 (user WIT decides) | [ ] |
 | F35 | When the event-loop callback runs JS (T19), it must catch `$js` like `run` does (print `Uncaught …`, return `err`) | T12 | T19 | [ ] |
-| F36 | Getters/setters, `Object.defineProperty`, property attributes beyond enumerable (read-only, non-configurable), `Object.freeze`/`seal` | T13 | T16 (with class `get`/`set`; needs T14) | [ ] |
-| F37 | Built-in methods (`Object.prototype.toString`, `String.prototype.slice`, …) are sentinels that trap when read; a user-replaced `toString`/`valueOf` traps in ToPrimitive. T14: values are callable now (`Function.prototype.call` is real); ToPrimitive still returns a string only, so calling a user `valueOf` needs it to return any primitive | T13 | T16 (user methods) / T21 (the methods) | [ ] |
+| F36 | Getters/setters, `Object.defineProperty`, property attributes beyond enumerable (read-only, non-configurable), `Object.freeze`/`seal` | T13 | T16 (with class `get`/`set`; needs T14) | [x] T16 (`props.rs`; array element attributes: F61) |
+| F37 | Built-in methods (`Object.prototype.toString`, `String.prototype.slice`, …) are sentinels that trap when read; a user-replaced `toString`/`valueOf` traps in ToPrimitive. T14: values are callable now (`Function.prototype.call` is real); ToPrimitive still returns a string only, so calling a user `valueOf` needs it to return any primitive | T13 | T16 (user methods) / T21 (the methods) | [ ] T16: user `valueOf`/`toString` called by ToPrimitive (hint aware); built-ins still sentinels |
 | F38 | Symbols as property keys (`Symbol.iterator` is needed by T15) | T13 | T15 | [x] T15 (`$symbol` ⊂ `$string`; `Symbol()`, `Symbol.iterator`; rest in F53) |
 | F39 | `Object.keys`/`values`/`entries`/`assign`/`fromEntries`, `JSON.stringify`. T15: `keys`/`values`/`entries` done | T13 | T21 | [ ] |
 | F40 | Hidden classes / inline caches for property access (dictionary mode only today) | T13 | after a benchmark | [ ] |
 | F41 | Method calls `o.m()` and optional calls `o?.m()` | T13 | T14 | [x] T14 (`CallRef`, `chain_call`) |
 | F42 | `arguments` (an array-like object) | T14 | T21 (moved in T15: rest parameters cover it) | [ ] |
 | F43 | `Function.prototype.apply` (needs arrays), `bind`, `toString` (source text): sentinels that trap when read. T15: `apply` done | T14 | T21 | [ ] |
-| F44 | `new` of user functions, `instanceof` with a user function (the `prototype` objects already exist) | T14 | T16 | [ ] |
+| F44 | `new` of user functions, `instanceof` with a user function (the `prototype` objects already exist) | T14 | T16 | [x] T16 (`Expr::New`, `InstanceOfValue`) |
 | F45 | Rejected for now: assigning to a function declaration's binding (calls to it are direct), a function with a computed key in a literal (its `name` comes from the key at run time), a closure in a `for (let …)` head reading a head variable before its declaration | T14 | later | [ ] |
 | F46 | Function objects get `length`/`name` (and `prototype` for `function`s) when made: 1–2 extra allocations per closure; could be lazy. Cell and environment reads `ref.cast` every time; a self-recursive nested function reads its own binding's cell for `self` | T14 | after a benchmark | [ ] |
-| F47 | `Function.prototype` is a plain object (spec: a function, so `typeof` is `"function"`); functions' `name`/`length` are writable (read-only attributes, F36) | T14 | T21 | [ ] |
-| F48 | `console.log` of a function with own enumerable properties traps (node prints them after `[Function: f]`, F24) | T14 | T21 | [ ] |
+| F47 | `Function.prototype` is a plain object (spec: a function, so `typeof` is `"function"`); functions' `name`/`length` are writable (read-only attributes, F36) | T14 | T21 | [ ] T16: `name`/`length` read-only; `Function.prototype` still a plain object |
+| F48 | `console.log` of a function with own enumerable properties traps (node prints them after `[Function: f]`, F24) | T14 | T21 | [x] T16 (functions and classes print their own properties) |
 | F49 | Array methods other than `push`/`pop`/`join`/`toString`/`values`/`[Symbol.iterator]` (`map`, `forEach`, `slice`, `indexOf`, …) are sentinels; `Array(...)`, `Array.from`, `Array.of`; the real methods only accept arrays as `this` | T15 | T21 | [ ] |
 | F50 | Sparse arrays: an index or length ≥ 2^26 traps (dense store only) | T15 | after a benchmark / when needed | [ ] |
 | F51 | Arrays and strings iterate without looking up `Symbol.iterator` (a replaced `Array.prototype[Symbol.iterator]` isn't seen); `values` and `[Symbol.iterator]` are two function objects (spec: the same) | T15 | T21 | [ ] |
-| F52 | Array `length` is read-only-unaware: `Object.defineProperty`/frozen arrays (F36); array iterator objects print as a trap | T15 | T16/T21 | [ ] |
+| F52 | Array `length` is read-only-unaware: `Object.defineProperty`/frozen arrays (F36); array iterator objects print as a trap | T15 | T16/T21 | [ ] T16: frozen/sealed arrays respected; array iterator objects don't print like node |
 | F53 | Symbols: `Symbol.for`, other well-known symbols, `description` of `Symbol()` vs `Symbol("")` (both empty), `Object.getOwnPropertySymbols`; object spread / `{...rest}` skip symbol keys; `sym == 1` throws (node: false) | T15 | T21 | [ ] |
 | F54 | Destructuring assignment evaluates a member target after the value (spec: the reference first); a hole after a spread element in an array literal is rejected | T15 | later | [ ] |
 | F55 | Exported functions with a rest parameter are rejected (the WIT signature needs a `list`) | T15 | T20 | [ ] |
 | F56 | `for-of` and array destructuring always wrap the loop/bindings in a `try_table` (needed only for the protocol path; zero-cost EH, but bigger code) | T15 | optimisation pass | [ ] |
+| F57 | `new.target` outside class constructors (ordinary functions, arrows), `super()` in an arrow function, `this`/`super` in an arrow inside a static field initializer: rejected. An arrow capturing a derived constructor's `this` before `super()` keeps the uninitialized value | T16 | later | [ ] |
+| F58 | Classes: private getters/setters, `static { }` blocks, `accessor` fields, computed instance field keys, `o?.#x`: rejected. Private methods are own read-only hidden entries installed per instance (brand check by presence) | T16 | later | [ ] |
+| F59 | Methods, accessors and fields whose key is computed and whose value is a function (its `name` comes from the key at run time, SetFunctionName) are rejected (except `[Symbol.iterator]`) | T16 | T21 | [ ] |
+| F60 | `ir::may_throw` is unsound now that ToPrimitive calls user `valueOf`/`toString`: `+`, ToString, ToNumber and `==` on objects may throw but don't count, so such a library export lacks `result<T, js-error>` | T16 | T20 | [ ] |
+| F61 | `Object.defineProperty` with non-default attributes on array indices or `length` traps (dense store has no attributes; only sealed/frozen arrays) | T16 | when needed | [ ] |
+| F62 | `console.log`: circular references (`<ref *1>` / `[Circular *1]`) aren't detected (depth-limited instead); a function/class with own properties uses a width 1 larger than node's in the single-line check; class-instance errors print as `[name: message]` (no stack, F31) | T16 | T21 | [ ] |
+| F63 | A class (like a `let`) used before its declaration in the same function is rejected at compile time; node throws a ReferenceError at run time | T16 | later | [ ] |

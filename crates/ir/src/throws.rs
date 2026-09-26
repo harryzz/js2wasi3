@@ -60,6 +60,6 @@ fn expr(e: &Expr, throws: &[bool]) -> bool {
         Expr::Closure(c) => c.env.iter().any(|a| expr(a, throws)),
         Expr::Array(elems) => elems.iter().flatten().any(|a| expr(a, throws)),
         // Unknown callee (T14).
-        Expr::CallRef { .. } => true,
+        Expr::CallRef { .. } | Expr::New { .. } => true,
     }
 }

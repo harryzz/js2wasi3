@@ -41,6 +41,12 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   symbols are `$symbol`, a subtype of `$string` compared by identity, so property keys stay string arrays.
   Iteration uses an internal `$iter` state with fast paths for arrays and strings and the protocol otherwise.
   See `crates/backend/src/{array,iter,inspect}.rs` and `crates/lower/src/patterns.rs`.)
+  (T16: `$function` has a `construct` entry `(self, new_target, args)` (null: not a constructor) and a kind;
+  a class's code throws, its construct entry runs the constructor, which is keyed by the class scope in the closure
+  analysis (constructor body + instance field initializers). Accessors are an attribute bit whose value slot holds
+  an `$accessor { get, set }`; attributes: hidden, read-only, fixed, accessor, private; object flags for
+  non-extensible / sealed / frozen. Private names are a fresh `$symbol` per class evaluation, captured like
+  values. See `crates/backend/src/props.rs`, `crates/lower/src/classes.rs`.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
