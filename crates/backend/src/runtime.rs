@@ -28,7 +28,7 @@ use wasm_encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, array, func, host, inspect, iter, numstr, object, props};
+use crate::{abi, array, func, host, inspect, iter, numstr, object, promise, props};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
@@ -62,8 +62,15 @@ pub const T_ITER: u32 = 15;
 /// `$accessor { get: mut eqref, set: mut eqref }`: the value slot of an accessor property (T16,
 /// see [`crate::object`]). Never a JS value. Absent functions are `undefined`.
 pub const T_ACCESSOR: u32 = 16;
+/// `$promise`: a final subtype of `$object` with `state: mut i32`, `result: mut eqref`,
+/// `reactions: mut (ref null $vals)`, `count: mut i32` and `handled: mut i32` (T17, see
+/// [`crate::promise`]).
+pub const T_PROMISE: u32 = 17;
+/// `$reaction { derived: (ref null $promise), on_fulfilled: eqref, on_rejected: eqref }`: a
+/// PromiseReaction pair (T17). Never a JS value.
+pub const T_REACTION: u32 = 18;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 17;
+pub const TYPES: u32 = 19;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -85,8 +92,20 @@ pub const G_SYM_STATE: u32 = G_SYM_ITERATOR + 1;
 /// `(mut (ref null $object))` per [`js2wasi3_ir::ErrorKind`]: the native error constructor as a
 /// function object (T16), created on first use.
 pub const G_ERROR_CTORS: u32 = G_SYM_STATE + 1;
+/// `(mut (ref null $object))`: the `Promise` constructor (T17), created on first use.
+pub const G_PROMISE_CTOR: u32 = G_ERROR_CTORS + js2wasi3_ir::ErrorKind::ALL.len() as u32;
+/// `(mut (ref null $object))`: the `queueMicrotask` function (T17), created on first use.
+pub const G_QUEUE_MICROTASK: u32 = G_PROMISE_CTOR + 1;
+/// `(mut (ref null $vals))`: the job queue, 4 slots per job (see [`crate::promise`]).
+pub const G_JOBS: u32 = G_QUEUE_MICROTASK + 1;
+/// `(mut i32)`: the first slot of the next job, and one past the last job's slots.
+pub const G_JOB_HEAD: u32 = G_JOBS + 1;
+pub const G_JOB_TAIL: u32 = G_JOB_HEAD + 1;
+/// `(mut (ref null $vals))` and `(mut i32)`: promises rejected while unhandled, and their count.
+pub const G_REJECTED: u32 = G_JOB_TAIL + 1;
+pub const G_REJECTED_N: u32 = G_REJECTED + 1;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_ERROR_CTORS + js2wasi3_ir::ErrorKind::ALL.len() as u32;
+pub const GLOBALS: u32 = G_REJECTED_N + 1;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -217,6 +236,12 @@ pub fn types(types: &mut TypeSection) {
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
     function_fields.push(field(StorageType::Val(rt(true, T_CODE)), false));
     function_fields.push(field(StorageType::Val(ValType::I32), false));
+    let mut promise_fields = object_fields.clone();
+    promise_fields.push(field(StorageType::Val(ValType::I32), true));
+    promise_fields.push(field(StorageType::Val(jsval()), true));
+    promise_fields.push(field(StorageType::Val(rt(true, T_VALS)), true));
+    promise_fields.push(field(StorageType::Val(ValType::I32), true));
+    promise_fields.push(field(StorageType::Val(ValType::I32), true));
     types.ty().rec([
         st(ValType::F64),
         st(ValType::I32),
@@ -300,6 +325,20 @@ pub fn types(types: &mut TypeSection) {
                 field(StorageType::Val(jsval()), true),
             ]),
         })),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: promise_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(rt(true, T_PROMISE)), false),
+                field(StorageType::Val(jsval()), false),
+                field(StorageType::Val(jsval()), false),
+            ]),
+        })),
     ]);
 }
 
@@ -374,7 +413,7 @@ pub fn globals(globals: &mut GlobalSection) {
             &ConstExpr::extended(insns),
         );
     }
-    for _ in js2wasi3_ir::ErrorKind::ALL {
+    for _ in 0..js2wasi3_ir::ErrorKind::ALL.len() + 2 {
         globals.global(
             GlobalType {
                 val_type: rt(true, T_OBJECT),
@@ -384,6 +423,23 @@ pub fn globals(globals: &mut GlobalSection) {
             &ConstExpr::ref_null(object()),
         );
     }
+    // The job queue (head, tail) and the rejected promises (count).
+    let vals = GlobalType {
+        val_type: rt(true, T_VALS),
+        mutable: true,
+        shared: false,
+    };
+    let int = GlobalType {
+        val_type: ValType::I32,
+        mutable: true,
+        shared: false,
+    };
+    let null_vals = ConstExpr::ref_null(HeapType::Concrete(T_VALS));
+    globals.global(vals, &null_vals);
+    globals.global(int, &ConstExpr::i32_const(0));
+    globals.global(int, &ConstExpr::i32_const(0));
+    globals.global(vals, &null_vals);
+    globals.global(int, &ConstExpr::i32_const(0));
 }
 
 /// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
@@ -470,6 +526,7 @@ pub enum Helper {
     Arr(array::Helper),
     Iter(iter::Helper),
     Prop(props::Helper),
+    Prom(promise::Helper),
     Fmt(inspect::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
@@ -504,6 +561,7 @@ impl Helper {
             Helper::Arr(h) => h.name(),
             Helper::Iter(h) => h.name(),
             Helper::Prop(h) => h.name(),
+            Helper::Prom(h) => h.name(),
             Helper::Fmt(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
@@ -535,6 +593,7 @@ impl Helper {
             Helper::Arr(h) => h.signature(),
             Helper::Iter(h) => h.signature(),
             Helper::Prop(h) => h.signature(),
+            Helper::Prom(h) => h.signature(),
             Helper::Fmt(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
@@ -569,6 +628,7 @@ impl Helper {
             Helper::Arr(h) => h.body(cx),
             Helper::Iter(h) => h.body(cx),
             Helper::Prop(h) => h.body(cx),
+            Helper::Prom(h) => h.body(cx),
             Helper::Fmt(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());

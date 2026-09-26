@@ -20,7 +20,7 @@ use crate::array::{self, F_ELEMS, F_LENGTH};
 use crate::runtime::{
     self, Cx, T_ARRAY, T_KEYS, T_NUMBER, T_STRING, T_VALS, jsval, rt, string, string_ref,
 };
-use crate::{func, object, props};
+use crate::{func, object, promise, props};
 
 const BREAK_LENGTH: i32 = 80;
 
@@ -435,6 +435,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         cx.str("[Getter/Setter]"),
     );
     let str_eq = cx.helper(runtime::Helper::StrEq);
+    let (pending, rejected) = (cx.str("<pending>"), cx.str("<rejected> "));
     const O: u32 = 0;
     const DEPTH: u32 = 1;
     const INDENT: u32 = 2;
@@ -447,6 +448,9 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     const Q: u32 = 9;
     const R: u32 = 10;
     const PLAIN: u32 = 11;
+    // 1 for a promise: its state comes first (`Promise { <pending> }`, T17).
+    const EXTRA: u32 = 12;
+    const Q_STATE: u32 = 13;
     let mut f = Function::new([
         (1, rt(true, T_KEYS)),
         (2, ValType::I32),
@@ -454,7 +458,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_STRING)),
         (1, rt(true, runtime::T_OBJECT)),
         (1, jsval()),
-        (1, ValType::I32),
+        (3, ValType::I32),
     ]);
     let mut s = f.instructions();
     // Symbol keys aren't shown yet (F24).
@@ -506,11 +510,16 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         s.end();
     }
     s.end();
+    s.local_get(O)
+        .ref_test_non_null(promise::promise())
+        .local_set(EXTRA);
     // Too deep (node: only when there is something to show).
     s.local_get(DEPTH).i32_const(2).i32_gt_s();
     s.local_get(O)
         .call(own_keys)
         .array_len()
+        .local_get(EXTRA)
+        .i32_or()
         .i32_const(0)
         .i32_ne();
     s.i32_and();
@@ -539,10 +548,43 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         .local_tee(KS)
         .array_len()
         .local_tee(N);
+    s.local_get(EXTRA).i32_add();
     s.array_new_default(T_KEYS).local_set(OUT);
+    s.local_get(EXTRA);
+    s.if_(BlockType::Empty);
+    {
+        // `<pending>`, the value, or `<rejected> ` and the reason.
+        s.local_get(OUT).i32_const(0);
+        s.local_get(O)
+            .ref_cast_non_null(promise::promise())
+            .struct_get(runtime::T_PROMISE, promise::P_STATE)
+            .local_tee(Q_STATE);
+        s.i32_const(promise::PENDING).i32_eq();
+        s.if_(BlockType::Result(string_ref()));
+        s.global_get(pending);
+        s.else_();
+        s.local_get(O)
+            .ref_cast_non_null(promise::promise())
+            .struct_get(runtime::T_PROMISE, promise::P_RESULT);
+        s.local_get(DEPTH).i32_const(1).i32_add();
+        s.local_get(INDENT).i32_const(2).i32_add();
+        s.i32_const(1).call(format).local_set(NAME);
+        s.local_get(Q_STATE).i32_const(promise::REJECTED).i32_eq();
+        s.if_(BlockType::Result(string_ref()));
+        s.global_get(rejected)
+            .local_get(NAME)
+            .ref_as_non_null()
+            .call(concat);
+        s.else_();
+        s.local_get(NAME).ref_as_non_null();
+        s.end();
+        s.end();
+        s.array_set(T_KEYS);
+    }
+    s.end();
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).local_get(N).i32_ge_u().br_if(1);
-    s.local_get(OUT).local_get(I);
+    s.local_get(OUT).local_get(I).local_get(EXTRA).i32_add();
     s.local_get(KS)
         .local_get(I)
         .array_get(T_KEYS)
@@ -595,6 +637,8 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.local_get(OUT)
         .ref_as_non_null()
         .local_get(N)
+        .local_get(EXTRA)
+        .i32_add()
         .local_get(INDENT);
     s.local_get(PREFIX).ref_is_null();
     s.if_(BlockType::Result(string_ref()));

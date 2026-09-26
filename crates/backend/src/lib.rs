@@ -43,6 +43,7 @@ mod inspect;
 mod iter;
 mod numstr;
 mod object;
+mod promise;
 mod props;
 mod runtime;
 
@@ -1252,6 +1253,8 @@ impl Emitter<'_> {
                     Intrinsic::Integrity(op) => H::Prop(props::Helper::Integrity(*op)),
                     Intrinsic::TestIntegrity(op) => H::Prop(props::Helper::TestIntegrity(*op)),
                     Intrinsic::ErrorCtor(k) => H::Func(func::Helper::ErrorCtor(*k)),
+                    Intrinsic::PromiseCtor => H::Prom(promise::Helper::Ctor),
+                    Intrinsic::QueueMicrotask => H::Prom(promise::Helper::QueueMicrotask),
                     Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
                     Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
                     Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),

@@ -2625,6 +2625,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         Kind::Any,
                     ));
                 }
+                if let Some(op) = self.global_function(id) {
+                    return Ok(Val::js(Expr::intrinsic(op, vec![]), Kind::Any));
+                }
                 let var = self.resolve(cx, id)?;
                 Ok(self.read_var(&var))
             }
@@ -3512,6 +3515,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let sp = p.span;
                 self.p.source[sp.start as usize..sp.end as usize].to_string()
             }
+        }
+    }
+
+    /// A built-in global function that is a value (T17): `Promise`, `queueMicrotask`.
+    fn global_function(&self, id: &IdentifierReference<'a>) -> Option<Intrinsic> {
+        if self
+            .scoping
+            .get_reference(id.reference_id())
+            .symbol_id()
+            .is_some()
+        {
+            return None;
+        }
+        match id.name.as_str() {
+            "Promise" => Some(Intrinsic::PromiseCtor),
+            "queueMicrotask" => Some(Intrinsic::QueueMicrotask),
+            _ => None,
         }
     }
 

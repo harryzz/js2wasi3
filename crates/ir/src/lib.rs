@@ -213,11 +213,13 @@ pub enum Builtin {
     Symbol,
     /// `%ArrayIteratorPrototype%` (not a global name).
     ArrayIterator,
+    /// T17.
+    Promise,
 }
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 15] = [
+    pub const ALL: [Builtin; 16] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -233,6 +235,7 @@ impl Builtin {
         Builtin::Array,
         Builtin::Symbol,
         Builtin::ArrayIterator,
+        Builtin::Promise,
     ];
 
     pub fn name(self) -> &'static str {
@@ -246,6 +249,7 @@ impl Builtin {
             Builtin::Array => "Array",
             Builtin::Symbol => "Symbol",
             Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
+            Builtin::Promise => "Promise",
         }
     }
 
@@ -410,6 +414,10 @@ pub enum Intrinsic {
     TestIntegrity(u8),
     /// A native error constructor as a value (`class E extends Error`).
     ErrorCtor(ErrorKind),
+    /// The `Promise` constructor as a value (T17).
+    PromiseCtor,
+    /// The `queueMicrotask` function as a value (T17).
+    QueueMicrotask,
     /// `o.#x`: args: object, private symbol, the TypeError message if `o` doesn't have it.
     PrivateGet,
     /// `o.#x = v` (no result): args: object, private symbol, value, the TypeError message if `o`
@@ -482,7 +490,10 @@ impl Intrinsic {
             Intrinsic::DefineMethod | Intrinsic::DefineField | Intrinsic::DefineAccessor { .. } => {
                 (&[JsVal, JsVal, JsVal], None)
             }
-            Intrinsic::Hole | Intrinsic::ErrorCtor(_) => (&[], Some(JsVal)),
+            Intrinsic::Hole
+            | Intrinsic::ErrorCtor(_)
+            | Intrinsic::PromiseCtor
+            | Intrinsic::QueueMicrotask => (&[], Some(JsVal)),
             Intrinsic::PrivateGet => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::PrivateSet | Intrinsic::PrivateAdd { .. } | Intrinsic::SuperSet => {
                 (&[JsVal, JsVal, JsVal, JsVal], None)
@@ -572,6 +583,8 @@ impl Intrinsic {
             Intrinsic::TestIntegrity(1) => "is_sealed",
             Intrinsic::TestIntegrity(_) => "is_frozen",
             Intrinsic::ErrorCtor(_) => "error_constructor",
+            Intrinsic::PromiseCtor => "promise_constructor",
+            Intrinsic::QueueMicrotask => "queue_microtask",
             Intrinsic::PrivateGet => "private_get",
             Intrinsic::PrivateSet => "private_set",
             Intrinsic::PrivateHas => "private_has",

@@ -193,7 +193,7 @@ fn methods(b: Builtin) -> &'static [&'static str] {
             "with",
         ],
         Builtin::Symbol => &["toString", "valueOf", "description"],
-        Builtin::ArrayIterator => &[],
+        Builtin::ArrayIterator | Builtin::Promise => &[],
     }
 }
 
@@ -317,6 +317,7 @@ impl Helper {
                 Builtin::Array => "Array.prototype",
                 Builtin::Symbol => "Symbol.prototype",
                 Builtin::ArrayIterator => "%ArrayIteratorPrototype%",
+                Builtin::Promise => "Promise.prototype",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -1088,6 +1089,14 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
                 0,
             ),
         ],
+        Builtin::Promise => [
+            (crate::promise::Helper::Then, "then", 2),
+            (crate::promise::Helper::Catch, "catch", 1),
+            (crate::promise::Helper::Finally, "finally", 1),
+        ]
+        .into_iter()
+        .map(|(h, name, len)| (runtime::Helper::Prom(h), Some(name), name, len))
+        .collect(),
         _ => Vec::new(),
     };
     let real: Vec<(u32, u32, u32, i32)> = real
@@ -1142,6 +1151,10 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     if let Builtin::Error(k) = b {
         // `constructor`: the function object (T16).
         let ctor = cx.helper(runtime::Helper::Func(func::Helper::ErrorCtor(k)));
+        s.call(ctor).drop();
+    }
+    if b == Builtin::Promise {
+        let ctor = cx.helper(runtime::Helper::Prom(crate::promise::Helper::Ctor));
         s.call(ctor).drop();
     }
     s.local_get(O).ref_as_non_null();

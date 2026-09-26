@@ -11,6 +11,8 @@
 //! - **Uncaught exceptions** (T12): `run` catches the JS exception tag around `main`, appends
 //!   `Uncaught <text>` to stderr ([`Helper::Uncaught`]) and makes `run` return `err` (exit status 1,
 //!   like node). Output written before the exception is kept.
+//! - **Jobs** (T17): after `main`, `run` drains the promise job queue (in the same `try_table`), then
+//!   reports the first rejection still unhandled ([`Helper::Report`], see [`crate::promise`]).
 //! - **Event loop** (design D3, callback lift): `run` creates the waitable set, runs `main`, then
 //!   [`Helper::Flush`]. Flush advances each open stream: write the unwritten bytes (a write may
 //!   complete partially, or block: then it waits on the set), then drop the writable end and read
@@ -23,8 +25,8 @@
 
 use wasm_encoder::{BlockType, Catch, EntityType, Function, ImportSection, MemArg, ValType};
 
-use crate::abi;
 use crate::runtime::{self, Cx};
+use crate::{abi, promise};
 
 /// Streams: stdout and stderr.
 pub const STREAMS: u32 = 2;
@@ -194,6 +196,8 @@ pub enum Helper {
     Flush,
     /// `(v: jsval)`: report an uncaught exception: `Uncaught <describe(v)>` to stderr, `run` fails.
     Uncaught,
+    /// `(text: (ref $string))`: `Uncaught <text>` to stderr, `run` fails.
+    Report,
     /// `() -> i32`: the `run` export (async lift with callback).
     Run,
     /// `(event, index, payload: i32) -> i32`: its callback.
@@ -215,6 +219,7 @@ impl Helper {
             Helper::Step(_) => "step_stderr",
             Helper::Flush => "flush",
             Helper::Uncaught => "uncaught",
+            Helper::Report => "report_uncaught",
             Helper::Run => "run",
             Helper::Callback => "run_callback",
         }
@@ -226,6 +231,7 @@ impl Helper {
             Helper::Append(_) => (vec![runtime::string_ref()], vec![]),
             Helper::Advance(_) | Helper::Closed(_) => (vec![I32], vec![]),
             Helper::Uncaught => (vec![runtime::jsval()], vec![]),
+            Helper::Report => (vec![runtime::string_ref()], vec![]),
             Helper::Pump(_) | Helper::Step(_) | Helper::Flush | Helper::Run => (vec![], vec![I32]),
             Helper::Callback => (vec![I32; 3], vec![I32]),
         }
@@ -324,13 +330,21 @@ impl Helper {
             }
             Helper::Uncaught => {
                 let describe = cx.helper(runtime::Helper::Describe);
+                let report = cx.helper(runtime::Helper::Host(Helper::Report));
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(0).call(describe).call(report);
+                s.end();
+                f
+            }
+            Helper::Report => {
                 let concat = cx.helper(runtime::Helper::Concat);
                 let append = cx.helper(runtime::Helper::Host(Helper::Append(1)));
                 let (prefix, newline) = (cx.str("Uncaught "), cx.str("\n"));
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
                 s.global_get(prefix);
-                s.local_get(0).call(describe).call(concat);
+                s.local_get(0).call(concat);
                 s.global_get(newline).call(concat);
                 s.call(append);
                 s.i32_const(1).global_set(err);
@@ -340,7 +354,12 @@ impl Helper {
             Helper::Run => {
                 let flush = cx.helper(runtime::Helper::Host(Helper::Flush));
                 let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
-                let mut f = Function::new([]);
+                let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
+                let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
+                let text = cx.helper(runtime::Helper::Prom(promise::Helper::UnhandledText));
+                let report = cx.helper(runtime::Helper::Host(Helper::Report));
+                const R: u32 = 0;
+                let mut f = Function::new([(1, runtime::jsval())]);
                 let mut s = f.instructions();
                 s.call(import(Import::WaitableSetNew)).global_set(ws);
                 s.block(BlockType::Result(runtime::jsval()));
@@ -352,9 +371,14 @@ impl Helper {
                     }],
                 );
                 s.call(main);
-                s.call(flush).return_();
+                s.call(drain);
                 s.end();
-                s.unreachable();
+                // Microtasks drained: an unhandled rejection ends the program (like node).
+                s.call(unhandled).local_tee(R).ref_is_null().i32_eqz();
+                s.if_(BlockType::Empty);
+                s.local_get(R).call(text).call(report);
+                s.end();
+                s.call(flush).return_();
                 s.end();
                 s.call(uncaught);
                 s.call(flush);

@@ -30,7 +30,7 @@ const F_KIND: u32 = 0;
 const F_OBJ: u32 = 1;
 const F_NEXT: u32 = 2;
 const F_INDEX: u32 = 3;
-const F_VALUE: u32 = 4;
+pub const F_VALUE: u32 = 4;
 
 pub fn iter() -> wasm_encoder::HeapType {
     wasm_encoder::HeapType::Concrete(T_ITER)

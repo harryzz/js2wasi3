@@ -7,7 +7,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 - **Follow-ups**: everything found during a task but deliberately left for later, with the task that should pick it up.
 - Details of a finished task (what changed, commands run, results) are in its own file under "Notes / Result".
 
-**Next up: T17** (promises + microtasks). T16 is done: classes (fields, statics, private `#x` fields/methods, `extends` incl. native errors, `super`, `new.target`), `new`/`instanceof` with any function, accessors and property attributes (`defineProperty`, freeze/seal), user `valueOf`/`toString` (see T16's Notes / Result). T15: arrays, symbols, the iterator protocol, `for-of`, spread, destructuring and `console.log` of arrays/plain objects (see T15's Notes / Result). T14: functions are values (closures, arrows, methods, `this`, `call`/`apply`). T13: plain objects with prototypes. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
+**Next up: T18** (suspension transform: generators). T17 is done: `Promise` (constructor, `then`/`catch`/`finally`, `resolve`/`reject`/`all`/`allSettled`/`race`), `queueMicrotask`, one job queue drained by the command after top-level code, unhandled rejections reported like node, `console.log` of promises (see T17's Notes / Result). T16: classes (fields, statics, private `#x` fields/methods, `extends` incl. native errors, `super`, `new.target`), `new`/`instanceof` with any function, accessors and property attributes (`defineProperty`, freeze/seal), user `valueOf`/`toString` (see T16's Notes / Result). T15: arrays, symbols, the iterator protocol, `for-of`, spread, destructuring and `console.log` of arrays/plain objects (see T15's Notes / Result). T14: functions are values (closures, arrows, methods, `this`, `call`/`apply`). T13: plain objects with prototypes. T12: exceptions on native Wasm EH. The second milestone is reached: `hello.js` runs as a WASI 0.3 command, and `scripts/diff.sh` compares every command fixture with node (see T11's Notes / Result). WIT naming rules: [../docs/wit-names.md](../docs/wit-names.md).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
@@ -27,7 +27,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T14](T14-closures.md) | Closures, function values, `this` | done | T13 |
 | [T15](T15-arrays-iteration.md) | Arrays and iteration | done | T14 |
 | [T16](T16-classes.md) | Classes | done | T15 |
-| [T17](T17-promises-microtasks.md) | Promises + microtask queue | todo | T16 |
+| [T17](T17-promises-microtasks.md) | Promises + microtask queue | done | T16 |
 | [T18](T18-generators-state-machine.md) | Suspension transform: generators | todo | T17 |
 | [T19](T19-async-await-event-loop.md) | async/await + P3 event loop + timers | todo | T18 |
 | [T20](T20-wit-async-user-worlds.md) | WIT async + user worlds | todo | T19 |
@@ -66,7 +66,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F21 | Canonical ABI: more than 16 flat params (passed in memory) are rejected today | T09 | T20 | [ ] |
 | F22 | TDZ: a function reading a top-level `let`/`const` before `main` initialized it gets a placeholder value (only direct reads in `main` are rejected) | T10 | T12 (throw ReferenceError) | [x] T12 (init flags; `main` throws too) |
 | F23 | `console.log` format strings (`%s %d %i %f %j %o %O %c %%`, first of ≥2 args): rejected for literals, a trap otherwise | T10 | T21 | [ ] |
-| F24 | `console.log` of objects, arrays, functions (node's `util.inspect` format). T15: arrays and plain objects print like node (`crates/backend/src/inspect.rs`); still trapping: class instances, null prototypes, > 100 elements, extra array properties, symbol keys, strings needing escapes, nested errors; non-ASCII widths are counted as UTF-16 units | T10 | T21 | [ ] |
+| F24 | `console.log` of objects, arrays, functions (node's `util.inspect` format). T15: arrays and plain objects print like node (`crates/backend/src/inspect.rs`); T17: promises print like node; still trapping: class instances, null prototypes, > 100 elements, extra array properties, symbol keys, strings needing escapes, nested errors; non-ASCII widths are counted as UTF-16 units | T10 | T21 | [ ] |
 | F25 | Uncaught exception in a command: print it to stderr, flush, `task.return(err)` (`run` in `backend/src/host.rs` must catch `$js`) | T10 | T12 | [x] T12 |
 | F26 | Event loop: the callback ignores `TASK_CANCELLED`; output is only pumped while JS runs if the host takes writes at once (otherwise buffered until `main` returns) | T10 | T19 | [ ] |
 | F27 | When stdout's reader goes away (`\| head`) `run` returns `err` (exit 1); node exits 0. Decide which the harness expects | T10 | T11 | [x] T11 (keep `err`: the write failed; not covered by the harness) |
@@ -106,3 +106,8 @@ Each open item names where it came from and which task should pick it up. When i
 | F61 | `Object.defineProperty` with non-default attributes on array indices or `length` traps (dense store has no attributes; only sealed/frozen arrays) | T16 | when needed | [ ] |
 | F62 | `console.log`: circular references (`<ref *1>` / `[Circular *1]`) aren't detected (depth-limited instead); a function/class with own properties uses a width 1 larger than node's in the single-line check; class-instance errors print as `[name: message]` (no stack, F31) | T16 | T21 | [ ] |
 | F63 | A class (like a `let`) used before its declaration in the same function is rejected at compile time; node throws a ReferenceError at run time | T16 | later | [ ] |
+| F64 | Promises: species / subclassing (`then` and the statics always make `%Promise%` promises; only `new MyPromise` gets the subclass prototype), `Promise.any` (AggregateError), `Promise.withResolvers`, `Symbol.toStringTag`; the statics ignore `this` | T17 | T21 | [ ] |
+| F65 | Library exports: jobs queued during an export call never run (only a command's `run` drains the queue) and unhandled rejections aren't reported | T17 | T20 | [ ] |
+| F66 | The unhandled-rejection check runs once, after `main`'s drain; with timers/events it must run after every macrotask's drain (node: `processTicksAndRejections`) | T17 | T19 | [ ] |
+| F67 | `queueMicrotask`'s TypeError lacks node's `code: 'ERR_INVALID_ARG_TYPE'` (uncaught: node prints `TypeError [ERR_INVALID_ARG_TYPE]: …`); an unhandled rejection whose reason is a function shows `#<Function>`-style text (node: the source); a rejected promise holding an Error prints without the stack (F31) | T17 | T21 | [ ] |
+| F68 | Every command links the promise runtime (the drain and the unhandled check in `run`: +2.8 KB for `hello.js`) even without promises; gate it on use | T17 | optimisation pass | [ ] |

@@ -92,6 +92,9 @@ Probes 2 and 5 in `probes/` show this loop working with Wasmtime 49.
 every WASI call (fixed imports) and the `run` export + callback; `console.*` output goes to per-stream buffers that are
 written as soon as the host takes them, and the callback finishes blocked writes, closes the streams and awaits their
 futures before `task.return`. The WASI 0.3.1 WIT is vendored in `crates/component/wit/`.)
+(T17: promises are `$promise` objects; every job (reaction, resolve-thenable, `queueMicrotask`) goes into one FIFO in
+globals. `run` drains it after `main`, then reports the first rejection still unhandled (node's text) and fails. See
+`crates/backend/src/promise.rs`.)
 
 ### D4. The WIT boundary follows jco/componentize-js conventions
 The entry module's ES exports become the world's exports. WIT types map to JS:
