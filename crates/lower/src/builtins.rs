@@ -116,6 +116,8 @@ pub(crate) const GATED: &[&str] = &[
     "toPrimitive",
     "hasInstance",
     "toStringTag",
+    "any",
+    "withResolvers",
 ];
 
 /// The built-in constructors that can be values (T25): their prelude function (`$$Array`) is what

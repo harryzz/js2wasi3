@@ -217,10 +217,12 @@ pub enum ErrorKind {
     SyntaxError,
     EvalError,
     UriError,
+    /// T25: `new AggregateError(errors, message, options)`.
+    AggregateError,
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 7] = [
+    pub const ALL: [ErrorKind; 8] = [
         ErrorKind::Error,
         ErrorKind::TypeError,
         ErrorKind::RangeError,
@@ -228,6 +230,7 @@ impl ErrorKind {
         ErrorKind::SyntaxError,
         ErrorKind::EvalError,
         ErrorKind::UriError,
+        ErrorKind::AggregateError,
     ];
 
     pub fn name(self) -> &'static str {
@@ -239,6 +242,7 @@ impl ErrorKind {
             ErrorKind::SyntaxError => "SyntaxError",
             ErrorKind::EvalError => "EvalError",
             ErrorKind::UriError => "URIError",
+            ErrorKind::AggregateError => "AggregateError",
         }
     }
 
@@ -344,11 +348,14 @@ pub enum Builtin {
     /// `%MapIteratorPrototype%`, `%SetIteratorPrototype%` (T25, not global names).
     MapIterator,
     SetIterator,
+    /// node's `Timeout` and `Immediate` classes (T25, not global names).
+    Timeout,
+    Immediate,
 }
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 21] = [
+    pub const ALL: [Builtin; 24] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -370,6 +377,9 @@ impl Builtin {
         Builtin::Set,
         Builtin::MapIterator,
         Builtin::SetIterator,
+        Builtin::Error(ErrorKind::AggregateError),
+        Builtin::Timeout,
+        Builtin::Immediate,
     ];
 
     pub fn name(self) -> &'static str {
@@ -389,6 +399,8 @@ impl Builtin {
             Builtin::Set => "Set",
             Builtin::MapIterator => "%MapIteratorPrototype%",
             Builtin::SetIterator => "%SetIteratorPrototype%",
+            Builtin::Timeout => "%Timeout%",
+            Builtin::Immediate => "%Immediate%",
         }
     }
 
@@ -449,6 +461,7 @@ pub enum Intrinsic {
     },
     /// `new E(message, options)` / `E(…)`: a new error object; an own `message` unless the
     /// message is `undefined`, an own `cause` if `options` is an object with one.
+    /// `AggregateError` takes `(errors, message, options)` and adds `errors` (an array).
     NewError(ErrorKind),
     /// `{}`: a new plain object (prototype `Object.prototype`).
     NewObject,
@@ -735,8 +748,20 @@ pub const TIMER_SET_TIMEOUT: u8 = 0;
 pub const TIMER_SET_INTERVAL: u8 = 1;
 pub const TIMER_CLEAR_TIMEOUT: u8 = 2;
 pub const TIMER_CLEAR_INTERVAL: u8 = 3;
-/// Their JS names, by kind.
-pub const TIMER_NAMES: [&str; 4] = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
+/// T25: `setImmediate`, `clearImmediate`, `process.nextTick`.
+pub const TIMER_SET_IMMEDIATE: u8 = 4;
+pub const TIMER_CLEAR_IMMEDIATE: u8 = 5;
+pub const TIMER_NEXT_TICK: u8 = 6;
+/// Their JS names, by kind (the globals; `nextTick` is `process.nextTick`).
+pub const TIMER_NAMES: [&str; 7] = [
+    "setTimeout",
+    "setInterval",
+    "clearTimeout",
+    "clearInterval",
+    "setImmediate",
+    "clearImmediate",
+    "nextTick",
+];
 
 /// [`Intrinsic::ResumeMode`] values.
 pub const RESUME_NEXT: i32 = 0;
@@ -760,6 +785,7 @@ impl Intrinsic {
             | Intrinsic::BuiltinTag
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::BuiltinToString => (&[JsVal], Some(Bool)),
+            Intrinsic::NewError(ErrorKind::AggregateError) => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
             Intrinsic::SetProp | Intrinsic::DefineProp => (&[JsVal, JsVal, JsVal], None),

@@ -142,7 +142,8 @@ node/WASI globals:
 
 | Word | Status | Notes |
 |---|---|---|
-| `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` | ✅ | T19, on the P3 event loop (commands only; libraries: T20). Timeout objects are plain objects (F74); a string delay traps if nothing else converts to a number (F85). |
+| `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` | ✅ | T19, on the P3 event loop (commands only; libraries: T20). T25: Timeout objects have `ref`/`unref`/`hasRef`/`refresh`/`[Symbol.toPrimitive]` (the id, which the clear functions also take); printing them differs from node (F112); a string delay traps if nothing else converts to a number (F85). |
+| `setImmediate`, `clearImmediate`, `process.nextTick` | ✅ | T25, commands only; `process` itself is not provided (F112). |
 | `constructor` | ✅ | Classes, functions, built-in prototypes. |
 | `parseInt`, `parseFloat` | ✅ | T21 (also `isNaN`, `isFinite`). Non-decimal `parseInt` past 2^53 isn't correctly rounded (F89). |
 | `decodeURI`, `decodeURIComponent`, `encodeURI`, `encodeURIComponent`, `escape`, `unescape` | ❌ | Rejected (T21). |

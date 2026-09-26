@@ -79,7 +79,8 @@ pub const T_GENERATOR: u32 = 19;
 /// `(func (param eqref i32 eqref) (result eqref))`: a generator's resume function (T18).
 pub const T_RESUME: u32 = 20;
 /// `$timer`: a final subtype of `$object` (the Timeout object) with `deadline: mut i64`,
-/// `interval: i64`, `callback: eqref`, `args: (ref $vals)` (T19, see [`crate::timers`]).
+/// `interval: i64`, `callback: eqref`, `args: (ref $vals)` (T19, see [`crate::timers`]); T25:
+/// `delay: i64`, `id: i32`, `flags: mut i32`. Immediates are `$timer`s too.
 pub const T_TIMER: u32 = 21;
 /// `$map`: a final subtype of `$object` with `table: mut (ref $mtable)` (T25, see [`crate::mapset`]).
 pub const T_MAP: u32 = 22;
@@ -127,7 +128,7 @@ pub const G_REJECTED_N: u32 = G_REJECTED + 1;
 /// first use.
 pub const G_TIMER_FNS: u32 = G_REJECTED_N + 1;
 /// `(mut (ref null $vals))` and `(mut i32)`: the active timers (`$timer`s), and their count.
-pub const G_TIMERS: u32 = G_TIMER_FNS + 4;
+pub const G_TIMERS: u32 = G_TIMER_FNS + js2wasi3_ir::TIMER_NAMES.len() as u32;
 pub const G_TIMERS_N: u32 = G_TIMERS + 1;
 /// `(mut i64)`: the event loop's time (ns, `monotonic-clock.now`), set when it wakes up for
 /// timers.
@@ -151,8 +152,15 @@ pub const G_INSPECT_CIRC_N: u32 = G_INSPECT_CIRC + 1;
 pub const G_CTORS: u32 = G_INSPECT_CIRC_N + 1;
 /// `(mut (ref null $object))` per [`js2wasi3_ir::Namespace`]: `Math`/`JSON` as values (T25).
 pub const G_NAMESPACES: u32 = G_CTORS + js2wasi3_ir::Builtin::ALL.len() as u32;
+/// T25: `(mut (ref null $vals))` and `(mut i32)`: the queued immediates (`$timer`s); the same
+/// for the `process.nextTick` queue (callback, arguments pairs); `(mut i32)`: the last timer id.
+pub const G_IMMEDIATES: u32 = G_NAMESPACES + js2wasi3_ir::Namespace::ALL.len() as u32;
+pub const G_IMMEDIATES_N: u32 = G_IMMEDIATES + 1;
+pub const G_TICKS: u32 = G_IMMEDIATES_N + 1;
+pub const G_TICKS_N: u32 = G_TICKS + 1;
+pub const G_TIMER_ID: u32 = G_TICKS_N + 1;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_NAMESPACES + js2wasi3_ir::Namespace::ALL.len() as u32;
+pub const GLOBALS: u32 = G_TIMER_ID + 1;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -326,6 +334,10 @@ pub fn types(types: &mut TypeSection) {
     timer_fields.push(field(StorageType::Val(ValType::I64), false));
     timer_fields.push(field(StorageType::Val(jsval()), false));
     timer_fields.push(field(StorageType::Val(rt(false, T_VALS)), false));
+    // T25: the delay (ns), the id, the flags.
+    timer_fields.push(field(StorageType::Val(ValType::I64), false));
+    timer_fields.push(field(StorageType::Val(ValType::I32), false));
+    timer_fields.push(field(StorageType::Val(ValType::I32), true));
     let mut map_fields = object_fields.clone();
     map_fields.push(field(StorageType::Val(rt(false, T_MTABLE)), true));
     let mut mapiter_fields = object_fields.clone();
@@ -581,7 +593,7 @@ pub fn globals(globals: &mut GlobalSection) {
     globals.global(vals, &null_vals);
     globals.global(int, &ConstExpr::i32_const(0));
     // Timers (T19): the functions, the list, the loop time, the wait.
-    for _ in 0..4 {
+    for _ in 0..js2wasi3_ir::TIMER_NAMES.len() {
         globals.global(
             GlobalType {
                 val_type: rt(true, T_OBJECT),
@@ -620,6 +632,12 @@ pub fn globals(globals: &mut GlobalSection) {
             &ConstExpr::ref_null(object()),
         );
     }
+    // T25: immediates, ticks, the timer id.
+    for _ in 0..2 {
+        globals.global(vals, &null_vals);
+        globals.global(int, &ConstExpr::i32_const(0));
+    }
+    globals.global(int, &ConstExpr::i32_const(0));
 }
 
 /// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
@@ -1491,6 +1509,17 @@ fn describe(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(V).call(inspect).return_();
     s.end();
+    if cx.names("any") || cx.names("AggregateError") {
+        // An error whose `stack` has no frames (`Promise.any`'s, T25): node inspects it.
+        let own_get = cx.helper(Helper::Obj(object::Helper::OwnGet));
+        let stack = cx.str("stack");
+        s.local_get(V).ref_cast_non_null(object());
+        s.global_get(stack).call(own_get).local_set(T);
+        is_string(&mut s, T);
+        s.if_(BlockType::Empty);
+        s.local_get(V).call(inspect).return_();
+        s.end();
+    }
     s.local_get(V).call(to_string).local_set(H);
     // node's `improveStack`: an error whose constructor isn't named like it shows both,
     // `Ctor [name]: message` (or `Ctor: message` when the constructor's name contains it).

@@ -109,6 +109,10 @@ reaction job whose handler is a frame resumes it (next / throw), so no closures 
 `[async-lower]wait-until` subtask for the earliest deadline is in the waitable set; when it returns, the due timers
 run (microtasks and the unhandled-rejection check after each), then Loop again; with none left, the streams are
 flushed and closed. See `crates/backend/src/{asyncfn,timers,host}.rs`.)
+(T25: `setImmediate` callbacks queue in a FIFO run at the end of each timers pass (only those queued before it);
+`process.nextTick` callbacks run after every timer/immediate callback, then the microtasks, until both are empty,
+and after the main module's microtasks (an ES module, as in node). An unref'd timer doesn't keep the loop alive.
+See `crates/backend/src/timers.rs`.)
 
 ### D4. The WIT boundary follows jco/componentize-js conventions
 The entry module's ES exports become the world's exports. WIT types map to JS:

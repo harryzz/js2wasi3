@@ -544,6 +544,11 @@ impl Helper {
                     s.drop();
                 }
                 s.call(drain);
+                if cx.names("$ticks") {
+                    // (An ES module: its microtasks first, then the `nextTick` queue, T25.)
+                    let ticks = cx.helper(runtime::Helper::Timer(timers::Helper::RunTicks));
+                    s.call(ticks);
+                }
                 s.end();
                 // Microtasks drained: an unhandled rejection ends the program (like node).
                 s.call(unhandled).local_tee(R).ref_is_null().i32_eqz();

@@ -207,6 +207,8 @@ fn methods(b: Builtin) -> &'static [&'static str] {
             "has", "add", "delete", "clear", "entries", "forEach", "values", "keys",
         ],
         Builtin::MapIterator | Builtin::SetIterator => &["next"],
+        // Native (T25, `crate::timers`).
+        Builtin::Timeout | Builtin::Immediate => &[],
     }
 }
 
@@ -343,6 +345,7 @@ impl Helper {
                 Builtin::Error(ErrorKind::SyntaxError) => "SyntaxError.prototype",
                 Builtin::Error(ErrorKind::EvalError) => "EvalError.prototype",
                 Builtin::Error(ErrorKind::UriError) => "URIError.prototype",
+                Builtin::Error(ErrorKind::AggregateError) => "AggregateError.prototype",
                 Builtin::Function => "Function.prototype",
                 Builtin::Array => "Array.prototype",
                 Builtin::Symbol => "Symbol.prototype",
@@ -353,6 +356,8 @@ impl Helper {
                 Builtin::Set => "Set.prototype",
                 Builtin::MapIterator => "%MapIteratorPrototype%",
                 Builtin::SetIterator => "%SetIteratorPrototype%",
+                Builtin::Timeout => "Timeout.prototype",
+                Builtin::Immediate => "Immediate.prototype",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -421,6 +426,7 @@ impl Helper {
             Helper::OwnKeys => (vec![o], vec![rt(false, T_KEYS)]),
             Helper::ForInKeys | Helper::Create | Helper::GetPrototypeOf => (vec![v], vec![v]),
             Helper::InstanceOf(_) => (vec![v], vec![I32]),
+            Helper::NewError(ErrorKind::AggregateError) => (vec![v, v, v], vec![v]),
             Helper::NewError(_) => (vec![v, v], vec![v]),
             Helper::ToPrimitive => (vec![o, I32], vec![v]),
             Helper::ObjectToNumber => (vec![o], vec![F64]),
@@ -1286,6 +1292,10 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             "[Symbol.iterator]",
             0,
         )],
+        Builtin::Timeout | Builtin::Immediate => crate::timers::proto_methods(b)
+            .into_iter()
+            .map(|(h, name, len)| (runtime::Helper::Timer(h), Some(name), name, len))
+            .collect(),
         _ => Vec::new(),
     };
     // (keys, name, code, length, getter): one function object defined under each key.
@@ -1403,6 +1413,26 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     if b == Builtin::Promise {
         let ctor = cx.helper(runtime::Helper::Prom(crate::promise::Helper::Ctor));
         s.call(ctor).drop();
+    }
+    if b == Builtin::Timeout {
+        // `Timeout.prototype[Symbol.toPrimitive]`: the timer's id (T25).
+        let sym = cx.helper(runtime::Helper::WellKnownSymbol(
+            js2wasi3_ir::well_known_symbol("toPrimitive").expect("well-known"),
+        ));
+        let code = cx.helper(runtime::Helper::Timer(crate::timers::Helper::ToPrimitive));
+        cx.declare_func(code);
+        let name = cx.str("[Symbol.toPrimitive]");
+        s.local_get(O).ref_as_non_null();
+        s.call(sym)
+            .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
+        s.ref_func(code);
+        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.ref_null(func::vals());
+        s.global_get(name)
+            .i32_const(0)
+            .i32_const(0)
+            .call(new_function);
+        s.i32_const(HIDDEN).call(define);
     }
     if let Some(tag) = builtin_tag_name(b).filter(|_| cx.names("toStringTag")) {
         // `[Symbol.toStringTag]` (T25; only when the code names it).
@@ -2418,6 +2448,8 @@ fn instance_of(cx: &mut dyn Cx, b: Builtin) -> Function {
 
 /// `$new_error(message, options)`: own `stack` (a sentinel: reading it traps, F31), `message`
 /// unless it's `undefined`, and `cause` if `options` is an object that has one.
+/// `AggregateError` (T25): `(errors, message, options)`, then an own `errors`: the iterable
+/// `errors` as a new array.
 fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     let alloc = h(cx, Helper::Alloc);
     let proto = h(cx, Helper::Proto(Builtin::Error(k)));
@@ -2426,37 +2458,61 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     let get = h(cx, Helper::Get);
     let to_string = rh(cx, runtime::Helper::ToString);
     let (stack, message, cause) = (cx.str("stack"), cx.str("message"), cx.str("cause"));
-    const M: u32 = 0;
-    const OPT: u32 = 1;
-    const O: u32 = 2;
-    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let aggregate = k == ErrorKind::AggregateError;
+    const ERRS: u32 = 0;
+    let first = aggregate as u32;
+    let (m, opt, o) = (first, first + 1, first + 2);
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (2, jsval())]);
     let mut s = f.instructions();
     s.i32_const(CLASS_ERROR)
         .call(proto)
         .call(alloc)
-        .local_set(O);
-    s.local_get(O)
+        .local_set(o);
+    s.local_get(o)
         .ref_as_non_null()
         .global_get(stack)
         .global_get(G_BUILTIN);
     s.i32_const(HIDDEN).call(define);
-    s.local_get(M).global_get(G_UNDEFINED).ref_eq().i32_eqz();
+    s.local_get(m).global_get(G_UNDEFINED).ref_eq().i32_eqz();
     s.if_(BlockType::Empty);
-    s.local_get(O).ref_as_non_null().global_get(message);
-    s.local_get(M).call(to_string);
+    s.local_get(o).ref_as_non_null().global_get(message);
+    s.local_get(m).call(to_string);
     s.i32_const(HIDDEN).call(define);
     s.end();
-    s.local_get(OPT).ref_test_non_null(object());
+    s.local_get(opt).ref_test_non_null(object());
     s.if_(BlockType::Empty);
-    as_obj(&mut s, OPT);
+    as_obj(&mut s, opt);
     s.global_get(cause).call(lookup).ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
-    s.local_get(O).ref_as_non_null().global_get(cause);
-    s.local_get(OPT).global_get(cause).call(get);
+    s.local_get(o).ref_as_non_null().global_get(cause);
+    s.local_get(opt).global_get(cause).call(get);
     s.i32_const(HIDDEN).call(define);
     s.end();
     s.end();
-    s.local_get(O).ref_as_non_null();
+    if aggregate {
+        let not_iterable = cx.helper(runtime::Helper::Prom(crate::promise::Helper::NotIterable));
+        let open = rh(cx, runtime::Helper::Iter(crate::iter::Helper::Open));
+        let step = rh(cx, runtime::Helper::Iter(crate::iter::Helper::Step));
+        let new_array = rh(cx, runtime::Helper::Arr(crate::array::Helper::New));
+        let push = rh(cx, runtime::Helper::Arr(crate::array::Helper::Push));
+        let errors = cx.str("errors");
+        let (it, list) = (o + 1, o + 2);
+        s.local_get(ERRS).local_get(ERRS).call(not_iterable);
+        s.call(open).local_set(it);
+        s.i32_const(0).array_new_default(T_VALS).i32_const(0);
+        s.call(new_array).local_set(list);
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(it).call(step).i32_eqz().br_if(1);
+        s.local_get(list).ref_cast_non_null(crate::array::array());
+        s.local_get(it)
+            .ref_cast_non_null(crate::iter::iter())
+            .struct_get(runtime::T_ITER, crate::iter::F_VALUE);
+        s.call(push);
+        s.br(0).end().end();
+        s.local_get(o).ref_as_non_null().global_get(errors);
+        s.local_get(list).i32_const(HIDDEN).call(define);
+    }
+    s.local_get(o).ref_as_non_null();
     s.end();
     f
 }
@@ -2505,8 +2561,9 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_STRING)),
     ]);
     let mut s = f.instructions();
-    if cx.names("toPrimitive") {
-        // `o[Symbol.toPrimitive](hint)` first (T25; only when the code names it).
+    if cx.names("toPrimitive") || cx.names("$timers") {
+        // `o[Symbol.toPrimitive](hint)` first (T25; only when the code names it, or has timers:
+        // `+timeout` is its id).
         let get = h(cx, Helper::Get);
         let is_nullish = rh(cx, runtime::Helper::IsNullish);
         let sym = rh(

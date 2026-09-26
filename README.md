@@ -58,9 +58,10 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …), `Array.from`/`of`, `JSON.stringify`/`parse`, `Map`/`Set`, `Object.assign`/`fromEntries`, `hasOwnProperty` and the other
   `Object.prototype` methods.
 - Classes: fields, static members, private `#x` fields and methods, `extends` (also built-in errors), `super`.
-- Generators (`function*`, `yield`, `yield*`); `Promise` (`then`/`catch`/`finally`, `all`/`allSettled`/`race`),
-  `queueMicrotask`; `async`/`await`, including top-level `await`.
-- Timers (`setTimeout`, `setInterval`, `clear*`) on the WASI 0.3 event loop, using `wasi:clocks`.
+- Generators (`function*`, `yield`, `yield*`); `Promise` (`then`/`catch`/`finally`, `all`/`allSettled`/`race`/`any`,
+  `withResolvers`), `AggregateError`, `queueMicrotask`; `async`/`await`, including top-level `await`.
+- Timers (`setTimeout`, `setInterval`, `setImmediate`, `clear*`, `process.nextTick`) on the WASI 0.3 event loop,
+  using `wasi:clocks`.
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
 Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex,

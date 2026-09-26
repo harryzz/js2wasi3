@@ -204,10 +204,15 @@ fn format(cx: &mut dyn Cx) -> Function {
     const N: u32 = 4;
     const P: u32 = 5;
     const B: u32 = 6;
+    // AggregateError (T25): its own `stack` (set when V8 makes it without frames) and `errors`.
+    const STK: u32 = 7;
+    const ERRS: u32 = 8;
+    let aggregate = cx.names("any") || cx.names("AggregateError");
     let mut f = Function::new([
         (1, jsval()),
         (1, rt(true, runtime::T_OBJECT)),
         (1, rt(true, T_STRING)),
+        (2, jsval()),
     ]);
     let mut s = f.instructions();
     runtime::is_string(&mut s, V);
@@ -375,14 +380,57 @@ fn format(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     object::is_error(&mut s, V);
     s.if_(BlockType::Empty);
-    // An error inside an array or object: node prints its stack (F31).
-    s.local_get(NESTED);
-    s.if_(BlockType::Empty);
-    trap(cx, &mut s);
-    s.end();
-    s.global_get(open);
-    s.local_get(V).call(to_string).call(concat);
-    s.global_get(close).call(concat).return_();
+    if aggregate {
+        // A `stack` without frames (`Promise.any`'s error): node prints it in brackets, also
+        // nested; `errors` as `{ [errors]: [ … ] }`.
+        let own_get = oh(cx, object::Helper::OwnGet);
+        let layout = ih(cx, Helper::Layout);
+        let format = ih(cx, Helper::Format);
+        let (stack, errors) = (cx.str("stack"), cx.str("errors"));
+        let (errors_key, brace, rbrace) = (cx.str("[errors]: "), cx.str(" {"), cx.str("}"));
+        s.local_get(V).ref_cast_non_null(runtime::object());
+        s.global_get(stack).call(own_get).local_set(STK);
+        runtime::is_string(&mut s, STK);
+        s.i32_eqz().local_get(NESTED).i32_and();
+        s.if_(BlockType::Empty);
+        trap(cx, &mut s);
+        s.end();
+        s.global_get(open);
+        runtime::is_string(&mut s, STK);
+        s.if_(BlockType::Result(string_ref()));
+        s.local_get(STK).ref_cast_non_null(string());
+        s.else_();
+        s.local_get(V).call(to_string);
+        s.end();
+        s.call(concat).global_get(close).call(concat).local_set(B);
+        s.local_get(V).ref_cast_non_null(runtime::object());
+        s.global_get(errors).call(own_get).local_tee(ERRS);
+        s.ref_test_non_null(array::array());
+        s.if_(BlockType::Empty);
+        s.global_get(errors_key);
+        s.local_get(ERRS);
+        s.local_get(DEPTH).i32_const(1).i32_add();
+        s.local_get(INDENT).i32_const(2).i32_add();
+        s.i32_const(1).call(format).call(concat);
+        s.array_new_fixed(T_KEYS, 1).i32_const(1).local_get(INDENT);
+        s.local_get(B)
+            .ref_as_non_null()
+            .global_get(brace)
+            .call(concat);
+        s.global_get(rbrace);
+        s.i32_const(0).i32_const(0).call(layout).return_();
+        s.end();
+        s.local_get(B).ref_as_non_null().return_();
+    } else {
+        // An error inside an array or object: node prints its stack (F31).
+        s.local_get(NESTED);
+        s.if_(BlockType::Empty);
+        trap(cx, &mut s);
+        s.end();
+        s.global_get(open);
+        s.local_get(V).call(to_string).call(concat);
+        s.global_get(close).call(concat).return_();
+    }
     s.end();
     s.local_get(V).ref_cast_non_null(runtime::object());
     s.local_get(DEPTH).local_get(INDENT);

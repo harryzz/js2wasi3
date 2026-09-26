@@ -268,8 +268,10 @@ impl Helper {
                 const P: u32 = 4;
                 let mut f = Function::new([(2, jsval())]);
                 let mut s = f.instructions();
-                s.local_get(ARGS).i32_const(0).call(arg_get);
-                s.local_get(ARGS).i32_const(1).call(arg_get);
+                let n = if k == ErrorKind::AggregateError { 3 } else { 2 };
+                for i in 0..n {
+                    s.local_get(ARGS).i32_const(i).call(arg_get);
+                }
                 s.call(new_error).local_set(E);
                 if matches!(self, Helper::ErrorConstruct(_)) {
                     s.local_get(NT).local_get(SELF).ref_eq().i32_eqz();
@@ -763,7 +765,8 @@ fn error_ctor(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     s.end();
     s.ref_func(call).ref_func(construct);
     s.ref_null(HeapType::Concrete(T_VALS));
-    s.global_get(name).i32_const(1).i32_const(0);
+    let length = if k == ErrorKind::AggregateError { 2 } else { 1 };
+    s.global_get(name).i32_const(length).i32_const(0);
     s.call(new).local_tee(F);
     s.ref_cast_non_null(runtime::object()).global_set(g);
     s.call(proto).local_set(P);

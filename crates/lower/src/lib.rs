@@ -3050,6 +3050,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
                 if let Some(k) = self.error_ctor(e) {
                     // A native error constructor as a value (T16).
+                    self.note_error_kind(k);
                     return Ok(Val::js(
                         Expr::intrinsic(Intrinsic::ErrorCtor(k), vec![]),
                         Kind::Any,
@@ -3057,12 +3058,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
                 if let Some(op) = self.global_function(id) {
                     self.module.promises |= op == Intrinsic::PromiseCtor;
-                    if matches!(op, Intrinsic::Timer(_)) && !self.command {
-                        return Err(self.unsupported(
-                            id.span,
-                            &format!("`{}` in a module with exports", id.name),
-                            "T20",
-                        ));
+                    if let Intrinsic::Timer(k) = op {
+                        return self.timer_value(id.span, k);
                     }
                     return Ok(Val::js(Expr::intrinsic(op, vec![]), Kind::Any));
                 }
@@ -3305,6 +3302,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let func = self.builtin_static(e).expect("checked");
                 self.check_builtin(span, func)?;
                 Ok(Val::js(self.func_value(func), Kind::Any))
+            }
+            Expression::StaticMemberExpression(sm)
+                if !sm.optional
+                    && self.is_global(&sm.object, "process")
+                    && sm.property.name == "nextTick" =>
+            {
+                self.timer_value(span, ir::TIMER_NEXT_TICK)
             }
             Expression::StaticMemberExpression(sm) if self.is_global(&sm.object, "Math") => {
                 if sm.optional {
@@ -3695,6 +3699,24 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if c.arguments.iter().any(|a| a.is_spread()) {
             return self.spread_call(cx, c);
+        }
+        if let Expression::StaticMemberExpression(m) = callee
+            && !m.optional
+            && m.property.name == "nextTick"
+            && self.is_global(&m.object, "process")
+        {
+            // `process.nextTick(…)` (T25): `this` doesn't matter.
+            let f = jsval_of(self.expr(cx, callee)?);
+            let args = self.value_args(cx, &c.arguments)?;
+            return Ok((
+                Expr::CallRef {
+                    callee: Box::new(f),
+                    this: Box::new(Expr::undefined()),
+                    args,
+                    what: self.callee_text(&c.callee),
+                },
+                Call::Value,
+            ));
         }
         if let Some(b) = ["Map", "Set"]
             .into_iter()
@@ -4113,9 +4135,32 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "queueMicrotask" => Some(Intrinsic::QueueMicrotask),
             name => ir::TIMER_NAMES
                 .iter()
-                .position(|n| *n == name)
+                .position(|n| *n == name && *n != "nextTick")
                 .map(|k| Intrinsic::Timer(k as u8)),
         }
+    }
+
+    /// A timer function as a value (T19; T25: immediates, `process.nextTick`): commands only.
+    /// Notes the kinds used for the backend (`$timers`, `$immediates`, `$ticks` in `names`).
+    fn timer_value(&mut self, span: Span, k: u8) -> R<Val> {
+        let name = ir::TIMER_NAMES[k as usize];
+        if !self.command {
+            return Err(self.unsupported(
+                span,
+                &format!("`{name}` in a module with exports"),
+                "T20",
+            ));
+        }
+        let what = match k {
+            ir::TIMER_SET_IMMEDIATE | ir::TIMER_CLEAR_IMMEDIATE => "$immediates",
+            ir::TIMER_NEXT_TICK => "$ticks",
+            _ => "$timers",
+        };
+        self.module.names.insert(what.to_string());
+        Ok(Val::js(
+            Expr::intrinsic(Intrinsic::Timer(k), vec![]),
+            Kind::Any,
+        ))
     }
 
     /// The native error constructor `callee` names, if it's one (and not shadowed).
@@ -4131,6 +4176,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         global.then(|| ErrorKind::parse(id.name.as_str())).flatten()
     }
 
+    /// `AggregateError` in the code: `console.log` shows the `errors` of errors (T25).
+    fn note_error_kind(&mut self, k: ErrorKind) {
+        if k == ErrorKind::AggregateError {
+            self.module.names.insert(k.name().to_string());
+        }
+    }
+
     /// `new E(message)` or `E(message)` (the same for the native errors).
     fn new_error(
         &mut self,
@@ -4140,7 +4192,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         span: Span,
     ) -> R<Val> {
         let _ = span;
-        let args = self.args(cx, args, 2)?;
+        self.note_error_kind(k);
+        let n = if k == ErrorKind::AggregateError { 3 } else { 2 };
+        let args = self.args(cx, args, n)?;
         Ok(Val::js(
             Expr::intrinsic(Intrinsic::NewError(k), args),
             Kind::Any,

@@ -173,6 +173,15 @@ fn declarations_and_functions() {
         one("export function f() { setTimeout(f, 1); return 0; }"),
         "1:23 unsupported: `setTimeout` in a module with exports (planned: T20)"
     );
+    assert_eq!(
+        one("export function f() { process.nextTick(f); return 0; }"),
+        "1:23 unsupported: `nextTick` in a module with exports (planned: T20)"
+    );
+    assert_eq!(
+        one("export function f() { setImmediate(f); return 0; }"),
+        "1:23 unsupported: `setImmediate` in a module with exports (planned: T20)"
+    );
+    lowers("setImmediate(() => {}); process.nextTick(() => {});");
     lowers("async function f(a) { return (await a) + 1; } f(1);");
     lowers("await 1;");
     lowers("export function f(a = 1) { return a; }");

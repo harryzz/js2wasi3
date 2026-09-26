@@ -54,10 +54,10 @@ Every open follow-up whose "Pick up in" is T25 belongs to one of the slices abov
 (record them as follow-ups if a slice needs them).
 
 ## Acceptance
-- [ ] Each slice: fixtures in `tests/fixtures/builtins/` match node (`scripts/diff.sh`), `unsupported.rs` updated.
-- [ ] `hello.js` still pulls in no unused built-in (size unchanged, or the growth explained).
-- [ ] The follow-ups each slice resolves are ticked in `tasks/README.md`.
-- [ ] T25 is done only when every follow-up in the table above is ticked, or moved to another task with the reason
+- [x] Each slice: fixtures in `tests/fixtures/builtins/` match node (`scripts/diff.sh`), `unsupported.rs` updated.
+- [x] `hello.js` still pulls in no unused built-in (size unchanged, or the growth explained).
+- [x] The follow-ups each slice resolves are ticked in `tasks/README.md`.
+- [x] T25 is done only when every follow-up in the table above is ticked, or moved to another task with the reason
       written in its row (`tasks/README.md`) and in Notes / Result.
 
 ## Notes / Result
@@ -274,7 +274,50 @@ species, `isConcatSpreadable`, generic `push`/`join`; `Array.fromAsync`, iterato
 **Next smallest step:** slice 6 (promises and timers: F64, F67, F74) or T20, the user's choice. Slice 6's first
 piece: `Promise.withResolvers` and `Promise.any` + `AggregateError` (F64).
 
-## Handoff for slice 6 (written 2026-09-26, end of the slices 3–5 session)
+### Slice 6: promises and timers (done 2026-09-26)
+- **`AggregateError` / `Promise.any` / `Promise.withResolvers` (F64):** `ir::ErrorKind::AggregateError` (also in
+  `Builtin::ALL`); `new AggregateError(errors, message, options)` lowers to a 3-argument `NewError` whose helper
+  iterates `errors` into an own hidden array (`AggregateError.length` 2). `promise::Combinator::Any` with
+  `Element::AnyRejected`; `Helper::AnyReject` makes node's error with an own `stack` of just its header (V8 creates
+  it without frames), so `console.log` and the uncaught report print `[AggregateError: All promises were rejected]
+  { [errors]: [ … ] }` like node (inspect's error branch and `runtime::describe`, gated on `any`/`AggregateError`;
+  an `AggregateError` in the code puts its name in `ir::Module::names`). `Promise.withResolvers` returns
+  `{ promise, resolve, reject }`. Both statics are installed only when the code names them (`builtins::GATED`).
+- **node errors (F67):** `promise::Helper::ThrowArgType`: the `ERR_INVALID_ARG_TYPE` TypeError gets an own
+  enumerable `code` and an own `toString` (`TypeError [ERR_INVALID_ARG_TYPE]: …`), which also gives node's uncaught
+  header. V8's NoSideEffectsToString (`promise::Helper::Describe`) of a function is its source (via
+  `Function.prototype.toString`) when the code names `toString`; else the old text (F104).
+- **Timers (F74):** `$timer` gained `delay`, `id`, `flags` (unref, immediate, cleared); Timeouts and Immediates get
+  `Builtin::Timeout` / `Builtin::Immediate` prototypes (`ref`, `unref`, `hasRef`; Timeout: `refresh`,
+  `[Symbol.toPrimitive]` = the id; internal names `%Timeout%`/`%Immediate%` so user code can't name them).
+  `clearTimeout`/`clearInterval` take a Timeout or its id (number or string); a cleared timer stays dead on
+  `refresh`; `refresh` after firing re-arms. An unref'd timer or immediate doesn't keep the loop alive
+  (`timers::Helper::Next` returns -1 when nothing ref'd is left). `setImmediate`/`clearImmediate`: a FIFO
+  (`G_IMMEDIATES`) run at the end of each timers pass (`RunImmediates`), only those queued before it.
+  `process.nextTick` (lowered from `process.nextTick` only; `process` itself stays unsupported): `G_TICKS`, run by
+  `RunTicks` (ticks, then microtasks, until both are empty) after every timer/immediate callback, and after the
+  main module's microtasks (fixtures are ES modules: node runs the microtasks first there). The gates are
+  `$timers`/`$immediates`/`$ticks` in `ir::Module::names` (set by the lowering); with timers, ToPrimitive looks up
+  `Symbol.toPrimitive` (so `+timeout`, `` `${timeout}` `` give the id).
+- Tests: fixtures `promises/any.js`, `any-unhandled.js`, `arg-type.js`, `unhandled-function.js`,
+  `async/timers-more.js` (delays far apart: node's order of timers due together is racy), `timer-ids.js`;
+  `unsupported.rs` (`nextTick`/`setImmediate` in a library). `cargo test` ok; `scripts/diff.sh -j 4`: 92 passed,
+  0 failed, 11 skipped.
+- `hello.js`: 55367 bytes (+192 over 55175): 15 more runtime globals declared in every module (the new error kind's
+  and the two prototypes' slots, three timer-function slots, the immediate/tick queues and the id counter), which
+  also pushes later global indices past 127 (2-byte LEBs). No new code is linked (F113).
+
+**Not done (follow-ups):** F111 (promise species/subclassing, statics ignoring `this`), F112 (printing Timeout
+objects, `Timeout`/`Immediate` constructors, id registration, warnings, `process` beyond `nextTick`), F113 (declare
+only the runtime globals a module uses), F114 (`JSON.rawJSON`), F104 (function sources for rejection reasons
+without a `toString` in the code), F31 (stacks).
+
+**T25 is done:** every follow-up in the slice table is ticked or moved (F70 → F110, F93's rest → F114, F64's rest →
+F111, F74's rest → F112).
+
+**Next smallest step:** T20 (WIT async + user worlds): start with its "Read first" list.
+
+## Handoff for slice 6 (done; written 2026-09-26, end of the slices 3–5 session)
 
 **State:** `main` at `31a8218`, pushed. Slices 1–5 are done (Notes / Result above). Slice 6 is the last one:
 F64, F67, F74 (rows in `tasks/README.md`). T25 is done when those are ticked or moved with a reason.
@@ -489,3 +532,8 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 - 2026-09-26: 5e done (F51): KIND_VALUES/NEW_VALUES; one function object for Array.prototype.values and [Symbol.iterator]; Open keeps the fast path only while [Symbol.iterator] is a built-in values (gated on `iterator`); values() builds its state directly. iterator-lookup.js PASS; diff.sh 86/0/11; hello.js 55175.
 - 2026-09-26: slice 5 done: Notes / Result, README (F23, F24, F51, F52, F53, F62, F94, F99 ticked; F70 moved to F110; Next up), D5, keywords.md updated.
 - 2026-09-26: handoff for slice 6 written.
+- 2026-09-26: slice 6 started (user's choice over T20). Baseline: cargo test ok; diff.sh 86/0/11; hello.js 55175.
+- 2026-09-26: 6a done (F64 part): ErrorKind::AggregateError (8th kind, Builtin::ALL entry, 3-arg NewError: errors iterated into an own hidden array; length 2); Promise.any (Combinator::Any, Element::AnyRejected, AnyReject builds the error with an own frame-less `stack`) and Promise.withResolvers, both gated on their names (GATED); inspect/describe print a frame-less error as `[AggregateError: …] { [errors]: [...] }` (gated on `any`/AggregateError, lowering notes the name). promises/any.js, any-unhandled.js PASS; diff.sh 88/0/11; hello.js 55204 (+29: three always-declared null globals).
+- 2026-09-26: 6b done (F67): Helper::ThrowArgType (NodeError: TypeError + own enumerable `code` + own `toString` `TypeError [ERR_INVALID_ARG_TYPE]: …`, so the uncaught header matches) used by CheckCallback; promise Describe of a function = Function.prototype.toString (the source when kept, F104; else native-code form). promises/arg-type.js, unhandled-function.js PASS; promises+async 21/0.
+- 2026-09-26: 6c done (F74): Builtin::Timeout/Immediate prototypes (ref/unref/hasRef, Timeout: refresh, [Symbol.toPrimitive] = id); $timer + delay/id/flags (unref, immediate, cleared); clearTimeout/clearInterval by numeric/string id; setImmediate/clearImmediate (G_IMMEDIATES, run after the due timers, only those queued before the pass); process.nextTick (lowered from `process.nextTick`, G_TICKS, RunTicks = ticks then microtasks until empty; after the ES-module main: microtasks, then ticks); Next ignores unref'd timers for liveness; ToPrimitive's @@toPrimitive lookup also when timers are used. Gates: names $timers/$immediates/$ticks from the lowering. async/timers-more.js, timer-ids.js PASS; diff.sh 92/0/11; unsupported tests + nextTick/setImmediate in libraries. hello.js 55367 (+192 over 55175: 15 more always-declared runtime globals and 2-byte global indices past 127).
+- 2026-09-26: slice 6 done: Notes / Result, README (F64, F67, F74, F93 ticked; F111–F114 added; T25 done; Next up T20).

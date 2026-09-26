@@ -66,6 +66,8 @@ pub enum Combinator {
     All,
     AllSettled,
     Race,
+    /// T25.
+    Any,
 }
 
 impl Combinator {
@@ -74,6 +76,7 @@ impl Combinator {
             Combinator::All => "all",
             Combinator::AllSettled => "allSettled",
             Combinator::Race => "race",
+            Combinator::Any => "any",
         }
     }
 }
@@ -86,6 +89,8 @@ pub enum Element {
     /// `Promise.allSettled` Resolve / Reject Element Functions.
     Fulfilled,
     Rejected,
+    /// `Promise.any` Reject Element Functions (T25).
+    AnyRejected,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -132,8 +137,13 @@ pub enum Helper {
     StaticResolve,
     /// `Promise.reject`.
     StaticReject,
-    /// `Promise.all` / `allSettled` / `race`.
+    /// `Promise.all` / `allSettled` / `race` / `any`.
     Combine(Combinator),
+    /// `(state: (ref $vals))`: the end of `Promise.any` when every promise was rejected: call
+    /// `state[3]` (reject) with an AggregateError of `state[0]` (T25).
+    AnyReject,
+    /// The code of `Promise.withResolvers` (T25).
+    WithResolvers,
     /// A combinator's element function (`env`: the shared state `[values, remaining, resolve,
     /// reject]`, the index, then `true` once called).
     Element(Element),
@@ -154,6 +164,10 @@ pub enum Helper {
     /// `(v)`: node's TypeError `ERR_INVALID_ARG_TYPE` for a `callback` argument that isn't a
     /// function (`queueMicrotask`, the timers).
     CheckCallback,
+    /// `(msg: (ref $string))`: throw that NodeError (T25: with its `code`).
+    ThrowArgType,
+    /// The code of its own `toString`.
+    CodeToString,
     /// `() -> eqref`: the reason of the first recorded rejection still unhandled (Wasm null: none);
     /// forgets the records.
     Unhandled,
@@ -194,6 +208,9 @@ impl Helper {
             Helper::Combine(Combinator::All) => "Promise.all",
             Helper::Combine(Combinator::AllSettled) => "Promise.allSettled",
             Helper::Combine(Combinator::Race) => "Promise.race",
+            Helper::Combine(Combinator::Any) => "Promise.any",
+            Helper::AnyReject => "promise_any_reject",
+            Helper::WithResolvers => "Promise.withResolvers",
             Helper::Element(_) => "promise_element_function",
             Helper::Invoke => "invoke",
             Helper::Enqueue => "enqueue_job",
@@ -203,6 +220,8 @@ impl Helper {
             Helper::QueueMicrotask => "queue_microtask_function",
             Helper::QueueMicrotaskCall => "queueMicrotask",
             Helper::CheckCallback => "check_callback",
+            Helper::ThrowArgType => "throw_err_invalid_arg_type",
+            Helper::CodeToString => "node_error_to_string",
             Helper::Unhandled => "unhandled_rejection",
             Helper::UnhandledText => "unhandled_rejection_text",
             Helper::Describe => "no_side_effects_to_string",
@@ -225,7 +244,9 @@ impl Helper {
             Helper::Invoke => (vec![v, s, rt(false, T_VALS)], vec![v]),
             Helper::Enqueue => (vec![ValType::I32, v, v, v], vec![]),
             Helper::Drain => (vec![], vec![]),
+            Helper::AnyReject => (vec![rt(false, T_VALS)], vec![]),
             Helper::CheckCallback => (vec![v], vec![]),
+            Helper::ThrowArgType => (vec![s], vec![]),
             Helper::ReactionJob => (vec![v, ValType::I32, v], vec![]),
             Helper::ThenableJob => (vec![v, v, v], vec![]),
             Helper::Unhandled => (vec![], vec![v]),
@@ -243,6 +264,8 @@ impl Helper {
             | Helper::StaticReject
             | Helper::Combine(_)
             | Helper::Element(_)
+            | Helper::WithResolvers
+            | Helper::CodeToString
             | Helper::QueueMicrotaskCall => code,
         }
     }
@@ -295,6 +318,10 @@ impl Helper {
                 f
             }
             Helper::PromiseResolve => promise_resolve(cx),
+            Helper::AnyReject => any_reject(cx),
+            Helper::ThrowArgType => throw_arg_type(cx),
+            Helper::CodeToString => code_to_string(cx),
+            Helper::WithResolvers => with_resolvers(cx),
             Helper::StaticResolve => {
                 let resolve = ph(cx, Helper::PromiseResolve);
                 let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
@@ -416,6 +443,18 @@ impl Helper {
                 const V: u32 = 0;
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
+                // A function: its source (V8), kept only when the code names `toString` (F104;
+                // else `#<Function>`-style text, as before).
+                if cx.has_to_string() {
+                    let fn_to_string = cx.helper(runtime::Helper::Func(func::Helper::ToString));
+                    s.local_get(V).ref_test_non_null(function());
+                    s.if_(BlockType::Empty);
+                    s.local_get(V).local_get(V);
+                    s.i32_const(0).array_new_default(T_VALS);
+                    s.call(fn_to_string).ref_cast_non_null(runtime::string());
+                    s.return_();
+                    s.end();
+                }
                 s.local_get(V).ref_test_non_null(runtime::object());
                 s.if_(BlockType::Empty);
                 s.local_get(V)
@@ -567,18 +606,26 @@ fn ctor(cx: &mut dyn Cx) -> Function {
     let construct = ph(cx, Helper::CtorConstruct);
     cx.declare_func(call);
     cx.declare_func(construct);
-    let statics: Vec<(u32, u32, i32)> = [
-        (Helper::Combine(Combinator::All), "all"),
-        (Helper::Combine(Combinator::AllSettled), "allSettled"),
-        (Helper::Combine(Combinator::Race), "race"),
-        (Helper::StaticResolve, "resolve"),
-        (Helper::StaticReject, "reject"),
+    // `any` and `withResolvers` only when the code names them (T25).
+    let gated = [
+        (Helper::Combine(Combinator::Any), "any", 1),
+        (Helper::WithResolvers, "withResolvers", 0),
     ]
     .into_iter()
-    .map(|(h, name)| {
+    .filter(|(_, name, _)| cx.names(name));
+    let statics: Vec<(u32, u32, i32)> = [
+        (Helper::Combine(Combinator::All), "all", 1),
+        (Helper::Combine(Combinator::AllSettled), "allSettled", 1),
+        (Helper::Combine(Combinator::Race), "race", 1),
+        (Helper::StaticResolve, "resolve", 1),
+        (Helper::StaticReject, "reject", 1),
+    ]
+    .into_iter()
+    .chain(gated.collect::<Vec<_>>())
+    .map(|(h, name, len)| {
         let code = ph(cx, h);
         cx.declare_func(code);
-        (code, cx.str(name), 1)
+        (code, cx.str(name), len)
     })
     .collect();
     let (name, prototype, constructor) = (
@@ -1092,10 +1139,12 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
     let element = match c {
         Combinator::All => Some(ph(cx, Helper::Element(Element::All))),
         Combinator::AllSettled => Some(ph(cx, Helper::Element(Element::Fulfilled))),
+        Combinator::Any => Some(ph(cx, Helper::Element(Element::AnyRejected))),
         Combinator::Race => None,
     };
     let rejected =
         (c == Combinator::AllSettled).then(|| ph(cx, Helper::Element(Element::Rejected)));
+    let any_reject = (c == Combinator::Any).then(|| ph(cx, Helper::AnyReject));
     for code in element.iter().chain(&rejected) {
         cx.declare_func(*code);
     }
@@ -1171,9 +1220,14 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
                             s.local_get(STATE).local_get(I).ref_i31();
                             s.global_get(G_FALSE);
                             s.array_new_fixed(T_VALS, 3).local_set(ENV);
+                            if c == Combinator::Any {
+                                // then(resolve, rejectElement)
+                                s.local_get(RES);
+                            }
                             native(s, new_function, code, Some(ENV), empty, 1);
                             match rejected {
                                 Some(code) => native(s, new_function, code, Some(ENV), empty, 1),
+                                None if c == Combinator::Any => {}
                                 None => {
                                     s.local_get(REJ);
                                 }
@@ -1205,13 +1259,17 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
                 s.array_get(T_VALS).ref_cast_non_null(HeapType::I31);
                 s.i31_get_s().i32_eqz();
                 s.if_(BlockType::Empty);
-                s.local_get(RES).global_get(G_UNDEFINED);
-                s.local_get(STATE)
-                    .ref_as_non_null()
-                    .i32_const(0)
-                    .array_get(T_VALS);
-                s.array_new_fixed(T_VALS, 1);
-                s.global_get(empty).call(call_value).drop();
+                if let Some(any_reject) = any_reject {
+                    s.local_get(STATE).ref_as_non_null().call(any_reject);
+                } else {
+                    s.local_get(RES).global_get(G_UNDEFINED);
+                    s.local_get(STATE)
+                        .ref_as_non_null()
+                        .i32_const(0)
+                        .array_get(T_VALS);
+                    s.array_new_fixed(T_VALS, 1);
+                    s.global_get(empty).call(call_value).drop();
+                }
                 s.end();
             }
         },
@@ -1233,8 +1291,9 @@ fn element(cx: &mut dyn Cx, e: Element) -> Function {
     let define = oh(cx, object::Helper::DefineProp);
     let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
     let empty = cx.str("");
+    let any_reject = (e == Element::AnyRejected).then(|| ph(cx, Helper::AnyReject));
     let settled = match e {
-        Element::All => None,
+        Element::All | Element::AnyRejected => None,
         Element::Fulfilled => Some((cx.str("fulfilled"), cx.str("value"))),
         Element::Rejected => Some((cx.str("rejected"), cx.str("reason"))),
     };
@@ -1290,19 +1349,78 @@ fn element(cx: &mut dyn Cx, e: Element) -> Function {
     s.array_get(T_VALS).ref_cast_non_null(HeapType::I31);
     s.i31_get_s().i32_eqz();
     s.if_(BlockType::Empty);
-    s.local_get(STATE)
-        .ref_as_non_null()
-        .i32_const(2)
-        .array_get(T_VALS);
-    s.global_get(G_UNDEFINED);
-    s.local_get(STATE)
-        .ref_as_non_null()
-        .i32_const(0)
-        .array_get(T_VALS);
-    s.array_new_fixed(T_VALS, 1);
-    s.global_get(empty).call(call_value).drop();
+    if let Some(any_reject) = any_reject {
+        s.local_get(STATE).ref_as_non_null().call(any_reject);
+    } else {
+        s.local_get(STATE)
+            .ref_as_non_null()
+            .i32_const(2)
+            .array_get(T_VALS);
+        s.global_get(G_UNDEFINED);
+        s.local_get(STATE)
+            .ref_as_non_null()
+            .i32_const(0)
+            .array_get(T_VALS);
+        s.array_new_fixed(T_VALS, 1);
+        s.global_get(empty).call(call_value).drop();
+    }
     s.end();
     s.global_get(G_UNDEFINED);
+    s.end();
+    f
+}
+
+/// node's AggregateError of `Promise.any`; V8 makes it with no stack frames, so its `stack` is
+/// just its header, and node prints it like an error without a stack: `[AggregateError: …]`.
+const ANY_MESSAGE: &str = "All promises were rejected";
+
+fn any_reject(cx: &mut dyn Cx) -> Function {
+    let new_error = oh(cx, object::Helper::NewError(ErrorKind::AggregateError));
+    let define = oh(cx, object::Helper::Define);
+    let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
+    let (msg, stack, header, empty) = (
+        cx.str(ANY_MESSAGE),
+        cx.str("stack"),
+        cx.str(&format!("AggregateError: {ANY_MESSAGE}")),
+        cx.str(""),
+    );
+    const STATE: u32 = 0;
+    const E: u32 = 1;
+    let mut f = Function::new([(1, jsval())]);
+    let mut s = f.instructions();
+    s.local_get(STATE).i32_const(0).array_get(T_VALS);
+    s.global_get(msg).global_get(G_UNDEFINED);
+    s.call(new_error).local_tee(E);
+    s.ref_cast_non_null(runtime::object()).global_get(stack);
+    s.global_get(header).i32_const(object::HIDDEN).call(define);
+    s.local_get(STATE).i32_const(3).array_get(T_VALS);
+    s.global_get(G_UNDEFINED);
+    s.local_get(E).array_new_fixed(T_VALS, 1);
+    s.global_get(empty).call(call_value).drop();
+    s.end();
+    f
+}
+
+/// `Promise.withResolvers()`: `{ promise, resolve, reject }` (always a `%Promise%`, F64).
+fn with_resolvers(cx: &mut dyn Cx) -> Function {
+    let new = ph(cx, Helper::New);
+    let resolvers = ph(cx, Helper::Resolvers);
+    let new_object = oh(cx, object::Helper::NewObject);
+    let define = oh(cx, object::Helper::DefineProp);
+    let keys = [cx.str("promise"), cx.str("resolve"), cx.str("reject")];
+    const O: u32 = 3;
+    const P: u32 = 4;
+    const RES: u32 = 5;
+    const REJ: u32 = 6;
+    let mut f = Function::new([(4, jsval())]);
+    let mut s = f.instructions();
+    s.call(new).local_tee(P).ref_cast_non_null(promise());
+    s.call(resolvers).local_set(REJ).local_set(RES);
+    s.call(new_object).local_set(O);
+    for (key, v) in keys.into_iter().zip([P, RES, REJ]) {
+        s.local_get(O).global_get(key).local_get(v).call(define);
+    }
+    s.local_get(O);
     s.end();
     f
 }
@@ -1514,7 +1632,7 @@ fn check_callback(cx: &mut dyn Cx) -> Function {
     let inspect = cx.helper(runtime::Helper::Inspect);
     let ctor_name = cx.helper(runtime::Helper::Prop(props::Helper::CtorName));
     let concat = cx.helper(runtime::Helper::Concat);
-    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let throw = ph(cx, Helper::ThrowArgType);
     let (msg, instance, type_, open, close, quote) = (
         cx.str("The \"callback\" argument must be of type function. Received "),
         cx.str("an instance of "),
@@ -1584,6 +1702,75 @@ fn check_callback(cx: &mut dyn Cx) -> Function {
         s.call(concat).call(throw);
     }
     s.end();
+    s.end();
+    f
+}
+
+/// `(msg: (ref $string))`: throw node's `ERR_INVALID_ARG_TYPE` NodeError: a TypeError with an
+/// own enumerable `code` and an own `toString` giving `TypeError [code]: message` (also the
+/// header node prints when it's uncaught).
+fn throw_arg_type(cx: &mut dyn Cx) -> Function {
+    let new_error = oh(cx, object::Helper::NewError(ErrorKind::TypeError));
+    let new = cx.helper(runtime::Helper::Func(func::Helper::New));
+    let define = oh(cx, object::Helper::Define);
+    let define_prop = oh(cx, object::Helper::DefineProp);
+    let to_string = ph(cx, Helper::CodeToString);
+    cx.declare_func(to_string);
+    let (code, code_key, to_string_key) = (
+        cx.str("ERR_INVALID_ARG_TYPE"),
+        cx.str("code"),
+        cx.str("toString"),
+    );
+    const MSG: u32 = 0;
+    const E: u32 = 1;
+    const ENV: u32 = 2;
+    let mut f = Function::new([(1, jsval()), (1, rt(true, T_VALS))]);
+    let mut s = f.instructions();
+    s.local_get(MSG)
+        .global_get(G_UNDEFINED)
+        .call(new_error)
+        .local_set(E);
+    s.global_get(code).array_new_fixed(T_VALS, 1).local_set(ENV);
+    s.local_get(E).ref_cast_non_null(runtime::object());
+    s.global_get(to_string_key);
+    native(&mut s, new, to_string, Some(ENV), to_string_key, 0);
+    s.i32_const(object::HIDDEN).call(define);
+    s.local_get(E)
+        .global_get(code_key)
+        .global_get(code)
+        .call(define_prop);
+    s.local_get(E).throw(TAG);
+    s.end();
+    f
+}
+
+/// The code of a NodeError's own `toString`: `${this.name} [${code}]: ${this.message}` (`env`:
+/// the code).
+fn code_to_string(cx: &mut dyn Cx) -> Function {
+    let get = oh(cx, object::Helper::Get);
+    let to_string = cx.helper(runtime::Helper::ToString);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let (name, message, open, close) = (
+        cx.str("name"),
+        cx.str("message"),
+        cx.str(" ["),
+        cx.str("]: "),
+    );
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(THIS).global_get(name).call(get).call(to_string);
+    s.global_get(open).call(concat);
+    env(&mut s);
+    s.i32_const(0)
+        .array_get(T_VALS)
+        .ref_cast_non_null(runtime::string());
+    s.call(concat);
+    s.global_get(close).call(concat);
+    s.local_get(THIS)
+        .global_get(message)
+        .call(get)
+        .call(to_string);
+    s.call(concat);
     s.end();
     f
 }
