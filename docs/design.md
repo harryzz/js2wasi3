@@ -169,6 +169,11 @@ stubs (same identity and `name`, calling traps) so it doesn't link every constru
 are objects of the prelude functions the code names (`Intrinsic::Namespace`). What the prelude links is decided by
 the names in the user's code: property names, and string literals (`s[m]()`, `Math[k]`); native methods that are
 not always needed are gated the same way (`ir::Module::names`). A name built at run time finds nothing (F109).)
+(T25 slice 5: well-known symbols are made on first use (`G_WELL_KNOWN`); the runtime honours `Symbol.toPrimitive`,
+`Symbol.hasInstance` and a user `Symbol.toStringTag` only when the code names them. `console.log` format strings are
+node's `formatWithOptions` in `builtins/console.js`, linked when a string in the code has a `%`. The formatter
+(`inspect.rs`) now matches node's `util.inspect` for cycles (a stack of the objects being formatted), symbol keys,
+escapes, > 100 entries and Map/Set iterators; it is linked into every command through the uncaught-exception path.)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

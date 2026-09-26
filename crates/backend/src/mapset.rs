@@ -54,9 +54,9 @@ pub const T_SIZE: u32 = 4;
 const T_NEXT: u32 = 5;
 const T_REMOVED: u32 = 6;
 /// `$mapiter` fields after the object's.
-const I_TABLE: u32 = 7;
-const I_POS: u32 = 8;
-const I_MODE: u32 = 9;
+pub const I_TABLE: u32 = 7;
+pub const I_POS: u32 = 8;
+pub const I_MODE: u32 = 9;
 
 /// The capacity of the first real table.
 const MIN_CAP: i32 = 4;
@@ -69,7 +69,7 @@ fn mtable() -> HeapType {
     HeapType::Concrete(T_MTABLE)
 }
 
-fn mapiter() -> HeapType {
+pub fn mapiter() -> HeapType {
     HeapType::Concrete(T_MAPITER)
 }
 

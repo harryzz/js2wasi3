@@ -188,16 +188,15 @@ fn command_output_is_streamed() {
         "let s = \"0123456789\";\n\
          for (let i = 0; i < 6; i++) s = s + s;\n\
          for (let i = 0; i < 5000; i++) console.log(i, s);\n\
-         function fmt() { return \"%s\"; }\n\
-         console.log(fmt(), 1);\n",
+         console.log(new Number(1));\n",
     )
     .unwrap();
     let out = dir.join("stream.wasm");
     let b = build(&src, &out, &[]);
     assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
     let (ok, stdout, stderr) = run_command(&out);
-    assert!(!ok, "the format string traps");
-    assert!(String::from_utf8_lossy(&stderr).contains("no_format"));
+    assert!(!ok, "the wrapper object traps");
+    assert!(String::from_utf8_lossy(&stderr).contains("wrapper_object_not_implemented"));
     let stdout = String::from_utf8(stdout).unwrap();
     let line = "0123456789".repeat(64);
     assert_eq!(stdout.lines().count(), 5000);
@@ -277,7 +276,7 @@ fn builtins_in_a_library() {
     }
 }
 
-/// T12 acceptance: a Wasm trap (here the unimplemented `%` format string) is not a JS exception:
+/// T12 acceptance: a Wasm trap (here an unimplemented wrapper object, F106) is not a JS exception:
 /// neither `catch` nor `finally` runs, and the command fails with the trap.
 #[test]
 fn traps_are_not_caught() {
@@ -287,13 +286,16 @@ fn traps_are_not_caught() {
     let (ok, stdout, stderr) = run_command(&out);
     assert!(!ok);
     let stderr = String::from_utf8_lossy(&stderr);
-    assert!(stderr.contains("no_format"), "{stderr}");
+    assert!(
+        stderr.contains("wrapper_object_not_implemented"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("Uncaught"), "{stderr}");
     assert_eq!(String::from_utf8(stdout).unwrap(), "before\n");
 }
 
 /// T13: what isn't implemented yet traps instead of giving a wrong value: reading a built-in
-/// method (functions are T14/T21), `console.log` of an object with a symbol key (F24), a built-in
+/// method (functions are T14/T21), `console.log` of an error inside an object (no stack: F24), a built-in
 /// `toString` that isn't implemented (`Function.prototype.toString` when the code never names
 /// `toString`: functions then carry no source text, T25).
 #[test]
@@ -307,7 +309,7 @@ fn unimplemented_object_features_trap() {
         ),
         (
             "inspect",
-            "const o = { [Symbol()]: 1 };\nconsole.log(\"before\");\nconsole.log(o);\n",
+            "const o = { e: new Error(\"x\") };\nconsole.log(\"before\");\nconsole.log(o);\n",
             "inspect_object_not_implemented",
         ),
         (

@@ -1,11 +1,8 @@
 // A Wasm trap is not a JS exception: neither `catch` nor `finally` runs.
-// (`%s` with more arguments is a format string, not implemented yet: it traps.)
-function fmt() {
-  return "%s";
-}
+// (A `Number` wrapper object isn't implemented (F106): `new Number` traps.)
 console.log("before");
 try {
-  console.log(fmt(), 1);
+  console.log(new Number(1));
 } catch (e) {
   console.log("caught", e);
 } finally {

@@ -256,10 +256,8 @@ fn command_globals() {
 
 #[test]
 fn command_rules() {
-    assert_eq!(
-        one("console.log('%d items', 3);"),
-        "1:13 unsupported: `console.log` format string (a first argument containing `%`, followed by more arguments) (planned: T21)"
-    );
+    // Format strings (T25 slice 5).
+    lowers("console.log('%d items', 3);");
     assert_eq!(
         one("export function f() { console.log(1); }"),
         "1:23 unsupported: `console` in a module with exports (a library can't write to stdout yet) (planned: T20)"

@@ -45,6 +45,9 @@ pub const KIND_GENERATOR: i32 = 2;
 pub const KIND_ASYNC: i32 = 3;
 /// A bound function (T25): `env` is `[target, bound this, ...bound args]`.
 pub const KIND_BOUND: i32 = 4;
+/// `Array.prototype.values` / `[Symbol.iterator]`, `String.prototype[Symbol.iterator]` (T25): while
+/// a value's `[Symbol.iterator]` is one, for-of takes the fast path.
+pub const KIND_VALUES: i32 = 5;
 
 /// [`Helper::New`] flags: an ordinary `function` (a `prototype` object, the ordinary construct).
 pub const NEW_ORDINARY: i32 = 1;
@@ -56,6 +59,8 @@ pub const NEW_GENERATOR: i32 = 4;
 pub const NEW_ASYNC: i32 = 8;
 /// [`Helper::New`] flags: a bound function (T25; no `prototype`).
 pub const NEW_BOUND: i32 = 16;
+/// [`Helper::New`] flags: a built-in `values` iterator method ([`KIND_VALUES`], T25).
+pub const NEW_VALUES: i32 = 32;
 
 pub fn function() -> HeapType {
     HeapType::Concrete(T_FUNCTION)
@@ -375,8 +380,11 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.i32_const(KIND_CLASS);
     s.i32_const(KIND_GENERATOR);
     s.i32_const(KIND_ASYNC);
+    s.i32_const(KIND_VALUES);
     s.i32_const(KIND_BOUND).i32_const(KIND_FUNCTION);
     s.local_get(FLAGS).i32_const(NEW_BOUND).i32_and();
+    s.select();
+    s.local_get(FLAGS).i32_const(NEW_VALUES).i32_and();
     s.select();
     s.local_get(FLAGS).i32_const(NEW_ASYNC).i32_and();
     s.select();
@@ -631,6 +639,27 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
     const O: u32 = 3;
     let mut f = Function::new([(1, jsval()), (1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
+    if cx.names("hasInstance") {
+        // `f[Symbol.hasInstance](v)` first (T25; only when the code names it).
+        let is_nullish = cx.helper(runtime::Helper::IsNullish);
+        let to_boolean = cx.helper(runtime::Helper::ToBoolean);
+        let call_value = fh(cx, Helper::CallValue);
+        let sym = cx.helper(runtime::Helper::WellKnownSymbol(
+            js2wasi3_ir::well_known_symbol("hasInstance").expect("well-known"),
+        ));
+        let what = cx.str("[Symbol.hasInstance]");
+        s.local_get(F).ref_test_non_null(runtime::object());
+        s.if_(BlockType::Empty);
+        s.local_get(F).call(sym).call(get).local_tee(P);
+        s.call(is_nullish).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(P).local_get(F);
+        s.local_get(V).array_new_fixed(T_VALS, 1);
+        s.global_get(what).call(call_value);
+        s.call(to_boolean).return_();
+        s.end();
+        s.end();
+    }
     s.local_get(F).ref_test_non_null(function()).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(not_callable).call(throw);
@@ -1326,6 +1355,9 @@ fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
     s.ref_cast_non_null(runtime::object()).global_set(g);
     if ns == Namespace::Math {
         define_constants(cx, &mut s, O, &js2wasi3_ir::MATH_CONSTANTS);
+    }
+    if cx.names("toStringTag") {
+        object::define_tag(cx, &mut s, O, ns.name());
     }
     for (key, code, len) in methods {
         s.local_get(O)

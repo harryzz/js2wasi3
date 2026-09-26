@@ -299,6 +299,20 @@ pub enum Helper {
     Keys(u8),
     /// `(o: (ref $object)) -> i32`: the number of live enumerable symbol keys.
     SymbolKeys,
+    /// `(o: (ref $object), all: i32) -> jsval`: an array of the own symbol keys in insertion order
+    /// (`all`: also non-enumerable ones; never private ones), T25.
+    OwnSymbols,
+    /// `(v) -> jsval`: `Object.getOwnPropertySymbols(v)` (T25).
+    GetOwnSymbols,
+    /// `(o: (ref $object)) -> jsval`: its `Symbol.toStringTag` (T25): `o[Symbol.toStringTag]` if
+    /// the code names `toStringTag` and it's a string, else the built-in tag from its type (`Map`,
+    /// `Promise`, `Generator`, `Array Iterator`, `Math`, …) or `undefined`.
+    BuiltinTag,
+    /// `(v) -> jsval`: [`Helper::BuiltinTag`] of an object, `undefined` for anything else.
+    TagOf,
+    /// `(v) -> i32`: node's `hasBuiltInToString` (T25): not an object, no `toString`, or one found
+    /// on a built-in prototype (not an own one).
+    BuiltinToString,
     /// `(args: jsval (an `$array`)) -> jsval`: an unmapped `arguments` object (T25): the indices,
     /// `length` and `[Symbol.iterator]` (`Array.prototype.values`), both hidden.
     MakeArguments,
@@ -370,6 +384,11 @@ impl Helper {
             Helper::Keys(1) => "Object.values",
             Helper::Keys(_) => "Object.entries",
             Helper::SymbolKeys => "symbol_keys",
+            Helper::OwnSymbols => "own_symbols",
+            Helper::GetOwnSymbols => "Object.getOwnPropertySymbols",
+            Helper::BuiltinTag => "builtin_tag",
+            Helper::TagOf => "tag_of",
+            Helper::BuiltinToString => "has_builtin_to_string",
             Helper::MakeArguments => "make_arguments",
         }
     }
@@ -414,6 +433,10 @@ impl Helper {
             Helper::CheckDestructure => (vec![v, s], vec![]),
             Helper::Keys(_) => (vec![v], vec![v]),
             Helper::SymbolKeys => (vec![o], vec![I32]),
+            Helper::OwnSymbols => (vec![o, I32], vec![v]),
+            Helper::GetOwnSymbols | Helper::TagOf => (vec![v], vec![v]),
+            Helper::BuiltinTag => (vec![o], vec![v]),
+            Helper::BuiltinToString => (vec![v], vec![I32]),
             Helper::MakeArguments => (vec![v], vec![v]),
         }
     }
@@ -474,6 +497,76 @@ impl Helper {
             Helper::CheckDestructure => check_destructure(cx),
             Helper::Keys(k) => keys(cx, k),
             Helper::SymbolKeys => symbol_keys(),
+            Helper::OwnSymbols => own_symbols(cx),
+            Helper::BuiltinTag => builtin_tag(cx),
+            Helper::BuiltinToString => {
+                let holder = h(cx, Helper::Holder);
+                let key = cx.str("toString");
+                const V: u32 = 0;
+                const HD: u32 = 1;
+                let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+                let mut s = f.instructions();
+                s.local_get(V).ref_test_non_null(object()).i32_eqz();
+                s.if_(BlockType::Empty);
+                s.i32_const(1).return_();
+                s.end();
+                s.local_get(V).ref_cast_non_null(object()).global_get(key);
+                s.call(holder).local_tee(HD).ref_is_null();
+                s.if_(BlockType::Empty);
+                s.i32_const(1).return_();
+                s.end();
+                s.local_get(HD).local_get(V).ref_eq();
+                s.if_(BlockType::Empty);
+                s.i32_const(0).return_();
+                s.end();
+                for b in Builtin::ALL {
+                    s.local_get(HD).global_get(G_PROTOS + b.index()).ref_eq();
+                    s.if_(BlockType::Empty);
+                    s.i32_const(1).return_();
+                    s.end();
+                }
+                s.i32_const(0);
+                s.end();
+                f
+            }
+            Helper::TagOf => {
+                let tag = h(cx, Helper::BuiltinTag);
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(0).ref_test_non_null(object());
+                s.if_(BlockType::Result(jsval()));
+                as_obj(&mut s, 0);
+                s.call(tag);
+                s.else_();
+                s.global_get(G_UNDEFINED);
+                s.end();
+                s.end();
+                f
+            }
+            Helper::GetOwnSymbols => {
+                let own = h(cx, Helper::OwnSymbols);
+                let new_array = rh(cx, runtime::Helper::Arr(array::Helper::New));
+                let is_nullish = rh(cx, runtime::Helper::IsNullish);
+                let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
+                let msg = cx.str("Cannot convert undefined or null to object");
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(0).ref_test_non_null(object());
+                s.if_(BlockType::Empty);
+                as_obj(&mut s, 0);
+                s.i32_const(1).call(own).return_();
+                s.end();
+                s.local_get(0).call(is_nullish);
+                s.if_(BlockType::Empty);
+                s.global_get(msg).call(throw);
+                s.end();
+                s.i32_const(0)
+                    .array_new_default(T_VALS)
+                    .i32_const(0)
+                    .call(new_array);
+                s.end();
+                f
+            }
             Helper::MakeArguments => make_arguments(cx),
         }
     }
@@ -1114,8 +1207,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             .into_iter()
             .map(|(name, h, len)| (runtime::Helper::Arr(h), Some(name), name, len))
             .chain([
+                // (Also `[Symbol.iterator]`: the same function object.)
                 (values, Some("values"), "values", 0),
-                (values, None, "values", 0),
             ])
             // `keys`/`entries` only when the code names them (T25).
             .chain(
@@ -1196,20 +1289,26 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         _ => Vec::new(),
     };
     // (keys, name, code, length, getter): one function object defined under each key.
-    let mut real: Vec<(Vec<u32>, u32, u32, i32, bool)> = real
+    // (keys, name, code, length, getter, `New` flags)
+    let mut real: Vec<(Vec<u32>, u32, u32, i32, bool, i32)> = real
         .into_iter()
         .map(|(h, key, name, len)| {
             let code = cx.helper(h);
             cx.declare_func(code);
-            let key = key.map_or(runtime::G_SYM_ITERATOR, |k| cx.str(k));
-            (vec![key], cx.str(name), code, len, false)
+            let mut keys = vec![key.map_or(runtime::G_SYM_ITERATOR, |k| cx.str(k))];
+            if h == values && b == Builtin::Array {
+                keys.push(runtime::G_SYM_ITERATOR);
+            }
+            let flags = if h == values { func::NEW_VALUES } else { 0 };
+            (keys, cx.str(name), code, len, false, flags)
         })
         .collect();
     // Methods written in the prelude (T21). T25: `Map.prototype[Symbol.iterator]` is `entries`,
     // `Set.prototype[Symbol.iterator]` and `keys` are `values`; `size` is a getter.
     for (key, code, len) in cx.builtin_methods(b) {
         cx.declare_func(code);
-        let getter = matches!(b, Builtin::Map | Builtin::Set) && key == "size";
+        let getter = (matches!(b, Builtin::Map | Builtin::Set) && key == "size")
+            || (b == Builtin::Symbol && key == "description");
         let name = cx.str(&if getter {
             format!("get {key}")
         } else {
@@ -1221,7 +1320,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             (Builtin::Set, "values") => keys.extend([cx.str("keys"), runtime::G_SYM_ITERATOR]),
             _ => {}
         }
-        real.push((keys, name, code, len as i32, getter));
+        real.push((keys, name, code, len as i32, getter, 0));
     }
     let define_accessor = real
         .iter()
@@ -1275,13 +1374,13 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.i32_const(0).ref_i31();
         s.i32_const(HIDDEN).call(define);
     }
-    for (keys, name, code, len, getter) in real {
+    for (keys, name, code, len, getter, flags) in real {
         s.ref_func(code);
         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
         s.ref_null(func::vals());
         s.global_get(name)
             .i32_const(len)
-            .i32_const(0)
+            .i32_const(flags)
             .call(new_function)
             .local_set(M);
         for key in keys {
@@ -1304,6 +1403,10 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     if b == Builtin::Promise {
         let ctor = cx.helper(runtime::Helper::Prom(crate::promise::Helper::Ctor));
         s.call(ctor).drop();
+    }
+    if let Some(tag) = builtin_tag_name(b).filter(|_| cx.names("toStringTag")) {
+        // `[Symbol.toStringTag]` (T25; only when the code names it).
+        define_tag(cx, &mut s, O, tag);
     }
     if cx.has_ctor(b) {
         // `constructor`: the constructor value (T25).
@@ -1875,16 +1978,19 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
     let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
     let define = h(cx, Helper::Define);
     let number_to_string = rh(cx, runtime::Helper::Num(numstr::Helper::NumberToString));
+    let own_symbols = h(cx, Helper::OwnSymbols);
     const T: u32 = 0;
     const SRC: u32 = 1;
     const I: u32 = 2;
     const N: u32 = 3;
     const KEYS: u32 = 4;
     const KK: u32 = 5;
+    const SYMS: u32 = 6;
     let mut f = Function::new([
         (2, ValType::I32),
         (1, rt(true, T_KEYS)),
         (1, rt(true, T_STRING)),
+        (1, jsval()),
     ]);
     let mut s = f.instructions();
     s.local_get(SRC).ref_test_non_null(object());
@@ -1900,6 +2006,27 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
                 .ref_as_non_null()
                 .local_tee(KK);
             s.ref_as_non_null();
+            as_obj(s, SRC);
+            s.local_get(KK).ref_as_non_null().call(own);
+            s.local_get(SRC).call(value);
+            s.i32_const(0).call(define);
+        });
+        // Then the enumerable symbol keys (T25).
+        as_obj(&mut s, SRC);
+        s.i32_const(0).call(own_symbols).local_tee(SYMS);
+        s.ref_cast_non_null(array::array())
+            .struct_get(T_ARRAY, array::F_LENGTH)
+            .local_set(N);
+        count_loop(&mut s, I, N, |s| {
+            as_obj(s, T);
+            s.local_get(SYMS)
+                .ref_cast_non_null(array::array())
+                .struct_get(T_ARRAY, array::F_ELEMS)
+                .local_get(I)
+                .array_get(T_VALS)
+                .ref_cast_non_null(string())
+                .local_tee(KK)
+                .ref_as_non_null();
             as_obj(s, SRC);
             s.local_get(KK).ref_as_non_null().call(own);
             s.local_get(SRC).call(value);
@@ -2356,6 +2483,14 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
         cx.str("[object Function]"),
     ];
     let no_prim = cx.str("Cannot convert object to primitive value");
+    let builtin_tag = cx.has_tags().then(|| {
+        (
+            h(cx, Helper::BuiltinTag),
+            rh(cx, runtime::Helper::Concat),
+            cx.str("[object "),
+            cx.str("]"),
+        )
+    });
     const O: u32 = 0;
     const HINT: u32 = 1;
     const HD: u32 = 2;
@@ -2370,6 +2505,52 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_STRING)),
     ]);
     let mut s = f.instructions();
+    if cx.names("toPrimitive") {
+        // `o[Symbol.toPrimitive](hint)` first (T25; only when the code names it).
+        let get = h(cx, Helper::Get);
+        let is_nullish = rh(cx, runtime::Helper::IsNullish);
+        let sym = rh(
+            cx,
+            runtime::Helper::WellKnownSymbol(
+                js2wasi3_ir::well_known_symbol("toPrimitive").expect("well-known"),
+            ),
+        );
+        let typeof_string = rh(cx, runtime::Helper::TypeofString);
+        let to_string = rh(cx, runtime::Helper::ToString);
+        let concat = rh(cx, runtime::Helper::Concat);
+        let (space, not_fn) = (cx.str(" "), cx.str(" is not a function"));
+        let hints = [cx.str("default"), cx.str("number"), cx.str("string")];
+        s.local_get(O).call(sym).call(get).local_tee(T);
+        s.call(is_nullish).i32_eqz();
+        s.if_(BlockType::Empty);
+        {
+            s.local_get(T).ref_test_non_null(func::function()).i32_eqz();
+            s.if_(BlockType::Empty);
+            s.local_get(T).call(typeof_string);
+            s.global_get(space).call(concat);
+            s.local_get(T).call(to_string).call(concat);
+            s.global_get(not_fn).call(concat).call(throw);
+            s.end();
+            s.local_get(T).local_get(O);
+            // (`select` picks its first operand when the condition holds.)
+            s.global_get(hints[2]);
+            s.global_get(hints[1]);
+            s.global_get(hints[0]);
+            s.local_get(HINT).i32_const(1).i32_eq();
+            s.typed_select(string_ref());
+            s.local_get(HINT).i32_const(2).i32_eq();
+            s.typed_select(string_ref());
+            s.array_new_fixed(T_VALS, 1);
+            s.global_get(to_primitive_key(cx));
+            s.call(call_value).local_tee(R);
+            s.ref_test_non_null(object());
+            s.if_(BlockType::Empty);
+            s.global_get(no_prim).call(throw);
+            s.end();
+            s.local_get(R).return_();
+        }
+        s.end();
+    }
     // Two rounds: I = 0, 1. The key of round I: toString when (I == 0) == (hint == string).
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).i32_const(2).i32_ge_u().br_if(1);
@@ -2402,7 +2583,17 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
         s.end();
         s.local_get(HD).call(obj_proto).ref_eq();
         s.if_(BlockType::Empty);
-        // Object.prototype.toString: `[object Tag]`.
+        // Object.prototype.toString: `[object Tag]`, the built-in tag first (T25; only if the
+        // program can make a tagged object).
+        if let Some((builtin_tag, concat, object_open, close_bracket)) = builtin_tag {
+            s.local_get(O).call(builtin_tag).local_tee(T);
+            runtime::is_string(&mut s, T);
+            s.if_(BlockType::Empty);
+            s.global_get(object_open);
+            s.local_get(T).ref_cast_non_null(string()).call(concat);
+            s.global_get(close_bracket).call(concat).return_();
+            s.end();
+        }
         s.local_get(O).ref_test_non_null(func::function());
         s.if_(BlockType::Empty);
         s.global_get(tags[3]).return_();
@@ -2740,4 +2931,195 @@ fn make_arguments(cx: &mut dyn Cx) -> Function {
     s.local_get(O);
     s.end();
     f
+}
+
+/// `$own_symbols(o, all)` (T25): the own symbol keys in insertion order, as an array.
+fn own_symbols(cx: &mut dyn Cx) -> Function {
+    let new_array = rh(cx, runtime::Helper::Arr(array::Helper::New));
+    const O: u32 = 0;
+    const ALL: u32 = 1;
+    const E: u32 = 2;
+    const N: u32 = 3;
+    const C: u32 = 4;
+    const V: u32 = 5;
+    let mut f = Function::new([(3, ValType::I32), (1, rt(true, T_VALS))]);
+    let mut s = f.instructions();
+    // Is entry E a symbol key to list?
+    let listed = |s: &mut InstructionSink| {
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(E)
+            .array_get(T_KEYS)
+            .ref_test_non_null(runtime::symbol());
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_ATTRS)
+            .local_get(E)
+            .array_get_u(T_BYTES);
+        // Private: never; hidden (non-enumerable): only with `all`.
+        // (`select` picks its first operand when `all` is set.)
+        s.i32_const(PRIVATE)
+            .i32_const(PRIVATE | HIDDEN)
+            .local_get(ALL)
+            .select();
+        s.i32_and().i32_eqz();
+        s.i32_and();
+    };
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(N);
+    count_loop(&mut s, E, N, |s| {
+        listed(s);
+        s.local_get(C).i32_add().local_set(C);
+    });
+    s.local_get(C).array_new_default(T_VALS).local_set(V);
+    s.i32_const(0).local_set(C);
+    count_loop(&mut s, E, N, |s| {
+        listed(s);
+        s.if_(BlockType::Empty);
+        s.local_get(V).ref_as_non_null().local_get(C);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(E)
+            .array_get(T_KEYS);
+        s.array_set(T_VALS);
+        s.local_get(C).i32_const(1).i32_add().local_set(C);
+        s.end();
+    });
+    s.local_get(V)
+        .ref_as_non_null()
+        .local_get(C)
+        .call(new_array);
+    s.end();
+    f
+}
+
+/// The callee text of a `Symbol.toPrimitive` call in errors (T25).
+fn to_primitive_key(cx: &mut dyn Cx) -> u32 {
+    cx.str("[Symbol.toPrimitive]")
+}
+
+/// The tags of the built-in prototypes (T25): `Symbol.toStringTag` own properties when the code
+/// names `toStringTag`, and what [`Helper::BuiltinTag`] reports for their instances.
+pub fn builtin_tag_name(b: Builtin) -> Option<&'static str> {
+    Some(match b {
+        Builtin::Map => "Map",
+        Builtin::Set => "Set",
+        Builtin::Promise => "Promise",
+        Builtin::Generator => "Generator",
+        Builtin::Symbol => "Symbol",
+        Builtin::ArrayIterator => "Array Iterator",
+        Builtin::MapIterator => "Map Iterator",
+        Builtin::SetIterator => "Set Iterator",
+        _ => return None,
+    })
+}
+
+/// `$builtin_tag(o)` (T25), see [`Helper::BuiltinTag`].
+fn builtin_tag(cx: &mut dyn Cx) -> Function {
+    use crate::{generator, mapset, promise};
+    const O: u32 = 0;
+    const T: u32 = 1;
+    let mut f = Function::new([(1, jsval())]);
+    let mut s = f.instructions();
+    if cx.names("toStringTag") {
+        let get = h(cx, Helper::Get);
+        let sym = rh(
+            cx,
+            runtime::Helper::WellKnownSymbol(
+                js2wasi3_ir::well_known_symbol("toStringTag").expect("well-known"),
+            ),
+        );
+        s.local_get(O).call(sym).call(get).local_set(T);
+        runtime::is_string(&mut s, T);
+        s.if_(BlockType::Empty);
+        s.local_get(T).return_();
+        s.end();
+    }
+    let tag = |cx: &mut dyn Cx, s: &mut InstructionSink, name: &str| {
+        let g = cx.str(name);
+        s.if_(BlockType::Empty);
+        s.global_get(g).return_();
+        s.end();
+    };
+    let class = |s: &mut InstructionSink, c: i32| {
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_CLASS)
+            .i32_const(CLASS_MASK)
+            .i32_and()
+            .i32_const(c)
+            .i32_eq();
+    };
+    if cx.has_maps() {
+        class(&mut s, mapset::CLASS_MAP);
+        tag(cx, &mut s, "Map");
+        class(&mut s, mapset::CLASS_SET);
+        tag(cx, &mut s, "Set");
+        s.local_get(O).ref_test_non_null(mapset::mapiter());
+        s.if_(BlockType::Empty);
+        {
+            let (m, st) = (cx.str("Map Iterator"), cx.str("Set Iterator"));
+            s.global_get(m).global_get(st);
+            s.local_get(O)
+                .ref_cast_non_null(mapset::mapiter())
+                .struct_get(runtime::T_MAPITER, mapset::I_MODE)
+                .i32_const(3)
+                .i32_ge_u();
+            s.typed_select(string_ref()).return_();
+        }
+        s.end();
+    }
+    s.local_get(O).ref_test_non_null(promise::promise());
+    tag(cx, &mut s, "Promise");
+    // Generator and async functions (their prototypes' tags, F70).
+    for (kind, name) in [
+        (func::KIND_GENERATOR, "GeneratorFunction"),
+        (func::KIND_ASYNC, "AsyncFunction"),
+    ] {
+        s.local_get(O).ref_test_non_null(func::function());
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(O)
+            .ref_cast_non_null(func::function())
+            .struct_get(runtime::T_FUNCTION, func::F_KIND)
+            .i32_const(kind)
+            .i32_eq();
+        s.else_();
+        s.i32_const(0);
+        s.end();
+        tag(cx, &mut s, name);
+    }
+    s.local_get(O).ref_test_non_null(generator::generator());
+    tag(cx, &mut s, "Generator");
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_PROTO)
+        .global_get(G_PROTOS + Builtin::ArrayIterator.index())
+        .ref_eq();
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_PROTO)
+        .ref_is_null()
+        .i32_eqz()
+        .i32_and();
+    tag(cx, &mut s, "Array Iterator");
+    if cx.has_namespaces() {
+        class(&mut s, CLASS_MATH);
+        tag(cx, &mut s, "Math");
+        class(&mut s, CLASS_JSON);
+        tag(cx, &mut s, "JSON");
+    }
+    s.global_get(G_UNDEFINED);
+    s.end();
+    f
+}
+
+/// Define `o[Symbol.toStringTag] = tag` (read-only, non-enumerable) on the object in local `o`.
+pub fn define_tag(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, tag: &str) {
+    let define = h(cx, Helper::Define);
+    let sym = rh(
+        cx,
+        runtime::Helper::WellKnownSymbol(
+            js2wasi3_ir::well_known_symbol("toStringTag").expect("well-known"),
+        ),
+    );
+    let tag = cx.str(tag);
+    s.local_get(o).ref_cast_non_null(object());
+    s.call(sym).ref_cast_non_null(string());
+    s.global_get(tag);
+    s.i32_const(HIDDEN | READONLY).call(define);
 }

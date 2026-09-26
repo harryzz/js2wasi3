@@ -237,6 +237,43 @@ species, `isConcatSpreadable`, generic `push`/`join`; `Array.fromAsync`, iterato
 **Next smallest step:** slice 5 (symbols and printing) or T20, the user's choice. Slice 5's first piece:
 `Symbol.toStringTag` on the built-in prototypes (F94), which `Object.prototype.toString` and `console.log` read.
 
+### Slice 5: symbols and printing (done 2026-09-26)
+- **Symbols (F53):** `builtins/symbol.js` (`Symbol.prototype` `toString`/`valueOf`/`description` getter,
+  `Symbol.for`/`keyFor` over two maps); the well-known symbols (`ir::WELL_KNOWN_SYMBOLS`,
+  `Intrinsic::WellKnownSymbol`, made on first use in `G_WELL_KNOWN`); `Object.getOwnPropertySymbols`
+  (`object::Helper::OwnSymbols`), symbol keys in spread/rest (`copy_props`) and `Object.assign`; a symbol `==` only
+  itself. `Symbol.toPrimitive` (ToPrimitive, with the hint strings; `string + x` now lowers to the run-time `+` so
+  the hint is `default`) and `Symbol.hasInstance` (`instanceof`) are honoured when the code names them.
+- **`Symbol.toStringTag` (F94):** `object::Helper::BuiltinTag` (the user's tag when `toStringTag` is named, else
+  type checks: Map/Set and their iterators, Promise, Generator, Array Iterator, Math/JSON, generator and async
+  functions) behind `Object.prototype.toString` (prelude, `__intrinsic_builtin_tag`) and the native `"" + obj`
+  (gated on `Cx::has_tags`); tag properties on the built-in prototypes and `Math`/`JSON` when the code names
+  `toStringTag`.
+- **`console.log` (F24, F62, F99, F52):** `inspect_props` (string then symbol keys) shared by objects, arrays (extra
+  properties) and maps/sets (own properties); at most 100 entries then `... n more items` (node's
+  `groupArrayElements` tail and number-alignment rules); node's `strEscape` in `inspect_quote`; cycles
+  (`inspect_format` keeps a stack of the objects being formatted: `[Circular *n]`, `<ref *n>` before the braces so it
+  counts in the width like node's); Map/Set iterator previews (`inspect_map_iterator` steps a copy); user
+  `Symbol.toStringTag` prefixes (`T [Tee] {}`).
+- **Format strings (F23):** `builtins/console.js` `$$consoleFormat` (node's `formatWithOptions`: `%s %d %i %f %j %O
+  %o %c %%`), linked only when a string in the user's code has a `%`; intrinsics `inspect(v, depth)` and
+  `builtin_to_string` (node's `hasBuiltInToString`). Without a `%` string in the code a dynamic first argument
+  keeps the run-time check (it traps on a `%`).
+- **Iteration (F51):** `Array.prototype.values` and `[Symbol.iterator]` are one function object; built-in `values`
+  functions have kind `KIND_VALUES`, and when the code names `iterator`, for-of/spread keep the array/string fast
+  path only while `v[Symbol.iterator]` is one (a replaced or own one is called).
+- Tests: fixtures `builtins/symbols.js`, `inspect-more.js` (23 cases), `console-format.js`, `iterator-lookup.js`;
+  `exceptions/trap.js` and the streamed-output test now trap on `new Number(1)` (format strings work);
+  `unsupported.rs`, `build.rs`. `cargo test` ok; `scripts/diff.sh -j 4`: 86 passed, 0 failed, 11 skipped.
+- `hello.js`: 55175 bytes (+2132 over 53043): the formatter's new features (cycles, escapes, props, more-items) are
+  linked into every command because the uncaught-exception path can print any value (F110).
+
+**Not done (follow-ups):** F110 (errors nested in objects, non-ASCII widths, `%o` of objects, `Symbol()` vs
+`Symbol("")`, F70's generator prototype chain, the formatter's size in every command).
+
+**Next smallest step:** slice 6 (promises and timers: F64, F67, F74) or T20, the user's choice. Slice 6's first
+piece: `Promise.withResolvers` and `Promise.any` + `AggregateError` (F64).
+
 ## Handoff for the rest of slice 3 (written 2026-09-26, end of the slices 1–3 session; done, kept for reference)
 
 **State:** `main`, committed, not pushed. Slices 1 (`JSON.parse`) and 2 (`Map`/`Set`, `Map.groupBy`) are done; slice 3
@@ -403,3 +440,11 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 - 2026-09-26: spread calls of built-in constructors (`Array(...xs)`) and their function properties (`Array.apply`, `String.name`: builtins::FUNCTION_PROPS) go through the constructor value. ctor-values.js PASS.
 - 2026-09-26: slice 4 done: Notes / Result, README (F37, F81, F87, F88, F91, F95, F97, F101 ticked; F106–F108; Next up), D5, keywords.md updated.
 - 2026-09-26: recorded F109 (built-ins linked only when named in the code) in README, D5, keywords.md, slice 4 notes.
+- 2026-09-26: slice 5 (symbols and printing) started.
+- 2026-09-26: 5a done (F53 mostly): symbol.js prelude (Symbol.prototype toString/valueOf/description getter, Symbol.for/keyFor over two maps); well-known symbols (ir::WELL_KNOWN_SYMBOLS, Intrinsic::WellKnownSymbol, runtime G_WELL_KNOWN made on first use); Symbol.toPrimitive in ToPrimitive and Symbol.hasInstance in instanceof (gated on the names via ir::Module::names); `string + any` lowers to the run-time + (hint default); Object.getOwnPropertySymbols (object::Helper::OwnSymbols), symbol keys in spread/rest (copy_props) and Object.assign; a symbol == only itself. Left: Symbol() vs Symbol('') (description undefined for both). symbols.js PASS; diff.sh 82/0/11; hello.js 53050.
+- 2026-09-26: 5b part 1: Symbol.toStringTag (F94): object::Helper::BuiltinTag (the user's @@toStringTag when `toStringTag` is named, else type checks: Map/Set/iterators, Promise, Generator, Array Iterator, Math/JSON, generator/async functions), used by the native `"" + obj` path (gated on Cx::has_tags: maps/namespaces/promises/generator or async functions/iterator names) and by the prelude's Object.prototype.toString (__intrinsic_builtin_tag); tag properties on the built-in prototypes and Math/JSON when `toStringTag` is named. hello.js 53050; diff.sh 83/0/11.
+- 2026-09-26: 5c part 1: console.log: inspect_props (own enumerable string keys, symbol keys as `Symbol(x): v`) shared by objects, arrays (extra properties) and maps/sets (own properties); arrays and maps/sets show at most 100 entries then `... n more items` (node's groupArrayElements tail and number-alignment rules); strings escape like node's strEscape (\\b \\t \\n \\f \\r, \\xHH, \\uxxxx lone surrogates, \\', \\\\) instead of trapping; own_symbols select fix. Trap test example now a nested error. hello.js 54609 (+1559: the formatter is linked into every command through the uncaught-exception path). diff.sh 83/0/11, cargo test ok.
+- 2026-09-26: 5c done: cycles (inspect_format = cycle check over G_INSPECT_SEEN/CIRC, then inspect_format_value; `<ref *n>` before the braces via inspect_ref_open, so it counts in the width check like node), Map/Set iterator previews (inspect_map_iterator: a copy of the iterator steps the rest; `{  }` when empty; ≤ 100), user Symbol.toStringTag prefixes `Name [tag] ` (gated on `toStringTag`). inspect-more.js PASS (23 cases); errors nested in objects still trap (no stacks, F31). hello.js 55169 (+2119 over 53050: the formatter is linked into every command via the uncaught-exception path).
+- 2026-09-26: 5d done (F23): console.js prelude `$$consoleFormat` (node's formatWithOptions: %s %d %i %f %j %O %o(primitives; objects trap) %c %%), linked only when a user string has a `%` (then console.log calls it when the first of several arguments may be a string); intrinsics inspect(v, depth) (Intrinsic::InspectAt, inspect::Helper::At) and builtin_to_string (hasBuiltInToString). Trap tests (exceptions/trap.js, streamed output) now use `new Number(1)`. console-format.js PASS; cargo test ok; hello.js 55169.
+- 2026-09-26: 5e done (F51): KIND_VALUES/NEW_VALUES; one function object for Array.prototype.values and [Symbol.iterator]; Open keeps the fast path only while [Symbol.iterator] is a built-in values (gated on `iterator`); values() builds its state directly. iterator-lookup.js PASS; diff.sh 86/0/11; hello.js 55175.
+- 2026-09-26: slice 5 done: Notes / Result, README (F23, F24, F51, F52, F53, F62, F94, F99 ticked; F70 moved to F110; Next up), D5, keywords.md updated.

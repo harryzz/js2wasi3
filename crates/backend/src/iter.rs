@@ -162,11 +162,39 @@ fn open(cx: &mut dyn Cx) -> Function {
         null_eq(s);
         s.struct_new(T_ITER).return_();
     };
+    // Arrays and strings by index, unless their `[Symbol.iterator]` was replaced (T25: looked up
+    // only when the code names `iterator`).
+    let checked = cx.names("iterator");
+    // (After the type test on the stack: `test && [Symbol.iterator] is a built-in values`.)
+    let fast = |s: &mut InstructionSink| {
+        if checked {
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(V)
+                .global_get(G_SYM_ITERATOR)
+                .call(get)
+                .local_tee(M);
+            s.ref_test_non_null(func::function());
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(M)
+                .ref_cast_non_null(func::function())
+                .struct_get(runtime::T_FUNCTION, func::F_KIND)
+                .i32_const(func::KIND_VALUES)
+                .i32_eq();
+            s.else_();
+            s.i32_const(0);
+            s.end();
+            s.else_();
+            s.i32_const(0);
+            s.end();
+        }
+    };
     s.local_get(V).ref_test_non_null(array::array());
+    fast(&mut s);
     s.if_(BlockType::Empty);
     simple(&mut s, ARRAY);
     s.end();
     runtime::is_string(&mut s, V);
+    fast(&mut s);
     s.if_(BlockType::Empty);
     simple(&mut s, STRING);
     s.end();
@@ -536,7 +564,6 @@ fn spread(cx: &mut dyn Cx) -> Function {
 /// `kind`: [`ARRAY_LIKE`] (`values`: arrays and strings take `Open`'s fast paths), [`ARRAY_KEYS`]
 /// or [`ARRAY_ENTRIES`] (any object).
 fn proto_values(cx: &mut dyn Cx, kind: i32) -> Function {
-    let open = ih(cx, Helper::Open);
     let alloc = oh(cx, object::Helper::Alloc);
     let define = oh(cx, object::Helper::Define);
     let proto = oh(
@@ -567,7 +594,15 @@ fn proto_values(cx: &mut dyn Cx, kind: i32) -> Function {
     s.i32_or();
     s.i32_const((kind == ARRAY_LIKE) as i32).i32_and();
     s.if_(BlockType::Result(jsval()));
-    s.local_get(THIS).global_get(msg).call(open);
+    // (Not through `Open`: that would look up a replaced `[Symbol.iterator]`.)
+    s.i32_const(ARRAY).i32_const(STRING);
+    s.local_get(THIS).ref_test_non_null(array::array());
+    s.select();
+    s.local_get(THIS);
+    null_eq(&mut s);
+    s.i32_const(0);
+    null_eq(&mut s);
+    s.struct_new(T_ITER);
     s.else_();
     s.i32_const(kind);
     s.local_get(THIS);

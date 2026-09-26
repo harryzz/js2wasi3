@@ -697,6 +697,19 @@ impl runtime::Cx for Emitter<'_> {
         self.m.names.contains(name)
     }
 
+    fn has_tags(&mut self) -> bool {
+        let m = &self.m;
+        m.maps
+            || m.namespaces
+            || m.promises
+            || m.functions
+                .iter()
+                .any(|f| f.flags.is_async || f.flags.is_generator)
+            || ["toStringTag", "iterator", "values", "keys", "entries"]
+                .iter()
+                .any(|n| m.names.contains(*n))
+    }
+
     fn has_namespaces(&mut self) -> bool {
         self.m.namespaces
     }
@@ -1337,6 +1350,11 @@ impl Emitter<'_> {
                     Intrinsic::ForInKeys => H::Obj(object::Helper::ForInKeys),
                     Intrinsic::ObjectCreate => H::Obj(object::Helper::Create),
                     Intrinsic::GetPrototypeOf => H::Obj(object::Helper::GetPrototypeOf),
+                    Intrinsic::GetOwnPropertySymbols => H::Obj(object::Helper::GetOwnSymbols),
+                    Intrinsic::BuiltinTag => H::Obj(object::Helper::TagOf),
+                    Intrinsic::InspectAt(d) => H::Fmt(inspect::Helper::At(*d)),
+                    Intrinsic::BuiltinToString => H::Obj(object::Helper::BuiltinToString),
+                    Intrinsic::WellKnownSymbol(k) => H::WellKnownSymbol(*k),
                     Intrinsic::HasOwn => H::Obj(object::Helper::HasOwn),
                     Intrinsic::InstanceOf(b) => H::Obj(object::Helper::InstanceOf(*b)),
                     Intrinsic::ConstructList => H::Func(func::Helper::ConstructList),

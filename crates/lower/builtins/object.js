@@ -1,7 +1,6 @@
 // Objects (T21 slice 4). Conventions: crates/lower/src/builtins.rs.
 // `$$Object_x` is `Object.x`, `$$Object_prototype_x` is `Object.prototype.x`. Object intrinsics:
-// `define(o, k, v)` (CreateDataProperty on an object). Not implemented: symbol keys (the key lists
-// come from `Object.keys`), wrapper objects for primitive `this` / targets (they trap).
+// `define(o, k, v)` (CreateDataProperty on an object). Not implemented: wrapper objects for primitive `this` / targets (they trap).
 // Uses string.js's `$$String`.
 
 // ToObject for an object or a primitive whose properties are only read.
@@ -57,6 +56,17 @@ function $$Object_assign(target, ...sources) {
     for (let k = 0; k < m; k++) {
       const key = keys[k];
       to[key] = from[key];
+    }
+    // Then the enumerable symbol keys (T25).
+    if (typeof from === "object" || typeof from === "function") {
+      const syms = Object.getOwnPropertySymbols(from);
+      const ns = +syms.length;
+      for (let k = 0; k < ns; k++) {
+        const key = syms[k];
+        if (Object.getOwnPropertyDescriptor(from, key).enumerable) {
+          to[key] = from[key];
+        }
+      }
     }
   }
   return to;
@@ -189,7 +199,8 @@ function $$Object_prototype_toString() {
   }
   const t = typeof o;
   if (t === "function") {
-    return "[object Function]";
+    const ftag = __intrinsic_builtin_tag(o);
+    return ftag !== undefined ? "[object " + ftag + "]" : "[object Function]";
   }
   if (t === "number") {
     return "[object Number]";
@@ -206,11 +217,15 @@ function $$Object_prototype_toString() {
   if (t === "bigint") {
     return "[object BigInt]";
   }
+  // `Symbol.toStringTag` (T25): the object's own when the code names it, else the built-in one.
+  const tag = __intrinsic_builtin_tag(o);
+  if (tag !== undefined) {
+    return "[object " + tag + "]";
+  }
   if (Array.isArray(o)) {
     return "[object Array]";
   }
-  // `[[ErrorData]]`, approximated by the prototype chain. `Symbol.toStringTag` isn't supported
-  // (`[object Promise]`, `[object Generator]`: F53).
+  // `[[ErrorData]]`, approximated by the prototype chain.
   if (o instanceof Error) {
     return "[object Error]";
   }

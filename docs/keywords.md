@@ -58,14 +58,14 @@ templates, regex, multi-file `import`).
 | `final` | ➖ | Removed in ES5. |
 | `finally` | ✅ | Completion dispatch for every jump, also around `yield`/`await` (T12, T18, T19). |
 | `float` | ➖ | Removed in ES5. |
-| `for` | 🟡 | `for`, `for-in`, `for-of` (iterator protocol, destructuring) work. Missing: `for await` (F72). Arrays/strings iterate without looking up a replaced `Symbol.iterator` (F51). |
+| `for` | 🟡 | `for`, `for-in`, `for-of` (iterator protocol, destructuring) work. Missing: `for await` (F72). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). |
 | `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments`, `toString` (source text, T25), names from computed keys (T25). Missing: `"" + f` in code that never names `toString` traps (F104); `new.target` outside class constructors (F57); assigning to a function declaration's name (F45). |
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
 | `implements` | ➖ | Reserved in strict mode; a syntax error in node too. |
 | `import` | ❌ | Rejected: single-file programs only (multi-file modules F7; `import.meta` and dynamic `import()` F79). WIT imports as ES imports come with T20. |
 | `in` | ✅ | Objects and arrays; `#x in o` (T16). |
-| `instanceof` | 🟡 | Classes, functions, native errors, built-ins. Missing: `Symbol.hasInstance` (T21). |
+| `instanceof` | ✅ | Classes, functions, native errors, built-ins, `Symbol.hasInstance` (T25). |
 | `int` | ➖ | Removed in ES5. |
 | `interface` | ➖ | Reserved in strict mode; a syntax error in node too. |
 | `let` | ✅ | Block scope, a fresh binding per loop iteration, TDZ (also across `switch` cases). |
@@ -123,6 +123,7 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 | `Object` | 🟡 | `Object.keys`/`values`/`entries`, `defineProperty`, `getOwnPropertyDescriptor`, `freeze`/`seal`/`preventExtensions` and their tests, `getPrototypeOf`/`setPrototypeOf`, `create` (no descriptors), `assign`, `fromEntries` (T21); `Object.prototype` `toString` (no `Symbol.toStringTag`), `toLocaleString`, `valueOf`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`. T25: `Object(v)`, `Object` as a value, `Object.groupBy`, `__defineGetter__` & co. Missing: symbol keys in `assign` and `getOwnPropertySymbols` (F53); `Object("s")` wrappers (F106). |
 | `prototype` | ✅ | Function and class `prototype`, prototype chains, `Object.create`. |
 | `String` | 🟡 | T21: `String(x)`, `String.fromCharCode`/`fromCodePoint`, and `at`, `charAt`, `charCodeAt`, `codePointAt`, `concat`, `endsWith`, `includes`, `indexOf`, `lastIndexOf`, `padEnd`/`padStart`, `repeat`, `replace`/`replaceAll` (string patterns), `slice`, `split` (string separators), `startsWith`, `substring`/`substr`, `toLowerCase`/`toUpperCase` (common scripts; others trap), `trim*`, `isWellFormed`/`toWellFormed`, `toString`/`valueOf`; `<`/`>` compare strings. T25: `localeCompare` (ICU order for ASCII; others trap), `normalize` (strings no form changes; others trap), `String` as a value. Missing: RegExp methods (`match`, `search`, regex `split`/`replace`, T27), `new String` (F106), the rest of `localeCompare`/`normalize` (F107). |
+| `Symbol` | 🟡 | `Symbol(desc)`, `description`, `toString`, `Symbol.for`/`keyFor`, the well-known symbols (`iterator`, `toPrimitive`, `hasInstance` and `toStringTag` are honoured), symbol keys (`getOwnPropertySymbols`, spread, rest, `assign`, `console.log`) (T25). Missing: `Symbol()` and `Symbol("")` both have `description` `undefined` (F110); `Symbol` as a value (F106). |
 | `toString` | 🟡 | User `toString` is called by ToPrimitive (T16); arrays' `toString` works. Numbers' `toString(radix)` works (T21); plain objects' built-in `toString` traps when called directly (F37, T21); implicit string conversion (`"" + x`, templates) works. |
 | `undefined` | ✅ | |
 | `valueOf` | ✅ | User `valueOf` is called by ToPrimitive (hint-aware). Calling the built-in one directly traps (F37). |

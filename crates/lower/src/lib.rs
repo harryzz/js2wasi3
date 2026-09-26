@@ -3056,6 +3056,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     ));
                 }
                 if let Some(op) = self.global_function(id) {
+                    self.module.promises |= op == Intrinsic::PromiseCtor;
                     if matches!(op, Intrinsic::Timer(_)) && !self.command {
                         return Err(self.unsupported(
                             id.span,
@@ -3335,6 +3336,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if sm.property.name == "prototype" {
                     return Ok(Val::js(
                         Expr::intrinsic(Intrinsic::Prototype(Builtin::Symbol), vec![]),
+                        Kind::Any,
+                    ));
+                }
+                if let Some(k) = ir::well_known_symbol(&sm.property.name) {
+                    return Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::WellKnownSymbol(k), vec![]),
                         Kind::Any,
                     ));
                 }
@@ -4179,7 +4186,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ));
         }
         let several = c.arguments.len() > 1;
+        // `$$consoleFormat`, linked when a string in the code has a `%` (T25).
+        let format = self
+            .prelude
+            .names
+            .get("$$consoleFormat")
+            .filter(|_| self.prelude.is_live("$$consoleFormat"))
+            .and_then(|sym| self.funcs.get(sym))
+            .copied();
+        let mut first_format = false;
         let mut parts = Vec::new();
+        // The arguments as JS values (for `$$consoleFormat`).
+        let mut raw = Vec::new();
         // Every argument is evaluated before any is formatted (`console.log(a, a.pop())`).
         let mut pre = Vec::new();
         let mut result = Ok(());
@@ -4199,6 +4217,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let t = cx.func.add_local("arg", v.ty);
                 pre.push(Stmt::Set(t, v.e));
                 v.e = Expr::Local(t);
+            }
+            if format.is_some() {
+                raw.push(jsval_of(Val {
+                    e: v.e.clone(),
+                    ty: v.ty,
+                    kind: v.kind,
+                }));
+            }
+            if i == 0 && several && matches!(v.kind, Kind::Str | Kind::Any) && format.is_some() {
+                // A possible format string (T25): the whole line from `$$consoleFormat`.
+                first_format = true;
+                parts.push(jsval_of(v));
+                continue;
             }
             if i == 0 && several && matches!(v.kind, Kind::Str | Kind::Any) {
                 match static_string(e) {
@@ -4224,6 +4255,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             });
         }
         result?;
+        if let Some(func) = format.filter(|_| first_format) {
+            // Every argument as a JS value, formatted by the prelude.
+            for p in self.func_params[&func].clone().into_iter().flatten() {
+                self.observe(Slot::Var(p), Kind::Any);
+            }
+            let line = Expr::Call {
+                func,
+                args: vec![Expr::Array(raw.into_iter().map(Some).collect())],
+            };
+            parts = vec![Expr::intrinsic(Intrinsic::ToString, vec![line])];
+        }
         let mut line = Vec::new();
         for (i, p) in parts.into_iter().enumerate() {
             if i > 0 {
@@ -4372,6 +4414,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "random_seed" => 0,
             "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
             "trap" => 0,
+            "builtin_tag" | "builtin_to_string" => 1,
+            "inspect" => 2,
             "unit" => 2,
             "sub" | "str_set" | "define" => 3,
             _ => return Err(self.unsupported(c.span, &format!("intrinsic `{name}`"), "T21")),
@@ -4387,6 +4431,47 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             let e = from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![]));
             return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+        }
+        if name == "inspect" {
+            // `util.inspect(v)` from a literal depth (T25; -1: `console.log`'s own).
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, e)?);
+            let d = match c.arguments[1].as_expression() {
+                Some(Expression::NumericLiteral(n)) => Some(n.value as u8),
+                Some(Expression::UnaryExpression(u))
+                    if u.operator == UnaryOperator::UnaryNegation =>
+                {
+                    None
+                }
+                _ => return Err(self.unsupported(c.span, "inspect depth", "T21")),
+            };
+            let e = match d {
+                Some(d) => Expr::intrinsic(Intrinsic::InspectAt(d), vec![v]),
+                None => Expr::intrinsic(Intrinsic::Inspect, vec![v]),
+            };
+            return Ok((e, Call::Intrinsic(Some(Kind::Str))));
+        }
+        if name == "builtin_to_string" {
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, e)?);
+            let e = jsval_of(Val::new(
+                Expr::intrinsic(Intrinsic::BuiltinToString, vec![v]),
+                Type::Bool,
+            ));
+            return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
+        }
+        if name == "builtin_tag" {
+            // An object's `Symbol.toStringTag` (T25).
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, e)?);
+            let e = Expr::intrinsic(Intrinsic::BuiltinTag, vec![v]);
+            return Ok((e, Call::Intrinsic(Some(Kind::Any))));
         }
         if name == "define" {
             // CreateDataProperty(o, k, v) on an object.
@@ -4505,6 +4590,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         match (self.builtin_ident(&m.object)?, m.property.name.as_str()) {
             (Builtin::Object, "create") => Some(Intrinsic::ObjectCreate),
             (Builtin::Object, "getPrototypeOf") => Some(Intrinsic::GetPrototypeOf),
+            (Builtin::Object, "getOwnPropertySymbols") => Some(Intrinsic::GetOwnPropertySymbols),
             (Builtin::Object, "hasOwn") => Some(Intrinsic::HasOwn),
             (Builtin::Object, "keys") => Some(Intrinsic::ObjectKeys),
             (Builtin::Object, "values") => Some(Intrinsic::ObjectValues),
@@ -5717,7 +5803,13 @@ fn to_str(v: Val) -> Expr {
 /// JS `l + r`: concatenation if either is known to be a string, addition if both are known
 /// to be numbers or booleans, otherwise decided at run time.
 fn add(l: Val, r: Val) -> Val {
-    if l.kind == Kind::Str || r.kind == Kind::Str {
+    if (l.kind == Kind::Str && r.kind == Kind::Any) || (l.kind == Kind::Any && r.kind == Kind::Str)
+    {
+        // An object operand converts with the "default" hint (`Symbol.toPrimitive`, T25), not
+        // ToString's "string": the run-time `+`.
+        let e = Expr::intrinsic(Intrinsic::JsAdd, vec![jsval_of(l), jsval_of(r)]);
+        Val::js(e, Kind::Str)
+    } else if l.kind == Kind::Str || r.kind == Kind::Str {
         let e = Expr::intrinsic(Intrinsic::Concat, vec![to_str(l), to_str(r)]);
         Val::js(e, Kind::Str)
     } else if l.kind == Kind::Bottom || r.kind == Kind::Bottom {

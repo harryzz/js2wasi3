@@ -26,8 +26,18 @@ const BREAK_LENGTH: i32 = 80;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Helper {
-    /// `(v, depth: i32, indent: i32, nested: i32) -> (ref $string)`.
+    /// `(v, depth: i32, indent: i32, nested: i32) -> (ref $string)`: [`Helper::FormatValue`] with
+    /// node's cycle detection (T25): an object already being formatted is `[Circular *n]`.
     Format,
+    /// The same, without the cycle check.
+    FormatValue,
+    /// `(open: (ref $string), o: jsval) -> (ref $string)`: `<ref *n> ` + `open` if `o` was found
+    /// in a cycle (T25).
+    RefOpen,
+    /// `(it: (ref $mapiter), depth, indent) -> (ref $string)`: `[Map Iterator] { 'a' }`,
+    /// `[Map Entries] { [ 'a', 1 ] }`, `[Set Iterator] { 1 }`: the entries left, without
+    /// consuming them (T25).
+    MapIter,
     /// `(a: (ref $array), depth, indent) -> (ref $string)`.
     Array,
     /// `(o: (ref $object), depth, indent, prefix: (ref null $string)) -> (ref $string)`: `prefix`
@@ -52,12 +62,23 @@ pub enum Helper {
     /// `(m: (ref $map), depth, indent) -> (ref $string)`: `Map(n) { k => v, … }` / `Set(n) { … }`
     /// (T25).
     MapSet,
+    /// `(o: (ref $object), depth, indent, skip_indices: i32) -> (ref $keys)`: `key: value` for its
+    /// own enumerable string keys (array indices skipped if `skip_indices`), then its enumerable
+    /// symbol keys (`Symbol(x): value`), T25.
+    Props,
+    /// `(v) -> jsval`: `util.inspect(v)` from depth `d`, strings quoted, cycle tracking reset
+    /// (T25: `console.log` format strings).
+    At(u8),
 }
 
 impl Helper {
     pub fn name(self) -> &'static str {
         match self {
             Helper::Format => "inspect_format",
+            Helper::FormatValue => "inspect_format_value",
+            Helper::RefOpen => "inspect_ref_open",
+            Helper::MapIter => "inspect_map_iterator",
+            Helper::At(_) => "inspect_at",
             Helper::Array => "inspect_array",
             Helper::Object => "inspect_object",
             Helper::Quote => "inspect_quote",
@@ -68,6 +89,7 @@ impl Helper {
             Helper::Pad => "pad",
             Helper::Join => "join_strings",
             Helper::MapSet => "inspect_map",
+            Helper::Props => "inspect_props",
         }
     }
 
@@ -77,7 +99,10 @@ impl Helper {
         let s = string_ref();
         let k = rt(false, T_KEYS);
         match self {
-            Helper::Format => (vec![v, I32, I32, I32], vec![s]),
+            Helper::Format | Helper::FormatValue => (vec![v, I32, I32, I32], vec![s]),
+            Helper::RefOpen => (vec![s, v], vec![s]),
+            Helper::MapIter => (vec![rt(false, runtime::T_MAPITER), I32, I32], vec![s]),
+            Helper::At(_) => (vec![v], vec![v]),
             Helper::Array => (vec![rt(false, T_ARRAY), I32, I32], vec![s]),
             Helper::MapSet => (vec![rt(false, runtime::T_MAP), I32, I32], vec![s]),
             Helper::Object => (
@@ -90,12 +115,27 @@ impl Helper {
             Helper::Spaces => (vec![I32], vec![s]),
             Helper::Pad => (vec![s, I32, I32], vec![s]),
             Helper::Join => (vec![k, I32, s], vec![s]),
+            Helper::Props => (vec![rt(false, runtime::T_OBJECT), I32, I32, I32], vec![k]),
         }
     }
 
     pub fn body(self, cx: &mut dyn Cx) -> Function {
         match self {
-            Helper::Format => format(cx),
+            Helper::Format => format_checked(cx),
+            Helper::FormatValue => format(cx),
+            Helper::RefOpen => ref_open(cx),
+            Helper::MapIter => format_map_iter(cx),
+            Helper::At(d) => {
+                let format = ih(cx, Helper::Format);
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.i32_const(0).global_set(runtime::G_INSPECT_SEEN_N);
+                s.i32_const(0).global_set(runtime::G_INSPECT_CIRC_N);
+                s.local_get(0).i32_const(d as i32).i32_const(0).i32_const(1);
+                s.call(format);
+                s.end();
+                f
+            }
             Helper::Array => format_array(cx),
             Helper::Object => format_object(cx),
             Helper::Quote => quote(cx),
@@ -106,6 +146,7 @@ impl Helper {
             Helper::Pad => pad(cx),
             Helper::Join => join(cx),
             Helper::MapSet => format_mapset(cx),
+            Helper::Props => format_props(cx),
         }
     }
 }
@@ -322,11 +363,12 @@ fn format(cx: &mut dyn Cx) -> Function {
             .call(f_mapset)
             .return_();
         s.end();
-        // Map/Set iterators (`[Map Iterator] { … }`) aren't implemented (F24).
-        s.local_get(V)
-            .ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_MAPITER));
+        // Map/Set iterators (T25).
+        let f_iter = ih(cx, Helper::MapIter);
+        s.local_get(V).ref_test_non_null(mapset::mapiter());
         s.if_(BlockType::Empty);
-        trap(cx, &mut s);
+        s.local_get(V).ref_cast_non_null(mapset::mapiter());
+        s.local_get(DEPTH).local_get(INDENT).call(f_iter).return_();
         s.end();
     }
     s.local_get(V).ref_test_non_null(runtime::object());
@@ -367,14 +409,15 @@ fn format(cx: &mut dyn Cx) -> Function {
 }
 
 fn format_array(cx: &mut dyn Cx) -> Function {
+    let ref_open = ih(cx, Helper::RefOpen);
+    let props = ih(cx, Helper::Props);
+    let (more, more_item, more_items) =
+        (cx.str("... "), cx.str(" more item"), cx.str(" more items"));
     let format = ih(cx, Helper::Format);
     let layout = ih(cx, Helper::Layout);
     let concat = cx.helper(runtime::Helper::Concat);
     let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
     let is_number = cx.helper(runtime::Helper::IsNumber);
-    let own_keys = oh(cx, object::Helper::OwnKeys);
-    let index_keys = array::ah(cx, array::Helper::IndexKeys);
-    let symbols = oh(cx, object::Helper::SymbolKeys);
     let (open, close, deep) = (cx.str("["), cx.str("]"), cx.str("[Array]"));
     let (lt, item, items) = (cx.str("<"), cx.str(" empty item>"), cx.str(" empty items>"));
     const A: u32 = 0;
@@ -387,7 +430,13 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     const NUMBERS: u32 = 7;
     const OUT: u32 = 8;
     const E: u32 = 9;
-    let mut f = Function::new([(5, ValType::I32), (1, rt(true, T_KEYS)), (1, jsval())]);
+    const EXTRA: u32 = 10;
+    let mut f = Function::new([
+        (5, ValType::I32),
+        (1, rt(true, T_KEYS)),
+        (1, jsval()),
+        (1, rt(true, T_KEYS)),
+    ]);
     let mut s = f.instructions();
     // Too deep (node: only when there is something to show).
     s.local_get(DEPTH).i32_const(2).i32_gt_s();
@@ -399,17 +448,21 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(deep).return_();
     s.end();
-    s.local_get(A).struct_get(T_ARRAY, F_LENGTH).local_tee(LEN);
-    // More than 100 elements ("... n more items") or extra properties: not implemented (F24).
-    s.i32_const(100).i32_gt_u();
-    s.local_get(A).call(own_keys).array_len();
-    s.local_get(A).call(index_keys).array_len();
-    s.i32_ne().i32_or();
-    s.local_get(A).call(symbols).i32_or();
-    s.if_(BlockType::Empty);
-    trap(cx, &mut s);
-    s.end();
-    s.local_get(LEN).array_new_default(T_KEYS).local_set(OUT);
+    s.local_get(A).struct_get(T_ARRAY, F_LENGTH).local_set(LEN);
+    // Its other properties (T25), after the elements and `... n more items`.
+    s.local_get(A);
+    s.local_get(DEPTH).local_get(INDENT).i32_const(1);
+    s.call(props).local_set(EXTRA);
+    // At most 100 entries, one more for `... n more items`.
+    s.local_get(LEN)
+        .i32_const(100)
+        .local_get(LEN)
+        .i32_const(100)
+        .i32_lt_u()
+        .select();
+    s.i32_const(1).i32_add();
+    s.local_get(EXTRA).ref_as_non_null().array_len().i32_add();
+    s.array_new_default(T_KEYS).local_set(OUT);
     s.i32_const(1).local_set(NUMBERS);
     let elem = |s: &mut InstructionSink, idx: u32| {
         s.local_get(A)
@@ -419,6 +472,7 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     };
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+    s.local_get(N).i32_const(100).i32_ge_u().br_if(1);
     elem(&mut s, I);
     s.local_tee(E).ref_is_null();
     s.if_(BlockType::Empty);
@@ -467,11 +521,66 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(N).i32_const(1).i32_add().local_set(N);
     s.br(0).end().end();
+    // `... n more item(s)`.
+    s.local_get(I).local_get(LEN).i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(OUT).ref_as_non_null().local_get(N);
+    s.global_get(more);
+    s.local_get(LEN)
+        .local_get(I)
+        .i32_sub()
+        .f64_convert_i32_u()
+        .call(number_to_string)
+        .call(concat);
+    s.global_get(more_item).global_get(more_items);
+    s.local_get(LEN)
+        .local_get(I)
+        .i32_sub()
+        .i32_const(1)
+        .i32_eq();
+    s.typed_select(string_ref());
+    s.call(concat);
+    s.array_set(T_KEYS);
+    s.local_get(N).i32_const(1).i32_add().local_set(N);
+    s.end();
+    s.local_get(OUT).ref_as_non_null().local_get(N);
+    s.local_get(EXTRA).ref_as_non_null().i32_const(0);
+    s.local_get(EXTRA).ref_as_non_null().array_len();
+    s.array_copy(T_KEYS, T_KEYS);
+    // node's number alignment checks `value[i]` for every output position (T25): the positions
+    // past the shown elements too (`... n more items`, the properties).
+    s.local_get(N)
+        .local_get(EXTRA)
+        .ref_as_non_null()
+        .array_len()
+        .i32_add()
+        .local_set(J);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(J).i32_ge_u().br_if(1);
+    s.local_get(I).local_get(LEN).i32_ge_u();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(1);
+    s.else_();
+    elem(&mut s, I);
+    s.call(is_number).i32_eqz();
+    s.end();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).local_set(NUMBERS);
+    s.br(2);
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
     s.local_get(OUT)
         .ref_as_non_null()
         .local_get(N)
+        .local_get(EXTRA)
+        .ref_as_non_null()
+        .array_len()
+        .i32_add()
         .local_get(INDENT);
-    s.global_get(open).global_get(close);
+    s.global_get(open);
+    s.local_get(A).call(ref_open);
+    s.global_get(close);
     s.i32_const(1).local_get(NUMBERS).call(layout);
     s.end();
     f
@@ -479,15 +588,17 @@ fn format_array(cx: &mut dyn Cx) -> Function {
 
 /// node's `formatMap` / `formatSet` in `formatRaw`: `Map(n) {`, the entries in order (keys and
 /// values formatted one level deeper), laid out like an object's. Past depth 2, `[Map]` / `[Set]`
-/// unless empty. Own properties and more than 100 entries aren't implemented (a trap, F24).
+/// unless empty. At most 100 entries (`... n more items`), then its own properties (T25).
 fn format_mapset(cx: &mut dyn Cx) -> Function {
+    let ref_open = ih(cx, Helper::RefOpen);
     use crate::mapset::{T_KEYS_F, T_SIZE, T_USED, T_VALS_F};
     let format = ih(cx, Helper::Format);
     let layout = ih(cx, Helper::Layout);
     let concat = cx.helper(runtime::Helper::Concat);
     let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
-    let own_keys = oh(cx, object::Helper::OwnKeys);
-    let symbols = oh(cx, object::Helper::SymbolKeys);
+    let props = ih(cx, Helper::Props);
+    let (more, more_item, more_items) =
+        (cx.str("... "), cx.str(" more item"), cx.str(" more items"));
     let (map_open, set_open) = (cx.str("Map("), cx.str("Set("));
     let (map_deep, set_deep) = (cx.str("[Map]"), cx.str("[Set]"));
     let (paren, close, arrow) = (cx.str(") {"), cx.str("}"), cx.str(" => "));
@@ -501,11 +612,15 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
     const T: u32 = 6;
     const OUT: u32 = 7;
     const K: u32 = 8;
+    const EXTRA: u32 = 9;
+    const SIZE: u32 = 10;
     let mut f = Function::new([
         (3, ValType::I32),
         (1, rt(true, runtime::T_MTABLE)),
         (1, rt(true, T_KEYS)),
         (1, jsval()),
+        (1, rt(true, T_KEYS)),
+        (1, ValType::I32),
     ]);
     let mut s = f.instructions();
     s.local_get(M)
@@ -528,18 +643,21 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
     s.local_get(SET).typed_select(string_ref());
     s.return_();
     s.end();
-    s.local_get(N).i32_const(100).i32_gt_u();
-    s.local_get(M)
-        .call(own_keys)
-        .array_len()
-        .i32_const(0)
-        .i32_ne();
-    s.i32_or();
-    s.local_get(M).call(symbols).i32_or();
-    s.if_(BlockType::Empty);
-    trap(cx, &mut s);
-    s.end();
-    s.local_get(N).array_new_default(T_KEYS).local_set(OUT);
+    // Its own properties after the entries (T25).
+    s.local_get(M);
+    s.local_get(DEPTH).local_get(INDENT).i32_const(0);
+    s.call(props).local_set(EXTRA);
+    s.local_get(N).local_set(SIZE);
+    // At most 100 entries, then `... n more items`.
+    s.local_get(N)
+        .i32_const(100)
+        .local_get(N)
+        .i32_const(100)
+        .i32_lt_u()
+        .select();
+    s.i32_const(1).i32_add();
+    s.local_get(EXTRA).ref_as_non_null().array_len().i32_add();
+    s.array_new_default(T_KEYS).local_set(OUT);
     s.i32_const(0).local_set(N);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(E)
@@ -547,6 +665,7 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
         .struct_get(runtime::T_MTABLE, T_USED)
         .i32_ge_u()
         .br_if(1);
+    s.local_get(N).i32_const(100).i32_ge_u().br_if(1);
     s.local_get(T)
         .struct_get(runtime::T_MTABLE, T_KEYS_F)
         .local_get(E)
@@ -580,15 +699,46 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(E).i32_const(1).i32_add().local_set(E);
     s.br(0).end().end();
+    // `... n more item(s)`, then the properties.
+    s.local_get(SIZE).local_get(N).i32_gt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(OUT).ref_as_non_null().local_get(N);
+    s.global_get(more);
+    s.local_get(SIZE)
+        .local_get(N)
+        .i32_sub()
+        .f64_convert_i32_u()
+        .call(number_to_string)
+        .call(concat);
+    s.global_get(more_item).global_get(more_items);
+    s.local_get(SIZE)
+        .local_get(N)
+        .i32_sub()
+        .i32_const(1)
+        .i32_eq();
+    s.typed_select(string_ref());
+    s.call(concat);
+    s.array_set(T_KEYS);
+    s.local_get(N).i32_const(1).i32_add().local_set(N);
+    s.end();
+    s.local_get(OUT).ref_as_non_null().local_get(N);
+    s.local_get(EXTRA).ref_as_non_null().i32_const(0);
+    s.local_get(EXTRA).ref_as_non_null().array_len();
+    s.array_copy(T_KEYS, T_KEYS);
     s.local_get(OUT)
         .ref_as_non_null()
         .local_get(N)
+        .local_get(EXTRA)
+        .ref_as_non_null()
+        .array_len()
+        .i32_add()
         .local_get(INDENT);
     s.global_get(set_open).global_get(map_open);
     s.local_get(SET).typed_select(string_ref());
-    s.local_get(N).f64_convert_i32_u().call(number_to_string);
+    s.local_get(SIZE).f64_convert_i32_u().call(number_to_string);
     s.call(concat);
     s.global_get(paren).call(concat);
+    s.local_get(M).call(ref_open);
     s.global_get(close);
     s.i32_const(0).i32_const(0).call(layout);
     s.end();
@@ -596,16 +746,16 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
 }
 
 fn format_object(cx: &mut dyn Cx) -> Function {
+    let ref_open = ih(cx, Helper::RefOpen);
+    let props = ih(cx, Helper::Props);
     let format = ih(cx, Helper::Format);
     let layout = ih(cx, Helper::Layout);
-    let key = ih(cx, Helper::Key);
     let concat = cx.helper(runtime::Helper::Concat);
     let own_keys = oh(cx, object::Helper::OwnKeys);
-    let own = oh(cx, object::Helper::OwnGet);
     let obj_proto = oh(cx, object::Helper::Proto(js2wasi3_ir::Builtin::Object));
     let symbols = oh(cx, object::Helper::SymbolKeys);
     let ctor_name = cx.helper(runtime::Helper::Prop(props::Helper::CtorName));
-    let (open, close, deep, colon) = (cx.str("{"), cx.str("}"), cx.str("[Object]"), cx.str(": "));
+    let (open, close, deep) = (cx.str("{"), cx.str("}"), cx.str("[Object]"));
     let (null_proto, deep_null) = (
         cx.str("[Object: null prototype] "),
         cx.str("[Object: null prototype]"),
@@ -614,11 +764,6 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     let arguments_prefix = cx.str("[Arguments] ");
     let (lbracket, rbracket, space, object_) =
         (cx.str("["), cx.str("]"), cx.str(" "), cx.str("Object"));
-    let (getter, setter, both) = (
-        cx.str("[Getter]"),
-        cx.str("[Setter]"),
-        cx.str("[Getter/Setter]"),
-    );
     let str_eq = cx.helper(runtime::Helper::StrEq);
     let (pending, rejected) = (cx.str("<pending>"), cx.str("<rejected> "));
     const O: u32 = 0;
@@ -627,15 +772,17 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     const PREFIX: u32 = 3;
     const KS: u32 = 4;
     const N: u32 = 5;
-    const I: u32 = 6;
+    // (6: unused)
     const OUT: u32 = 7;
     const NAME: u32 = 8;
     const Q: u32 = 9;
-    const R: u32 = 10;
+    // (10: unused)
     const PLAIN: u32 = 11;
     // 1 for a promise: its state comes first (`Promise { <pending> }`, T17).
     const EXTRA: u32 = 12;
     const Q_STATE: u32 = 13;
+    const Q_TAG: u32 = 14;
+    const Q_SYMS: u32 = 15;
     let mut f = Function::new([
         (1, rt(true, T_KEYS)),
         (2, ValType::I32),
@@ -644,13 +791,10 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         (1, rt(true, runtime::T_OBJECT)),
         (1, jsval()),
         (3, ValType::I32),
+        (1, jsval()),
+        (1, rt(true, T_VALS)),
     ]);
     let mut s = f.instructions();
-    // Symbol keys aren't shown yet (F24).
-    s.local_get(O).call(symbols);
-    s.if_(BlockType::Empty);
-    trap(cx, &mut s);
-    s.end();
     // A generator object (T18): `Object [Generator] ` (node's `Symbol.toStringTag` form).
     s.local_get(PREFIX).ref_is_null();
     s.local_get(O)
@@ -756,6 +900,90 @@ fn format_object(cx: &mut dyn Cx) -> Function {
             s.end();
         }
         s.end();
+        if cx.names("toStringTag") {
+            // A `Symbol.toStringTag` that isn't an own enumerable property and differs from the
+            // constructor's name (T25): `Name [tag] ` / `Object [tag] `.
+            let get = oh(cx, object::Helper::Get);
+            let own_symbols = oh(cx, object::Helper::OwnSymbols);
+            let sym = cx.helper(runtime::Helper::WellKnownSymbol(
+                js2wasi3_ir::well_known_symbol("toStringTag").expect("well-known"),
+            ));
+            let lb = cx.str("[");
+            let rb = cx.str("] ");
+            s.local_get(O).call(sym).call(get).local_set(Q_TAG);
+            runtime::is_string(&mut s, Q_TAG);
+            s.if_(BlockType::Empty);
+            {
+                // Not empty, not own enumerable, not the constructor's name.
+                s.local_get(Q_TAG)
+                    .ref_cast_non_null(string())
+                    .array_len()
+                    .i32_eqz();
+                s.local_get(O).i32_const(0).call(own_symbols);
+                s.ref_cast_non_null(array::array())
+                    .struct_get(T_ARRAY, F_ELEMS)
+                    .local_set(Q_SYMS);
+                s.i32_const(0).local_set(Q_STATE);
+                s.block(BlockType::Empty).loop_(BlockType::Empty);
+                s.local_get(Q_STATE)
+                    .local_get(Q_SYMS)
+                    .ref_as_non_null()
+                    .array_len()
+                    .i32_ge_u()
+                    .br_if(1);
+                s.local_get(Q_SYMS)
+                    .ref_as_non_null()
+                    .local_get(Q_STATE)
+                    .array_get(T_VALS)
+                    .call(sym)
+                    .ref_eq();
+                s.if_(BlockType::Empty);
+                s.i32_const(-1).local_set(Q_STATE);
+                s.br(2);
+                s.end();
+                s.local_get(Q_STATE)
+                    .i32_const(1)
+                    .i32_add()
+                    .local_set(Q_STATE);
+                s.br(0).end().end();
+                s.local_get(Q_STATE).i32_const(-1).i32_eq();
+                s.i32_or();
+                s.local_get(NAME).ref_is_null();
+                s.if_(BlockType::Result(ValType::I32));
+                s.i32_const(0);
+                s.else_();
+                s.local_get(NAME)
+                    .ref_as_non_null()
+                    .local_get(Q_TAG)
+                    .ref_cast_non_null(string())
+                    .call(str_eq);
+                s.end();
+                s.i32_or();
+                s.i32_eqz();
+                s.if_(BlockType::Empty);
+                s.local_get(NAME).ref_is_null();
+                s.if_(BlockType::Result(string_ref()));
+                // (No constructor: after `[Object: null prototype] `.)
+                s.local_get(PREFIX).ref_is_null();
+                s.if_(BlockType::Result(string_ref()));
+                s.global_get(object_).global_get(space).call(concat);
+                s.else_();
+                s.local_get(PREFIX).ref_as_non_null();
+                s.end();
+                s.else_();
+                s.local_get(NAME)
+                    .ref_as_non_null()
+                    .global_get(space)
+                    .call(concat);
+                s.end();
+                s.global_get(lb).call(concat);
+                s.local_get(Q_TAG).ref_cast_non_null(string()).call(concat);
+                s.global_get(rb).call(concat);
+                s.local_set(PREFIX);
+                s.end();
+            }
+            s.end();
+        }
     }
     s.end();
     s.local_get(O)
@@ -766,6 +994,9 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.local_get(O)
         .call(own_keys)
         .array_len()
+        .local_get(O)
+        .call(symbols)
+        .i32_or()
         .local_get(EXTRA)
         .i32_or()
         .i32_const(0)
@@ -791,11 +1022,9 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         s.global_get(rbracket).call(concat).return_();
     }
     s.end();
-    s.local_get(O)
-        .call(own_keys)
-        .local_tee(KS)
-        .array_len()
-        .local_tee(N);
+    s.local_get(O);
+    s.local_get(DEPTH).local_get(INDENT).i32_const(0);
+    s.call(props).local_tee(KS).array_len().local_tee(N);
     s.local_get(EXTRA).i32_add();
     s.array_new_default(T_KEYS).local_set(OUT);
     s.local_get(EXTRA);
@@ -830,58 +1059,15 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         s.array_set(T_KEYS);
     }
     s.end();
-    s.block(BlockType::Empty).loop_(BlockType::Empty);
-    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
-    s.local_get(OUT).local_get(I).local_get(EXTRA).i32_add();
-    s.local_get(KS)
-        .local_get(I)
-        .array_get(T_KEYS)
+    // The properties after the promise state (T25: `inspect_props`).
+    s.local_get(OUT)
         .ref_as_non_null()
-        .call(key);
-    s.global_get(colon).call(concat);
-    s.local_get(O);
-    s.local_get(KS)
-        .local_get(I)
-        .array_get(T_KEYS)
+        .local_get(EXTRA)
+        .local_get(KS)
         .ref_as_non_null()
-        .call(own)
-        .local_tee(R);
-    s.ref_test_non_null(props::accessor());
-    s.if_(BlockType::Result(string_ref()));
-    {
-        // `[Getter]`, `[Setter]` or `[Getter/Setter]`.
-        s.global_get(getter).global_get(setter);
-        s.local_get(R)
-            .ref_cast_non_null(props::accessor())
-            .struct_get(runtime::T_ACCESSOR, 0)
-            .global_get(runtime::G_UNDEFINED)
-            .ref_eq()
-            .i32_eqz();
-        s.typed_select(string_ref());
-        s.global_get(both);
-        s.local_get(R)
-            .ref_cast_non_null(props::accessor())
-            .struct_get(runtime::T_ACCESSOR, 0)
-            .global_get(runtime::G_UNDEFINED)
-            .ref_eq()
-            .local_get(R)
-            .ref_cast_non_null(props::accessor())
-            .struct_get(runtime::T_ACCESSOR, 1)
-            .global_get(runtime::G_UNDEFINED)
-            .ref_eq()
-            .i32_or();
-        s.typed_select(string_ref());
-    }
-    s.else_();
-    s.local_get(R);
-    s.local_get(DEPTH).i32_const(1).i32_add();
-    s.local_get(INDENT).i32_const(2).i32_add();
-    s.i32_const(1).call(format);
-    s.end();
-    s.call(concat);
-    s.array_set(T_KEYS);
-    s.local_get(I).i32_const(1).i32_add().local_set(I);
-    s.br(0).end().end();
+        .i32_const(0)
+        .local_get(N);
+    s.array_copy(T_KEYS, T_KEYS);
     s.local_get(OUT)
         .ref_as_non_null()
         .local_get(N)
@@ -897,6 +1083,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         .global_get(open)
         .call(concat);
     s.end();
+    s.local_get(O).call(ref_open);
     s.global_get(close);
     s.i32_const(0).i32_const(0).call(layout);
     s.end();
@@ -904,11 +1091,11 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// node's `strEscape` when nothing needs escaping: `'s'`, else `"s"` if `s` has a `'` but no `"`,
-/// else `` `s` `` if it has no `` ` `` or `${`. Anything needing escapes traps.
+/// node's `strEscape`: `'s'`, else `"s"` if `s` has a `'` but no `"`, else `` `s` `` if it has no
+/// `` ` `` or `${`, else `'s'` with `\'`. Escapes: `\b \t \n \f \r`, `\xHH` for the other
+/// control characters and U+007F–U+009F, `\\`, `\uxxxx` for a lone surrogate (T25).
 fn quote(cx: &mut dyn Cx) -> Function {
-    let concat = cx.helper(runtime::Helper::Concat);
-    let (sq, dq, bq) = (cx.str("'"), cx.str("\""), cx.str("`"));
+    let _ = cx;
     const S: u32 = 0;
     const I: u32 = 1;
     const N: u32 = 2;
@@ -916,113 +1103,206 @@ fn quote(cx: &mut dyn Cx) -> Function {
     const HAS_SQ: u32 = 4;
     const HAS_DQ: u32 = 5;
     const HAS_BQ: u32 = 6;
-    const Q: u32 = 7;
-    let mut f = Function::new([(6, ValType::I32), (1, rt(true, T_STRING))]);
+    const QC: u32 = 7;
+    const ESC_Q: u32 = 8;
+    const J: u32 = 9;
+    const BUF: u32 = 10;
+    let mut f = Function::new([(9, ValType::I32), (1, rt(true, T_STRING))]);
     let mut s = f.instructions();
+    let unit = |s: &mut InstructionSink, at: &dyn Fn(&mut InstructionSink)| {
+        s.local_get(S);
+        at(s);
+        s.array_get_u(T_STRING);
+    };
     s.local_get(S).array_len().local_set(N);
+    // Pass 1: which quotes occur (and `${`).
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).local_get(N).i32_ge_u().br_if(1);
-    s.local_get(S)
-        .local_get(I)
-        .array_get_u(T_STRING)
-        .local_set(C);
-    // Needs an escape: control characters, `\`, U+007F–U+009F, a lone surrogate.
-    s.local_get(C).i32_const(0x20).i32_lt_u();
-    s.local_get(C).i32_const('\\' as i32).i32_eq().i32_or();
-    s.local_get(C)
-        .i32_const(0x7f)
-        .i32_sub()
-        .i32_const(0x21)
-        .i32_lt_u()
-        .i32_or();
-    s.if_(BlockType::Empty);
-    trap(cx, &mut s);
-    s.end();
-    s.local_get(C)
-        .i32_const(0xF800)
-        .i32_and()
-        .i32_const(0xD800)
-        .i32_eq();
-    s.if_(BlockType::Empty);
-    {
-        // A high surrogate followed by a low one is fine (skip both).
-        s.local_get(C)
-            .i32_const(0xFC00)
-            .i32_and()
-            .i32_const(0xD800)
-            .i32_eq();
-        s.local_get(I)
-            .i32_const(1)
-            .i32_add()
-            .local_get(N)
-            .i32_lt_u()
-            .i32_and();
-        s.if_(BlockType::Result(ValType::I32));
-        s.local_get(S)
-            .local_get(I)
-            .i32_const(1)
-            .i32_add()
-            .array_get_u(T_STRING)
-            .i32_const(0xFC00)
-            .i32_and()
-            .i32_const(0xDC00)
-            .i32_eq();
-        s.else_();
-        s.i32_const(0);
-        s.end();
-        s.i32_eqz();
-        s.if_(BlockType::Empty);
-        trap(cx, &mut s);
-        s.end();
-        s.local_get(I).i32_const(1).i32_add().local_set(I);
-    }
-    s.end();
+    unit(&mut s, &|s| {
+        s.local_get(I);
+    });
+    s.local_set(C);
     for (ch, flag) in [('\'', HAS_SQ), ('"', HAS_DQ), ('`', HAS_BQ)] {
         s.local_get(C).i32_const(ch as i32).i32_eq();
         s.if_(BlockType::Empty);
         s.i32_const(1).local_set(flag);
         s.end();
     }
-    // `${` rules out backticks too.
     s.local_get(C).i32_const('$' as i32).i32_eq();
     s.local_get(I)
         .i32_const(1)
         .i32_add()
         .local_get(N)
-        .i32_lt_u()
-        .i32_and();
+        .i32_lt_u();
+    s.i32_and();
     s.if_(BlockType::Empty);
-    s.local_get(S)
-        .local_get(I)
-        .i32_const(1)
-        .i32_add()
-        .array_get_u(T_STRING)
-        .i32_const('{' as i32)
-        .i32_eq();
+    unit(&mut s, &|s| {
+        s.local_get(I).i32_const(1).i32_add();
+    });
+    s.i32_const('{' as i32).i32_eq();
     s.if_(BlockType::Empty);
     s.i32_const(1).local_set(HAS_BQ);
     s.end();
     s.end();
     s.local_get(I).i32_const(1).i32_add().local_set(I);
     s.br(0).end().end();
-    s.global_get(sq).local_set(Q);
+    // The quote.
+    s.i32_const('\'' as i32).local_set(QC);
     s.local_get(HAS_SQ);
     s.if_(BlockType::Empty);
     s.local_get(HAS_DQ).i32_eqz();
     s.if_(BlockType::Empty);
-    s.global_get(dq).local_set(Q);
+    s.i32_const('"' as i32).local_set(QC);
     s.else_();
     s.local_get(HAS_BQ).i32_eqz();
     s.if_(BlockType::Empty);
-    s.global_get(bq).local_set(Q);
+    s.i32_const('`' as i32).local_set(QC);
     s.else_();
-    // `'` inside single quotes needs an escape.
-    trap(cx, &mut s);
+    s.i32_const(1).local_set(ESC_Q);
     s.end();
     s.end();
     s.end();
-    s.local_get(Q).ref_as_non_null().local_get(S).call(concat);
-    s.local_get(Q).ref_as_non_null().call(concat);
+    // Pass 2: at most 6 units per unit (`\uxxxx`), plus the quotes.
+    s.local_get(N)
+        .i32_const(6)
+        .i32_mul()
+        .i32_const(2)
+        .i32_add()
+        .array_new_default(T_STRING)
+        .local_set(BUF);
+    let put = |s: &mut InstructionSink, v: &dyn Fn(&mut InstructionSink)| {
+        s.local_get(BUF).ref_as_non_null().local_get(J);
+        v(s);
+        s.array_set(T_STRING);
+        s.local_get(J).i32_const(1).i32_add().local_set(J);
+    };
+    let put_c = |s: &mut InstructionSink, c: char| {
+        put(s, &|s| {
+            s.i32_const(c as i32);
+        });
+    };
+    // A hex digit of C: (C >> shift) & 15, in upper or lower case.
+    let hex = |s: &mut InstructionSink, shift: i32, upper: bool| {
+        put(s, &|s| {
+            s.local_get(C)
+                .i32_const(shift)
+                .i32_shr_u()
+                .i32_const(15)
+                .i32_and();
+            s.local_tee(HAS_SQ);
+            s.i32_const(48).i32_add();
+            s.local_get(HAS_SQ)
+                .i32_const(if upper { 55 } else { 87 })
+                .i32_add();
+            s.local_get(HAS_SQ).i32_const(10).i32_lt_u();
+            s.select();
+        });
+    };
+    put(&mut s, &|s| {
+        s.local_get(QC);
+    });
+    s.i32_const(0).local_set(I);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    unit(&mut s, &|s| {
+        s.local_get(I);
+    });
+    s.local_set(C);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.block(BlockType::Empty);
+    {
+        // A surrogate pair: as is.
+        s.local_get(C)
+            .i32_const(0xFC00)
+            .i32_and()
+            .i32_const(0xD800)
+            .i32_eq();
+        s.local_get(I).local_get(N).i32_lt_u().i32_and();
+        s.if_(BlockType::Empty);
+        unit(&mut s, &|s| {
+            s.local_get(I);
+        });
+        s.i32_const(0xFC00).i32_and().i32_const(0xDC00).i32_eq();
+        s.if_(BlockType::Empty);
+        put(&mut s, &|s| {
+            s.local_get(C);
+        });
+        put(&mut s, &|s| {
+            s.local_get(S).local_get(I).array_get_u(T_STRING);
+        });
+        s.local_get(I).i32_const(1).i32_add().local_set(I);
+        s.br(2);
+        s.end();
+        s.end();
+        // A lone surrogate: `\uxxxx`.
+        s.local_get(C)
+            .i32_const(0xF800)
+            .i32_and()
+            .i32_const(0xD800)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        put_c(&mut s, '\\');
+        put_c(&mut s, 'u');
+        for shift in [12, 8, 4, 0] {
+            hex(&mut s, shift, false);
+        }
+        s.br(1);
+        s.end();
+        // `\` and the quote (only `'` needs it).
+        s.local_get(C).i32_const('\\' as i32).i32_eq();
+        s.local_get(C)
+            .i32_const('\'' as i32)
+            .i32_eq()
+            .local_get(ESC_Q)
+            .i32_and();
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        put_c(&mut s, '\\');
+        put(&mut s, &|s| {
+            s.local_get(C);
+        });
+        s.br(1);
+        s.end();
+        // Control characters.
+        s.local_get(C).i32_const(0x20).i32_lt_u();
+        s.local_get(C)
+            .i32_const(0x7f)
+            .i32_sub()
+            .i32_const(0x21)
+            .i32_lt_u();
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        {
+            for (code, letter) in [(8, 'b'), (9, 't'), (10, 'n'), (12, 'f'), (13, 'r')] {
+                s.local_get(C).i32_const(code).i32_eq();
+                s.if_(BlockType::Empty);
+                put_c(&mut s, '\\');
+                put_c(&mut s, letter);
+                s.br(3);
+                s.end();
+            }
+            put_c(&mut s, '\\');
+            put_c(&mut s, 'x');
+            hex(&mut s, 4, true);
+            hex(&mut s, 0, true);
+            s.br(1);
+        }
+        s.end();
+        put(&mut s, &|s| {
+            s.local_get(C);
+        });
+    }
+    s.end();
+    s.br(0).end().end();
+    put(&mut s, &|s| {
+        s.local_get(QC);
+    });
+    // Exactly J units.
+    s.local_get(J).array_new_default(T_STRING).local_tee(S);
+    s.i32_const(0);
+    s.local_get(BUF).ref_as_non_null().i32_const(0).local_get(J);
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(S);
     s.end();
     f
 }
@@ -1091,10 +1371,12 @@ fn layout(cx: &mut dyn Cx) -> Function {
     const J: u32 = 10;
     const NL: u32 = 11;
     const IND: u32 = 12;
+    const NL_KEYS: u32 = 13;
     let mut f = Function::new([
         (1, rt(true, T_KEYS)),
         (4, ValType::I32),
         (1, rt(true, T_STRING)),
+        (1, rt(true, T_KEYS)),
     ]);
     let mut s = f.instructions();
     s.local_get(N).i32_eqz();
@@ -1107,12 +1389,41 @@ fn layout(cx: &mut dyn Cx) -> Function {
         .i32_gt_u()
         .i32_and();
     s.if_(BlockType::Empty);
-    s.local_get(E)
-        .local_get(N)
-        .local_get(INDENT)
-        .local_get(NUMBERS)
-        .call(group)
-        .local_set(G);
+    {
+        // node's `groupArrayElements`: past 100 entries the last one (`... n more items`) isn't
+        // grouped but appended.
+        s.local_get(E);
+        s.local_get(N)
+            .local_get(N)
+            .i32_const(100)
+            .i32_gt_u()
+            .i32_sub();
+        s.local_get(INDENT)
+            .local_get(NUMBERS)
+            .call(group)
+            .local_set(G);
+        s.local_get(G).ref_is_null().i32_eqz();
+        s.local_get(N).i32_const(100).i32_gt_u().i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(G).ref_as_non_null().array_len().local_tee(I);
+        s.i32_const(1)
+            .i32_add()
+            .array_new_default(T_KEYS)
+            .local_set(NL_KEYS);
+        s.local_get(NL_KEYS).ref_as_non_null().i32_const(0);
+        s.local_get(G).ref_as_non_null().i32_const(0).local_get(I);
+        s.array_copy(T_KEYS, T_KEYS);
+        s.local_get(NL_KEYS).ref_as_non_null().local_get(I);
+        s.local_get(E)
+            .local_get(N)
+            .i32_const(1)
+            .i32_sub()
+            .array_get(T_KEYS);
+        s.array_set(T_KEYS);
+        s.local_get(NL_KEYS).local_set(G);
+        s.i32_const(0).local_set(I);
+        s.end();
+    }
     s.end();
     s.local_get(G).ref_is_null();
     s.if_(BlockType::Empty);
@@ -1484,6 +1795,484 @@ fn join(cx: &mut dyn Cx) -> Function {
     s.local_get(I).i32_const(1).i32_add().local_set(I);
     s.br(0).end().end();
     s.local_get(OUT).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `$inspect_props(o, depth, indent, skip_indices)` (T25), see [`Helper::Props`].
+fn format_props(cx: &mut dyn Cx) -> Function {
+    let format = ih(cx, Helper::Format);
+    let key = ih(cx, Helper::Key);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let own_keys = oh(cx, object::Helper::OwnKeys);
+    let own_symbols = oh(cx, object::Helper::OwnSymbols);
+    let own = oh(cx, object::Helper::OwnGet);
+    let index = oh(cx, object::Helper::ArrayIndex);
+    let colon = cx.str(": ");
+    let (getter, setter, both) = (
+        cx.str("[Getter]"),
+        cx.str("[Setter]"),
+        cx.str("[Getter/Setter]"),
+    );
+    const O: u32 = 0;
+    const DEPTH: u32 = 1;
+    const INDENT: u32 = 2;
+    const SKIP: u32 = 3;
+    const KS: u32 = 4;
+    const SYMS: u32 = 5;
+    const OUT: u32 = 6;
+    const N: u32 = 7;
+    const I: u32 = 8;
+    const M: u32 = 9;
+    const R: u32 = 10;
+    const K: u32 = 11;
+    let mut f = Function::new([
+        (1, rt(true, T_KEYS)),
+        (1, rt(true, T_VALS)),
+        (1, rt(true, T_KEYS)),
+        (3, ValType::I32),
+        (1, jsval()),
+        (1, rt(true, T_STRING)),
+    ]);
+    let mut s = f.instructions();
+    // The value part: `[Getter]`, `[Setter]`, `[Getter/Setter]` or the value one level deeper.
+    let value = |s: &mut InstructionSink| {
+        s.local_get(O)
+            .local_get(K)
+            .ref_as_non_null()
+            .call(own)
+            .local_tee(R);
+        s.ref_test_non_null(props::accessor());
+        s.if_(BlockType::Result(string_ref()));
+        {
+            s.global_get(getter).global_get(setter);
+            s.local_get(R)
+                .ref_cast_non_null(props::accessor())
+                .struct_get(runtime::T_ACCESSOR, 0)
+                .global_get(runtime::G_UNDEFINED)
+                .ref_eq()
+                .i32_eqz();
+            s.typed_select(string_ref());
+            s.global_get(both);
+            s.local_get(R)
+                .ref_cast_non_null(props::accessor())
+                .struct_get(runtime::T_ACCESSOR, 0)
+                .global_get(runtime::G_UNDEFINED)
+                .ref_eq()
+                .local_get(R)
+                .ref_cast_non_null(props::accessor())
+                .struct_get(runtime::T_ACCESSOR, 1)
+                .global_get(runtime::G_UNDEFINED)
+                .ref_eq()
+                .i32_or();
+            s.typed_select(string_ref());
+        }
+        s.else_();
+        s.local_get(R);
+        s.local_get(DEPTH).i32_const(1).i32_add();
+        s.local_get(INDENT).i32_const(2).i32_add();
+        s.i32_const(1).call(format);
+        s.end();
+    };
+    s.local_get(O).call(own_keys).local_set(KS);
+    s.local_get(O).i32_const(0).call(own_symbols);
+    s.ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, F_ELEMS)
+        .local_set(SYMS);
+    s.local_get(KS).ref_as_non_null().array_len();
+    s.local_get(SYMS).ref_as_non_null().array_len();
+    s.i32_add().array_new_default(T_KEYS).local_set(OUT);
+    s.local_get(KS).ref_as_non_null().array_len().local_set(N);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(KS)
+        .ref_as_non_null()
+        .local_get(I)
+        .array_get(T_KEYS)
+        .local_set(K);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    // An array index (skipped for arrays).
+    s.local_get(SKIP);
+    s.local_get(K)
+        .ref_as_non_null()
+        .call(index)
+        .i64_const(0)
+        .i64_ge_s();
+    s.i32_and().br_if(0);
+    s.local_get(OUT).ref_as_non_null().local_get(M);
+    s.local_get(K).ref_as_non_null().call(key);
+    s.global_get(colon).call(concat);
+    value(&mut s);
+    s.call(concat);
+    s.array_set(T_KEYS);
+    s.local_get(M).i32_const(1).i32_add().local_set(M);
+    s.br(0).end().end();
+    // Symbol keys: `Symbol(x): value`.
+    s.local_get(SYMS).ref_as_non_null().array_len().local_set(N);
+    s.i32_const(0).local_set(I);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(SYMS)
+        .ref_as_non_null()
+        .local_get(I)
+        .array_get(T_VALS)
+        .ref_cast_non_null(string())
+        .local_set(K);
+    s.local_get(OUT).ref_as_non_null().local_get(M);
+    s.local_get(K).ref_as_non_null();
+    s.i32_const(0).i32_const(0).i32_const(0).call(format);
+    s.global_get(colon).call(concat);
+    value(&mut s);
+    s.call(concat);
+    s.array_set(T_KEYS);
+    s.local_get(M).i32_const(1).i32_add().local_set(M);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    // Exactly M entries.
+    s.local_get(M).array_new_default(T_KEYS).local_tee(KS);
+    s.i32_const(0);
+    s.local_get(OUT).ref_as_non_null().i32_const(0).local_get(M);
+    s.array_copy(T_KEYS, T_KEYS);
+    s.local_get(KS).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// node's cycle detection in `formatValue` (T25): `[Circular *n]` for an object that is already
+/// being formatted (`n` numbers the cycle targets in the order found); the target's `<ref *n>`
+/// comes from [`Helper::RefOpen`]. The top-level call (depth 0, not nested) starts afresh.
+fn format_checked(cx: &mut dyn Cx) -> Function {
+    use runtime::{G_INSPECT_CIRC, G_INSPECT_CIRC_N, G_INSPECT_SEEN, G_INSPECT_SEEN_N};
+    let value = ih(cx, Helper::FormatValue);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let (circ_open, circ_close) = (cx.str("[Circular *"), cx.str("]"));
+    const V: u32 = 0;
+    const DEPTH: u32 = 1;
+    const INDENT: u32 = 2;
+    const NESTED: u32 = 3;
+    const K: u32 = 4;
+    const R: u32 = 5;
+    const TMP: u32 = 6;
+    let mut f = Function::new([
+        (1, ValType::I32),
+        (1, rt(true, T_STRING)),
+        (1, rt(true, T_VALS)),
+    ]);
+    let mut s = f.instructions();
+    let call_value = |s: &mut InstructionSink| {
+        s.local_get(V)
+            .local_get(DEPTH)
+            .local_get(INDENT)
+            .local_get(NESTED)
+            .call(value);
+    };
+    s.local_get(V)
+        .ref_test_non_null(runtime::object())
+        .i32_eqz();
+    s.if_(BlockType::Empty);
+    call_value(&mut s);
+    s.return_();
+    s.end();
+    s.local_get(DEPTH)
+        .i32_eqz()
+        .local_get(NESTED)
+        .i32_eqz()
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).global_set(G_INSPECT_SEEN_N);
+    s.i32_const(0).global_set(G_INSPECT_CIRC_N);
+    s.end();
+    // Already being formatted: `[Circular *n]`.
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(K)
+        .global_get(G_INSPECT_SEEN_N)
+        .i32_ge_u()
+        .br_if(1);
+    s.global_get(G_INSPECT_SEEN)
+        .ref_as_non_null()
+        .local_get(K)
+        .array_get(T_VALS)
+        .local_get(V)
+        .ref_eq();
+    s.if_(BlockType::Empty);
+    {
+        // Its number: its place among the targets found so far, or a new one.
+        s.i32_const(0).local_set(K);
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(K)
+            .global_get(G_INSPECT_CIRC_N)
+            .i32_ge_u()
+            .br_if(1);
+        s.global_get(G_INSPECT_CIRC)
+            .ref_as_non_null()
+            .local_get(K)
+            .array_get(T_VALS)
+            .local_get(V)
+            .ref_eq()
+            .br_if(1);
+        s.local_get(K).i32_const(1).i32_add().local_set(K);
+        s.br(0).end().end();
+        s.local_get(K).global_get(G_INSPECT_CIRC_N).i32_eq();
+        s.if_(BlockType::Empty);
+        push(&mut s, G_INSPECT_CIRC, G_INSPECT_CIRC_N, V, TMP);
+        s.end();
+        s.global_get(circ_open);
+        s.local_get(K)
+            .i32_const(1)
+            .i32_add()
+            .f64_convert_i32_u()
+            .call(number_to_string)
+            .call(concat);
+        s.global_get(circ_close).call(concat).return_();
+    }
+    s.end();
+    s.local_get(K).i32_const(1).i32_add().local_set(K);
+    s.br(0).end().end();
+    push(&mut s, G_INSPECT_SEEN, G_INSPECT_SEEN_N, V, TMP);
+    call_value(&mut s);
+    s.local_set(R);
+    s.global_get(G_INSPECT_SEEN_N)
+        .i32_const(1)
+        .i32_sub()
+        .global_set(G_INSPECT_SEEN_N);
+    s.local_get(R).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// Append local `v` to the growable `$vals` in globals `arr`/`n` (doubling, from 8); `tmp` is a
+/// `(ref null $vals)` local.
+fn push(s: &mut InstructionSink, arr: u32, n: u32, v: u32, tmp: u32) {
+    s.global_get(arr).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.i32_const(8).array_new_default(T_VALS).global_set(arr);
+    s.end();
+    s.global_get(n)
+        .global_get(arr)
+        .ref_as_non_null()
+        .array_len()
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(n)
+        .i32_const(2)
+        .i32_mul()
+        .array_new_default(T_VALS)
+        .local_tee(tmp);
+    s.i32_const(0);
+    s.global_get(arr)
+        .ref_as_non_null()
+        .i32_const(0)
+        .global_get(n);
+    s.array_copy(T_VALS, T_VALS);
+    s.local_get(tmp).global_set(arr);
+    s.end();
+    s.global_get(arr)
+        .ref_as_non_null()
+        .global_get(n)
+        .local_get(v);
+    s.array_set(T_VALS);
+    s.global_get(n).i32_const(1).i32_add().global_set(n);
+}
+
+/// `$inspect_ref_open(open, o)` (T25), see [`Helper::RefOpen`].
+fn ref_open(cx: &mut dyn Cx) -> Function {
+    use runtime::{G_INSPECT_CIRC, G_INSPECT_CIRC_N};
+    let concat = cx.helper(runtime::Helper::Concat);
+    let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let (ref_open, ref_close) = (cx.str("<ref *"), cx.str("> "));
+    const OPEN: u32 = 0;
+    const O: u32 = 1;
+    const K: u32 = 2;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(K)
+        .global_get(G_INSPECT_CIRC_N)
+        .i32_ge_u()
+        .br_if(1);
+    s.global_get(G_INSPECT_CIRC)
+        .ref_as_non_null()
+        .local_get(K)
+        .array_get(T_VALS)
+        .local_get(O)
+        .ref_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(ref_open);
+    s.local_get(K)
+        .i32_const(1)
+        .i32_add()
+        .f64_convert_i32_u()
+        .call(number_to_string)
+        .call(concat);
+    s.global_get(ref_close).call(concat);
+    s.local_get(OPEN).call(concat).return_();
+    s.end();
+    s.local_get(K).i32_const(1).i32_add().local_set(K);
+    s.br(0).end().end();
+    s.local_get(OPEN);
+    s.end();
+    f
+}
+
+/// `$inspect_map_iterator(it, depth, indent)` (T25), see [`Helper::MapIter`]: node's
+/// `formatIterator` / `formatMapIterInner`, at most 100 entries.
+fn format_map_iter(cx: &mut dyn Cx) -> Function {
+    use crate::mapset::{I_MODE, I_POS, I_TABLE};
+    use js2wasi3_ir::MapOp;
+    let format = ih(cx, Helper::Format);
+    let layout = ih(cx, Helper::Layout);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let op = |cx: &mut dyn Cx, o| cx.helper(runtime::Helper::Map(mapset::Helper::Op(o)));
+    let (step, key, value) = (
+        op(cx, MapOp::Step),
+        op(cx, MapOp::Key),
+        op(cx, MapOp::Value),
+    );
+    let heads = [
+        cx.str("[Map Iterator] {"),
+        cx.str("[Map Entries] {"),
+        cx.str("[Set Iterator] {"),
+        cx.str("[Set Entries] {"),
+    ];
+    let (open, close, brace) = (cx.str("["), cx.str("]"), cx.str("}"));
+    let empty_close = cx.str("  }");
+    let (more, more_item, more_items) =
+        (cx.str("... "), cx.str(" more item"), cx.str(" more items"));
+    const IT: u32 = 0;
+    const DEPTH: u32 = 1;
+    const INDENT: u32 = 2;
+    const C: u32 = 3;
+    const MODE: u32 = 4;
+    const I: u32 = 5;
+    const N: u32 = 6;
+    const TOTAL: u32 = 7;
+    const OUT: u32 = 8;
+    const PAIR: u32 = 9;
+    let mut f = Function::new([
+        (1, rt(true, runtime::T_MAPITER)),
+        (4, ValType::I32),
+        (2, rt(true, T_KEYS)),
+    ]);
+    let mut s = f.instructions();
+    // A copy to step: the same table, position and mode.
+    s.i32_const(object::CLASS_PLAIN);
+    s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_OBJECT));
+    s.i32_const(0).array_new_default(T_KEYS);
+    s.i32_const(0).array_new_default(T_VALS);
+    s.i32_const(0).array_new_default(runtime::T_BYTES);
+    s.i32_const(0);
+    s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_I32S));
+    s.local_get(IT).struct_get(runtime::T_MAPITER, I_TABLE);
+    s.local_get(IT).struct_get(runtime::T_MAPITER, I_POS);
+    s.local_get(IT)
+        .struct_get(runtime::T_MAPITER, I_MODE)
+        .local_tee(MODE);
+    s.struct_new(runtime::T_MAPITER).local_set(C);
+    s.i32_const(101).array_new_default(T_KEYS).local_set(OUT);
+    let fmt = |s: &mut InstructionSink, get: u32| {
+        s.local_get(C).ref_as_non_null().local_get(I).call(get);
+        s.local_get(DEPTH).i32_const(1).i32_add();
+        s.local_get(INDENT).i32_const(2).i32_add();
+        s.i32_const(1).call(format);
+    };
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(C).ref_as_non_null().call(step).local_tee(I);
+    s.i32_const(0).i32_lt_s().br_if(1);
+    s.local_get(TOTAL).i32_const(1).i32_add().local_set(TOTAL);
+    s.local_get(N).i32_const(100).i32_ge_u().br_if(0);
+    s.local_get(OUT).ref_as_non_null().local_get(N);
+    // Mode % 3: 0 keys, 1 values (a set's are its keys), 2 entries `[ k, v ]`.
+    s.local_get(MODE)
+        .i32_const(3)
+        .i32_rem_u()
+        .i32_const(2)
+        .i32_eq();
+    s.if_(BlockType::Result(string_ref()));
+    {
+        s.i32_const(2).array_new_default(T_KEYS).local_set(PAIR);
+        s.local_get(PAIR).ref_as_non_null().i32_const(0);
+        fmt(&mut s, key);
+        s.array_set(T_KEYS);
+        s.local_get(PAIR).ref_as_non_null().i32_const(1);
+        s.local_get(MODE).i32_const(3).i32_ge_u();
+        s.if_(BlockType::Result(string_ref()));
+        fmt(&mut s, key);
+        s.else_();
+        fmt(&mut s, value);
+        s.end();
+        s.array_set(T_KEYS);
+        s.local_get(PAIR).ref_as_non_null().i32_const(2);
+        s.local_get(INDENT).i32_const(2).i32_add();
+        s.global_get(open).global_get(close);
+        s.i32_const(1).i32_const(0).call(layout);
+    }
+    s.else_();
+    s.local_get(MODE).i32_const(1).i32_eq();
+    s.if_(BlockType::Result(string_ref()));
+    fmt(&mut s, value);
+    s.else_();
+    fmt(&mut s, key);
+    s.end();
+    s.end();
+    s.array_set(T_KEYS);
+    s.local_get(N).i32_const(1).i32_add().local_set(N);
+    s.br(0).end().end();
+    s.local_get(TOTAL).local_get(N).i32_gt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(OUT).ref_as_non_null().local_get(N);
+    s.global_get(more);
+    s.local_get(TOTAL)
+        .local_get(N)
+        .i32_sub()
+        .f64_convert_i32_u()
+        .call(number_to_string)
+        .call(concat);
+    s.global_get(more_item).global_get(more_items);
+    s.local_get(TOTAL)
+        .local_get(N)
+        .i32_sub()
+        .i32_const(1)
+        .i32_eq();
+    s.typed_select(string_ref());
+    s.call(concat);
+    s.array_set(T_KEYS);
+    s.local_get(N).i32_const(1).i32_add().local_set(N);
+    s.end();
+    // `[Map Iterator] {`, `[Map Entries] {`, `[Set Iterator] {`, `[Set Entries] {`.
+    let head = |s: &mut InstructionSink| {
+        // (`select` picks its first operand when the condition holds: the set's head first.)
+        s.global_get(heads[3]).global_get(heads[2]);
+        s.local_get(MODE)
+            .i32_const(3)
+            .i32_rem_u()
+            .i32_const(2)
+            .i32_eq();
+        s.typed_select(string_ref());
+        s.global_get(heads[1]).global_get(heads[0]);
+        s.local_get(MODE)
+            .i32_const(3)
+            .i32_rem_u()
+            .i32_const(2)
+            .i32_eq();
+        s.typed_select(string_ref());
+        s.local_get(MODE).i32_const(3).i32_ge_u();
+        s.typed_select(string_ref());
+    };
+    // No entries: `{  }` (node has no empty case for iterators).
+    s.local_get(N).i32_eqz();
+    s.if_(BlockType::Empty);
+    head(&mut s);
+    s.global_get(empty_close).call(concat).return_();
+    s.end();
+    s.local_get(OUT)
+        .ref_as_non_null()
+        .local_get(N)
+        .local_get(INDENT);
+    head(&mut s);
+    s.global_get(brace);
+    s.i32_const(0).i32_const(0).call(layout);
     s.end();
     f
 }

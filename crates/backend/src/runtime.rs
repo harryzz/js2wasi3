@@ -139,7 +139,16 @@ pub const G_WAIT_AT: u32 = G_WAIT + 1;
 pub const G_ID_HASH: u32 = G_WAIT_AT + 1;
 /// `(mut (ref null $object))` per [`js2wasi3_ir::Builtin`]: the constructor as a value (T25),
 /// created on first use.
-pub const G_CTORS: u32 = G_ID_HASH + 1;
+/// `(mut (ref null $vals))`: the well-known symbols other than `Symbol.iterator` (T25), made on
+/// first use ([`Helper::WellKnownSymbol`]).
+pub const G_WELL_KNOWN: u32 = G_ID_HASH + 1;
+/// `console.log`'s circular-reference tracking (T25, see `crate::inspect`): the objects being
+/// formatted (`(mut (ref null $vals))`, `(mut i32)`), and those found in a cycle.
+pub const G_INSPECT_SEEN: u32 = G_WELL_KNOWN + 1;
+pub const G_INSPECT_SEEN_N: u32 = G_INSPECT_SEEN + 1;
+pub const G_INSPECT_CIRC: u32 = G_INSPECT_SEEN_N + 1;
+pub const G_INSPECT_CIRC_N: u32 = G_INSPECT_CIRC + 1;
+pub const G_CTORS: u32 = G_INSPECT_CIRC_N + 1;
 /// `(mut (ref null $object))` per [`js2wasi3_ir::Namespace`]: `Math`/`JSON` as values (T25).
 pub const G_NAMESPACES: u32 = G_CTORS + js2wasi3_ir::Builtin::ALL.len() as u32;
 /// Number of runtime globals before the user globals.
@@ -196,6 +205,9 @@ pub trait Cx {
     fn namespace_methods(&mut self, ns: js2wasi3_ir::Namespace) -> Vec<(String, u32, u32)>;
     /// Does the user's code name property `name` (one of the lowering's gated names, T25)?
     fn names(&mut self, name: &str) -> bool;
+    /// Can the program make an object with a built-in `Symbol.toStringTag` (T25: a map, promise,
+    /// generator, iterator, `Math`/`JSON`, generator or async function), or name `toStringTag`?
+    fn has_tags(&mut self) -> bool;
     /// Is `Math` or `JSON` used as a value?
     fn has_namespaces(&mut self) -> bool;
     /// Its statics implemented by the prelude: (key, code, length).
@@ -591,7 +603,13 @@ pub fn globals(globals: &mut GlobalSection) {
     globals.global(long, &ConstExpr::i64_const(0));
     // T25: the identity hash counter.
     globals.global(int, &ConstExpr::i32_const(0));
-    // T25: the built-in constructors and namespaces as values.
+    // T25: the well-known symbols, `console.log`'s cycle tracking, the built-in constructors and
+    // namespaces as values.
+    globals.global(vals, &null_vals);
+    for _ in 0..2 {
+        globals.global(vals, &null_vals);
+        globals.global(int, &ConstExpr::i32_const(0));
+    }
     for _ in 0..js2wasi3_ir::Builtin::ALL.len() + js2wasi3_ir::Namespace::ALL.len() {
         globals.global(
             GlobalType {
@@ -663,6 +681,8 @@ pub enum Helper {
     IsNullish,
     StrictEq,
     LooseEq,
+    /// `() -> jsval`: `Symbol.<WELL_KNOWN_SYMBOLS[k]>` (T25), made on first use.
+    WellKnownSymbol(u8),
     Typeof,
     TypeofString,
     StrEq,
@@ -715,6 +735,7 @@ impl Helper {
             Helper::IsNullish => "is_nullish",
             Helper::StrictEq => "strict_eq",
             Helper::LooseEq => "loose_eq",
+            Helper::WellKnownSymbol(_) => "well_known_symbol",
             Helper::Typeof => "typeof",
             Helper::TypeofString => "typeof_string",
             Helper::StrEq => "string_eq",
@@ -757,6 +778,7 @@ impl Helper {
                 (vec![v], vec![ValType::I32])
             }
             Helper::StrictEq | Helper::LooseEq => (vec![v, v], vec![ValType::I32]),
+            Helper::WellKnownSymbol(_) => (vec![], vec![v]),
             Helper::TypeofString | Helper::ToString => (vec![v], vec![s]),
             Helper::StrEq => (vec![s, s], vec![ValType::I32]),
             Helper::Concat => (vec![s, s], vec![s]),
@@ -794,6 +816,7 @@ impl Helper {
             Helper::IsNullish => is_nullish(),
             Helper::StrictEq => strict_eq(cx),
             Helper::LooseEq => loose_eq(cx),
+            Helper::WellKnownSymbol(k) => well_known_symbol(cx, k),
             Helper::Typeof => typeof_(cx),
             Helper::TypeofString => typeof_string(cx),
             Helper::StrEq => str_eq(),
@@ -1042,8 +1065,8 @@ fn strict_eq(cx: &mut dyn Cx) -> Function {
 }
 
 /// `$loose_eq(a, b) -> i32`: JS `==`. Two objects compare by identity. `null == undefined`; a
-/// nullish value equals nothing else. An object compares as its ToPrimitive. Two strings compare
-/// by content; anything else compares as numbers.
+/// nullish value equals nothing else. An object compares as its ToPrimitive. A symbol equals only
+/// itself. Two strings compare by content; anything else compares as numbers.
 fn loose_eq(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(Helper::IsNullish);
     let to_number = cx.helper(Helper::ToNumber);
@@ -1076,6 +1099,13 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
             .local_set(v);
         s.end();
     }
+    // A symbol equals only itself (T25).
+    s.local_get(0).ref_test_non_null(symbol());
+    s.local_get(1).ref_test_non_null(symbol());
+    s.i32_or();
+    s.if_(BlockType::Empty);
+    s.local_get(0).local_get(1).ref_eq().return_();
+    s.end();
     s.block(BlockType::Result(ValType::I32));
     both_strings(&mut s, 0, 1);
     s.if_(BlockType::Result(ValType::I32));
@@ -1744,4 +1774,42 @@ mod tests {
         assert_eq!(small_int(1073741824.0), None);
         assert_eq!(small_int(1e300), None);
     }
+}
+
+/// `$well_known_symbol<k>()` (T25): `Symbol.<name>`, one per program, described `Symbol.<name>`.
+fn well_known_symbol(cx: &mut dyn Cx, k: u8) -> Function {
+    let n = js2wasi3_ir::WELL_KNOWN_SYMBOLS.len() as i32;
+    let desc: Vec<u16> = format!("Symbol.{}", js2wasi3_ir::WELL_KNOWN_SYMBOLS[k as usize])
+        .encode_utf16()
+        .collect();
+    let _ = cx;
+    const S: u32 = 0;
+    let mut f = Function::new([(1, jsval())]);
+    let mut s = f.instructions();
+    s.global_get(G_WELL_KNOWN).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.i32_const(n)
+        .array_new_default(T_VALS)
+        .global_set(G_WELL_KNOWN);
+    s.end();
+    s.global_get(G_WELL_KNOWN)
+        .ref_as_non_null()
+        .i32_const(k as i32)
+        .array_get(T_VALS)
+        .local_tee(S)
+        .ref_is_null();
+    s.if_(BlockType::Empty);
+    for u in &desc {
+        s.i32_const(*u as i32);
+    }
+    s.array_new_fixed(T_SYMBOL, desc.len() as u32).local_set(S);
+    s.global_get(G_WELL_KNOWN)
+        .ref_as_non_null()
+        .i32_const(k as i32)
+        .local_get(S)
+        .array_set(T_VALS);
+    s.end();
+    s.local_get(S);
+    s.end();
+    f
 }

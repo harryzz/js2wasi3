@@ -32,6 +32,8 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/object.js"),
     include_str!("../builtins/json.js"),
     include_str!("../builtins/map.js"),
+    include_str!("../builtins/symbol.js"),
+    include_str!("../builtins/console.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -106,7 +108,15 @@ pub(crate) const FUNCTION_PROPS: &[&str] = &["apply", "call", "bind", "name", "l
 
 /// Names that gate native built-in code (T25): `keys`/`entries` are linked only when the user's
 /// code names them; `console.log` recognizes array iterators only when it can make one.
-pub(crate) const GATED: &[&str] = &["keys", "entries", "values", "iterator"];
+pub(crate) const GATED: &[&str] = &[
+    "keys",
+    "entries",
+    "values",
+    "iterator",
+    "toPrimitive",
+    "hasInstance",
+    "toStringTag",
+];
 
 /// The built-in constructors that can be values (T25): their prelude function (`$$Array`) is what
 /// calling and constructing them runs.
@@ -199,6 +209,12 @@ impl Prelude {
                 && !p.in_prelude(s.span.start)
             {
                 user_props.insert(s.value.to_string());
+                // `console.log` format strings (T25).
+                if s.value.contains('%')
+                    && let Some(sym) = out.names.get("$$consoleFormat")
+                {
+                    roots.push(item_of[sym]);
+                }
                 // …or a prototype method (`s[m]()` with `m = "slice"`).
                 for &t in methods.get(s.value.as_str()).into_iter().flatten() {
                     roots.push(t);

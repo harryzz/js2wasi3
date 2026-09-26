@@ -123,6 +123,8 @@ pub struct Module {
     pub namespace_methods: Vec<(Namespace, BuiltinMethod)>,
     /// `Math` or `JSON` is used as a value: `console.log` checks for them.
     pub namespaces: bool,
+    /// The code names `Promise` (T25: the run-time `Symbol.toStringTag` checks look for promises).
+    pub promises: bool,
     /// Property names in the user's code that gate native built-in methods (T25: `keys`,
     /// `entries`): see `js2wasi3_lower`'s `GATED`.
     pub names: std::collections::BTreeSet<String>,
@@ -269,6 +271,30 @@ impl Namespace {
     pub fn index(self) -> u32 {
         Namespace::ALL.iter().position(|n| *n == self).unwrap() as u32
     }
+}
+
+/// The well-known symbols other than `Symbol.iterator` (T25), by index.
+pub const WELL_KNOWN_SYMBOLS: [&str; 12] = [
+    "asyncIterator",
+    "hasInstance",
+    "isConcatSpreadable",
+    "match",
+    "matchAll",
+    "replace",
+    "search",
+    "species",
+    "split",
+    "toPrimitive",
+    "toStringTag",
+    "unscopables",
+];
+
+/// The index of well-known symbol `Symbol.<name>` in [`WELL_KNOWN_SYMBOLS`].
+pub fn well_known_symbol(name: &str) -> Option<u8> {
+    WELL_KNOWN_SYMBOLS
+        .iter()
+        .position(|n| *n == name)
+        .map(|k| k as u8)
 }
 
 /// `Math`'s constants.
@@ -450,6 +476,16 @@ pub enum Intrinsic {
     ObjectCreate,
     /// `Object.getPrototypeOf(v)`.
     GetPrototypeOf,
+    /// `Object.getOwnPropertySymbols(v)` (T25).
+    GetOwnPropertySymbols,
+    /// `(v) -> jsval`: an object's `Symbol.toStringTag` (T25): a string, or `undefined`.
+    BuiltinTag,
+    /// `(v) -> jsval`: `util.inspect(v)` from depth `d` (T25, `console.log` format strings;
+    /// strings quoted).
+    InspectAt(u8),
+    /// `(v) -> bool`: node's `hasBuiltInToString(o)` (T25): `o.toString` is missing or comes from
+    /// a built-in prototype.
+    BuiltinToString,
     /// `Object.hasOwn(v, key)` (`bool`).
     HasOwn,
     /// `v instanceof B` (`bool`).
@@ -502,6 +538,8 @@ pub enum Intrinsic {
     NewSymbol,
     /// `Symbol.iterator`.
     SymbolIterator,
+    /// `() -> jsval`: another well-known symbol, `Symbol.<WELL_KNOWN_SYMBOLS[k]>` (T25).
+    WellKnownSymbol(u8),
     /// `Array.isArray(v)` (`bool`).
     IsArray,
     /// `Object.keys(v)`.
@@ -717,7 +755,11 @@ impl Intrinsic {
             | Intrinsic::NoFormat
             | Intrinsic::ForInKeys
             | Intrinsic::ObjectCreate
-            | Intrinsic::GetPrototypeOf => (&[JsVal], Some(JsVal)),
+            | Intrinsic::GetPrototypeOf
+            | Intrinsic::GetOwnPropertySymbols
+            | Intrinsic::BuiltinTag
+            | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::BuiltinToString => (&[JsVal], Some(Bool)),
             Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
             Intrinsic::SetProp | Intrinsic::DefineProp => (&[JsVal, JsVal, JsVal], None),
@@ -753,7 +795,7 @@ impl Intrinsic {
             Intrinsic::IterClose => (&[JsVal, Bool], None),
             Intrinsic::CallList => (&[JsVal, JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::CheckDestructure => (&[JsVal, JsVal], None),
-            Intrinsic::SymbolIterator => (&[], Some(JsVal)),
+            Intrinsic::SymbolIterator | Intrinsic::WellKnownSymbol(_) => (&[], Some(JsVal)),
             Intrinsic::ConstructList => (&[JsVal, JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::CreateThis | Intrinsic::ClassHeritage | Intrinsic::Integrity(_) => {
                 (&[JsVal], Some(JsVal))
@@ -839,6 +881,10 @@ impl Intrinsic {
             Intrinsic::KeysGet => "keys_get",
             Intrinsic::ObjectCreate => "object_create",
             Intrinsic::GetPrototypeOf => "get_prototype_of",
+            Intrinsic::GetOwnPropertySymbols => "get_own_property_symbols",
+            Intrinsic::BuiltinTag => "builtin_tag",
+            Intrinsic::InspectAt(_) => "inspect_at",
+            Intrinsic::BuiltinToString => "builtin_to_string",
             Intrinsic::HasOwn => "has_own",
             Intrinsic::InstanceOf(_) => "instanceof",
             Intrinsic::Prototype(_) => "prototype",
@@ -862,6 +908,7 @@ impl Intrinsic {
             Intrinsic::CheckDestructure => "check_destructure",
             Intrinsic::NewSymbol => "new_symbol",
             Intrinsic::SymbolIterator => "symbol_iterator",
+            Intrinsic::WellKnownSymbol(_) => "well_known_symbol",
             Intrinsic::IsArray => "is_array",
             Intrinsic::ObjectKeys => "object_keys",
             Intrinsic::ObjectValues => "object_values",
