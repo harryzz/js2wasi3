@@ -178,3 +178,4 @@ Next smallest step: T17 (promises + microtask queue).
 - 2026-09-26: private names (fields, methods, statics, `#x in o`, brand errors like node), `super.x = v`,
   `super` in literal methods; fixtures `classes/{private,scopes}.js`. Docs, Notes / Result, README status and
   follow-ups F57–F63. cargo test 60 ok, diff 40/0/9, clippy clean. Task done.
+- 2026-09-26: user approved the commit ("T16: classes", 48c863a), no attribution lines, not pushed. Next: T17.
