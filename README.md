@@ -55,17 +55,17 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Objects and prototypes, getters/setters, `Object.defineProperty`, `freeze`/`seal`; arrays and the iterator
   protocol.
 - Built-ins written in JS and compiled with the program (only what's used): `Math`, `String`/`Number` methods and
-  parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …), `Array.from`/`of`, `JSON.stringify`/`parse`, `Map`/`Set`, `Object.assign`/`fromEntries`, `hasOwnProperty` and the other
-  `Object.prototype` methods.
+  parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …), `Array.from`/`of`, `JSON.stringify`/`parse`, `Map`/`Set`, typed arrays and `ArrayBuffer`, `Object.assign`/`fromEntries`,
+  `hasOwnProperty` and the other `Object.prototype` methods.
 - Classes: fields, static members, private `#x` fields and methods, `extends` (also built-in errors), `super`.
 - Generators (`function*`, `yield`, `yield*`); `Promise` (`then`/`catch`/`finally`, `all`/`allSettled`/`race`/`any`,
-  `withResolvers`), `AggregateError`, `queueMicrotask`; `async`/`await`, including top-level `await`.
+  `withResolvers`), `AggregateError`, `queueMicrotask`; `async`/`await`, including top-level `await`; `for await`
+  and async generators.
 - Timers (`setTimeout`, `setInterval`, `setImmediate`, `clear*`, `process.nextTick`) on the WASI 0.3 event loop,
   using `wasi:clocks`.
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
-Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex,
-async generators and `for await`, multi-file `import`, and richer WIT types at the boundary (records, lists,
+Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex, multi-file `import`, and richer WIT types at the boundary (records, lists,
 async exports). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 

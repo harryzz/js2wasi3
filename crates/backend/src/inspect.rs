@@ -303,20 +303,51 @@ fn format(cx: &mut dyn Cx) -> Function {
                     .i32_eq();
             };
             // `[Function: `, `[GeneratorFunction: ` or `[AsyncFunction: `.
-            let pick = |s: &mut InstructionSink, plain: u32, generator: u32, async_: u32| {
+            // T20: `[AsyncGeneratorFunction: ` (only with async generators in the code).
+            let async_gen = cx.names("$asyncgen").then(|| {
+                (
+                    cx.str("[AsyncGeneratorFunction: "),
+                    cx.str("[AsyncGeneratorFunction (anonymous)]"),
+                )
+            });
+            let pick = |s: &mut InstructionSink,
+                        plain: u32,
+                        generator: u32,
+                        async_: u32,
+                        async_gen: Option<u32>| {
+                // (`select` keeps its first operand when the condition holds.)
+                if let Some(g) = async_gen {
+                    s.global_get(g);
+                }
                 s.global_get(async_);
                 s.global_get(generator).global_get(plain);
                 is_kind(s, func::KIND_GENERATOR);
                 s.typed_select(string_ref());
                 is_kind(s, func::KIND_ASYNC);
                 s.typed_select(string_ref());
+                if async_gen.is_some() {
+                    is_kind(s, func::KIND_ASYNC_GENERATOR);
+                    s.typed_select(string_ref());
+                }
             };
             s.if_(BlockType::Result(string_ref()));
-            pick(&mut s, named, gen_named, async_named);
+            pick(
+                &mut s,
+                named,
+                gen_named,
+                async_named,
+                async_gen.map(|g| g.0),
+            );
             s.local_get(N).ref_cast_non_null(string()).call(concat);
             s.global_get(close).call(concat);
             s.else_();
-            pick(&mut s, anonymous, gen_anonymous, async_anonymous);
+            pick(
+                &mut s,
+                anonymous,
+                gen_anonymous,
+                async_anonymous,
+                async_gen.map(|g| g.1),
+            );
             s.end();
         }
         s.end();
@@ -359,6 +390,24 @@ fn format(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(array::array());
     s.local_get(DEPTH).local_get(INDENT).call(f_array).return_();
     s.end();
+    if cx.names("$typed") {
+        // Typed arrays and `ArrayBuffer`s (T20).
+        let f_typed = cx.helper(runtime::Helper::Typed(crate::typed::Helper::Format));
+        let f_buffer = cx.helper(runtime::Helper::Typed(crate::typed::Helper::FormatBuffer));
+        s.local_get(V).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(V).ref_cast_non_null(crate::typed::typed());
+        s.local_get(DEPTH).local_get(INDENT).call(f_typed).return_();
+        s.end();
+        s.local_get(V).ref_test_non_null(crate::typed::buffer());
+        s.if_(BlockType::Empty);
+        s.local_get(V).ref_cast_non_null(crate::typed::buffer());
+        s.local_get(DEPTH)
+            .local_get(INDENT)
+            .call(f_buffer)
+            .return_();
+        s.end();
+    }
     if let Some(f_mapset) = f_mapset {
         s.local_get(V).ref_test_non_null(mapset::map());
         s.if_(BlockType::Empty);
@@ -851,6 +900,19 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(generator_prefix).local_set(PREFIX);
     s.end();
+    if cx.names("$asyncgen") {
+        // An async generator object (T20): `Object [AsyncGenerator] `.
+        let prefix = cx.str("Object [AsyncGenerator] ");
+        s.local_get(O)
+            .struct_get(runtime::T_OBJECT, object::F_CLASS)
+            .i32_const(object::CLASS_MASK)
+            .i32_and()
+            .i32_const(object::CLASS_ASYNC_GEN)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(prefix).local_set(PREFIX);
+        s.end();
+    }
     // An array iterator (T25): `Object [Array Iterator] ` (only if the code can make one).
     if ["values", "keys", "entries", "iterator"]
         .into_iter()

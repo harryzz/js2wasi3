@@ -19,13 +19,13 @@ table in [`tasks/README.md`](../tasks/README.md).
 
 | | ✅ | 🟡 | ❌ | ➖ |
 |---|---|---|---|---|
-| Keywords (66 entries) | 27 | 11 | 4 | 24 |
-| Built-in objects, properties, methods (20) | 11 | 6 | 3 | – |
+| Keywords (66 entries) | 28 | 10 | 4 | 24 |
+| Built-in objects, properties, methods (21) | 11 | 7 | 3 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
 What's most needed, in order: the rest of the built-in library (`Date`: T26; regex: T27; built-ins as values: T25), spread into `console.log` and calls through `console.log`
-as a value, `typeof` of an undeclared name, then the language gaps below (async generators, `for await`, tagged
-templates, regex, multi-file `import`).
+as a value, `typeof` of an undeclared name, then the language gaps below (tagged templates, regex, multi-file
+`import`).
 
 ## 1. Keywords
 
@@ -33,8 +33,8 @@ templates, regex, multi-file `import`).
 |---|---|---|
 | `abstract` | ➖ | Removed in ES5 (Java-era reserved word). |
 | `arguments` | 🟡 | T25: in ordinary functions, methods, generators and async functions (unmapped, as in strict mode; iterable, printed `[Arguments] {…}`). Rejected in arrow functions, class constructors, with a rest parameter and in exported functions (F103). |
-| `async` | 🟡 | T19: `async function`, async arrows, methods, static methods. Missing: async generators `async function*` (F72); exported async functions at the WIT boundary (T20). |
-| `await` | 🟡 | T19: in async functions and at top level. Missing: `for await` (F72); an unsettled top-level `await` exits 0 instead of node's 13 (F76). |
+| `async` | 🟡 | T19: `async function`, async arrows, methods, static methods. T20: async generators (`async function*`, methods), except `yield*` in them (F115). Missing: exported async functions at the WIT boundary (T20). |
+| `await` | 🟡 | T19: in async functions and at top level; T20: `for await` (async and sync iterables, node's microtask ticks). Missing: an unsettled top-level `await` exits 0 instead of node's 13 (F76). |
 | `boolean` | ➖ | Removed in ES5. |
 | `break` | ✅ | Loops, `switch`, labeled statements and blocks; through `finally`. |
 | `byte` | ➖ | Removed in ES5. |
@@ -58,7 +58,7 @@ templates, regex, multi-file `import`).
 | `final` | ➖ | Removed in ES5. |
 | `finally` | ✅ | Completion dispatch for every jump, also around `yield`/`await` (T12, T18, T19). |
 | `float` | ➖ | Removed in ES5. |
-| `for` | 🟡 | `for`, `for-in`, `for-of` (iterator protocol, destructuring) work. Missing: `for await` (F72). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). |
+| `for` | ✅ | `for`, `for-in`, `for-of` (iterator protocol, destructuring), `for await` (T20). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). |
 | `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments`, `toString` (source text, T25), names from computed keys (T25). Missing: `"" + f` in code that never names `toString` traps (F104); `new.target` outside class constructors (F57); assigning to a function declaration's name (F45). |
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
@@ -116,6 +116,7 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 | `isPrototypeOf` | ✅ | T21. |
 | `length` | ✅ | Strings, arrays, functions. |
 | `Map` / `Set` | 🟡 | T25: `new Map(iterable)`/`new Set(iterable)`, every method (`get`/`set`/`has`/`delete`/`clear`/`size`/`forEach`/`keys`/`values`/`entries`/`add`), SameValueZero keys, insertion order, iteration that sees changes, `instanceof`, printed like node. Also `Map.groupBy`. Also the ES2025 `Set` methods and `Map`/`Set` as values (T25 slice 4). Missing: subclassing (F106), `WeakMap`/`WeakSet` (F98), printing their iterators (F99). |
+| Typed arrays, `ArrayBuffer` | 🟡 | T20: the nine non-BigInt typed arrays (constructors from a length, a buffer, a typed array, an iterable or an array-like; `from`/`of`; element conversions; every `%TypedArray%.prototype` method; `subarray` views; iteration; `Object.keys`/`in`/`for-in`; printed like node) and `ArrayBuffer` (`byteLength`, `slice`, `isView`). Missing: `Float16Array`, BigInt arrays, `DataView`, resizable buffers, subclassing (F116). |
 | `Math` | 🟡 | T21: every function and constant, matching node bit for bit except `pow`/`**` (last-bit differences on some inexact results: F77). `Math` (and `JSON`) as values (`const M = Math`, `Math[k]`, printed `Object [Math] {}`, T25; `Math[k]` finds only functions whose name appears in the code, F109); `Math.random` only in commands (F83). |
 | `NaN` | ✅ | |
 | `name` | ✅ | Functions, classes, methods, accessors (`get x`), inferred names. |

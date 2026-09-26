@@ -351,11 +351,32 @@ pub enum Builtin {
     /// node's `Timeout` and `Immediate` classes (T25, not global names).
     Timeout,
     Immediate,
+    /// `%AsyncGeneratorPrototype%` (T20, not a global name).
+    AsyncGenerator,
+    /// T20: `ArrayBuffer`, `%TypedArray%` (not a global name) and the typed arrays (kind: an
+    /// index into [`TYPED_NAMES`]).
+    ArrayBuffer,
+    TypedArray,
+    Typed(u8),
 }
+
+/// The typed array constructors (T20), by kind; [`TYPED_SIZES`]: their element sizes.
+pub const TYPED_NAMES: [&str; 9] = [
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+];
+pub const TYPED_SIZES: [u32; 9] = [1, 1, 1, 2, 2, 4, 4, 4, 8];
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 24] = [
+    pub const ALL: [Builtin; 36] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -380,6 +401,18 @@ impl Builtin {
         Builtin::Error(ErrorKind::AggregateError),
         Builtin::Timeout,
         Builtin::Immediate,
+        Builtin::AsyncGenerator,
+        Builtin::ArrayBuffer,
+        Builtin::TypedArray,
+        Builtin::Typed(0),
+        Builtin::Typed(1),
+        Builtin::Typed(2),
+        Builtin::Typed(3),
+        Builtin::Typed(4),
+        Builtin::Typed(5),
+        Builtin::Typed(6),
+        Builtin::Typed(7),
+        Builtin::Typed(8),
     ];
 
     pub fn name(self) -> &'static str {
@@ -401,6 +434,10 @@ impl Builtin {
             Builtin::SetIterator => "%SetIteratorPrototype%",
             Builtin::Timeout => "%Timeout%",
             Builtin::Immediate => "%Immediate%",
+            Builtin::AsyncGenerator => "%AsyncGeneratorPrototype%",
+            Builtin::ArrayBuffer => "ArrayBuffer",
+            Builtin::TypedArray => "%TypedArray%",
+            Builtin::Typed(k) => TYPED_NAMES[k as usize],
         }
     }
 
@@ -408,6 +445,7 @@ impl Builtin {
     pub fn parse_prelude(s: &str) -> Option<Builtin> {
         match s {
             "MapIterator" => Some(Builtin::MapIterator),
+            "TypedArray" => Some(Builtin::TypedArray),
             "SetIterator" => Some(Builtin::SetIterator),
             _ => Builtin::parse(s),
         }
@@ -426,6 +464,8 @@ impl Builtin {
             | Builtin::Boolean
             | Builtin::Array => Some(1),
             Builtin::Map | Builtin::Set => Some(0),
+            Builtin::ArrayBuffer => Some(1),
+            Builtin::Typed(_) => Some(3),
             _ => None,
         }
     }
@@ -538,6 +578,20 @@ pub enum Intrinsic {
     IterClose,
     /// The rest of an iteration, as a new array.
     IterRest,
+    /// `for await` (T20): start iterating `v` (args: v, the TypeError message if it isn't
+    /// iterable): its `Symbol.asyncIterator` iterator, else the `IterOpen` state of its sync one.
+    AsyncIterOpen,
+    /// Is the state from `AsyncIterOpen` an async iterator (else a sync `IterOpen` state)?
+    IsAsyncIter,
+    /// The async iterator's `next()` result (to await).
+    AsyncIterNext,
+    /// Check an awaited iterator result is an object (TypeError); returns it.
+    AsyncIterResult,
+    /// Closing an async iterator: args: state, `throwing` (`bool`: errors are ignored, a Wasm
+    /// null result). Its `return()` result to await, or a hole when it has no `return`.
+    AsyncIterReturn,
+    /// Does a sync `IterOpen` state have a `return` method (it isn't done)?
+    IterHasReturn,
     /// `f.apply(this, args)` without the lookup: args: callee, this, array-like, what (the
     /// TypeError text if it isn't a function).
     CallList,
@@ -642,6 +696,12 @@ pub enum Intrinsic {
         resume: FuncId,
         slots: u32,
     },
+    /// From the suspension transform on (T20): an async generator object; its frame has one more
+    /// slot, the queue of `next`/`throw`/`return` requests.
+    NewAsyncGenerator {
+        resume: FuncId,
+        slots: u32,
+    },
     /// Run an async function's frame (args: the frame) up to its first `await` or its end, and
     /// return its promise. Later steps run from promise jobs; the body's result resolves the
     /// promise and an exception rejects it.
@@ -654,9 +714,10 @@ pub enum Intrinsic {
     GenPoint,
     /// Record that the generator suspends at a point (args: the generator, the point, an `i32`);
     /// the resume function then returns the value to yield (`raw`: an iterator result object
-    /// passed out as is, `yield*`). No result.
+    /// passed out as is, `yield*`; `awaiting`: an `await` in an async generator, T20). No result.
     GenSuspend {
         raw: bool,
+        awaiting: bool,
     },
     /// `yield* v`: start iterating `v` (a TypeError like node's if it isn't iterable): an internal
     /// iteration state, as `IterOpen` gives.
@@ -693,6 +754,8 @@ pub enum Intrinsic {
     Trap,
     /// `Map`/`Set` storage for the prelude (T25).
     Map(MapOp),
+    /// Typed arrays and `ArrayBuffer`s (T20), for the prelude.
+    Typed(TypedOp),
     /// `(args: an array of every argument) -> jsval`: a function's `arguments` object (T25,
     /// unmapped: strict mode).
     MakeArguments,
@@ -735,6 +798,35 @@ pub enum MapOp {
     /// `(it, index) -> jsval`: the key / value of the entry `Step` gave.
     Key,
     Value,
+}
+
+/// [`Intrinsic::Typed`] operations (T20). `t` is a typed array, `b` an `ArrayBuffer` (the
+/// prelude checks them with `Kind`/`IsBuffer` first: anything else traps); `kind` indexes
+/// [`TYPED_NAMES`]; lengths, offsets and indices are `i32`s in range (the prelude checks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypedOp {
+    /// `(kind, length) -> jsval`: a new zeroed typed array on a new buffer.
+    New,
+    /// `(kind, b, byte_offset, length) -> jsval`: a typed array on `b`.
+    View,
+    /// `(v) -> i32`: the kind of a typed array, or -1.
+    Kind,
+    /// `(t) -> i32`: its length / byte offset.
+    Length,
+    ByteOffset,
+    /// `(t) -> jsval`: its buffer.
+    Buffer,
+    /// `(v) -> bool`: is it an `ArrayBuffer`?
+    IsBuffer,
+    /// `(byte_length) -> jsval`: a new zeroed `ArrayBuffer`.
+    BufferNew,
+    /// `(b) -> i32`.
+    BufferLength,
+    /// `(b, start, end) -> jsval`: a new `ArrayBuffer` with a copy of bytes `start..end`.
+    BufferSlice,
+    /// `(dst, dst_index, src, src_index, count)`: copy elements between typed arrays of the same
+    /// kind (overlap allowed).
+    Copy,
 }
 
 pub const MAP_KIND_MAP: u8 = 0;
@@ -819,6 +911,10 @@ impl Intrinsic {
             Intrinsic::IterOpen | Intrinsic::ObjectRest => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::IterStep | Intrinsic::IsArray => (&[JsVal], Some(Bool)),
             Intrinsic::IterClose => (&[JsVal, Bool], None),
+            Intrinsic::AsyncIterOpen => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::AsyncIterNext | Intrinsic::AsyncIterResult => (&[JsVal], Some(JsVal)),
+            Intrinsic::AsyncIterReturn => (&[JsVal, Bool], Some(JsVal)),
+            Intrinsic::IsAsyncIter | Intrinsic::IterHasReturn => (&[JsVal], Some(Bool)),
             Intrinsic::CallList => (&[JsVal, JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::CheckDestructure => (&[JsVal, JsVal], None),
             Intrinsic::SymbolIterator | Intrinsic::WellKnownSymbol(_) => (&[], Some(JsVal)),
@@ -848,7 +944,9 @@ impl Intrinsic {
                 (&[JsVal, JsVal], Some(JsVal))
             }
             Intrinsic::ResumeMode => (&[], Some(I32)),
-            Intrinsic::NewGenerator { .. } | Intrinsic::NewAsync { .. } => (&[], Some(JsVal)),
+            Intrinsic::NewGenerator { .. }
+            | Intrinsic::NewAsync { .. }
+            | Intrinsic::NewAsyncGenerator { .. } => (&[], Some(JsVal)),
             Intrinsic::AsyncStart => (&[JsVal], Some(JsVal)),
             Intrinsic::GenLoad(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::GenStore(_) => (&[JsVal, JsVal], None),
@@ -877,6 +975,18 @@ impl Intrinsic {
                 MapOp::Clear => (&[JsVal], None),
                 MapOp::Iter(_) => (&[JsVal], Some(JsVal)),
                 MapOp::Key | MapOp::Value => (&[JsVal, I32], Some(JsVal)),
+            },
+            Intrinsic::Typed(op) => match op {
+                TypedOp::New => (&[I32, I32], Some(JsVal)),
+                TypedOp::View => (&[I32, JsVal, I32, I32], Some(JsVal)),
+                TypedOp::Kind | TypedOp::Length | TypedOp::ByteOffset | TypedOp::BufferLength => {
+                    (&[JsVal], Some(I32))
+                }
+                TypedOp::Buffer => (&[JsVal], Some(JsVal)),
+                TypedOp::IsBuffer => (&[JsVal], Some(Bool)),
+                TypedOp::BufferNew => (&[I32], Some(JsVal)),
+                TypedOp::BufferSlice => (&[JsVal, I32, I32], Some(JsVal)),
+                TypedOp::Copy => (&[JsVal, I32, JsVal, I32, I32], None),
             },
         }
     }
@@ -928,6 +1038,12 @@ impl Intrinsic {
             Intrinsic::IterStep => "iter_step",
             Intrinsic::IterValue => "iter_value",
             Intrinsic::IterClose => "iter_close",
+            Intrinsic::AsyncIterOpen => "async_iter_open",
+            Intrinsic::IsAsyncIter => "is_async_iter",
+            Intrinsic::AsyncIterNext => "async_iter_next",
+            Intrinsic::AsyncIterResult => "async_iter_result",
+            Intrinsic::AsyncIterReturn => "async_iter_return",
+            Intrinsic::IterHasReturn => "iter_has_return",
             Intrinsic::IterRest => "iter_rest",
             Intrinsic::CallList => "call_list",
             Intrinsic::ObjectRest => "object_rest",
@@ -974,12 +1090,14 @@ impl Intrinsic {
             Intrinsic::ResumeMode => "resume_mode",
             Intrinsic::NewGenerator { .. } => "new_generator",
             Intrinsic::NewAsync { .. } => "new_async",
+            Intrinsic::NewAsyncGenerator { .. } => "new_async_generator",
             Intrinsic::AsyncStart => "async_start",
             Intrinsic::GenLoad(_) => "gen_load",
             Intrinsic::GenStore(_) => "gen_store",
             Intrinsic::GenPoint => "gen_point",
-            Intrinsic::GenSuspend { raw: false } => "gen_suspend",
-            Intrinsic::GenSuspend { raw: true } => "gen_suspend_raw",
+            Intrinsic::GenSuspend { awaiting: true, .. } => "gen_suspend_await",
+            Intrinsic::GenSuspend { raw: false, .. } => "gen_suspend",
+            Intrinsic::GenSuspend { raw: true, .. } => "gen_suspend_raw",
             Intrinsic::DelegateOpen => "delegate_open",
             Intrinsic::DelegateStep => "delegate_step",
             Intrinsic::F64Hi => "f64_hi",
@@ -1011,6 +1129,19 @@ impl Intrinsic {
                 MapOp::Key => "map_key",
                 MapOp::Value => "map_value",
             },
+            Intrinsic::Typed(op) => match op {
+                TypedOp::New => "typed_new",
+                TypedOp::View => "typed_view",
+                TypedOp::Kind => "typed_kind",
+                TypedOp::Length => "typed_length",
+                TypedOp::ByteOffset => "typed_byte_offset",
+                TypedOp::Buffer => "typed_buffer",
+                TypedOp::IsBuffer => "is_array_buffer",
+                TypedOp::BufferNew => "buffer_new",
+                TypedOp::BufferLength => "buffer_length",
+                TypedOp::BufferSlice => "buffer_slice",
+                TypedOp::Copy => "typed_copy",
+            },
         }
     }
 
@@ -1031,6 +1162,11 @@ impl Intrinsic {
                 | Intrinsic::IterValue
                 | Intrinsic::IterClose
                 | Intrinsic::IterRest
+                | Intrinsic::AsyncIterOpen
+                | Intrinsic::AsyncIterNext
+                | Intrinsic::AsyncIterResult
+                | Intrinsic::AsyncIterReturn
+                | Intrinsic::IterHasReturn
                 | Intrinsic::CallList
                 | Intrinsic::ObjectRest
                 | Intrinsic::CheckDestructure
@@ -1366,6 +1502,8 @@ pub enum FnKind {
     Generator,
     /// An async function (T19): not a constructor.
     Async,
+    /// An async generator function (T20): not a constructor.
+    AsyncGenerator,
 }
 
 impl Expr {

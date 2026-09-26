@@ -49,6 +49,8 @@ pub const CLASS_ARGUMENTS: i32 = 4;
 /// `Math` and `JSON` as values (T25): printed `Object [Math] {}`.
 pub const CLASS_MATH: i32 = 5;
 pub const CLASS_JSON: i32 = 6;
+/// An async generator object (T20, a `$generator`, see `crate::asyncgen`).
+pub const CLASS_ASYNC_GEN: i32 = 7;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -208,7 +210,9 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         ],
         Builtin::MapIterator | Builtin::SetIterator => &["next"],
         // Native (T25, `crate::timers`).
-        Builtin::Timeout | Builtin::Immediate => &[],
+        Builtin::Timeout | Builtin::Immediate | Builtin::AsyncGenerator => &[],
+        // T20: from the prelude and `crate::typed`.
+        Builtin::ArrayBuffer | Builtin::TypedArray | Builtin::Typed(_) => &[],
     }
 }
 
@@ -216,6 +220,7 @@ fn parent(b: Builtin) -> Option<Builtin> {
     match b {
         Builtin::Object => None,
         Builtin::Error(k) if k != ErrorKind::Error => Some(Builtin::Error(ErrorKind::Error)),
+        Builtin::Typed(_) => Some(Builtin::TypedArray),
         _ => Some(Builtin::Object),
     }
 }
@@ -358,6 +363,10 @@ impl Helper {
                 Builtin::SetIterator => "%SetIteratorPrototype%",
                 Builtin::Timeout => "Timeout.prototype",
                 Builtin::Immediate => "Immediate.prototype",
+                Builtin::AsyncGenerator => "%AsyncGeneratorPrototype%",
+                Builtin::ArrayBuffer => "ArrayBuffer.prototype",
+                Builtin::TypedArray => "%TypedArray%.prototype",
+                Builtin::Typed(_) => "typed_array_prototype",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -1228,6 +1237,25 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             )
             .collect(),
         Builtin::String => vec![(values, None, "[Symbol.iterator]", 0)],
+        // T20: the array iterators work on any array-like.
+        Builtin::TypedArray => [(values, "values")]
+            .into_iter()
+            .chain(
+                [
+                    (
+                        runtime::Helper::Iter(crate::iter::Helper::ProtoKeys),
+                        "keys",
+                    ),
+                    (
+                        runtime::Helper::Iter(crate::iter::Helper::ProtoEntries),
+                        "entries",
+                    ),
+                ]
+                .into_iter()
+                .filter(|(_, k)| named.contains(k)),
+            )
+            .map(|(h, k)| (h, Some(k), k, 0))
+            .collect(),
         Builtin::Error(ErrorKind::Error) => vec![(
             runtime::Helper::Obj(Helper::ErrorToString),
             Some("toString"),
@@ -1292,6 +1320,20 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             "[Symbol.iterator]",
             0,
         )],
+        Builtin::AsyncGenerator => {
+            use js2wasi3_ir::{RESUME_NEXT, RESUME_RETURN, RESUME_THROW};
+            [
+                (RESUME_NEXT, "next"),
+                (RESUME_RETURN, "return"),
+                (RESUME_THROW, "throw"),
+            ]
+            .into_iter()
+            .map(|(m, name)| {
+                let h = runtime::Helper::AsyncGen(crate::asyncgen::Helper::Method(m));
+                (h, Some(name), name, 1)
+            })
+            .collect()
+        }
         Builtin::Timeout | Builtin::Immediate => crate::timers::proto_methods(b)
             .into_iter()
             .map(|(h, name, len)| (runtime::Helper::Timer(h), Some(name), name, len))
@@ -1306,7 +1348,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             let code = cx.helper(h);
             cx.declare_func(code);
             let mut keys = vec![key.map_or(runtime::G_SYM_ITERATOR, |k| cx.str(k))];
-            if h == values && b == Builtin::Array {
+            if h == values && matches!(b, Builtin::Array | Builtin::TypedArray) {
                 keys.push(runtime::G_SYM_ITERATOR);
             }
             let flags = if h == values { func::NEW_VALUES } else { 0 };
@@ -1318,7 +1360,10 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     for (key, code, len) in cx.builtin_methods(b) {
         cx.declare_func(code);
         let getter = (matches!(b, Builtin::Map | Builtin::Set) && key == "size")
-            || (b == Builtin::Symbol && key == "description");
+            || (b == Builtin::Symbol && key == "description")
+            || (b == Builtin::TypedArray
+                && ["length", "byteLength", "byteOffset", "buffer"].contains(&key.as_str()))
+            || (b == Builtin::ArrayBuffer && key == "byteLength");
         let name = cx.str(&if getter {
             format!("get {key}")
         } else {
@@ -1413,6 +1458,31 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     if b == Builtin::Promise {
         let ctor = cx.helper(runtime::Helper::Prom(crate::promise::Helper::Ctor));
         s.call(ctor).drop();
+    }
+    if let Builtin::Typed(k) = b {
+        // T20: `BYTES_PER_ELEMENT` on each typed array prototype.
+        let size = js2wasi3_ir::TYPED_SIZES[k as usize] as f64;
+        func::define_constants(cx, &mut s, O, &[("BYTES_PER_ELEMENT", size)]);
+    }
+    if b == Builtin::AsyncGenerator {
+        // `[Symbol.asyncIterator]` (`this`; it's `%AsyncIteratorPrototype%`'s, F70-like).
+        let sym = cx.helper(runtime::Helper::WellKnownSymbol(
+            js2wasi3_ir::well_known_symbol("asyncIterator").expect("well-known"),
+        ));
+        let code = cx.helper(runtime::Helper::Iter(crate::iter::Helper::This));
+        cx.declare_func(code);
+        let name = cx.str("[Symbol.asyncIterator]");
+        s.local_get(O).ref_as_non_null();
+        s.call(sym)
+            .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
+        s.ref_func(code);
+        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.ref_null(func::vals());
+        s.global_get(name)
+            .i32_const(0)
+            .i32_const(0)
+            .call(new_function);
+        s.i32_const(HIDDEN).call(define);
     }
     if b == Builtin::Timeout {
         // `Timeout.prototype[Symbol.toPrimitive]`: the timer's id (T25).
@@ -1614,6 +1684,57 @@ fn get(cx: &mut dyn Cx) -> Function {
     s.end();
     s.end();
     s.end();
+    if cx.names("$typed") {
+        // A typed array (T20): an index key (an `i31` or an array-index string) reads the
+        // element, or `undefined` out of range; never the prototype chain.
+        let elem = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Get));
+        let t = |s: &mut InstructionSink| {
+            s.local_get(V).ref_cast_non_null(crate::typed::typed());
+        };
+        s.local_get(V).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        {
+            s.local_get(KEY)
+                .ref_test_non_null(wasm_encoder::HeapType::I31);
+            s.if_(BlockType::Result(ValType::I64));
+            s.local_get(KEY)
+                .ref_cast_non_null(wasm_encoder::HeapType::I31)
+                .i31_get_s()
+                .i64_extend_i32_s();
+            s.else_();
+            s.local_get(KEY).ref_test_non_null(string());
+            s.if_(BlockType::Result(ValType::I64));
+            s.local_get(KEY).ref_cast_non_null(string()).call(index);
+            s.else_();
+            s.i64_const(-2);
+            s.end();
+            s.end();
+            s.local_tee(I);
+            s.i64_const(-2).i64_ne();
+            s.if_(BlockType::Empty);
+            s.local_get(I).i64_const(0).i64_ge_s();
+            t(&mut s);
+            s.struct_get(runtime::T_TYPED, crate::typed::F_LENGTH)
+                .i64_extend_i32_u()
+                .local_get(I)
+                .i64_gt_s();
+            s.i32_and();
+            s.if_(BlockType::Empty);
+            t(&mut s);
+            s.local_get(I).i32_wrap_i64().call(elem).return_();
+            s.end();
+            // An index out of range, or a negative integer key.
+            s.local_get(I).i64_const(-1).i64_ne();
+            s.local_get(KEY)
+                .ref_test_non_null(wasm_encoder::HeapType::I31);
+            s.i32_or();
+            s.if_(BlockType::Empty);
+            s.global_get(runtime::G_UNDEFINED).return_();
+            s.end();
+            s.end();
+        }
+        s.end();
+    }
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
     s.local_get(V).local_get(KEY).call(to_key).call(throw_read);
@@ -1692,11 +1813,42 @@ fn set(cx: &mut dyn Cx) -> Function {
     const VAL: u32 = 2;
     const K: u32 = 3;
     let set_index = cx.helper(runtime::Helper::Arr(array::Helper::SetIndex));
-    let mut f = Function::new([(1, rt(true, T_STRING))]);
+    const X: u32 = 4;
+    let mut f = Function::new([(1, rt(true, T_STRING)), (1, ValType::F64)]);
     let mut s = f.instructions();
     let k = |s: &mut InstructionSink| {
         s.local_get(K).ref_as_non_null();
     };
+    if cx.names("$typed") {
+        // A typed array element (T20): the value is converted first; out of range, dropped.
+        let elem = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Set));
+        let to_number = rh(cx, runtime::Helper::ToNumber);
+        s.local_get(V).ref_test_non_null(crate::typed::typed());
+        s.local_get(KEY)
+            .ref_test_non_null(wasm_encoder::HeapType::I31);
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        {
+            let key = |s: &mut InstructionSink| {
+                s.local_get(KEY)
+                    .ref_cast_non_null(wasm_encoder::HeapType::I31)
+                    .i31_get_s();
+            };
+            s.local_get(VAL).call(to_number).local_set(X);
+            key(&mut s);
+            s.local_get(V)
+                .ref_cast_non_null(crate::typed::typed())
+                .struct_get(runtime::T_TYPED, crate::typed::F_LENGTH);
+            s.i32_lt_u();
+            s.if_(BlockType::Empty);
+            s.local_get(V).ref_cast_non_null(crate::typed::typed());
+            key(&mut s);
+            s.local_get(X).call(elem);
+            s.end();
+            s.return_();
+        }
+        s.end();
+    }
     // Fast path: an array element at a non-negative small integer index.
     s.local_get(V).ref_test_non_null(array::array());
     s.local_get(KEY)
@@ -1894,8 +2046,40 @@ fn has(cx: &mut dyn Cx) -> Function {
     const KEY: u32 = 0;
     const V: u32 = 1;
     const J: u32 = 2;
-    let mut f = Function::new([(1, ValType::I32)]);
+    let mut f = Function::new([(1, ValType::I32), (1, ValType::I64)]);
     let mut s = f.instructions();
+    if cx.names("$typed") {
+        // A typed array (T20): an index key is there iff it's in range.
+        let index = h(cx, Helper::ArrayIndex);
+        const IDX: u32 = 3;
+        s.local_get(V).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        {
+            s.local_get(KEY)
+                .ref_test_non_null(wasm_encoder::HeapType::I31);
+            s.if_(BlockType::Result(ValType::I64));
+            s.local_get(KEY)
+                .ref_cast_non_null(wasm_encoder::HeapType::I31)
+                .i31_get_s()
+                .i64_extend_i32_s();
+            s.else_();
+            s.local_get(KEY).call(to_key).call(index);
+            s.end();
+            s.local_tee(IDX).i64_const(-1).i64_ne();
+            s.if_(BlockType::Empty);
+            s.local_get(IDX).i64_const(0).i64_ge_s();
+            s.local_get(V)
+                .ref_cast_non_null(crate::typed::typed())
+                .struct_get(runtime::T_TYPED, crate::typed::F_LENGTH)
+                .i64_extend_i32_u()
+                .local_get(IDX)
+                .i64_gt_s();
+            s.i32_and();
+            s.return_();
+            s.end();
+        }
+        s.end();
+    }
     // Fast path: an array element at a small integer index (holes take the slow path).
     s.local_get(V).ref_test_non_null(array::array());
     s.local_get(KEY)
@@ -2206,6 +2390,48 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
         s.end();
         s.end();
     });
+    if cx.names("$typed") {
+        // A typed array (T20): its indices, "0" to "length - 1", come first.
+        let number_to_string = rh(
+            cx,
+            runtime::Helper::Num(crate::numstr::Helper::NumberToString),
+        );
+        s.local_get(O).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .ref_cast_non_null(crate::typed::typed())
+            .struct_get(runtime::T_TYPED, crate::typed::F_LENGTH)
+            .local_tee(M)
+            .array_new_default(T_KEYS)
+            .local_set(ELEMS);
+        s.i32_const(0).local_set(P);
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(P).local_get(M).i32_ge_u().br_if(1);
+        s.local_get(ELEMS).ref_as_non_null().local_get(P);
+        s.local_get(P).f64_convert_i32_u().call(number_to_string);
+        s.array_set(T_KEYS);
+        s.local_get(P).i32_const(1).i32_add().local_set(P);
+        s.br(0).end().end();
+        s.local_get(M)
+            .local_get(OUT)
+            .ref_as_non_null()
+            .array_len()
+            .i32_add()
+            .array_new_default(T_KEYS)
+            .local_set(ALL);
+        s.local_get(ALL).ref_as_non_null().i32_const(0);
+        s.local_get(ELEMS)
+            .ref_as_non_null()
+            .i32_const(0)
+            .local_get(M);
+        s.array_copy(T_KEYS, T_KEYS);
+        s.local_get(ALL).ref_as_non_null().local_get(M);
+        s.local_get(OUT).ref_as_non_null().i32_const(0);
+        s.local_get(OUT).ref_as_non_null().array_len();
+        s.array_copy(T_KEYS, T_KEYS);
+        s.local_get(ALL).ref_as_non_null().return_();
+        s.end();
+    }
     // An array: its elements' indices come first.
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
@@ -3061,6 +3287,7 @@ pub fn builtin_tag_name(b: Builtin) -> Option<&'static str> {
         Builtin::Set => "Set",
         Builtin::Promise => "Promise",
         Builtin::Generator => "Generator",
+        Builtin::AsyncGenerator => "AsyncGenerator",
         Builtin::Symbol => "Symbol",
         Builtin::ArrayIterator => "Array Iterator",
         Builtin::MapIterator => "Map Iterator",
@@ -3125,10 +3352,25 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
     }
     s.local_get(O).ref_test_non_null(promise::promise());
     tag(cx, &mut s, "Promise");
+    if cx.names("$typed") {
+        // T20: typed arrays (`%TypedArray%.prototype[@@toStringTag]`) and `ArrayBuffer`s.
+        let name = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Name));
+        s.local_get(O).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .ref_cast_non_null(crate::typed::typed())
+            .struct_get(runtime::T_TYPED, crate::typed::F_KIND)
+            .call(name)
+            .return_();
+        s.end();
+        s.local_get(O).ref_test_non_null(crate::typed::buffer());
+        tag(cx, &mut s, "ArrayBuffer");
+    }
     // Generator and async functions (their prototypes' tags, F70).
     for (kind, name) in [
         (func::KIND_GENERATOR, "GeneratorFunction"),
         (func::KIND_ASYNC, "AsyncFunction"),
+        (func::KIND_ASYNC_GENERATOR, "AsyncGeneratorFunction"),
     ] {
         s.local_get(O).ref_test_non_null(func::function());
         s.if_(BlockType::Result(ValType::I32));
@@ -3142,6 +3384,8 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
         s.end();
         tag(cx, &mut s, name);
     }
+    class(&mut s, CLASS_ASYNC_GEN);
+    tag(cx, &mut s, "AsyncGenerator");
     s.local_get(O).ref_test_non_null(generator::generator());
     tag(cx, &mut s, "Generator");
     s.local_get(O)

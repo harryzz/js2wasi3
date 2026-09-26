@@ -34,6 +34,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/map.js"),
     include_str!("../builtins/symbol.js"),
     include_str!("../builtins/console.js"),
+    include_str!("../builtins/typedarray.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -123,7 +124,40 @@ pub(crate) const GATED: &[&str] = &[
 /// The built-in constructors that can be values (T25): their prelude function (`$$Array`) is what
 /// calling and constructing them runs.
 pub(crate) const CTOR_VALUES: &[&str] = &[
-    "Object", "String", "Number", "Boolean", "Array", "Map", "Set",
+    "Object",
+    "String",
+    "Number",
+    "Boolean",
+    "Array",
+    "Map",
+    "Set",
+    "ArrayBuffer",
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+];
+
+/// Constructors whose prelude function `$$X` is what `new X(…)` runs and that throw when called
+/// without `new` (T25: `Map`, `Set`; T20: `ArrayBuffer` and the typed arrays).
+pub(crate) const NEW_ONLY: &[&str] = &[
+    "Map",
+    "Set",
+    "ArrayBuffer",
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
 ];
 
 impl Prelude {

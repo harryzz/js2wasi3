@@ -30,8 +30,8 @@ use wasm_encoder::{
 };
 
 use crate::{
-    abi, array, asyncfn, func, generator, host, inspect, iter, mapset, numstr, object, promise,
-    props, timers,
+    abi, array, asyncfn, asyncgen, func, generator, host, inspect, iter, mapset, numstr, object,
+    promise, props, timers, typed,
 };
 
 pub const T_NUMBER: u32 = 0;
@@ -89,8 +89,14 @@ pub const T_MTABLE: u32 = 23;
 /// `$mapiter`: a final subtype of `$object` with `table: mut (ref null $mtable)`, `pos: mut i32`,
 /// `mode: i32` (T25).
 pub const T_MAPITER: u32 = 24;
+/// `$buffer`: a final subtype of `$object` (an `ArrayBuffer`) with `data: (ref $bytes)` (T20, see
+/// [`crate::typed`]).
+pub const T_BUFFER: u32 = 25;
+/// `$typed`: a final subtype of `$object` (a typed array) with `kind: i32`, `buffer: (ref
+/// $buffer)`, `offset: i32` (bytes), `length: i32` (elements) (T20).
+pub const T_TYPED: u32 = 26;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 25;
+pub const TYPES: u32 = 27;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -340,6 +346,13 @@ pub fn types(types: &mut TypeSection) {
     timer_fields.push(field(StorageType::Val(ValType::I32), true));
     let mut map_fields = object_fields.clone();
     map_fields.push(field(StorageType::Val(rt(false, T_MTABLE)), true));
+    let mut buffer_fields = object_fields.clone();
+    buffer_fields.push(field(StorageType::Val(rt(false, T_BYTES)), false));
+    let mut typed_fields = object_fields.clone();
+    typed_fields.push(field(StorageType::Val(ValType::I32), false));
+    typed_fields.push(field(StorageType::Val(rt(false, T_BUFFER)), false));
+    typed_fields.push(field(StorageType::Val(ValType::I32), false));
+    typed_fields.push(field(StorageType::Val(ValType::I32), false));
     let mut mapiter_fields = object_fields.clone();
     mapiter_fields.push(field(StorageType::Val(rt(true, T_MTABLE)), true));
     mapiter_fields.push(field(StorageType::Val(ValType::I32), true));
@@ -487,6 +500,20 @@ pub fn types(types: &mut TypeSection) {
         sub_of(
             CompositeInnerType::Struct(StructType {
                 fields: mapiter_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: buffer_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: typed_fields.into_boxed_slice(),
             }),
             true,
             Some(T_OBJECT),
@@ -736,6 +763,8 @@ pub enum Helper {
     Prom(promise::Helper),
     Gen(generator::Helper),
     Async(asyncfn::Helper),
+    AsyncGen(asyncgen::Helper),
+    Typed(typed::Helper),
     Timer(timers::Helper),
     Map(mapset::Helper),
     Fmt(inspect::Helper),
@@ -778,6 +807,8 @@ impl Helper {
             Helper::Prom(h) => h.name(),
             Helper::Gen(h) => h.name(),
             Helper::Async(h) => h.name(),
+            Helper::AsyncGen(h) => h.name(),
+            Helper::Typed(h) => h.name(),
             Helper::Timer(h) => h.name(),
             Helper::Map(h) => h.name(),
             Helper::Fmt(h) => h.name(),
@@ -817,6 +848,8 @@ impl Helper {
             Helper::Prom(h) => h.signature(),
             Helper::Gen(h) => h.signature(),
             Helper::Async(h) => h.signature(),
+            Helper::AsyncGen(h) => h.signature(),
+            Helper::Typed(h) => h.signature(),
             Helper::Timer(h) => h.signature(),
             Helper::Map(h) => h.signature(),
             Helper::Fmt(h) => h.signature(),
@@ -859,6 +892,8 @@ impl Helper {
             Helper::Prom(h) => h.body(cx),
             Helper::Gen(h) => h.body(cx),
             Helper::Async(h) => h.body(cx),
+            Helper::AsyncGen(h) => h.body(cx),
+            Helper::Typed(h) => h.body(cx),
             Helper::Timer(h) => h.body(cx),
             Helper::Map(h) => h.body(cx),
             Helper::Fmt(h) => h.body(cx),

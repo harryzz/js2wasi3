@@ -127,6 +127,15 @@ fn step(cx: &mut dyn Cx) -> Function {
     const R: u32 = 3;
     let mut f = Function::new([(1, jsval())]);
     let mut s = f.instructions();
+    if cx.names("$asyncgen") {
+        // An async generator's frame awaited (T20): its own driver.
+        let agen = cx.helper(runtime::Helper::AsyncGen(crate::asyncgen::Helper::Step));
+        crate::asyncgen::is_async_gen(&mut s, G);
+        s.if_(BlockType::Empty);
+        s.local_get(G).local_get(MODE).local_get(V).call(agen);
+        s.return_();
+        s.end();
+    }
     let status = |s: &mut InstructionSink, st: i32| {
         frame(s, G);
         s.i32_const(st).struct_set(T_GENERATOR, F_STATUS);

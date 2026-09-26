@@ -161,13 +161,12 @@ fn declarations_and_functions() {
         one("export async function f() { }"),
         "1:8 unsupported: exported async function (the boundary needs an async export) (planned: T20)"
     );
+    // T20 slice 1b: async generators; `yield*` in them isn't supported yet.
+    lowers("async function* g() { yield 1; } g();");
+    lowers("const g = async function* () { await null; return 2; }; g();");
     assert_eq!(
-        one("async function* g() { }"),
-        "1:1 unsupported: async generator function (planned: later)"
-    );
-    assert_eq!(
-        one("const g = async function* () { };"),
-        "1:11 unsupported: async generator function (planned: later)"
+        one("async function* g() { yield* [1]; } g();"),
+        "1:23 unsupported: `yield*` in an async generator (planned: later)"
     );
     assert_eq!(
         one("export function f() { setTimeout(f, 1); return 0; }"),
@@ -345,10 +344,9 @@ fn arrays_and_iteration() {
     ] {
         lowers(src);
     }
-    assert_eq!(
-        one("for await (const x of []) {}"),
-        "1:1 unsupported: `for await` (planned: later)"
-    );
+    // T20 slice 1a: `for await` (top level: `main` becomes async).
+    lowers("for await (const x of []) {}");
+    lowers("async function f(a) { for await (const [k, v] of a) { if (k) break; } } f([]);");
     assert_eq!(
         one("export function f(a) { return [...a, , 1]; }"),
         "1:31 unsupported: array hole after a spread element (planned: later)"

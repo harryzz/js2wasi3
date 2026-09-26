@@ -113,6 +113,10 @@ flushed and closed. See `crates/backend/src/{asyncfn,timers,host}.rs`.)
 `process.nextTick` callbacks run after every timer/immediate callback, then the microtasks, until both are empty,
 and after the main module's microtasks (an ES module, as in node). An unref'd timer doesn't keep the loop alive.
 See `crates/backend/src/timers.rs`.)
+(T20: `for await` is lowered like `for-of` on `Intrinsic::AsyncIter*` (sync iterables get node's
+CreateAsyncFromSyncIterator ticks). Async generators are transformed like generators (`NewAsyncGenerator`, `await`
+points marked) and driven by a request queue in `crates/backend/src/asyncgen.rs`. Every suspension point breaks to
+one shared "save the locals" tail per resume function.)
 
 ### D4. The WIT boundary follows jco/componentize-js conventions
 The entry module's ES exports become the world's exports. WIT types map to JS:
@@ -151,6 +155,8 @@ sentinels like the others, so ToPrimitive calls the prelude's `toString`) and `b
 spec's algorithm writing pieces into one array joined at the end; node's circular-structure message). The intrinsic
 `define(o, k, v)` is CreateDataProperty. A static of a global the prelude has statics for but not this one
 (`JSON.rawJSON`) is rejected by name.)
+(T20: typed arrays and `ArrayBuffer`s are native `$typed`/`$buffer` objects (`crates/backend/src/typed.rs`: element
+access, printing) with their constructors and methods in `builtins/typedarray.js` on `Intrinsic::Typed` operations.)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude
 globals (no user code runs while parsing), members stored with `define` (`__proto__` is an own key), numbers other
 than short integers through `$$StringToNumber`, then the reviver walk; node's SyntaxError messages (with node 24's line/column) and context

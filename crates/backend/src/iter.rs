@@ -67,6 +67,14 @@ pub enum Helper {
     Next,
     /// `%ArrayIteratorPrototype%[Symbol.iterator]`: `this`.
     This,
+    /// `for await` (T20), see `Intrinsic::AsyncIterOpen` & co. An async iterator's state is a
+    /// `$vals` `[iterator, next]`; a sync one's is a `$iter`.
+    AsyncOpen,
+    IsAsync,
+    AsyncNext,
+    AsyncResult,
+    AsyncReturn,
+    HasReturn,
 }
 
 impl Helper {
@@ -82,6 +90,12 @@ impl Helper {
             Helper::ProtoEntries => "Array.prototype.entries",
             Helper::Next => "%ArrayIteratorPrototype%.next",
             Helper::This => "%ArrayIteratorPrototype%[Symbol.iterator]",
+            Helper::AsyncOpen => "async_iter_open",
+            Helper::IsAsync => "is_async_iter",
+            Helper::AsyncNext => "async_iter_next",
+            Helper::AsyncResult => "async_iter_result",
+            Helper::AsyncReturn => "async_iter_return",
+            Helper::HasReturn => "iter_has_return",
         }
     }
 
@@ -98,6 +112,10 @@ impl Helper {
             | Helper::ProtoEntries
             | Helper::Next
             | Helper::This => (vec![v, v, v], vec![v]),
+            Helper::AsyncOpen => (vec![v, v], vec![v]),
+            Helper::IsAsync | Helper::HasReturn => (vec![v], vec![ValType::I32]),
+            Helper::AsyncNext | Helper::AsyncResult => (vec![v], vec![v]),
+            Helper::AsyncReturn => (vec![v, ValType::I32], vec![v]),
         }
     }
 
@@ -115,6 +133,64 @@ impl Helper {
             Helper::This => {
                 let mut f = Function::new([]);
                 f.instructions().local_get(1).end();
+                f
+            }
+            Helper::AsyncOpen => async_open(cx),
+            Helper::IsAsync => {
+                let mut f = Function::new([]);
+                f.instructions()
+                    .local_get(0)
+                    .ref_test_non_null(wasm_encoder::HeapType::Concrete(T_VALS))
+                    .end();
+                f
+            }
+            Helper::AsyncNext => {
+                let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
+                let what = cx.str("next");
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                record(&mut s, 0, 1);
+                record(&mut s, 0, 0);
+                empty_args(&mut s);
+                s.global_get(what).call(call_value);
+                s.end();
+                f
+            }
+            Helper::AsyncResult => {
+                let inspect = cx.helper(runtime::Helper::Inspect);
+                let concat = cx.helper(runtime::Helper::Concat);
+                let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+                let (result, not_obj) = (cx.str("Iterator result "), cx.str(" is not an object"));
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(0)
+                    .ref_test_non_null(runtime::object())
+                    .i32_eqz();
+                s.if_(BlockType::Empty);
+                s.global_get(result);
+                s.local_get(0).call(inspect).call(concat);
+                s.global_get(not_obj).call(concat).call(throw);
+                s.end();
+                s.local_get(0);
+                s.end();
+                f
+            }
+            Helper::AsyncReturn => async_return(cx),
+            Helper::HasReturn => {
+                let get = oh(cx, object::Helper::Get);
+                let is_nullish = cx.helper(runtime::Helper::IsNullish);
+                let ret = cx.str("return");
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                it(&mut s, 0);
+                s.struct_get(T_ITER, F_KIND).i32_const(PROTOCOL).i32_ne();
+                s.if_(BlockType::Empty);
+                s.i32_const(0).return_();
+                s.end();
+                it(&mut s, 0);
+                s.struct_get(T_ITER, F_OBJ).global_get(ret).call(get);
+                s.call(is_nullish).i32_eqz();
+                s.end();
                 f
             }
         }
@@ -135,6 +211,111 @@ fn it(s: &mut InstructionSink, local: u32) {
 
 fn null_eq(s: &mut InstructionSink) {
     s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
+}
+
+/// Push element `i` of the async iteration record in local `st` (`[iterator, next]`).
+fn record(s: &mut InstructionSink, st: u32, i: i32) {
+    s.local_get(st)
+        .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_VALS))
+        .i32_const(i)
+        .array_get(T_VALS);
+}
+
+/// GetIterator(v, async): `v[Symbol.asyncIterator]()` and its `next` as `[iterator, next]`, or
+/// the sync iteration state when `v` has no async iterator method.
+fn async_open(cx: &mut dyn Cx) -> Function {
+    let open = ih(cx, Helper::Open);
+    let get = oh(cx, object::Helper::Get);
+    let is_nullish = cx.helper(runtime::Helper::IsNullish);
+    let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
+    let typeof_string = cx.helper(runtime::Helper::TypeofString);
+    let describe = cx.helper(runtime::Helper::Prom(crate::promise::Helper::Describe));
+    let concat = cx.helper(runtime::Helper::Concat);
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let sym = cx.helper(runtime::Helper::WellKnownSymbol(
+        js2wasi3_ir::well_known_symbol("asyncIterator").expect("well-known"),
+    ));
+    let (space, not_fn, not_obj, next, what) = (
+        cx.str(" "),
+        cx.str(" is not a function"),
+        cx.str("Result of the Symbol.asyncIterator method is not an object"),
+        cx.str("next"),
+        cx.str("[Symbol.asyncIterator]"),
+    );
+    const V: u32 = 0;
+    const MSG: u32 = 1;
+    const M: u32 = 2;
+    const IT: u32 = 3;
+    let mut f = Function::new([(2, jsval())]);
+    let mut s = f.instructions();
+    s.local_get(V).call(is_nullish);
+    s.if_(BlockType::Empty);
+    s.local_get(V).local_get(MSG).call(open).return_();
+    s.end();
+    s.local_get(V).call(sym).call(get).local_tee(M);
+    s.call(is_nullish);
+    s.if_(BlockType::Empty);
+    s.local_get(V).local_get(MSG).call(open).return_();
+    s.end();
+    s.local_get(M).ref_test_non_null(func::function()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(M).call(typeof_string);
+    s.global_get(space).call(concat);
+    s.local_get(M).call(describe).call(concat);
+    s.global_get(not_fn).call(concat).call(throw);
+    s.end();
+    s.local_get(M).local_get(V);
+    empty_args(&mut s);
+    s.global_get(what).call(call_value).local_tee(IT);
+    s.ref_test_non_null(runtime::object()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.global_get(not_obj).call(throw);
+    s.end();
+    s.local_get(IT);
+    s.local_get(IT).global_get(next).call(get);
+    s.array_new_fixed(T_VALS, 2);
+    s.end();
+    f
+}
+
+/// AsyncIteratorClose's call: `iterator.return()` (to await), or Wasm null when there's no
+/// `return` (or, when `throwing`, when getting or calling it threw: the original exception wins).
+fn async_return(cx: &mut dyn Cx) -> Function {
+    let get = oh(cx, object::Helper::Get);
+    let is_nullish = cx.helper(runtime::Helper::IsNullish);
+    let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
+    let ret = cx.str("return");
+    const ST: u32 = 0;
+    const THROWING: u32 = 1;
+    const M: u32 = 2;
+    let mut f = Function::new([(1, jsval())]);
+    let mut s = f.instructions();
+    s.block(BlockType::Result(jsval()));
+    s.try_table(BlockType::Empty, [Catch::One { tag: TAG, label: 0 }]);
+    record(&mut s, ST, 0);
+    s.global_get(ret).call(get).local_tee(M);
+    s.call(is_nullish);
+    s.if_(BlockType::Empty);
+    null_eq(&mut s);
+    s.return_();
+    s.end();
+    s.local_get(M);
+    record(&mut s, ST, 0);
+    empty_args(&mut s);
+    s.global_get(ret).call(call_value).return_();
+    s.end();
+    s.unreachable();
+    s.end();
+    // Caught.
+    s.local_set(M);
+    s.local_get(THROWING);
+    s.if_(BlockType::Empty);
+    null_eq(&mut s);
+    s.return_();
+    s.end();
+    s.local_get(M).throw(TAG);
+    s.end();
+    f
 }
 
 fn empty_args(s: &mut InstructionSink) {

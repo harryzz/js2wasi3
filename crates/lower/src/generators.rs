@@ -31,6 +31,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         func.flags.is_async = true;
         func.result = Some(Type::JsVal);
         self.observe(result, Kind::Any);
+        if func.flags.is_generator {
+            // The backend links the async generator runtime (T20).
+            self.module.names.insert("$asyncgen".to_string());
+        }
+    }
+
+    /// `await arg` (also `for await`'s): a top-level one makes `main` an async function.
+    pub(crate) fn await_value(&mut self, cx: &mut FnCx, arg: Expr) -> Expr {
+        if Some(cx.id) == self.main {
+            cx.func.flags.is_async = true;
+            cx.func.result = Some(Type::JsVal);
+        }
+        self.suspend(cx, SuspendKind::Await, arg)
     }
 
     /// A `yield` (an `await`) of `arg`: the value the generator (async function) is resumed with.
@@ -38,9 +51,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let sent = cx.func.add_local("sent", Type::JsVal);
         let mode = cx.func.add_local("mode", Type::I32);
         let is = |m: i32| Expr::binary(BinOp::Eq, Type::I32, Expr::Local(mode), Expr::i32(m));
-        // An async function is never resumed with `return`.
+        // An async function is never resumed with `return`. An async generator awaits the value
+        // it's resumed with by `return(v)` (T20).
         let ret = if kind == SuspendKind::Await {
             Vec::new()
+        } else if cx.func.flags.is_async {
+            let awaited = self.await_value(cx, Expr::Local(sent));
+            let mut ret = vec![Stmt::Set(sent, awaited)];
+            ret.extend(self.jump(cx, Jump::Return, Some(Expr::Local(sent))));
+            ret
         } else {
             self.jump(cx, Jump::Return, Some(Expr::Local(sent)))
         };

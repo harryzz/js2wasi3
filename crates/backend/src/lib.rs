@@ -38,6 +38,7 @@
 mod abi;
 mod array;
 mod asyncfn;
+mod asyncgen;
 mod func;
 mod generator;
 mod host;
@@ -51,6 +52,7 @@ mod promise;
 mod props;
 mod runtime;
 mod timers;
+mod typed;
 
 use std::collections::HashMap;
 
@@ -1325,6 +1327,12 @@ impl Emitter<'_> {
                     Intrinsic::IterStep => H::Iter(iter::Helper::Step),
                     Intrinsic::IterClose => H::Iter(iter::Helper::Close),
                     Intrinsic::IterRest => H::Iter(iter::Helper::Rest),
+                    Intrinsic::AsyncIterOpen => H::Iter(iter::Helper::AsyncOpen),
+                    Intrinsic::IsAsyncIter => H::Iter(iter::Helper::IsAsync),
+                    Intrinsic::AsyncIterNext => H::Iter(iter::Helper::AsyncNext),
+                    Intrinsic::AsyncIterResult => H::Iter(iter::Helper::AsyncResult),
+                    Intrinsic::AsyncIterReturn => H::Iter(iter::Helper::AsyncReturn),
+                    Intrinsic::IterHasReturn => H::Iter(iter::Helper::HasReturn),
                     Intrinsic::CallList => H::Func(func::Helper::CallList),
                     Intrinsic::ObjectRest => H::Obj(object::Helper::ObjectRest),
                     Intrinsic::CheckDestructure => H::Obj(object::Helper::CheckDestructure),
@@ -1385,6 +1393,7 @@ impl Emitter<'_> {
                     Intrinsic::QueueMicrotask => H::Prom(promise::Helper::QueueMicrotask),
                     Intrinsic::Timer(k) => H::Timer(timers::Helper::Fn(*k)),
                     Intrinsic::Map(op) => H::Map(mapset::Helper::Op(*op)),
+                    Intrinsic::Typed(op) => H::Typed(typed::Helper::Op(*op)),
                     Intrinsic::MakeArguments => H::Obj(object::Helper::MakeArguments),
                     Intrinsic::SetFunctionName => H::Func(func::Helper::SetName),
                     Intrinsic::BuiltinCtor(b) => H::Func(func::Helper::BuiltinCtor(*b)),
@@ -1399,6 +1408,7 @@ impl Emitter<'_> {
                     Intrinsic::ResumeMode
                     | Intrinsic::NewGenerator { .. }
                     | Intrinsic::NewAsync { .. }
+                    | Intrinsic::NewAsyncGenerator { .. }
                     | Intrinsic::AsyncStart
                     | Intrinsic::GenLoad(_)
                     | Intrinsic::GenStore(_)
@@ -1462,6 +1472,10 @@ impl Emitter<'_> {
                     ir::FnKind::Async => {
                         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
                         func::NEW_ASYNC
+                    }
+                    ir::FnKind::AsyncGenerator => {
+                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        func::NEW_ASYNC_GENERATOR
                     }
                     ir::FnKind::Class { construct } => {
                         let construct = self.func_base + construct.0;
@@ -1575,14 +1589,16 @@ impl Emitter<'_> {
             Intrinsic::ResumeMode => {
                 bail!("internal error: ResumeMode after the suspension transform")
             }
-            Intrinsic::NewGenerator { resume, slots } | Intrinsic::NewAsync { resume, slots } => {
+            Intrinsic::NewGenerator { resume, slots }
+            | Intrinsic::NewAsync { resume, slots }
+            | Intrinsic::NewAsyncGenerator { resume, slots } => {
                 let code = self.func_base + resume.0;
                 runtime::Cx::declare_func(self, code);
                 s.ref_func(code).i32_const(*slots as i32);
-                let h = if matches!(op, Intrinsic::NewAsync { .. }) {
-                    H::Async(asyncfn::Helper::New)
-                } else {
-                    H::Gen(generator::Helper::New)
+                let h = match op {
+                    Intrinsic::NewAsync { .. } => H::Async(asyncfn::Helper::New),
+                    Intrinsic::NewAsyncGenerator { .. } => H::AsyncGen(asyncgen::Helper::New),
+                    _ => H::Gen(generator::Helper::New),
                 };
                 s.call(self.helper_index(Helper::Js(h)));
             }
@@ -1607,10 +1623,16 @@ impl Emitter<'_> {
                 gen_arg(self, s, frames)?;
                 s.struct_get(runtime::T_GENERATOR, generator::F_POINT);
             }
-            Intrinsic::GenSuspend { raw } => {
+            Intrinsic::GenSuspend { raw, awaiting } => {
                 self.expr(s, frames, &args[0])?;
                 self.expr(s, frames, &args[1])?;
-                s.i32_const(if *raw { 2 } else { 1 });
+                s.i32_const(if *awaiting {
+                    asyncgen::YIELDED_AWAIT
+                } else if *raw {
+                    2
+                } else {
+                    1
+                });
                 s.call(self.helper_index(Helper::Js(H::Gen(generator::Helper::Suspend))));
             }
             Intrinsic::DelegateOpen | Intrinsic::DelegateStep => {

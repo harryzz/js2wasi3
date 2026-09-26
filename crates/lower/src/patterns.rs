@@ -561,19 +561,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         f: &'a ForOfStatement<'a>,
         out: &mut Vec<Stmt>,
     ) -> R<()> {
-        if f.r#await {
-            return Err(self.unsupported(f.span, "`for await`", "later"));
-        }
         let right = self.expr(cx, &f.right)?;
         let it = cx.func.add_local("iter", Type::JsVal);
         let done = cx.func.add_local("done", Type::Bool);
+        let (open, what) = if f.r#await {
+            (Intrinsic::AsyncIterOpen, "async iterable")
+        } else {
+            (Intrinsic::IterOpen, "iterable")
+        };
         out.push(Stmt::Set(
             it,
             Expr::intrinsic(
-                Intrinsic::IterOpen,
+                open,
                 vec![
                     jsval_of(right),
-                    Expr::str(&format!("{} is not iterable", self.callee_text(&f.right))),
+                    Expr::str(&format!("{} is not {what}", self.callee_text(&f.right))),
                 ],
             ),
         ));
@@ -589,20 +591,28 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             jumps: Vec::new(),
         });
         let brk = cx.label();
-        let mut inner = vec![
-            Stmt::Set(done, Expr::bool(true)),
-            Stmt::If {
-                cond: Expr::unary(
-                    UnOp::Not,
-                    Type::Bool,
-                    Expr::intrinsic(Intrinsic::IterStep, vec![Expr::Local(it)]),
-                ),
-                then: vec![Stmt::Break(brk)],
-                els: vec![],
-            },
-            Stmt::Set(done, Expr::bool(false)),
-        ];
-        let value = Expr::intrinsic(Intrinsic::IterValue, vec![Expr::Local(it)]);
+        let (mut inner, value) = if f.r#await {
+            let v = cx.func.add_local("value", Type::JsVal);
+            (self.for_await_step(cx, it, done, v, brk), Expr::Local(v))
+        } else {
+            let inner = vec![
+                Stmt::Set(done, Expr::bool(true)),
+                Stmt::If {
+                    cond: Expr::unary(
+                        UnOp::Not,
+                        Type::Bool,
+                        Expr::intrinsic(Intrinsic::IterStep, vec![Expr::Local(it)]),
+                    ),
+                    then: vec![Stmt::Break(brk)],
+                    els: vec![],
+                },
+                Stmt::Set(done, Expr::bool(false)),
+            ];
+            (
+                inner,
+                Expr::intrinsic(Intrinsic::IterValue, vec![Expr::Local(it)]),
+            )
+        };
         let head = match &f.left {
             ForStatementLeft::VariableDeclaration(d) => {
                 let decl = &d.declarations[0];
@@ -646,12 +656,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         });
         // The "finally": close unless the iterator finished (or failed) by itself.
         let is = |code: i32| Expr::binary(BinOp::Eq, Type::I32, Expr::Local(kind), Expr::i32(code));
-        out.push(Stmt::If {
-            cond: Expr::unary(UnOp::Not, Type::Bool, Expr::Local(done)),
-            then: vec![Stmt::Expr(Expr::intrinsic(
+        let close = if f.r#await {
+            self.for_await_close(cx, it, is(1))
+        } else {
+            vec![Stmt::Expr(Expr::intrinsic(
                 Intrinsic::IterClose,
                 vec![Expr::Local(it), is(1)],
-            ))],
+            ))]
+        };
+        out.push(Stmt::If {
+            cond: Expr::unary(UnOp::Not, Type::Bool, Expr::Local(done)),
+            then: close,
             els: vec![],
         });
         for (i, j) in fin.jumps.into_iter().enumerate() {
@@ -672,5 +687,154 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             els: vec![],
         });
         Ok(())
+    }
+
+    /// One step of `for await` (T20): sets `v` or breaks out of `brk`. An async iterator:
+    /// `await it.next()`, which must be an object. A sync one (CreateAsyncFromSyncIterator): the
+    /// value is awaited, and each step takes node's two ticks (the unwrapping job, then the
+    /// await); a rejected value closes the sync iterator first.
+    fn for_await_step(
+        &mut self,
+        cx: &mut FnCx,
+        it: LocalId,
+        done: LocalId,
+        v: LocalId,
+        brk: js2wasi3_ir::LabelId,
+    ) -> Vec<Stmt> {
+        let r = cx.func.add_local("result", Type::JsVal);
+        let has = cx.func.add_local("has", Type::Bool);
+        let failed = cx.func.add_local("failed", Type::Bool);
+        let err = cx.func.add_local("error", Type::JsVal);
+        let get =
+            |key: &str| Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(r), Expr::str(key)]);
+        let next = self.await_value(
+            cx,
+            Expr::intrinsic(Intrinsic::AsyncIterNext, vec![Expr::Local(it)]),
+        );
+        let async_step = vec![
+            Stmt::Set(r, Expr::intrinsic(Intrinsic::AsyncIterResult, vec![next])),
+            Stmt::If {
+                cond: Expr::convert(Type::JsVal, Type::Bool, get("done")),
+                then: vec![Stmt::Break(brk)],
+                els: vec![],
+            },
+            Stmt::Set(v, get("value")),
+        ];
+        let value = self.await_value(
+            cx,
+            Expr::intrinsic(Intrinsic::IterValue, vec![Expr::Local(it)]),
+        );
+        let tick1 = self.await_value(cx, Expr::undefined());
+        let tick2 = self.await_value(cx, Expr::undefined());
+        let sync_step = vec![
+            Stmt::Set(failed, Expr::bool(false)),
+            Stmt::Set(v, Expr::undefined()),
+            Stmt::Set(
+                has,
+                Expr::intrinsic(Intrinsic::IterStep, vec![Expr::Local(it)]),
+            ),
+            Stmt::If {
+                cond: Expr::Local(has),
+                then: vec![Stmt::Try {
+                    body: vec![Stmt::Set(v, value)],
+                    catch_local: Some(err),
+                    catch_body: vec![
+                        Stmt::Set(failed, Expr::bool(true)),
+                        Stmt::Expr(Expr::intrinsic(
+                            Intrinsic::IterClose,
+                            vec![Expr::Local(it), Expr::bool(true)],
+                        )),
+                    ],
+                }],
+                els: vec![Stmt::Expr(tick1)],
+            },
+            Stmt::Expr(tick2),
+            Stmt::If {
+                cond: Expr::Local(failed),
+                then: vec![Stmt::Throw(Expr::Local(err))],
+                els: vec![],
+            },
+            Stmt::If {
+                cond: Expr::unary(UnOp::Not, Type::Bool, Expr::Local(has)),
+                then: vec![Stmt::Break(brk)],
+                els: vec![],
+            },
+        ];
+        vec![
+            Stmt::Set(done, Expr::bool(true)),
+            Stmt::If {
+                cond: Expr::intrinsic(Intrinsic::IsAsyncIter, vec![Expr::Local(it)]),
+                then: async_step,
+                els: sync_step,
+            },
+            Stmt::Set(done, Expr::bool(false)),
+        ]
+    }
+
+    /// AsyncIteratorClose for `for await` left early (`throwing`: by an exception, whose errors
+    /// from `return` are ignored). A sync iterator's `return` runs at once, then one tick, or two
+    /// when it has a `return` (node's ticks).
+    fn for_await_close(&mut self, cx: &mut FnCx, it: LocalId, throwing: Expr) -> Vec<Stmt> {
+        let c = cx.func.add_local("close", Type::JsVal);
+        let ignored = cx.func.add_local("ignored", Type::JsVal);
+        let has = cx.func.add_local("has_return", Type::Bool);
+        let t = cx.func.add_local("throwing", Type::Bool);
+        let awaited_throwing = self.await_value(cx, Expr::Local(c));
+        let awaited = self.await_value(cx, Expr::Local(c));
+        let tick1 = self.await_value(cx, Expr::undefined());
+        let tick2 = self.await_value(cx, Expr::undefined());
+        let async_close = vec![
+            Stmt::Set(
+                c,
+                Expr::intrinsic(
+                    Intrinsic::AsyncIterReturn,
+                    vec![Expr::Local(it), Expr::Local(t)],
+                ),
+            ),
+            Stmt::If {
+                cond: Expr::unary(
+                    UnOp::Not,
+                    Type::Bool,
+                    Expr::intrinsic(Intrinsic::IsHole, vec![Expr::Local(c)]),
+                ),
+                then: vec![Stmt::If {
+                    cond: Expr::Local(t),
+                    then: vec![Stmt::Try {
+                        body: vec![Stmt::Expr(awaited_throwing)],
+                        catch_local: Some(ignored),
+                        catch_body: vec![],
+                    }],
+                    els: vec![Stmt::Expr(Expr::intrinsic(
+                        Intrinsic::AsyncIterResult,
+                        vec![awaited],
+                    ))],
+                }],
+                els: vec![],
+            },
+        ];
+        let sync_close = vec![
+            Stmt::Set(
+                has,
+                Expr::intrinsic(Intrinsic::IterHasReturn, vec![Expr::Local(it)]),
+            ),
+            Stmt::Expr(Expr::intrinsic(
+                Intrinsic::IterClose,
+                vec![Expr::Local(it), Expr::Local(t)],
+            )),
+            Stmt::Expr(tick1),
+            Stmt::If {
+                cond: Expr::Local(has),
+                then: vec![Stmt::Expr(tick2)],
+                els: vec![],
+            },
+        ];
+        vec![
+            Stmt::Set(t, throwing),
+            Stmt::If {
+                cond: Expr::intrinsic(Intrinsic::IsAsyncIter, vec![Expr::Local(it)]),
+                then: async_close,
+                els: sync_close,
+            },
+        ]
     }
 }

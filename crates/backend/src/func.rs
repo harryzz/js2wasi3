@@ -48,6 +48,8 @@ pub const KIND_BOUND: i32 = 4;
 /// `Array.prototype.values` / `[Symbol.iterator]`, `String.prototype[Symbol.iterator]` (T25): while
 /// a value's `[Symbol.iterator]` is one, for-of takes the fast path.
 pub const KIND_VALUES: i32 = 5;
+/// An async generator function (T20): `console.log` shows `[AsyncGeneratorFunction: f]`.
+pub const KIND_ASYNC_GENERATOR: i32 = 6;
 
 /// [`Helper::New`] flags: an ordinary `function` (a `prototype` object, the ordinary construct).
 pub const NEW_ORDINARY: i32 = 1;
@@ -61,6 +63,8 @@ pub const NEW_ASYNC: i32 = 8;
 pub const NEW_BOUND: i32 = 16;
 /// [`Helper::New`] flags: a built-in `values` iterator method ([`KIND_VALUES`], T25).
 pub const NEW_VALUES: i32 = 32;
+/// [`Helper::New`] flags: an async generator function (T20; not a constructor).
+pub const NEW_ASYNC_GENERATOR: i32 = 64;
 
 pub fn function() -> HeapType {
     HeapType::Concrete(T_FUNCTION)
@@ -380,6 +384,7 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.local_get(CONSTRUCT);
     s.end();
     s.i32_const(KIND_CLASS);
+    s.i32_const(KIND_ASYNC_GENERATOR);
     s.i32_const(KIND_GENERATOR);
     s.i32_const(KIND_ASYNC);
     s.i32_const(KIND_VALUES);
@@ -391,6 +396,8 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.local_get(FLAGS).i32_const(NEW_ASYNC).i32_and();
     s.select();
     s.local_get(FLAGS).i32_const(NEW_GENERATOR).i32_and();
+    s.select();
+    s.local_get(FLAGS).i32_const(NEW_ASYNC_GENERATOR).i32_and();
     s.select();
     s.local_get(FLAGS).i32_const(NEW_CLASS).i32_and();
     s.select();
@@ -1246,7 +1253,9 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     let define = oh(cx, object::Helper::Define);
     cx.declare_func(code);
     let call = match b {
-        Builtin::Map | Builtin::Set => fh(cx, Helper::RequiresNew(b)),
+        Builtin::Map | Builtin::Set | Builtin::ArrayBuffer | Builtin::Typed(_) => {
+            fh(cx, Helper::RequiresNew(b))
+        }
         _ => code,
     };
     let construct = match b {
@@ -1289,6 +1298,11 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     if b == Builtin::Number {
         define_constants(cx, &mut s, F, &js2wasi3_ir::NUMBER_CONSTANTS);
     }
+    if let Builtin::Typed(k) = b {
+        // T20.
+        let size = js2wasi3_ir::TYPED_SIZES[k as usize] as f64;
+        define_constants(cx, &mut s, F, &[("BYTES_PER_ELEMENT", size)]);
+    }
     for (key, code, len) in statics {
         s.local_get(F)
             .ref_cast_non_null(runtime::object())
@@ -1306,7 +1320,7 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
 }
 
 /// Define `constants` on the object in local `o`: read-only, non-enumerable, non-configurable.
-fn define_constants(
+pub(crate) fn define_constants(
     cx: &mut dyn Cx,
     s: &mut wasm_encoder::InstructionSink,
     o: u32,

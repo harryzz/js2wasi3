@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: todo | Depends on: T19
+Status: in progress (slice 1 done; next: slice 2) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -13,17 +13,65 @@ Imported interfaces become ES imports (`import { f } from "pkg:ns/iface"`).
 
 ## Notes / Result
 
+### Slice 1: `for await`, async generators, typed arrays (done 2026-09-26)
+- **`for await` (1a, F72):** `patterns.rs` lowers it like `for-of` with `Intrinsic::AsyncIterOpen` (the
+  `Symbol.asyncIterator` iterator as `[iterator, next]`, else the sync `$iter`), `AsyncIterNext`/`AsyncIterResult`
+  (await `next()`, TypeError for a non-object) and, on early exit, `AsyncIterReturn` (awaited; errors ignored when
+  leaving by a throw). A sync iterable follows CreateAsyncFromSyncIterator's ticks: each value is awaited plus one
+  more tick, a rejected value closes the sync iterator first, closing takes 1 tick (2 with a `return` method).
+  Top-level `for await` makes `main` async (`Lowerer::await_value`). node's messages (`x is not async iterable`,
+  `Iterator result 1 is not an object`, `number 5 is not a function`).
+- **Async generators (1b, F72):** `ir::FnKind::AsyncGenerator`, `Intrinsic::NewAsyncGenerator`,
+  `GenSuspend { awaiting }`; the lowering awaits `yield`'s operand, `return`'s operand and a `return()`
+  resumption's value. `crates/backend/src/asyncgen.rs`: the request queue (the frame's extra slot), the driver
+  (`Step`: `await` points wait like an async function's, `yield`s fulfill the head and continue with the next
+  request), `%AsyncGeneratorPrototype%` `next`/`return`/`throw`/`[Symbol.asyncIterator]`, draining and
+  AwaitReturn after completion; `asyncfn`'s step hands async-generator frames over (gated on `$asyncgen`). Printed
+  `Object [AsyncGenerator] {}` / `[AsyncGeneratorFunction: f]`, tags. `yield*` inside one is rejected (F115).
+- **Suspension transform fix:** every suspension point used to inline "save all locals" (code = points × locals:
+  five `for await` loops made 182 KB and took wasmtime 4 s to compile). Now each point sets the value, point and
+  kind and breaks to one shared saving tail per resume function (71 KB, 0.3 s). The frames still save every local
+  (F117).
+- **Typed arrays (1c):** `$buffer`/`$typed` runtime types, `crates/backend/src/typed.rs` (little-endian element
+  reads/writes with ToInt32 / clamping / `f32` rounding, `TypedOp`s, printing like node), fast paths in
+  `object::get`/`set`/`has`/`own_keys` and `builtin_tag` (gated on `$typed`), `builtins/typedarray.js` (the nine
+  constructors, `from`/`of`, `%TypedArray%.prototype` methods and getters, `ArrayBuffer`), `BYTES_PER_ELEMENT`,
+  native `values`/`keys`/`entries`/`[Symbol.iterator]`.
+- Tests: `async/for-await.js`, `for-await-order.js` (tick-exact), `async-generators.js`, `builtins/typed-arrays.js`,
+  `typed-arrays-more.js`; `unsupported.rs`, IR tests for the transform. `cargo test` ok; `scripts/diff.sh -j 4`:
+  97 passed, 0 failed, 11 skipped.
+- `hello.js`: 55715 bytes (+348 over 55367): always-declared global slots of the new built-ins (the async
+  generator prototype, `ArrayBuffer`, `%TypedArray%`, nine typed arrays) and two struct types; no new code (F113).
+
+**Not done (follow-ups):** F115 (`yield*` in async generators), F116 (typed array leftovers), F117 (frames save
+every local at each suspension).
+
+**Next smallest step:** slice 2, library runtime: exports drain the job queue and report unhandled rejections
+(F65), then library top-level code (F11).
+
+## Slices (agreed 2026-09-26)
+1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
+   a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
+      with each value awaited (CreateAsyncFromSyncIterator); `return()` on early exit; the TypeErrors node gives.
+   b. Async generators (`async function*`, methods, `yield`, `await`, `return`, `yield*` if it fits):
+      `%AsyncGeneratorPrototype%` `next`/`return`/`throw` returning promises, with the request queue.
+   c. Typed arrays: `Uint8Array` first (constructor from a length / array-like / iterable / `ArrayBuffer`, indexing
+      with wrap-around, `length`, `subarray`/`slice`/`set`/`fill`, iteration, `console.log` like node), then the
+      other element types if cheap; `ArrayBuffer` as far as `Uint8Array` needs it.
+2. Library runtime (the handoff's slice 1). 3. Async exports. 4. User worlds. 5. Imports. 6. `future`/`stream`.
+
 ## Handoff (written 2026-09-26, end of the T25 session)
 
-**State:** `main` after `T25 slice 6: promises and timers` (T17–T19, T21, T24, T25 done). This task file is only
-a goal so far: nothing in it is started. Commit/push only when the user asks; no attribution lines.
+**State:** written after T25; updated 2026-09-26 after slice 1 (`for await`, async generators, typed arrays: see
+Notes / Result). The slice numbers below are the pre-slice-1 ones: "Suggested slices" 1–5 are now slices 2–6 (see
+"Slices"). Commit/push only when the user asks; no attribution lines.
 
 **Run first (baseline):**
 ```sh
 scripts/check-tools.sh
 cargo build -q --release && cargo test -q --no-fail-fast 2>&1 | grep -E 'FAILED|panicked'   # nothing
-scripts/diff.sh -j 4 | tail -1                              # 92 passed, 0 failed, 11 skipped
-target/release/js2wasi3 build tests/fixtures/hello.js -o /tmp/h.wasm && stat -c %s /tmp/h.wasm   # 55367
+scripts/diff.sh -j 4 | tail -1                              # 97 passed, 0 failed, 11 skipped
+target/release/js2wasi3 build tests/fixtures/hello.js -o /tmp/h.wasm && stat -c %s /tmp/h.wasm   # 55715
 ```
 
 **Read first:** `docs/design.md` D3 (event loop: callback lift, `Helper::Loop`) and D4 (WIT conventions),
@@ -60,10 +108,9 @@ rejections), F83 (`wasi:random` in library worlds).
    imports with the adapters in reverse; `async func` imports via `[async-lower]` + a subtask in the waitable
    set, surfaced as a Promise (like `wait-until` in `host.rs`). Acceptance: a library world with one async export
    and one async import, composed with a test component via `wac` (installed: `wac-cli 0.11.0`), runs on wasmtime.
-5. **`future<T>` / `stream<u8>`:** future ↔ Promise; `stream<u8>` ↔ async iterable of `Uint8Array`. **Blockers to
-   raise with the user:** `for await` and async generators are unsupported (`patterns.rs`: "`for await`", F72) and
-   there are no typed arrays (`Uint8Array`, T25 left them out). Either add them (a slice or a new task) or map
-   `stream<u8>` to something smaller first. Acceptance: a stream export echoes its input bytes.
+5. **`future<T>` / `stream<u8>`:** future ↔ Promise; `stream<u8>` ↔ async iterable of `Uint8Array` (`for await`,
+   async generators and typed arrays exist since slice 1; `yield*` in async generators doesn't: F115). Acceptance:
+   a stream export echoes its input bytes.
 
 **Pitfalls carried over:**
 - Wasm `select` picks its **first** operand when the condition is non-zero; check every `select`/`typed_select`.
@@ -76,3 +123,10 @@ rejections), F83 (`wasi:random` in library worlds).
 - Subtasks must leave their waitable set (`waitable.join h 0`) before `subtask.cancel` (probe 8).
 
 ## Progress
+- 2026-09-26: plan: slice 1 = for await (1a), async generators (1b), typed arrays (1c), before the WIT slices (user's choice). Status in progress.
+- 2026-09-26: 1a done: `for await` (Intrinsic::AsyncIterOpen/IsAsyncIter/AsyncIterNext/AsyncIterResult/AsyncIterReturn/IterHasReturn; iter.rs helpers; patterns.rs for_await_step/for_await_close; generators.rs await_value marks main async). Sync fallback takes node's 2 ticks per step (value await + one more; a rejected value closes the sync iterator first), close: 1 tick, 2 with a sync `return`; async close awaits `return()`, ignoring its errors when leaving by a throw. async/for-await-order.js (tick-exact vs node), for-await.js PASS; async 12/0; unsupported test updated.
+- 2026-09-26: 1b done: async generators. IR: FnKind::AsyncGenerator, Intrinsic::NewAsyncGenerator, GenSuspend { awaiting } (yielded 3); lowering: `yield v` awaits v, `return v` awaits v, a `return()` resumption awaits its value, `yield*` in them rejected (follow-up); backend `asyncgen.rs` (request queue in the frame's extra slot, Step/Method/Drain/AwaitReturn/Settle; asyncfn::Step hands async-generator frames over, gated on `$asyncgen`), `%AsyncGeneratorPrototype%` (next/return/throw, [Symbol.asyncIterator]), CLASS_ASYNC_GEN, KIND_ASYNC_GENERATOR (`[AsyncGeneratorFunction: f]`, `Object [AsyncGenerator] {}`, tags). async/async-generators.js matches node tick for tick.
+- 2026-09-26: found while testing: the for-await fixtures timed out: ir::suspend inlined "save all locals" at every point (code = points × locals; 5 for-await loops → 182 KB, 4 s wasmtime compile). Now every point breaks to one shared saving tail per resume function (only the GenSuspend kinds used): 71 KB, 0.3 s. IR tests updated. cargo test ok; diff.sh 95/0/11; hello.js 55390 (+23: the AsyncGenerator prototype's global slots).
+- 2026-09-26: 1c done: typed arrays. IR Builtin::{ArrayBuffer, TypedArray, Typed(k)}, TYPED_NAMES/SIZES, Intrinsic::Typed(TypedOp); runtime types $buffer/$typed (T_BUFFER 25, T_TYPED 26); backend typed.rs (element get/set with node's conversions, ops, printing `Uint8Array(n) [ … ]` / `ArrayBuffer { [Uint8Contents]: <…>, [byteLength]: n }`, names); object get/set/has/own_keys and builtin_tag handle typed arrays (gated on `$typed`, set by the lowering); prelude builtins/typedarray.js (constructors, from/of, %TypedArray%.prototype methods and getters, ArrayBuffer); BYTES_PER_ELEMENT; native values/keys/entries/[Symbol.iterator] on %TypedArray%.prototype. builtins/typed-arrays.js, typed-arrays-more.js PASS; cargo test ok; diff.sh 97/0/11; hello.js 55715 (+325: 22 more always-declared global slots and 2 types, F113).
+- 2026-09-26: slice 1 done: Notes / Result, README (F72 ticked, F115–F117, Next up), design.md D3/D5, keywords.md, README.md.
+- 2026-09-26: handoff refreshed for slice 2 (state, baseline 97/0/11, hello.js 55715).

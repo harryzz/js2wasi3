@@ -357,13 +357,17 @@ fn suspend_transform_validates() {
         !text.contains("yield(") && !text.contains("resume_mode"),
         "{text}"
     );
-    // Five points, the one in the catch body entered by skipping the `try_table`.
-    assert!(text.contains("$gen_suspend(gen.0, 5_i32)"), "{text}");
-    let st = resume
-        .locals
-        .iter()
-        .position(|l| l.name == "state")
-        .unwrap();
+    // Five points, the one in the catch body entered by skipping the `try_table`; they share
+    // one saving tail.
+    let local = |name: &str| resume.locals.iter().position(|l| l.name == name).unwrap();
+    let (st, point) = (local("state"), local("point"));
+    assert!(text.contains(&format!("point.{point} = 5_i32")), "{text}");
+    assert_eq!(
+        text.matches(&format!("$gen_suspend(gen.0, point.{point})"))
+            .count(),
+        1,
+        "{text}"
+    );
     assert!(
         text.contains(&format!("if i32.eq(state.{st}, 5_i32)")),
         "{text}"
@@ -404,5 +408,11 @@ fn suspend_transform_async() {
     assert!(text.contains("$new_async[f$resume#1, 2]()"), "{text}");
     assert!(text.contains("return $async_start("), "{text}");
     assert!(!text.contains("await("), "{text}");
-    assert!(text.contains("$gen_suspend(gen.0, 2_i32)"), "{text}");
+    let resume = &m.functions[1];
+    let point = resume
+        .locals
+        .iter()
+        .position(|l| l.name == "point")
+        .unwrap();
+    assert!(text.contains(&format!("point.{point} = 2_i32")), "{text}");
 }

@@ -1002,9 +1002,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         fns: &mut Vec<(&'a Function<'a>, FuncId)>,
     ) -> R<()> {
         let id_node = f.id.as_ref().expect("function declarations have a name");
-        if f.r#async && f.generator {
-            return Err(self.unsupported(f.span, "async generator function", "later"));
-        }
         // Simple parameters are typed; the others (defaults, patterns: `None`) are `jsval`s bound
         // in the body's prologue, and a rest parameter is one more `jsval` (an array).
         let mut params = Vec::new();
@@ -1752,14 +1749,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if self.lowered.contains(&id) {
             return Ok(());
         }
-        let mut bad = None;
-        if matches!(f, FnAst::Func(func) if func.r#async && func.generator) {
-            bad = Some(self.unsupported(f.span(), "async generator function", "later"));
-        }
         self.lowered.insert(id);
-        if let Some(e) = bad {
-            return Err(e);
-        }
         self.lower_body(id, f, scope)
     }
 
@@ -2059,7 +2049,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             code,
             name,
             length: js_length(f.params()),
-            kind: if self.module.function(id).flags.is_generator {
+            kind: if self.module.function(id).flags.is_generator
+                && self.module.function(id).flags.is_async
+            {
+                ir::FnKind::AsyncGenerator
+            } else if self.module.function(id).flags.is_generator {
                 ir::FnKind::Generator
             } else if self.module.function(id).flags.is_async {
                 ir::FnKind::Async
@@ -2148,7 +2142,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             code,
             name,
             length,
-            kind: if f.flags.is_generator {
+            kind: if f.flags.is_generator && f.flags.is_async {
+                ir::FnKind::AsyncGenerator
+            } else if f.flags.is_generator {
                 ir::FnKind::Generator
             } else if f.flags.is_async {
                 ir::FnKind::Async
@@ -2435,6 +2431,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     (a, Some(ty)) => {
                         // `return;` next to value returns returns `undefined`.
                         let v = match a {
+                            // In an async generator `return v` awaits `v` (T20).
+                            Some(a) if cx.func.flags.is_async && cx.func.flags.is_generator => {
+                                let v = jsval_of(self.expr(cx, a)?);
+                                Val::js(self.await_value(cx, v), Kind::Any)
+                            }
                             Some(a) => self.expr(cx, a)?,
                             None => self.undefined_val(),
                         };
@@ -3395,8 +3396,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Some(a) => jsval_of(self.expr(cx, a)?),
                     None => Expr::undefined(),
                 };
+                let async_gen = cx.func.flags.is_async && cx.func.flags.is_generator;
                 let e = if y.delegate {
+                    if async_gen {
+                        return Err(self.unsupported(
+                            y.span,
+                            "`yield*` in an async generator",
+                            "later",
+                        ));
+                    }
                     self.yield_star(cx, arg)
+                } else if async_gen {
+                    // `yield v` awaits `v` first (T20).
+                    let arg = self.await_value(cx, arg);
+                    self.suspend(cx, ir::SuspendKind::Yield, arg)
                 } else {
                     self.suspend(cx, ir::SuspendKind::Yield, arg)
                 };
@@ -3404,15 +3417,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Expression::AwaitExpression(a) => {
                 let arg = jsval_of(self.expr(cx, &a.argument)?);
-                if Some(cx.id) == self.main {
-                    // Top-level `await`: `main` is an async function.
-                    cx.func.flags.is_async = true;
-                    cx.func.result = Some(Type::JsVal);
-                }
-                Ok(Val::js(
-                    self.suspend(cx, ir::SuspendKind::Await, arg),
-                    Kind::Any,
-                ))
+                Ok(Val::js(self.await_value(cx, arg), Kind::Any))
             }
             Expression::PrivateInExpression(p) => {
                 let (sym, _) = self.private_sym(cx, &p.left)?;
@@ -3718,8 +3723,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Call::Value,
             ));
         }
-        if let Some(b) = ["Map", "Set"]
-            .into_iter()
+        if let Some(b) = builtins::NEW_ONLY
+            .iter()
+            .copied()
             .find(|b| self.is_global(callee, b))
         {
             // `Map(…)` without `new` (T25): the arguments, then node's TypeError.
@@ -4419,9 +4425,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         cx: &mut FnCx,
         c: &'a CallExpression<'a>,
         name: &str,
-        op: ir::MapOp,
+        i: Intrinsic,
     ) -> R<(Expr, Call)> {
-        let i = Intrinsic::Map(op);
         let (params, result) = i.signature();
         if c.arguments.len() != params.len() {
             return Err(self.unsupported(c.span, &format!("intrinsic `{name}` arity"), "T25"));
@@ -4437,8 +4442,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 _ => to_i32(self.num(v, e.span())?),
             });
         }
-        if matches!(op, ir::MapOp::New(_)) {
+        if matches!(i, Intrinsic::Map(ir::MapOp::New(_))) {
             self.module.maps = true;
+        }
+        if matches!(
+            i,
+            Intrinsic::Typed(ir::TypedOp::New | ir::TypedOp::View | ir::TypedOp::BufferNew)
+        ) {
+            // The backend links typed arrays' element access and printing (T20).
+            self.module.names.insert("$typed".to_string());
         }
         let e = Expr::intrinsic(i, args);
         Ok(match result {
@@ -4460,7 +4472,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         name: &str,
     ) -> R<(Expr, Call)> {
         if let Some(op) = map_op(name) {
-            return self.map_intrinsic(cx, c, name, op);
+            return self.map_intrinsic(cx, c, name, Intrinsic::Map(op));
+        }
+        if let Some(op) = typed_op(name) {
+            return self.map_intrinsic(cx, c, name, Intrinsic::Typed(op));
         }
         let arity = match name {
             "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
@@ -6141,6 +6156,25 @@ fn expression_kind(e: &Expression) -> String {
 }
 
 /// The [`ir::MapOp`] of `__intrinsic_<name>` (T25): `map_new_map`, `map_iter_entries`, ….
+/// `__intrinsic_typed_*` (T20): see [`ir::TypedOp`].
+fn typed_op(name: &str) -> Option<ir::TypedOp> {
+    use ir::TypedOp as T;
+    Some(match name {
+        "typed_new" => T::New,
+        "typed_view" => T::View,
+        "typed_kind" => T::Kind,
+        "typed_length" => T::Length,
+        "typed_byte_offset" => T::ByteOffset,
+        "typed_buffer" => T::Buffer,
+        "is_array_buffer" => T::IsBuffer,
+        "buffer_new" => T::BufferNew,
+        "buffer_length" => T::BufferLength,
+        "buffer_slice" => T::BufferSlice,
+        "typed_copy" => T::Copy,
+        _ => return None,
+    })
+}
+
 fn map_op(name: &str) -> Option<ir::MapOp> {
     use ir::MapOp as M;
     Some(match name.strip_prefix("map_")? {

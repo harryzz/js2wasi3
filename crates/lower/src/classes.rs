@@ -648,8 +648,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// `new f(…)` for any value `f` (the native errors are handled before).
     pub(crate) fn new_expr(&mut self, cx: &mut FnCx, n: &'a NewExpression<'a>) -> R<Val> {
         let what = self.callee_text(&n.callee);
-        if ["Array", "Map", "Set", "Object"]
+        if ["Array", "Object"]
             .iter()
+            .chain(super::builtins::NEW_ONLY)
             .any(|b| self.is_global(&n.callee, b))
             && !n.arguments.iter().any(|a| a.is_spread())
             && let Some(func) = self.builtin_global(&n.callee)

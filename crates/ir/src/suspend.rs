@@ -37,8 +37,10 @@
 //!      `block $a { block $c { if st in catch_range { br $c }; try { body } catch { br $c }; br $a }; catch_body }`,
 //!      so resuming inside the catch body skips the `try_table` and resuming inside the body
 //!      re-enters a fresh `try_table` (the same handler), with no code duplicated;
-//!    - the point itself: `if st != 0 { st = 0; l = sent } else { tmp = arg; <save all locals>;
-//!      GenSuspend(gen, k); return tmp }`.
+//!    - the point itself: `if st != 0 { st = 0; l = sent } else { tmp = arg; point = k; br $save }`;
+//!      the body is wrapped in `block $save`, followed by one copy of `<save all locals>;
+//!      GenSuspend(gen, point); return tmp` (T20: inlining the saves at every point made the code
+//!      points × locals, which took wasmtime seconds to compile for a few `for await` loops).
 //! 5. `ResumeMode` becomes the `mode` param. The lowering tests it right after each `Suspend`:
 //!    throw → `throw sent`, return → a `return sent` at that point, which runs the enclosing
 //!    `finally` code through the lowering's completion dispatch (design D2).
@@ -50,6 +52,11 @@
 //! parameters and returns `AsyncStart(frame)`, which runs the body up to its first `await` and
 //! gives the promise. The runtime resumes the frame from promise jobs (see the backend's
 //! `asyncfn` module).
+//!
+//! # Async generators (T20)
+//! Both flags: transformed like a generator (implicit first `yield`, the start function returns
+//! the object), made by `NewAsyncGenerator`; its `await` points are `GenSuspend { awaiting }` so
+//! the runtime (the backend's `asyncgen` module) tells them from `yield`s.
 
 use crate::{
     BinOp, Const, Expr, FnFlags, FuncId, Function, Intrinsic, LabelId, LocalId, Module,
@@ -106,14 +113,27 @@ fn transform(m: &mut Module, id: FuncId) {
         max_label(s, &mut next_label);
     }
     let resume_id = FuncId(m.functions.len() as u32);
+    // The shared suspension tail (see step 4 in the module docs).
+    let save = LabelId(next_label);
+    let (ytmp, kpoint, kcode) = (
+        r.add_local("yielded", Type::JsVal),
+        r.add_local("point", Type::I32),
+        r.add_local("yield_kind", Type::I32),
+    );
     let mut t = Transform {
-        r: &mut r,
         st,
-        slots,
+        async_generator: f.flags.is_async && f.flags.is_generator,
         next_point: 1,
-        next_label,
+        next_label: next_label + 1,
+        save,
+        ytmp,
+        kpoint,
+        kcode,
+        kinds: [false; 4],
     };
     let body = t.list(body);
+    let has_points = t.next_point > 1;
+    let kinds = t.kinds;
     let load = |i: u32| {
         let ty = f.locals[i as usize].ty;
         Stmt::Set(
@@ -129,8 +149,54 @@ fn transform(m: &mut Module, id: FuncId) {
             els: (0..f.params).map(load).collect(),
         },
     ];
-    out.extend(body);
-    out.push(Stmt::Return(Some(Expr::undefined())));
+    if has_points {
+        let mut inner = body;
+        inner.push(Stmt::Return(Some(Expr::undefined())));
+        out.push(Stmt::Block {
+            label: save,
+            body: inner,
+        });
+        // Save every local once, for all the points.
+        for i in 0..slots {
+            let ty = r.locals[(i + SHIFT) as usize].ty;
+            out.push(Stmt::Expr(gen_op(
+                Intrinsic::GenStore(i),
+                vec![to_js(ty, Expr::Local(LocalId(i + SHIFT)))],
+            )));
+        }
+        let suspend = |raw, awaiting| {
+            Stmt::Expr(gen_op(
+                Intrinsic::GenSuspend { raw, awaiting },
+                vec![Expr::Local(kpoint)],
+            ))
+        };
+        // One `GenSuspend` per kind of point the function has.
+        let is = |c: i32| Expr::binary(BinOp::Eq, Type::I32, Expr::Local(kcode), Expr::i32(c));
+        let mut tail: Vec<Stmt> = Vec::new();
+        for (code, raw, awaiting) in [
+            (KIND_YIELD, false, false),
+            (KIND_AWAITING, false, true),
+            (KIND_RAW, true, false),
+        ] {
+            if !kinds[code as usize] {
+                continue;
+            }
+            tail = if tail.is_empty() {
+                vec![suspend(raw, awaiting)]
+            } else {
+                vec![Stmt::If {
+                    cond: is(code),
+                    then: vec![suspend(raw, awaiting)],
+                    els: tail,
+                }]
+            };
+        }
+        out.extend(tail);
+        out.push(Stmt::Return(Some(Expr::Local(ytmp))));
+    } else {
+        out.extend(body);
+        out.push(Stmt::Return(Some(Expr::undefined())));
+    }
     r.body = out;
     m.functions.push(r);
 
@@ -145,7 +211,13 @@ fn transform(m: &mut Module, id: FuncId) {
         pos: f.pos,
     };
     let g = s.add_local("gen", Type::JsVal);
-    let new = if f.flags.is_async {
+    let async_fn = f.flags.is_async && !f.flags.is_generator;
+    let new = if f.flags.is_async && f.flags.is_generator {
+        Intrinsic::NewAsyncGenerator {
+            resume: resume_id,
+            slots,
+        }
+    } else if async_fn {
         Intrinsic::NewAsync {
             resume: resume_id,
             slots,
@@ -164,7 +236,7 @@ fn transform(m: &mut Module, id: FuncId) {
             vec![Expr::Local(g), to_js(ty, Expr::Local(LocalId(i)))],
         )));
     }
-    if f.flags.is_async {
+    if async_fn {
         s.body.push(Stmt::Return(Some(Expr::intrinsic(
             Intrinsic::AsyncStart,
             vec![Expr::Local(g)],
@@ -690,16 +762,28 @@ fn max_label(s: &Stmt, next: &mut u32) {
 
 // ---- steps 2 and 4: numbering and re-entry ---------------------------------------------------
 
-struct Transform<'a> {
-    r: &'a mut Function,
+struct Transform {
     st: LocalId,
-    /// Frame slots: the original locals (at `SHIFT..` in the resume function).
-    slots: u32,
+    /// An async generator (T20): its `await`s are marked for the runtime.
+    async_generator: bool,
     next_point: u32,
     next_label: u32,
+    /// The block every point breaks out of to save the locals and return (one copy of the
+    /// saving code: inlining it at every point made code size points × locals); the value to
+    /// return, the point and its kind ([`KIND_RAW`], [`KIND_AWAITING`], else a plain yield).
+    save: LabelId,
+    ytmp: LocalId,
+    kpoint: LocalId,
+    kcode: LocalId,
+    /// The kinds of points seen (indexed by kind).
+    kinds: [bool; 4],
 }
 
-impl Transform<'_> {
+const KIND_YIELD: i32 = 1;
+const KIND_RAW: i32 = 2;
+const KIND_AWAITING: i32 = 3;
+
+impl Transform {
     fn label(&mut self) -> LabelId {
         self.next_label += 1;
         LabelId(self.next_label - 1)
@@ -804,24 +888,18 @@ impl Transform<'_> {
             Stmt::Set(l, Expr::Suspend { kind, arg }) => {
                 let k = self.next_point;
                 self.next_point += 1;
-                let tmp = self.r.add_local("yielded", Type::JsVal);
-                let mut save = vec![Stmt::Set(tmp, *arg)];
-                for i in 0..self.slots {
-                    let ty = self.r.locals[(i + SHIFT) as usize].ty;
-                    save.push(Stmt::Expr(gen_op(
-                        Intrinsic::GenStore(i),
-                        vec![to_js(ty, Expr::Local(LocalId(i + SHIFT)))],
-                    )));
-                }
-                let raw = match kind {
-                    SuspendKind::Yield | SuspendKind::Await => false,
-                    SuspendKind::YieldDelegate => true,
+                let code = match kind {
+                    SuspendKind::YieldDelegate => KIND_RAW,
+                    SuspendKind::Await if self.async_generator => KIND_AWAITING,
+                    SuspendKind::Yield | SuspendKind::Await => KIND_YIELD,
                 };
-                save.push(Stmt::Expr(gen_op(
-                    Intrinsic::GenSuspend { raw },
-                    vec![Expr::i32(k as i32)],
-                )));
-                save.push(Stmt::Return(Some(Expr::Local(tmp))));
+                self.kinds[code as usize] = true;
+                let save = vec![
+                    Stmt::Set(self.ytmp, *arg),
+                    Stmt::Set(self.kpoint, Expr::i32(k as i32)),
+                    Stmt::Set(self.kcode, Expr::i32(code)),
+                    Stmt::Break(self.save),
+                ];
                 Stmt::If {
                     cond: ne0(self.st),
                     then: vec![
