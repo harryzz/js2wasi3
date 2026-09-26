@@ -593,6 +593,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         cx.str("[Object: null prototype]"),
     );
     let generator_prefix = cx.str("Object [Generator] ");
+    let arguments_prefix = cx.str("[Arguments] ");
     let (lbracket, rbracket, space, object_) =
         (cx.str("["), cx.str("]"), cx.str(" "), cx.str("Object"));
     let (getter, setter, both) = (
@@ -639,6 +640,18 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.i32_and();
     s.if_(BlockType::Empty);
     s.global_get(generator_prefix).local_set(PREFIX);
+    s.end();
+    // An `arguments` object (T25): `[Arguments] `.
+    s.local_get(PREFIX).ref_is_null();
+    s.local_get(O)
+        .struct_get(runtime::T_OBJECT, object::F_CLASS)
+        .i32_const(object::CLASS_MASK)
+        .i32_and()
+        .i32_const(object::CLASS_ARGUMENTS)
+        .i32_eq();
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(arguments_prefix).local_set(PREFIX);
     s.end();
     // The prefix: `Name ` from the constructor on the chain; none for `Object`; for no constructor,
     // `[Object: null prototype] ` unless the chain reaches Object.prototype.

@@ -113,6 +113,8 @@ pub struct Module {
     pub string_to_number: Option<FuncId>,
     /// The module can make a `Map`/`Set` (T25): `console.log` links their formatting.
     pub maps: bool,
+    /// The code names a property `bind` (T25): `Function.prototype.bind` is installed.
+    pub bind: bool,
 }
 
 /// A prototype method implemented in the prelude: `proto.prototype[key]` is a function object
@@ -556,6 +558,9 @@ pub enum Intrinsic {
     Trap,
     /// `Map`/`Set` storage for the prelude (T25).
     Map(MapOp),
+    /// `(args: an array of every argument) -> jsval`: a function's `arguments` object (T25,
+    /// unmapped: strict mode).
+    MakeArguments,
 }
 
 /// [`Intrinsic::Map`] operations. `m` is a `$map` and `it` a `$mapiter` (the prelude checks
@@ -701,6 +706,7 @@ impl Intrinsic {
             Intrinsic::StrSet => (&[JsVal, I32, I32], None),
             Intrinsic::JsLess { .. } => (&[JsVal, JsVal], Some(Bool)),
             Intrinsic::Trap => (&[], None),
+            Intrinsic::MakeArguments => (&[JsVal], Some(JsVal)),
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => (&[], Some(JsVal)),
                 MapOp::Kind | MapOp::Size | MapOp::IterKind | MapOp::Step => (&[JsVal], Some(I32)),
@@ -820,6 +826,7 @@ impl Intrinsic {
             Intrinsic::StrSet => "str_set",
             Intrinsic::JsLess { .. } => "js_less",
             Intrinsic::Trap => "trap",
+            Intrinsic::MakeArguments => "make_arguments",
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => "map_new",
                 MapOp::Kind => "map_kind",

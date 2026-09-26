@@ -23,7 +23,7 @@ table in [`tasks/README.md`](../tasks/README.md).
 | Built-in objects, properties, methods (20) | 11 | 6 | 3 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
-What's most needed, in order: the rest of the built-in library (`Date`: T26; regex: T27; built-ins as values: T25), `arguments` (F42), spread into `console.log` and calls through `console.log`
+What's most needed, in order: the rest of the built-in library (`Date`: T26; regex: T27; built-ins as values: T25), spread into `console.log` and calls through `console.log`
 as a value, `typeof` of an undeclared name, then the language gaps below (async generators, `for await`, tagged
 templates, regex, multi-file `import`).
 
@@ -32,7 +32,7 @@ templates, regex, multi-file `import`).
 | Word | Status | Notes / what's missing |
 |---|---|---|
 | `abstract` | ➖ | Removed in ES5 (Java-era reserved word). |
-| `arguments` | ❌ | Rejected (F42, T21). Rest parameters work instead. |
+| `arguments` | 🟡 | T25: in ordinary functions, methods, generators and async functions (unmapped, as in strict mode; iterable, printed `[Arguments] {…}`). Rejected in arrow functions, class constructors, with a rest parameter and in exported functions (F103). |
 | `async` | 🟡 | T19: `async function`, async arrows, methods, static methods. Missing: async generators `async function*` (F72); exported async functions at the WIT boundary (T20). |
 | `await` | 🟡 | T19: in async functions and at top level. Missing: `for await` (F72); an unsettled top-level `await` exits 0 instead of node's 13 (F76). |
 | `boolean` | ➖ | Removed in ES5. |
@@ -59,7 +59,7 @@ templates, regex, multi-file `import`).
 | `finally` | ✅ | Completion dispatch for every jump, also around `yield`/`await` (T12, T18, T19). |
 | `float` | ➖ | Removed in ES5. |
 | `for` | 🟡 | `for`, `for-in`, `for-of` (iterator protocol, destructuring) work. Missing: `for await` (F72). Arrays/strings iterate without looking up a replaced `Symbol.iterator` (F51). |
-| `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`. Missing: `arguments` (F42); `bind`, `toString` (F43); `new.target` outside class constructors (F57); assigning to a function declaration's name (F45). |
+| `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments` (T25). Missing: `toString` (F43); `new.target` outside class constructors (F57); assigning to a function declaration's name (F45). |
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
 | `implements` | ➖ | Reserved in strict mode; a syntax error in node too. |

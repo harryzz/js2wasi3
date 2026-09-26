@@ -150,6 +150,74 @@ when used. **Speed:** 300k string-keyed set/get/delete + 300k numeric for-of + 3
 **Next smallest step:** slice 3: `Function.prototype.bind` (a bound-function object kind in `func.rs`: target, bound
 `this`, bound args; `name` `bound f`, `length`, `new` through it).
 
+### Slice 3 (in progress): `bind`, `arguments`
+**Done so far (2026-09-26):**
+- `Function.prototype.bind` (native, `func.rs` `Helper::Bind`): a `$function` of kind `KIND_BOUND` whose env is
+  `[target, bound this, ...bound args]`; its code calls the target with the bound arguments first, its construct
+  entry (only if the target has one) `new`s the target (`new_target` = the target when it's the bound function
+  itself); `name` `bound f`, `length` max(0, target.length − bound args), no `prototype`; `instanceof` looks
+  through bound functions. Installed only when the user's code names a `bind` property (`ir::Module::bind`).
+- `arguments` (F42): the closure analysis marks non-arrow functions using it (`uses_arguments`); such a function is
+  lowered as `f(...args)` (one rest parameter, so every call site already passes all arguments), its declared
+  parameters are bound in the prologue from `args[i]` like default/pattern parameters, and
+  `Intrinsic::MakeArguments` makes the unmapped object (class `CLASS_ARGUMENTS`: indices, hidden `length` and
+  `[Symbol.iterator]` = `Array.prototype.values`; printed `[Arguments] { '0': 1 }`). `Array.prototype.values`
+  now iterates any object as an array-like (`iter.rs` `ARRAY_LIKE`). Rejected: arrow functions, class
+  constructors, with a rest parameter, exported functions (F103).
+- V8's CallPrinter for object literals (`{(intermediate value)…}` per property) in "not a function/constructor/
+  iterable" messages.
+- Tests: `tests/fixtures/builtins/functions.js`, `tests/fixtures/syntax/callee-text.js`, `unsupported.rs`.
+- `hello.js`: 52740 bytes (+206: the iterator's array-like branch and the `[Arguments]` check in existing helpers).
+
+**Left in slice 3:** `Function.prototype.toString` (source text), `Function.prototype` as a function (F47),
+F59 (computed keys whose value is a function: SetFunctionName at run time).
+
+## Handoff for the rest of slice 3 (written 2026-09-26, end of the slices 1–3 session)
+
+**State:** `main`, committed, not pushed. Slices 1 (`JSON.parse`) and 2 (`Map`/`Set`, `Map.groupBy`) are done; slice 3
+is half done (`bind`, `arguments`: see "Slice 3 (in progress)" above). The oracle is node **24.21.0** (latest LTS,
+`TOOLS.md`; `scripts/check-tools.sh` checks it). Commit/push only when the user asks; no attribution lines.
+The user watches cost: keep investigations short, record open questions as follow-ups instead of chasing them.
+
+**Run first (baseline):**
+```sh
+scripts/check-tools.sh
+cargo test -q --no-fail-fast 2>&1 | grep -E 'FAILED|panicked'   # nothing
+scripts/diff.sh -j 4 | tail -1                                   # 76 passed, 0 failed, 11 skipped
+```
+(`syntax/exponent.js` is skipped until F77: node 24's `**` is V8's own `pow`.)
+
+**Left in slice 3, in this order (smallest first):**
+1. **F47, `Function.prototype` as a function:** today it's a plain object from `object.rs` `proto()`. Spec: it's
+   callable (returns `undefined`), `typeof Function.prototype === "function"`, `name: ""`, `length: 0`; node prints
+   it as `Object [Function] {}`? (check with node). Probably: allocate it as a `$function` with a no-op `$code`
+   in `proto()` when `b == Builtin::Function` (its proto is still Object.prototype).
+2. **`Function.prototype.toString` (F43's rest):** node returns the exact source slice for user functions/classes/
+   methods/accessors (`toString` of a method is `m() { … }`), `function name() { [native code] }` for built-ins
+   (also prelude ones and bound functions: `function () { [native code] }`). Plan: `ir::Closure` (made by
+   `Lowerer::func_value` and the closure/class/method paths, `crates/lower/src/lib.rs` ~2068) gets a
+   `source: Option<String>` (the span's text from `self.p.source`); the backend stores it on the function object
+   (a hidden own property under a private symbol, or a `$function` field — decide; watch `func::Helper::New`'s ~25
+   callers). Emit sources only when the user's code names a `toString` property or converts functions to strings
+   (gate like `ir::Module::bind`, see `builtins::Prelude::bind`), else keep the sentinel/trap. ToPrimitive of a
+   function (`"" + f`) goes through it too (today `user_to_primitive_not_implemented`).
+3. **F59:** methods/accessors/fields with a computed key whose value is a function are rejected (except
+   `[Symbol.iterator]`): SetFunctionName at run time (`name` from the key: a symbol gives `[desc]`, getters
+   `get k`). Find the rejection with `grep -n "computed" crates/lower/src/classes.rs crates/lower/src/lib.rs`.
+
+Then the end-of-slice steps (CLAUDE.md): Notes / Result for slice 3 (replace "Slice 3 (in progress)"), tick F43,
+F47, F59 in `tasks/README.md`, docs (D5 if the design changes, `docs/keywords.md`, README). Next after slice 3:
+slice 4 (built-ins as values: F37, F81, F87, F88, F91, F95, F97, F101) or T20 — the user's choice.
+
+**Pitfalls learned this session:**
+- Scratch `.js` files run as CommonJS (sloppy) in node: use `.mjs` or put fixtures in `tests/fixtures` (ESM).
+- Anything a program may never use (formatting, `bind`) must be gated, or it grows every binary: check
+  `hello.js` (now 52740 bytes) with `target/release/js2wasi3 build tests/fixtures/hello.js` and diff the
+  function list (`wasm-tools print … | grep -o '(func \$[^ ]*'`).
+- Wasm `select` picks its first operand when the condition is non-zero; an `if` with `BlockType::Empty` can't
+  consume stack values (use `BlockType::Result`).
+- `cargo fmt --all` after editing Rust (the tree is kept formatted).
+
 ## Handoff for slice 1: `JSON.parse` (written 2026-09-26, end of the T21 session)
 
 **State:** `main` at `8dc3c68`, clean, pushed. T21 is done (all four slices; read its Notes / Result, slices 2–4).
@@ -250,3 +318,8 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 - 2026-09-26: node 24 fixes 2–3/5: callbacks' 'X is not a function' use `$$typeDescribe` everywhere (moved to array.js; flatMap too), the sort comparator error appends `: $$describe(v)`; map/set iterators as receivers are '[object Map Iterator]'/'[object Set Iterator]'. array-methods.js (+ a loop over value types) and map-set.js PASS.
 - 2026-09-26: node 24 fix 4/5: diff.sh runs node with --no-warnings (warnings carry the pid); timers.js PASS. Map.groupBy added (`$$Map_groupBy`; node's own messages, incl. the plain '5 is not a function'); map-set.js PASS. exponent.js: node 24's pow is bit for bit glibc 2.41's (0 diffs on 20k pairs vs Python math.pow; ARM optimized-routines algorithm), ours (fdlibm) differs on ~10% — F77 updated; porting it needs the user's go (numeric work). F101: Object.groupBy + Set methods.
 - 2026-09-26: pow investigation stopped at the user's request (time/credits): node 24 uses V8's own pow (deps/v8/src/base/ieee754.cc), not glibc (666/1M diffs vs glibc 2.41 FMA and non-FMA builds). Recorded in F77; tests/fixtures/syntax/exponent.js skipped (exponent.skip) until F77. F102 recorded: optional Wasm SIMD speed-ups.
+- 2026-09-26: slice 3 started (bind first).
+- 2026-09-26: bind done natively (func.rs Helper::Bind/BoundCall/BoundConstruct, KIND_BOUND/NEW_BOUND; instanceof unwraps bound targets); smoke test (call, new through bound class, instanceof, name/length, errors, map callback) matches node.
+- 2026-09-26: arguments done: a function using it is lowered as f(...all) (params bound in the prologue from all[i], like default params; no call-site change), Intrinsic::MakeArguments -> object class CLASS_ARGUMENTS (indices, hidden length, hidden @@iterator = Array.prototype.values), printed '[Arguments] {…}'; Array.prototype.values now iterates any object as an array-like (iter.rs ARRAY_LIKE). Rejected: arguments in arrows/class ctors, rest param + arguments. Smoke test matches node (strict).
+- 2026-09-26: checkpoint: bind + arguments done, functions.js/callee-text.js PASS, full diff.sh 76/0/11, cargo test ok; bind gated on a `bind` property name (hello.js 52740, +206). F42 ticked, F43 partial, F103 recorded.
+- 2026-09-26: handoff for the rest of slice 3 written (toString, F47, F59).

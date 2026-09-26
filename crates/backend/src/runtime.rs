@@ -174,6 +174,8 @@ pub trait Cx {
     fn builtin_methods(&mut self, b: js2wasi3_ir::Builtin) -> Vec<(String, u32, u32)>;
     /// Can the module make a `Map`/`Set` (T25)?
     fn has_maps(&mut self) -> bool;
+    /// Does the code name a property `bind` (T25)?
+    fn has_bind(&mut self) -> bool;
 
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();

@@ -83,6 +83,9 @@ pub(crate) struct Prelude {
     dead: Vec<Span>,
     /// The names of the needed top-level declarations.
     live: HashSet<String>,
+    /// Does the user's code name a property `bind` (T25: `Function.prototype.bind` is installed
+    /// only then)?
+    pub bind: bool,
 }
 
 impl Prelude {
@@ -173,6 +176,9 @@ impl Prelude {
                 _ => None,
             };
             if let Some((name, span)) = prop {
+                if name == "bind" && !p.in_prelude(span.start) {
+                    out.bind = true;
+                }
                 for &t in methods.get(name).into_iter().flatten() {
                     add(t, span, &mut roots);
                 }

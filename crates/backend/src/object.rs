@@ -44,6 +44,8 @@ const F_INDEX: u32 = 6;
 
 pub const CLASS_PLAIN: i32 = 0;
 pub const CLASS_ERROR: i32 = 1;
+/// A function's `arguments` object (T25; 2 and 3 are `Map`/`Set`, see `crate::mapset`).
+pub const CLASS_ARGUMENTS: i32 = 4;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -294,6 +296,9 @@ pub enum Helper {
     Keys(u8),
     /// `(o: (ref $object)) -> i32`: the number of live enumerable symbol keys.
     SymbolKeys,
+    /// `(args: jsval (an `$array`)) -> jsval`: an unmapped `arguments` object (T25): the indices,
+    /// `length` and `[Symbol.iterator]` (`Array.prototype.values`), both hidden.
+    MakeArguments,
 }
 
 impl Helper {
@@ -362,6 +367,7 @@ impl Helper {
             Helper::Keys(1) => "Object.values",
             Helper::Keys(_) => "Object.entries",
             Helper::SymbolKeys => "symbol_keys",
+            Helper::MakeArguments => "make_arguments",
         }
     }
 
@@ -405,6 +411,7 @@ impl Helper {
             Helper::CheckDestructure => (vec![v, s], vec![]),
             Helper::Keys(_) => (vec![v], vec![v]),
             Helper::SymbolKeys => (vec![o], vec![I32]),
+            Helper::MakeArguments => (vec![v], vec![v]),
         }
     }
 
@@ -464,6 +471,7 @@ impl Helper {
             Helper::CheckDestructure => check_destructure(cx),
             Helper::Keys(k) => keys(cx, k),
             Helper::SymbolKeys => symbol_keys(),
+            Helper::MakeArguments => make_arguments(cx),
         }
     }
 }
@@ -1078,7 +1086,16 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
                 "apply",
                 2,
             ),
-        ],
+        ]
+        .into_iter()
+        // `bind` only when the code names it (T25): it links the bound-function helpers.
+        .chain(cx.has_bind().then_some((
+            runtime::Helper::Func(func::Helper::Bind),
+            Some("bind"),
+            "bind",
+            1,
+        )))
+        .collect(),
         Builtin::Array => array::proto_methods()
             .into_iter()
             .map(|(name, h, len)| (runtime::Helper::Arr(h), Some(name), name, len))
@@ -2623,6 +2640,57 @@ fn symbol_keys() -> Function {
         s.local_get(C).i32_add().local_set(C);
     });
     s.local_get(C);
+    s.end();
+    f
+}
+
+/// `$make_arguments(args)` (T25).
+fn make_arguments(cx: &mut dyn Cx) -> Function {
+    let alloc = h(cx, Helper::Alloc);
+    let proto = h(cx, Helper::Proto(Builtin::Object));
+    let array_proto = h(cx, Helper::Proto(Builtin::Array));
+    let define = h(cx, Helper::Define);
+    let get = h(cx, Helper::Get);
+    let number_to_string = cx.helper(runtime::Helper::Num(numstr::Helper::NumberToString));
+    let length = cx.str("length");
+    const A: u32 = 0;
+    const O: u32 = 1;
+    const N: u32 = 2;
+    const I: u32 = 3;
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.i32_const(CLASS_ARGUMENTS)
+        .call(proto)
+        .call(alloc)
+        .local_set(O);
+    s.local_get(A)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_LENGTH)
+        .local_set(N);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(O).ref_as_non_null();
+    s.local_get(I).f64_convert_i32_u().call(number_to_string);
+    s.ref_cast_non_null(string());
+    s.local_get(A)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_ELEMS)
+        .local_get(I)
+        .array_get(T_VALS);
+    s.i32_const(0).call(define);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(O).ref_as_non_null().global_get(length);
+    s.local_get(N).ref_i31();
+    s.i32_const(HIDDEN).call(define);
+    s.local_get(O)
+        .ref_as_non_null()
+        .global_get(runtime::G_SYM_ITERATOR);
+    s.call(array_proto)
+        .global_get(runtime::G_SYM_ITERATOR)
+        .call(get);
+    s.i32_const(HIDDEN).call(define);
+    s.local_get(O);
     s.end();
     f
 }

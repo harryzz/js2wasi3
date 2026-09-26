@@ -40,6 +40,8 @@ pub const KIND_CLASS: i32 = 1;
 pub const KIND_GENERATOR: i32 = 2;
 /// An async function (T19): `console.log` shows `[AsyncFunction: f]`.
 pub const KIND_ASYNC: i32 = 3;
+/// A bound function (T25): `env` is `[target, bound this, ...bound args]`.
+pub const KIND_BOUND: i32 = 4;
 
 /// [`Helper::New`] flags: an ordinary `function` (a `prototype` object, the ordinary construct).
 pub const NEW_ORDINARY: i32 = 1;
@@ -49,6 +51,8 @@ pub const NEW_CLASS: i32 = 2;
 pub const NEW_GENERATOR: i32 = 4;
 /// [`Helper::New`] flags: an async function (T19; not a constructor).
 pub const NEW_ASYNC: i32 = 8;
+/// [`Helper::New`] flags: a bound function (T25; no `prototype`).
+pub const NEW_BOUND: i32 = 16;
 
 pub fn function() -> HeapType {
     HeapType::Concrete(T_FUNCTION)
@@ -110,6 +114,15 @@ pub enum Helper {
     CallList,
     /// `(v: jsval) -> (ref $vals)`: CreateListFromArrayLike (`undefined`/`null`: empty).
     ListFromArrayLike,
+    /// The code of `Function.prototype.bind` (T25): a bound function ([`KIND_BOUND`]) named
+    /// `bound <name>` with the remaining `length`, a constructor if the target is one.
+    Bind,
+    /// A bound function's code: call the target with the bound `this` and the bound arguments
+    /// first.
+    BoundCall,
+    /// A bound function's construct code: `new` the target (`new_target` the target when it's the
+    /// bound function itself).
+    BoundConstruct,
 }
 
 impl Helper {
@@ -135,6 +148,9 @@ impl Helper {
             Helper::Apply => "Function.prototype.apply",
             Helper::CallList => "call_list",
             Helper::ListFromArrayLike => "list_from_array_like",
+            Helper::Bind => "Function.prototype.bind",
+            Helper::BoundCall => "bound_call",
+            Helper::BoundConstruct => "bound_construct",
         }
     }
 
@@ -165,7 +181,11 @@ impl Helper {
             Helper::ErrorCall(_) | Helper::ErrorConstruct(_) => (vec![v, v, v], vec![v]),
             Helper::CallValue => (vec![v, v, rt(false, T_VALS), s], vec![v]),
             Helper::ArgGet => (vec![v, ValType::I32], vec![v]),
-            Helper::Call | Helper::Apply => (vec![v, v, v], vec![v]),
+            Helper::Call
+            | Helper::Apply
+            | Helper::Bind
+            | Helper::BoundCall
+            | Helper::BoundConstruct => (vec![v, v, v], vec![v]),
             Helper::CallList => (vec![v, v, v, s], vec![v]),
             Helper::ListFromArrayLike => (vec![v], vec![rt(false, T_VALS)]),
         }
@@ -229,6 +249,9 @@ impl Helper {
             Helper::Apply => apply(cx),
             Helper::CallList => call_list(cx),
             Helper::ListFromArrayLike => list_from_array_like(cx),
+            Helper::Bind => bind(cx),
+            Helper::BoundCall => bound_call(cx, false),
+            Helper::BoundConstruct => bound_call(cx, true),
         }
     }
 }
@@ -279,7 +302,10 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.end();
     s.i32_const(KIND_CLASS);
     s.i32_const(KIND_GENERATOR);
-    s.i32_const(KIND_ASYNC).i32_const(KIND_FUNCTION);
+    s.i32_const(KIND_ASYNC);
+    s.i32_const(KIND_BOUND).i32_const(KIND_FUNCTION);
+    s.local_get(FLAGS).i32_const(NEW_BOUND).i32_and();
+    s.select();
     s.local_get(FLAGS).i32_const(NEW_ASYNC).i32_and();
     s.select();
     s.local_get(FLAGS).i32_const(NEW_GENERATOR).i32_and();
@@ -536,6 +562,22 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(not_callable).call(throw);
     s.end();
+    // A bound function: its target's (InstanceofOperator on [[BoundTargetFunction]]).
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(F)
+        .ref_cast_non_null(function())
+        .struct_get(T_FUNCTION, F_KIND)
+        .i32_const(KIND_BOUND)
+        .i32_ne()
+        .br_if(1);
+    s.local_get(F)
+        .ref_cast_non_null(function())
+        .struct_get(T_FUNCTION, F_ENV)
+        .ref_as_non_null()
+        .i32_const(0)
+        .array_get(T_VALS)
+        .local_set(F);
+    s.br(0).end().end();
     s.local_get(V)
         .ref_test_non_null(runtime::object())
         .i32_eqz();
@@ -809,6 +851,187 @@ fn list_from_array_like(cx: &mut dyn Cx) -> Function {
     s.local_get(I).i32_const(1).i32_add().local_set(I);
     s.br(0).end().end();
     s.local_get(OUT).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `Function.prototype.bind(thisArg, ...args)` (T25): `this` is the target.
+fn bind(cx: &mut dyn Cx) -> Function {
+    let new = fh(cx, Helper::New);
+    let call = fh(cx, Helper::BoundCall);
+    let construct = fh(cx, Helper::BoundConstruct);
+    cx.declare_func(call);
+    cx.declare_func(construct);
+    let get = oh(cx, object::Helper::Get);
+    let is_number = cx.helper(runtime::Helper::IsNumber);
+    let to_number = cx.helper(runtime::Helper::ToNumber);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let (length, name, bound, not_fn) = (
+        cx.str("length"),
+        cx.str("name"),
+        cx.str("bound "),
+        cx.str("Bind must be called on a function"),
+    );
+    const THIS: u32 = 1;
+    const ARGS: u32 = 2;
+    const N: u32 = 3;
+    const ENV: u32 = 4;
+    const L: u32 = 5;
+    const X: u32 = 6;
+    const NAME: u32 = 7;
+    let mut f = Function::new([
+        (1, ValType::I32),
+        (1, rt(true, T_VALS)),
+        (1, ValType::F64),
+        (1, jsval()),
+        (1, rt(true, runtime::T_STRING)),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(THIS).ref_test_non_null(function()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.global_get(not_fn).call(throw);
+    s.end();
+    s.local_get(ARGS)
+        .ref_cast_non_null(vals())
+        .array_len()
+        .local_set(N);
+    // env = [target, thisArg, ...args[1..]]
+    s.local_get(N).i32_const(1).i32_add();
+    s.i32_const(2);
+    s.local_get(N).i32_const(1).i32_gt_u();
+    s.select();
+    s.array_new_default(T_VALS).local_tee(ENV);
+    s.i32_const(0).local_get(THIS).array_set(T_VALS);
+    s.local_get(ENV).i32_const(1);
+    s.local_get(N);
+    s.if_(BlockType::Result(jsval()));
+    s.local_get(ARGS)
+        .ref_cast_non_null(vals())
+        .i32_const(0)
+        .array_get(T_VALS);
+    s.else_();
+    s.global_get(G_UNDEFINED);
+    s.end();
+    s.array_set(T_VALS);
+    s.local_get(N).i32_const(1).i32_gt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(ENV).ref_as_non_null().i32_const(2);
+    s.local_get(ARGS).ref_cast_non_null(vals()).i32_const(1);
+    s.local_get(N).i32_const(1).i32_sub();
+    s.array_copy(T_VALS, T_VALS);
+    s.end();
+    // length: max(0, ToIntegerOrInfinity(target.length) - bound args), if it's a number.
+    s.f64_const(0.0.into()).local_set(L);
+    s.local_get(THIS).global_get(length).call(get).local_tee(X);
+    s.call(is_number);
+    s.if_(BlockType::Empty);
+    s.local_get(X).call(to_number).f64_trunc();
+    s.local_get(N).i32_const(1).i32_sub().i32_const(0);
+    s.local_get(N).i32_const(1).i32_gt_u();
+    s.select();
+    s.f64_convert_i32_u().f64_sub();
+    s.f64_const(0.0.into()).f64_max();
+    // (A NaN length is 0; the result is kept as an `i31`.)
+    s.f64_const(1073741823.0.into()).f64_min();
+    s.local_set(L);
+    s.end();
+    // name: "bound " + target.name (if a string).
+    s.local_get(THIS).global_get(name).call(get).local_set(X);
+    runtime::is_string(&mut s, X);
+    s.if_(BlockType::Result(string_ref()));
+    s.global_get(bound);
+    s.local_get(X)
+        .ref_cast_non_null(runtime::string())
+        .call(concat);
+    s.else_();
+    s.global_get(bound);
+    s.end();
+    s.local_set(NAME);
+    s.ref_func(call);
+    s.local_get(THIS)
+        .ref_cast_non_null(function())
+        .struct_get(T_FUNCTION, F_CONSTRUCT)
+        .ref_is_null();
+    s.if_(BlockType::Result(rt(true, T_CODE)));
+    s.ref_null(HeapType::Concrete(T_CODE));
+    s.else_();
+    s.ref_func(construct);
+    s.end();
+    s.local_get(ENV);
+    s.local_get(NAME).ref_as_non_null();
+    s.local_get(L).i32_trunc_sat_f64_u();
+    s.i32_const(NEW_BOUND);
+    s.call(new);
+    s.end();
+    f
+}
+
+/// A bound function's code (`construct`: its construct code): the bound arguments, then these.
+fn bound_call(cx: &mut dyn Cx, construct: bool) -> Function {
+    let call_value = fh(cx, Helper::CallValue);
+    let construct_fn = fh(cx, Helper::Construct);
+    let what = cx.str("bound function");
+    const SELF: u32 = 0;
+    const THIS: u32 = 1;
+    const ARGS: u32 = 2;
+    const ENV: u32 = 3;
+    const ALL: u32 = 4;
+    const NB: u32 = 5;
+    const NA: u32 = 6;
+    let mut f = Function::new([(2, rt(true, T_VALS)), (2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(SELF)
+        .ref_cast_non_null(function())
+        .struct_get(T_FUNCTION, F_ENV)
+        .local_tee(ENV);
+    s.ref_as_non_null()
+        .array_len()
+        .i32_const(2)
+        .i32_sub()
+        .local_set(NB);
+    s.local_get(ARGS)
+        .ref_cast_non_null(vals())
+        .array_len()
+        .local_set(NA);
+    s.local_get(NB).local_get(NA).i32_add();
+    s.array_new_default(T_VALS).local_set(ALL);
+    s.local_get(ALL).ref_as_non_null().i32_const(0);
+    s.local_get(ENV).ref_as_non_null().i32_const(2);
+    s.local_get(NB);
+    s.array_copy(T_VALS, T_VALS);
+    s.local_get(ALL).ref_as_non_null().local_get(NB);
+    s.local_get(ARGS).ref_cast_non_null(vals()).i32_const(0);
+    s.local_get(NA);
+    s.array_copy(T_VALS, T_VALS);
+    // The target.
+    s.local_get(ENV)
+        .ref_as_non_null()
+        .i32_const(0)
+        .array_get(T_VALS);
+    if construct {
+        s.local_get(ALL).ref_as_non_null();
+        // new_target: the target if it's this bound function.
+        s.local_get(THIS).local_get(SELF).ref_eq();
+        s.if_(BlockType::Result(jsval()));
+        s.local_get(ENV)
+            .ref_as_non_null()
+            .i32_const(0)
+            .array_get(T_VALS);
+        s.else_();
+        s.local_get(THIS);
+        s.end();
+        s.global_get(what);
+        s.call(construct_fn);
+    } else {
+        s.local_get(ENV)
+            .ref_as_non_null()
+            .i32_const(1)
+            .array_get(T_VALS);
+        s.local_get(ALL).ref_as_non_null();
+        s.global_get(what);
+        s.call(call_value);
+    }
     s.end();
     f
 }

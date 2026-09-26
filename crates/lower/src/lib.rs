@@ -133,7 +133,10 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             p: program,
             prelude: &prelude,
             scoping: program.semantic.scoping(),
-            module: ir::Module::default(),
+            module: ir::Module {
+                bind: prelude.bind,
+                ..ir::Module::default()
+            },
             funcs: HashMap::new(),
             func_params: HashMap::new(),
             globals: HashMap::new(),
@@ -475,6 +478,8 @@ struct FnCx {
     values: HashMap<SymbolId, LocalId>,
     /// The home object for `super.x` (T16).
     home: Option<LocalId>,
+    /// The `arguments` object (T25).
+    arguments: Option<LocalId>,
     /// `new.target` (a class constructor's param).
     new_target: Option<LocalId>,
     /// A class constructor: `Some(derived)`.
@@ -507,6 +512,7 @@ impl FnCx {
             self_local: None,
             values: HashMap::new(),
             home: None,
+            arguments: None,
             new_target: None,
             ctor: None,
             this_checked: false,
@@ -781,6 +787,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 "exported generator function (the boundary needs an iterator type)"
             } else if f.flags.is_async {
                 "exported async function (the boundary needs an async export)"
+            } else if self
+                .fn_scope
+                .get(&func)
+                .is_some_and(|s| self.an.uses_arguments.contains(s))
+            {
+                "`arguments` in an exported function (the WIT signature needs a `list`)"
             } else if self.rest_param.contains(&func) {
                 "rest parameter in an exported function"
             } else {
@@ -966,6 +978,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let body = f.body.as_ref().expect("function declarations have a body");
         let id = FuncId(self.module.functions.len() as u32);
         let result = Slot::Result(id);
+        let uses_arguments = f
+            .scope_id
+            .get()
+            .is_some_and(|s| self.an.uses_arguments.contains(&s));
+        if uses_arguments {
+            // `function f(...arguments)`: the parameters are bound in the prologue (T25).
+            if f.params.rest.is_some() {
+                return Err(self.unsupported(f.span, "a rest parameter with `arguments`", "later"));
+            }
+            params.clear();
+        }
         // A function has a result if it returns a value, or if its (undefined) result is used.
         let returns_value = f.generator
             || f.r#async
@@ -985,7 +1008,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let ty = sym.map_or(Type::JsVal, |s| self.slot_ty(Slot::Var(s)));
             sig.push((n, ty));
         }
-        if f.params.rest.is_some() {
+        if f.params.rest.is_some() || uses_arguments {
             sig.push(("rest", Type::JsVal));
             self.rest_param.insert(id);
         }
@@ -1520,7 +1543,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 sig.push(("this".into(), Type::JsVal));
             }
             let mut params = Vec::new();
+            let uses_arguments = self.an.uses_arguments.contains(&scope);
+            if uses_arguments && f.params().rest.is_some() {
+                let _ = self.unsupported(f.span(), "a rest parameter with `arguments`", "later");
+                continue;
+            }
             for p in &f.params().items {
+                if uses_arguments {
+                    break; // bound in the prologue from the rest parameter (T25)
+                }
                 let (name, sym) = match (&p.pattern, &p.initializer) {
                     (BindingPattern::BindingIdentifier(b), None) => {
                         (b.name.to_string(), b.symbol_id.get())
@@ -1531,7 +1562,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 sig.push((name, ty));
                 params.push(sym);
             }
-            if f.params().rest.is_some() {
+            if f.params().rest.is_some() || uses_arguments {
                 sig.push(("rest".to_string(), Type::JsVal));
                 self.rest_param.insert(id);
             }
@@ -1822,7 +1853,39 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let mut param_syms = Vec::new();
         let mut complex = Vec::new();
-        for (i, p) in params.map_or(&[][..], |ps| &ps.items).iter().enumerate() {
+        if self.an.uses_arguments.contains(&scope) {
+            // `function f(...args)` (T25): each parameter from `args[i]`, then `arguments`.
+            let all = cx.func.param(k);
+            for (i, p) in params.map_or(&[][..], |ps| &ps.items).iter().enumerate() {
+                let v = Expr::intrinsic(
+                    Intrinsic::GetProp,
+                    vec![Expr::Local(all), jsval_of(Val::num(Expr::f64(i as f64)))],
+                );
+                let _ = match &p.initializer {
+                    Some(init) => self.param_default(cx, &p.pattern, init, v, prologue),
+                    None => self.pattern(
+                        cx,
+                        Pat::Bind(&p.pattern),
+                        v,
+                        Mode::Decl { fresh: false },
+                        Some(Src::Value),
+                        prologue,
+                    ),
+                };
+            }
+            let l = cx.func.add_local("arguments", Type::JsVal);
+            prologue.push(Stmt::Set(
+                l,
+                Expr::intrinsic(Intrinsic::MakeArguments, vec![Expr::Local(all)]),
+            ));
+            cx.arguments = Some(l);
+        }
+        let items = if self.an.uses_arguments.contains(&scope) {
+            &[][..]
+        } else {
+            params.map_or(&[][..], |ps| &ps.items)
+        };
+        for (i, p) in items.iter().enumerate() {
             if p.initializer.is_some() || !matches!(p.pattern, BindingPattern::BindingIdentifier(_))
             {
                 complex.push((cx.func.param(k + i as u32), p));
@@ -1890,7 +1953,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ),
             };
         }
-        if let Some(rest) = params.and_then(|ps| ps.rest.as_ref()) {
+        if let Some(rest) = params.and_then(|ps| ps.rest.as_ref())
+            && cx.arguments.is_none()
+        {
             let param = cx.func.param(cx.func.params - 1);
             let _ = self.pattern(
                 cx,
@@ -2866,6 +2931,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Expression::Identifier(id) => {
                 if self.prelude_leak(id) {
                     return Err(Unsupported);
+                }
+                if id.name == "arguments"
+                    && let Some(l) = cx.arguments
+                    && self
+                        .scoping
+                        .get_reference(id.reference_id())
+                        .symbol_id()
+                        .is_none()
+                {
+                    return Ok(Val::js(Expr::Local(l), Kind::Any));
                 }
                 if Builtin::parse(id.name.as_str()).is_none()
                     && let Some(func) = self.builtin_global(e)
@@ -3874,6 +3949,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Expression::FunctionExpression(_)
             | Expression::ArrowFunctionExpression(_)
             | Expression::ClassExpression(_) => "(intermediate value)".to_string(),
+            // V8's CallPrinter: an object literal is `{` + `(intermediate value)` per property + `}`.
+            Expression::ObjectExpression(o) => {
+                format!("{{{}}}", "(intermediate value)".repeat(o.properties.len()))
+            }
             Expression::CallExpression(c) => format!("{}(...)", self.callee_text(&c.callee)),
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(c) => {
@@ -5160,7 +5239,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id() else {
             if id.name == "arguments" && cx.scope.is_some() {
-                return Err(self.unsupported(span, "`arguments`", "T21"));
+                // Reads are handled in `expr`; arrow functions and classes were reported by the
+                // closure analysis (T25).
+                if cx.arguments.is_none() {
+                    return Err(Unsupported);
+                }
+                return Err(self.unsupported(span, "`arguments` used other than read", "later"));
             }
             return Err(self.unsupported(span, &format!("global `{}`", id.name), "T21"));
         };

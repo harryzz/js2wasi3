@@ -63,7 +63,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Timers (`setTimeout`, `setInterval`, `clear*`) on the WASI 0.3 event loop, using `wasi:clocks`.
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
-Not yet: many built-ins (`Date`, `WeakMap`), `arguments`, regex,
+Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex,
 async generators and `for await`, multi-file `import`, and richer WIT types at the boundary (records, lists,
 async exports). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.

@@ -666,6 +666,10 @@ impl runtime::Cx for Emitter<'_> {
         self.m.maps
     }
 
+    fn has_bind(&mut self) -> bool {
+        self.m.bind
+    }
+
     fn builtin_methods(&mut self, b: ir::Builtin) -> Vec<(String, u32, u32)> {
         let base = self.func_base;
         self.m
@@ -1318,6 +1322,7 @@ impl Emitter<'_> {
                     Intrinsic::QueueMicrotask => H::Prom(promise::Helper::QueueMicrotask),
                     Intrinsic::Timer(k) => H::Timer(timers::Helper::Fn(*k)),
                     Intrinsic::Map(op) => H::Map(mapset::Helper::Op(*op)),
+                    Intrinsic::MakeArguments => H::Obj(object::Helper::MakeArguments),
                     Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
                     Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
                     Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),

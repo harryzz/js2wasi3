@@ -52,6 +52,8 @@ pub struct Analysis {
     pub arrows: HashSet<ScopeId>,
     /// Non-arrow functions that use `this` (themselves or in nested arrow functions).
     pub uses_this: HashSet<ScopeId>,
+    /// Non-arrow functions whose body uses `arguments` (T25; not in nested arrow functions yet).
+    pub uses_arguments: HashSet<ScopeId>,
     /// What each function captures, in environment order.
     pub captures: HashMap<ScopeId, Vec<Cap>>,
     /// Variables that live in cells.
@@ -248,6 +250,33 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
     }
 
     let mut captures: HashMap<ScopeId, BTreeSet<Cap>> = HashMap::new();
+
+    // `arguments` (T25): the nearest function's, if it isn't an arrow function or a class.
+    for node in nodes.iter() {
+        let AstKind::IdentifierReference(r) = node.kind() else {
+            continue;
+        };
+        if r.name != "arguments"
+            || scoping
+                .get_reference(r.reference_id())
+                .symbol_id()
+                .is_some()
+        {
+            continue;
+        }
+        let Some(f) = an.fn_at(scoping, node.scope_id(), r.span.start) else {
+            continue; // the module level: an unknown global
+        };
+        if an.is_arrow(f) {
+            an.unsupported
+                .push((r.span, "`arguments` in an arrow function"));
+        } else if an.classes.contains_key(&f) {
+            an.unsupported
+                .push((r.span, "`arguments` in a class constructor or field"));
+        } else {
+            an.uses_arguments.insert(f);
+        }
+    }
 
     // `this`, `super` and `new.target`: arrow functions capture them from the nearest non-arrow
     // function (a `this` param, a home object, a `new.target` param).

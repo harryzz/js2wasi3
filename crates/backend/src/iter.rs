@@ -7,6 +7,7 @@
 //! - [`PROTOCOL`]: anything else: `obj` is the iterator `v[Symbol.iterator]()` returned, `next` its
 //!   `next` method, read once.
 //! - [`DONE`]: finished (or closed).
+//! - [`ARRAY_LIKE`]: `Array.prototype.values` on another object (T25): `length` and `obj[i]`.
 //!
 //! Arrays and strings don't look at `Symbol.iterator` (a replaced `Array.prototype[Symbol.iterator]`
 //! isn't seen).
@@ -25,6 +26,9 @@ pub const ARRAY: i32 = 0;
 pub const STRING: i32 = 1;
 pub const PROTOCOL: i32 = 2;
 pub const DONE: i32 = 3;
+/// Any other object iterated by `Array.prototype.values` (T25: `arguments`, array-likes): `length`
+/// and `obj[i]` are read at every step.
+pub const ARRAY_LIKE: i32 = 4;
 
 pub const F_KIND: u32 = 0;
 pub const F_OBJ: u32 = 1;
@@ -190,6 +194,8 @@ fn step(cx: &mut dyn Cx) -> Function {
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
     let (result, not_obj) = (cx.str("Iterator result "), cx.str(" is not an object"));
     let (done, value, next) = (cx.str("done"), cx.str("value"), cx.str("next"));
+    let length = cx.str("length");
+    let to_number = cx.helper(runtime::Helper::ToNumber);
     const IT: u32 = 0;
     const I: u32 = 1;
     const N: u32 = 2;
@@ -236,6 +242,32 @@ fn step(cx: &mut dyn Cx) -> Function {
         s.else_();
         s.local_get(R);
         s.end();
+        set_value(&mut s);
+        it(&mut s, IT);
+        s.local_get(I)
+            .i32_const(1)
+            .i32_add()
+            .struct_set(T_ITER, F_INDEX);
+        s.i32_const(1).return_();
+    }
+    s.end();
+    // Array-likes (T25): ToLength(obj.length) and obj[i] at every step.
+    it(&mut s, IT);
+    s.struct_get(T_ITER, F_KIND).i32_const(ARRAY_LIKE).i32_eq();
+    s.if_(BlockType::Empty);
+    {
+        s.local_get(I).f64_convert_i32_u();
+        it(&mut s, IT);
+        s.struct_get(T_ITER, F_OBJ).global_get(length).call(get);
+        s.call(to_number).f64_ge();
+        s.if_(BlockType::Empty);
+        finish(&mut s);
+        s.end();
+        it(&mut s, IT);
+        it(&mut s, IT);
+        s.struct_get(T_ITER, F_OBJ);
+        s.local_get(I).ref_i31();
+        s.call(get);
         set_value(&mut s);
         it(&mut s, IT);
         s.local_get(I)
@@ -464,12 +496,12 @@ fn proto_values(cx: &mut dyn Cx) -> Function {
         object::Helper::Proto(js2wasi3_ir::Builtin::ArrayIterator),
     );
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
-    let msg = cx.str("values() is only implemented for arrays and strings (js2wasi3)");
+    let msg = cx.str("values() is only implemented for objects and strings (js2wasi3)");
     const THIS: u32 = 1;
     const O: u32 = 3;
     let mut f = Function::new([(1, rt(true, runtime::T_OBJECT))]);
     let mut s = f.instructions();
-    s.local_get(THIS).ref_test_non_null(array::array());
+    s.local_get(THIS).ref_test_non_null(runtime::object());
     runtime::is_string(&mut s, THIS);
     s.i32_or().i32_eqz();
     s.if_(BlockType::Empty);
@@ -481,7 +513,20 @@ fn proto_values(cx: &mut dyn Cx) -> Function {
         .local_tee(O)
         .ref_as_non_null();
     s.global_get(runtime::G_SYM_STATE);
+    // Arrays and strings: `Open`'s fast paths; other objects by `length` and index (T25).
+    s.local_get(THIS).ref_test_non_null(array::array());
+    runtime::is_string(&mut s, THIS);
+    s.i32_or();
+    s.if_(BlockType::Result(jsval()));
     s.local_get(THIS).global_get(msg).call(open);
+    s.else_();
+    s.i32_const(ARRAY_LIKE);
+    s.local_get(THIS);
+    s.global_get(G_UNDEFINED);
+    s.i32_const(0);
+    s.global_get(G_UNDEFINED);
+    s.struct_new(T_ITER);
+    s.end();
     s.i32_const(object::HIDDEN).call(define);
     s.local_get(O);
     s.end();

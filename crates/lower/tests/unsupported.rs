@@ -381,9 +381,21 @@ fn closures() {
     ] {
         lowers(src);
     }
+    // T25: `arguments` in ordinary functions and methods; not in arrow functions, class
+    // constructors, with a rest parameter, or in an exported function (a WIT `list`, F55).
+    lowers("export function f(a) { function g() { return arguments.length; } return g(a, 1); }");
+    lowers("export function f(a) { return { m() { return arguments[0]; } }.m(a); }");
     assert_eq!(
-        one("export function f() { return arguments; }"),
-        "1:30 unsupported: `arguments` (planned: T21)"
+        one("export function f() { return arguments.length; }"),
+        "1:8 unsupported: `arguments` in an exported function (the WIT signature needs a `list`) (planned: T20)"
+    );
+    assert_eq!(
+        one("export function f(a) { function g() { return () => arguments; } return 1; }"),
+        "1:52 unsupported: `arguments` in an arrow function (planned: later)"
+    );
+    assert_eq!(
+        one("export function f(a) { function g(...r) { return arguments; } return 1; }"),
+        "1:24 unsupported: a rest parameter with `arguments` (planned: later)"
     );
     assert_eq!(
         one("export function f() { function g() {} g = 1; return 0; }"),
