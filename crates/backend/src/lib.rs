@@ -37,6 +37,7 @@
 
 mod abi;
 mod array;
+mod asyncfn;
 mod func;
 mod generator;
 mod host;
@@ -47,6 +48,7 @@ mod object;
 mod promise;
 mod props;
 mod runtime;
+mod timers;
 
 use std::collections::HashMap;
 
@@ -430,7 +432,7 @@ fn check_supported(m: &ir::Module) -> anyhow::Result<()> {
         };
         // Generators are rewritten by `ir::suspend::lower_generators` (run by the lowering, T18).
         if f.flags.is_async {
-            report("async function", "T19");
+            report("async function before `ir::suspend`", "T19");
         }
         if f.flags.is_generator {
             report("generator function before `ir::suspend`", "T18");
@@ -705,13 +707,12 @@ impl runtime::Cx for Emitter<'_> {
         }
     }
 
-    fn main_func(&mut self) -> u32 {
-        self.func_base
-            + self
-                .m
-                .main
-                .expect("host helpers are only used by commands")
-                .0
+    fn main_func(&mut self) -> (u32, bool) {
+        let main = self.m.main.expect("host helpers are only used by commands");
+        (
+            self.func_base + main.0,
+            self.m.function(main).result.is_some(),
+        )
     }
 }
 
@@ -1269,6 +1270,7 @@ impl Emitter<'_> {
                     Intrinsic::ErrorCtor(k) => H::Func(func::Helper::ErrorCtor(*k)),
                     Intrinsic::PromiseCtor => H::Prom(promise::Helper::Ctor),
                     Intrinsic::QueueMicrotask => H::Prom(promise::Helper::QueueMicrotask),
+                    Intrinsic::Timer(k) => H::Timer(timers::Helper::Fn(*k)),
                     Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
                     Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
                     Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),
@@ -1278,6 +1280,8 @@ impl Emitter<'_> {
                     Intrinsic::Hole | Intrinsic::IsHole => unreachable!("inline"),
                     Intrinsic::ResumeMode
                     | Intrinsic::NewGenerator { .. }
+                    | Intrinsic::NewAsync { .. }
+                    | Intrinsic::AsyncStart
                     | Intrinsic::GenLoad(_)
                     | Intrinsic::GenStore(_)
                     | Intrinsic::GenPoint
@@ -1336,6 +1340,10 @@ impl Emitter<'_> {
                     ir::FnKind::Generator => {
                         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
                         func::NEW_GENERATOR
+                    }
+                    ir::FnKind::Async => {
+                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        func::NEW_ASYNC
                     }
                     ir::FnKind::Class { construct } => {
                         let construct = self.func_base + construct.0;
@@ -1440,11 +1448,20 @@ impl Emitter<'_> {
             Intrinsic::ResumeMode => {
                 bail!("internal error: ResumeMode after the suspension transform")
             }
-            Intrinsic::NewGenerator { resume, slots } => {
+            Intrinsic::NewGenerator { resume, slots } | Intrinsic::NewAsync { resume, slots } => {
                 let code = self.func_base + resume.0;
                 runtime::Cx::declare_func(self, code);
                 s.ref_func(code).i32_const(*slots as i32);
-                s.call(self.helper_index(Helper::Js(H::Gen(generator::Helper::New))));
+                let h = if matches!(op, Intrinsic::NewAsync { .. }) {
+                    H::Async(asyncfn::Helper::New)
+                } else {
+                    H::Gen(generator::Helper::New)
+                };
+                s.call(self.helper_index(Helper::Js(h)));
+            }
+            Intrinsic::AsyncStart => {
+                self.expr(s, frames, &args[0])?;
+                s.call(self.helper_index(Helper::Js(H::Async(asyncfn::Helper::Start))));
             }
             Intrinsic::GenLoad(i) => {
                 gen_arg(self, s, frames)?;

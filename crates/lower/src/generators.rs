@@ -1,4 +1,4 @@
-//! Generators (T18): `function*`, `yield` and `yield*`.
+//! Generators (T18): `function*`, `yield` and `yield*`; async functions and `await` (T19).
 //!
 //! A generator is lowered like any function, with `flags.is_generator`, a `jsval` result and an
 //! implicit `yield` after its prologue; `ir::suspend` then turns it into a start function and a
@@ -25,33 +25,49 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         self.observe(result, Kind::Any);
     }
 
-    /// A `yield` of `arg`: the value the generator is resumed with.
+    /// Make `func` (being declared) an async function (T19): its result, the promise, is a
+    /// `jsval` of any kind.
+    pub(crate) fn async_sig(&mut self, func: &mut ir::Function, result: Slot) {
+        func.flags.is_async = true;
+        func.result = Some(Type::JsVal);
+        self.observe(result, Kind::Any);
+    }
+
+    /// A `yield` (an `await`) of `arg`: the value the generator (async function) is resumed with.
     pub(crate) fn suspend(&mut self, cx: &mut FnCx, kind: SuspendKind, arg: Expr) -> Expr {
         let sent = cx.func.add_local("sent", Type::JsVal);
         let mode = cx.func.add_local("mode", Type::I32);
         let is = |m: i32| Expr::binary(BinOp::Eq, Type::I32, Expr::Local(mode), Expr::i32(m));
-        let ret = self.jump(cx, Jump::Return, Some(Expr::Local(sent)));
+        // An async function is never resumed with `return`.
+        let ret = if kind == SuspendKind::Await {
+            Vec::new()
+        } else {
+            self.jump(cx, Jump::Return, Some(Expr::Local(sent)))
+        };
+        let mut body = vec![
+            Stmt::Set(
+                sent,
+                Expr::Suspend {
+                    kind,
+                    arg: Box::new(arg),
+                },
+            ),
+            Stmt::Set(mode, Expr::intrinsic(Intrinsic::ResumeMode, vec![])),
+            Stmt::If {
+                cond: is(RESUME_THROW),
+                then: vec![Stmt::Throw(Expr::Local(sent))],
+                els: vec![],
+            },
+        ];
+        if !ret.is_empty() {
+            body.push(Stmt::If {
+                cond: is(RESUME_RETURN),
+                then: ret,
+                els: vec![],
+            });
+        }
         Expr::Seq {
-            body: vec![
-                Stmt::Set(
-                    sent,
-                    Expr::Suspend {
-                        kind,
-                        arg: Box::new(arg),
-                    },
-                ),
-                Stmt::Set(mode, Expr::intrinsic(Intrinsic::ResumeMode, vec![])),
-                Stmt::If {
-                    cond: is(RESUME_THROW),
-                    then: vec![Stmt::Throw(Expr::Local(sent))],
-                    els: vec![],
-                },
-                Stmt::If {
-                    cond: is(RESUME_RETURN),
-                    then: ret,
-                    els: vec![],
-                },
-            ],
+            body,
             value: Box::new(Expr::Local(sent)),
         }
     }

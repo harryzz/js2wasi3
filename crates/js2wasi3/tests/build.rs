@@ -298,3 +298,59 @@ fn unimplemented_object_features_trap() {
         assert_eq!(String::from_utf8(stdout).unwrap(), "before\n", "{name}");
     }
 }
+
+/// T19 acceptance: two concurrent timers take as long as one (their waits overlap), two in a row
+/// twice as long. Measured against the same program without timers (wasmtime's startup), best of
+/// three runs each; 300 ms timers leave room for noise (other tests run in parallel), and the
+/// concurrent run is compared with the sequential one rather than with a fixed bound.
+#[test]
+fn concurrent_timers_overlap() {
+    let dir = out_dir("timers");
+    let program = |name: &str, body: &str| {
+        let src = dir.join(format!("{name}.js"));
+        std::fs::write(
+            &src,
+            format!(
+                "const sleep = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms));\n{body}\n"
+            ),
+        )
+        .unwrap();
+        let out = dir.join(format!("{name}.wasm"));
+        let b = build(&src, &out, &[]);
+        assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+        out
+    };
+    let time = |component: &Path, expect: &str| {
+        (0..3)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let (ok, stdout, stderr) = run_command(component);
+                let t = start.elapsed().as_millis();
+                assert!(ok, "{}", String::from_utf8_lossy(&stderr));
+                assert_eq!(String::from_utf8(stdout).unwrap(), expect);
+                t
+            })
+            .min()
+            .unwrap()
+    };
+    let base = time(
+        &program("base", "console.log(await sleep(0, \"a\"));"),
+        "a\n",
+    );
+    let both = program(
+        "both",
+        "console.log((await Promise.all([sleep(300, \"a\"), sleep(300, \"b\")])).join(\"\"));",
+    );
+    let seq = program(
+        "seq",
+        "console.log((await sleep(300, \"a\")) + (await sleep(300, \"b\")));",
+    );
+    let both = time(&both, "ab\n").saturating_sub(base);
+    let seq = time(&seq, "ab\n").saturating_sub(base);
+    assert!(both >= 290, "concurrent: {both} ms");
+    assert!(seq >= 590, "sequential: {seq} ms");
+    assert!(
+        both + 200 < seq,
+        "concurrent {both} ms vs sequential {seq} ms"
+    );
+}

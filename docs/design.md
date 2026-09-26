@@ -102,6 +102,13 @@ globals. `run` drains it after `main`, then reports the first rejection still un
 re-entered as a fresh `try_table`, a `catch` body entered by skipping it). `return()`/`throw()` resume with a mode
 the lowering checks after each `yield`, so `return()` runs `finally` blocks through the D2 completion dispatch.
 See the `ir::suspend` crate docs and `crates/backend/src/generator.rs`.)
+(T19: an `async function` is transformed the same way; its frame is a `$generator` that never reaches JS, with the
+promise in one more slot. `await v` = PromiseResolve + PerformPromiseThen with the frame itself as the handler, and a
+reaction job whose handler is a frame resumes it (next / throw), so no closures are made. A top-level `await` makes
+`main` async. Timers: `run`/the callback end with `host::Helper::Loop`: while timers are active, one
+`[async-lower]wait-until` subtask for the earliest deadline is in the waitable set; when it returns, the due timers
+run (microtasks and the unhandled-rejection check after each), then Loop again; with none left, the streams are
+flushed and closed. See `crates/backend/src/{asyncfn,timers,host}.rs`.)
 
 ### D4. The WIT boundary follows jco/componentize-js conventions
 The entry module's ES exports become the world's exports. WIT types map to JS:
@@ -137,6 +144,9 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 - A command fixture is self-checking: it prints its results, and node's output is the expectation, so no `.out`
   file is needed. Keep each one under 2 s. Constructs that aren't supported yet show up as build failures.
 - `cargo test` doesn't run it (it needs node, F30).
+- Timers (T19): node refreshes its clock whenever a timer is made (ms steps), so the order of near-tied deadlines,
+  or of a timer made inside a callback against others due soon, depends on node's speed and the machine's load.
+  Keep such deadlines far apart in fixtures (see `tests/fixtures/async/timers.js`).
 
 ## Working rules
 - One task file = one session. Don't start the next task without approval.

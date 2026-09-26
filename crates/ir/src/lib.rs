@@ -54,8 +54,8 @@
 //!   `Intrinsic::NewCell` and used by `CellGet`/`CellSet`. A function object's captured cells and
 //!   values are its environment (`EnvGet`), and a function called through a value gets its
 //!   arguments as an internal array (`ArgGet`).
-//! - `Suspend { kind, arg }` (T18): a `yield` (T19: `await`) of `arg` in a generator. It evaluates to
-//!   the value the generator is resumed with; `Intrinsic::ResumeMode`, read right after it, says how
+//! - `Suspend { kind, arg }` (T18): a `yield` (T19: `await`) of `arg` in a generator (an async
+//!   function). It evaluates to the value the generator is resumed with; `Intrinsic::ResumeMode`, read right after it, says how
 //!   (next / throw / return: the lowering emits the throw and the return path itself). The
 //!   suspension transform ([`suspend`]) removes every `Suspend` before the IR reaches the backend.
 
@@ -426,6 +426,8 @@ pub enum Intrinsic {
     PromiseCtor,
     /// The `queueMicrotask` function as a value (T17).
     QueueMicrotask,
+    /// A timer function as a value (T19, commands only): [`TIMER_SET_TIMEOUT`] …
+    Timer(u8),
     /// `o.#x`: args: object, private symbol, the TypeError message if `o` doesn't have it.
     PrivateGet,
     /// `o.#x = v` (no result): args: object, private symbol, value, the TypeError message if `o`
@@ -443,6 +445,14 @@ pub enum Intrinsic {
     /// `%GeneratorPrototype%`) whose frame has `slots` slots and which runs `resume`, a function
     /// `(gen, mode: i32, value) -> jsval` (see [`suspend`]).
     NewGenerator { resume: FuncId, slots: u32 },
+    /// From the suspension transform on (T19): the frame of an `async function` call, a generator
+    /// object that never reaches JS, with `slots` slots for the locals plus one more for the
+    /// promise the call returns (a new pending one).
+    NewAsync { resume: FuncId, slots: u32 },
+    /// Run an async function's frame (args: the frame) up to its first `await` or its end, and
+    /// return its promise. Later steps run from promise jobs; the body's result resolves the
+    /// promise and an exception rejects it.
+    AsyncStart,
     /// Slot `i` of a generator's frame (args: the generator).
     GenLoad(u32),
     /// Store into slot `i` of a generator's frame (args: the generator, the value). No result.
@@ -462,6 +472,14 @@ pub enum Intrinsic {
     /// inner iterator has no `return` method.
     DelegateStep,
 }
+
+/// [`Intrinsic::Timer`] functions.
+pub const TIMER_SET_TIMEOUT: u8 = 0;
+pub const TIMER_SET_INTERVAL: u8 = 1;
+pub const TIMER_CLEAR_TIMEOUT: u8 = 2;
+pub const TIMER_CLEAR_INTERVAL: u8 = 3;
+/// Their JS names, by kind.
+pub const TIMER_NAMES: [&str; 4] = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
 
 /// [`Intrinsic::ResumeMode`] values.
 pub const RESUME_NEXT: i32 = 0;
@@ -531,7 +549,8 @@ impl Intrinsic {
             Intrinsic::Hole
             | Intrinsic::ErrorCtor(_)
             | Intrinsic::PromiseCtor
-            | Intrinsic::QueueMicrotask => (&[], Some(JsVal)),
+            | Intrinsic::QueueMicrotask
+            | Intrinsic::Timer(_) => (&[], Some(JsVal)),
             Intrinsic::PrivateGet => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::PrivateSet | Intrinsic::PrivateAdd { .. } | Intrinsic::SuperSet => {
                 (&[JsVal, JsVal, JsVal, JsVal], None)
@@ -542,7 +561,8 @@ impl Intrinsic {
                 (&[JsVal, JsVal], Some(JsVal))
             }
             Intrinsic::ResumeMode => (&[], Some(I32)),
-            Intrinsic::NewGenerator { .. } => (&[], Some(JsVal)),
+            Intrinsic::NewGenerator { .. } | Intrinsic::NewAsync { .. } => (&[], Some(JsVal)),
+            Intrinsic::AsyncStart => (&[JsVal], Some(JsVal)),
             Intrinsic::GenLoad(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::GenStore(_) => (&[JsVal, JsVal], None),
             Intrinsic::GenPoint => (&[JsVal], Some(I32)),
@@ -631,6 +651,7 @@ impl Intrinsic {
             Intrinsic::ErrorCtor(_) => "error_constructor",
             Intrinsic::PromiseCtor => "promise_constructor",
             Intrinsic::QueueMicrotask => "queue_microtask",
+            Intrinsic::Timer(k) => TIMER_NAMES[k as usize],
             Intrinsic::PrivateGet => "private_get",
             Intrinsic::PrivateSet => "private_set",
             Intrinsic::PrivateHas => "private_has",
@@ -638,6 +659,8 @@ impl Intrinsic {
             Intrinsic::PrivateAdd { method: true } => "private_add_method",
             Intrinsic::ResumeMode => "resume_mode",
             Intrinsic::NewGenerator { .. } => "new_generator",
+            Intrinsic::NewAsync { .. } => "new_async",
+            Intrinsic::AsyncStart => "async_start",
             Intrinsic::GenLoad(_) => "gen_load",
             Intrinsic::GenStore(_) => "gen_store",
             Intrinsic::GenPoint => "gen_point",
@@ -979,6 +1002,8 @@ pub enum FnKind {
     Class { construct: FuncId },
     /// A generator function (T18): not a constructor.
     Generator,
+    /// An async function (T19): not a constructor.
+    Async,
 }
 
 impl Expr {

@@ -371,3 +371,38 @@ fn suspend_transform_validates() {
     // The spilled operand is taken before the yield.
     assert!(text.contains("spill"), "{text}");
 }
+
+/// The suspension transform on an async function (T19): no implicit first suspension, the start
+/// function makes a `NewAsync` frame and returns `AsyncStart(frame)`.
+#[test]
+fn suspend_transform_async() {
+    let mut m = Module::default();
+    let mut f = Function::new("f", &[("p", Type::JsVal)], Some(Type::JsVal));
+    f.flags.is_async = true;
+    let p = f.param(0);
+    let x = f.add_local("x", Type::JsVal);
+    let aw = |arg: Expr| Expr::Suspend {
+        kind: SuspendKind::Await,
+        arg: Box::new(arg),
+    };
+    f.body = vec![
+        Stmt::Set(x, aw(Expr::Local(p))),
+        Stmt::Try {
+            body: vec![Stmt::Set(x, aw(Expr::Local(x)))],
+            catch_local: None,
+            catch_body: vec![],
+        },
+        Stmt::Return(Some(Expr::Local(x))),
+    ];
+    m.add_function(f);
+    suspend::lower_generators(&mut m);
+    validate(&m).unwrap_or_else(|errs| panic!("{}\n{m}", errs.join("\n")));
+    assert_eq!(m.functions.len(), 2);
+    let start = &m.functions[0];
+    assert!(!start.flags.is_async);
+    let text = m.to_string();
+    assert!(text.contains("$new_async[f$resume#1, 2]()"), "{text}");
+    assert!(text.contains("return $async_start("), "{text}");
+    assert!(!text.contains("await("), "{text}");
+    assert!(text.contains("$gen_suspend(gen.0, 2_i32)"), "{text}");
+}

@@ -562,7 +562,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         out: &mut Vec<Stmt>,
     ) -> R<()> {
         if f.r#await {
-            return Err(self.unsupported(f.span, "`for await`", "T19"));
+            return Err(self.unsupported(f.span, "`for await`", "later"));
         }
         let right = self.expr(cx, &f.right)?;
         let it = cx.func.add_local("iter", Type::JsVal);

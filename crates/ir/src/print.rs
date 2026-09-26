@@ -224,8 +224,9 @@ impl Printer<'_> {
                     | crate::Intrinsic::GenStore(i) => {
                         format!("{}.{i}", op.name())
                     }
-                    crate::Intrinsic::NewGenerator { resume, slots } => {
-                        format!("new_generator[{}, {slots}]", self.func_name(resume.0))
+                    crate::Intrinsic::NewGenerator { resume, slots }
+                    | crate::Intrinsic::NewAsync { resume, slots } => {
+                        format!("{}[{}, {slots}]", op.name(), self.func_name(resume.0))
                     }
                     _ => op.name().to_string(),
                 };
@@ -257,6 +258,7 @@ impl Printer<'_> {
                         crate::FnKind::Plain => String::new(),
                         crate::FnKind::Ordinary => ", ctor".to_string(),
                         crate::FnKind::Generator => ", generator".to_string(),
+                        crate::FnKind::Async => ", async".to_string(),
                         crate::FnKind::Class { construct } =>
                             format!(", class {}", self.func_name(construct.0)),
                     },

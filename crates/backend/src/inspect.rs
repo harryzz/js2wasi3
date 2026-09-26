@@ -143,6 +143,10 @@ fn format(cx: &mut dyn Cx) -> Function {
         cx.str("[GeneratorFunction: "),
         cx.str("[GeneratorFunction (anonymous)]"),
     );
+    let (async_named, async_anonymous) = (
+        cx.str("[AsyncFunction: "),
+        cx.str("[AsyncFunction (anonymous)]"),
+    );
     let empty = cx.str("");
     const V: u32 = 0;
     const DEPTH: u32 = 1;
@@ -231,23 +235,28 @@ fn format(cx: &mut dyn Cx) -> Function {
             s.else_();
             s.i32_const(0);
             s.end();
-            let is_gen = |s: &mut InstructionSink| {
+            let is_kind = |s: &mut InstructionSink, kind: i32| {
                 s.local_get(V)
                     .ref_cast_non_null(func::function())
                     .struct_get(runtime::T_FUNCTION, func::F_KIND)
-                    .i32_const(func::KIND_GENERATOR)
+                    .i32_const(kind)
                     .i32_eq();
             };
+            // `[Function: `, `[GeneratorFunction: ` or `[AsyncFunction: `.
+            let pick = |s: &mut InstructionSink, plain: u32, generator: u32, async_: u32| {
+                s.global_get(async_);
+                s.global_get(generator).global_get(plain);
+                is_kind(s, func::KIND_GENERATOR);
+                s.typed_select(string_ref());
+                is_kind(s, func::KIND_ASYNC);
+                s.typed_select(string_ref());
+            };
             s.if_(BlockType::Result(string_ref()));
-            s.global_get(gen_named).global_get(named);
-            is_gen(&mut s);
-            s.typed_select(string_ref());
+            pick(&mut s, named, gen_named, async_named);
             s.local_get(N).ref_cast_non_null(string()).call(concat);
             s.global_get(close).call(concat);
             s.else_();
-            s.global_get(gen_anonymous).global_get(anonymous);
-            is_gen(&mut s);
-            s.typed_select(string_ref());
+            pick(&mut s, anonymous, gen_anonymous, async_anonymous);
             s.end();
         }
         s.end();

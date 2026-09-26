@@ -17,3 +17,5 @@ echo "7) 1M coroutine round trips: CM threads vs stack switching"
 wasm-tools parse bench_cm.wat -o out/bench_cm.wasm && wasm-tools parse bench_ss.wat -o out/bench_ss.wasm
 time wasmtime run -W component-model-async-stackful=y,component-model-threading=y --invoke 'run()' out/bench_cm.wasm
 time wasmtime run -W stack-switching=y --invoke main out/bench_ss.wasm 2>/dev/null
+echo "8) timers: two concurrent wait-until (50 ms) + a cancelled 5 s one (expect ~50 ms, exit 0)"
+wasm-tools parse timers.wat -o out/timers.core.wasm && wasm-tools component embed wit out/timers.core.wasm -o out/timers.emb.wasm && wasm-tools component new out/timers.emb.wasm -o out/timers.wasm && time wasmtime run -Sp3 out/timers.wasm

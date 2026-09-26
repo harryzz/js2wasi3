@@ -44,9 +44,10 @@ pub fn validate(m: &Module) -> Result<(), Vec<String>> {
     }
     if let Some(main) = m.main {
         match m.functions.get(main.0 as usize) {
-            Some(f) if f.params == 0 && f.result.is_none() => {}
+            // T19: with a top-level `await`, `main` returns its promise.
+            Some(f) if f.params == 0 && matches!(f.result, None | Some(Type::JsVal)) => {}
             Some(f) => errs.push(format!(
-                "main {}: must take no params and return nothing",
+                "main {}: must take no params and return nothing (or a jsval)",
                 f.name
             )),
             None => errs.push(format!("main: no function #{}", main.0)),

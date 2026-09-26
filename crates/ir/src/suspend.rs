@@ -42,6 +42,14 @@
 //! 5. `ResumeMode` becomes the `mode` param. The lowering tests it right after each `Suspend`:
 //!    throw → `throw sent`, return → a `return sent` at that point, which runs the enclosing
 //!    `finally` code through the lowering's completion dispatch (design D2).
+//!
+//! # Async functions (T19)
+//! A function with `flags.is_async` is transformed the same way (an `await` is a point like a
+//! `yield`; it's never resumed with `return`). Its body has no implicit first suspension: the
+//! start function makes the frame (`NewAsync`, one more slot for the promise), stores the
+//! parameters and returns `AsyncStart(frame)`, which runs the body up to its first `await` and
+//! gives the promise. The runtime resumes the frame from promise jobs (see the backend's
+//! `asyncfn` module).
 
 use crate::{
     BinOp, Const, Expr, FnFlags, FuncId, Function, Intrinsic, LabelId, LocalId, Module,
@@ -54,10 +62,11 @@ const MODE: LocalId = LocalId(1);
 const SENT: LocalId = LocalId(2);
 const SHIFT: u32 = 3;
 
-/// Rewrite every generator function of `m` (see the module docs).
+/// Rewrite every generator and async function of `m` (see the module docs).
 pub fn lower_generators(m: &mut Module) {
     for i in 0..m.functions.len() {
-        if m.functions[i].flags.is_generator {
+        let flags = m.functions[i].flags;
+        if flags.is_generator || flags.is_async {
             transform(m, FuncId(i as u32));
         }
     }
@@ -136,16 +145,18 @@ fn transform(m: &mut Module, id: FuncId) {
         pos: f.pos,
     };
     let g = s.add_local("gen", Type::JsVal);
-    s.body.push(Stmt::Set(
-        g,
-        Expr::intrinsic(
-            Intrinsic::NewGenerator {
-                resume: resume_id,
-                slots,
-            },
-            vec![],
-        ),
-    ));
+    let new = if f.flags.is_async {
+        Intrinsic::NewAsync {
+            resume: resume_id,
+            slots,
+        }
+    } else {
+        Intrinsic::NewGenerator {
+            resume: resume_id,
+            slots,
+        }
+    };
+    s.body.push(Stmt::Set(g, Expr::intrinsic(new, vec![])));
     for i in 0..f.params {
         let ty = f.locals[i as usize].ty;
         s.body.push(Stmt::Expr(Expr::intrinsic(
@@ -153,11 +164,18 @@ fn transform(m: &mut Module, id: FuncId) {
             vec![Expr::Local(g), to_js(ty, Expr::Local(LocalId(i)))],
         )));
     }
-    s.body.push(Stmt::Expr(Expr::Call {
-        func: resume_id,
-        args: vec![Expr::Local(g), Expr::i32(RESUME_NEXT), Expr::undefined()],
-    }));
-    s.body.push(Stmt::Return(Some(Expr::Local(g))));
+    if f.flags.is_async {
+        s.body.push(Stmt::Return(Some(Expr::intrinsic(
+            Intrinsic::AsyncStart,
+            vec![Expr::Local(g)],
+        ))));
+    } else {
+        s.body.push(Stmt::Expr(Expr::Call {
+            func: resume_id,
+            args: vec![Expr::Local(g), Expr::i32(RESUME_NEXT), Expr::undefined()],
+        }));
+        s.body.push(Stmt::Return(Some(Expr::Local(g))));
+    }
     m.functions[id.0 as usize] = s;
 }
 
@@ -796,9 +814,8 @@ impl Transform<'_> {
                     )));
                 }
                 let raw = match kind {
-                    SuspendKind::Yield => false,
+                    SuspendKind::Yield | SuspendKind::Await => false,
                     SuspendKind::YieldDelegate => true,
-                    SuspendKind::Await => unreachable!("await: T19"),
                 };
                 save.push(Stmt::Expr(gen_op(
                     Intrinsic::GenSuspend { raw },

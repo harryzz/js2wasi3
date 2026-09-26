@@ -29,7 +29,10 @@ use wasm_encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 
-use crate::{abi, array, func, generator, host, inspect, iter, numstr, object, promise, props};
+use crate::{
+    abi, array, asyncfn, func, generator, host, inspect, iter, numstr, object, promise, props,
+    timers,
+};
 
 pub const T_NUMBER: u32 = 0;
 pub const T_ODDBALL: u32 = 1;
@@ -75,8 +78,11 @@ pub const T_REACTION: u32 = 18;
 pub const T_GENERATOR: u32 = 19;
 /// `(func (param eqref i32 eqref) (result eqref))`: a generator's resume function (T18).
 pub const T_RESUME: u32 = 20;
+/// `$timer`: a final subtype of `$object` (the Timeout object) with `deadline: mut i64`,
+/// `interval: i64`, `callback: eqref`, `args: (ref $vals)` (T19, see [`crate::timers`]).
+pub const T_TIMER: u32 = 21;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 21;
+pub const TYPES: u32 = 22;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -110,8 +116,20 @@ pub const G_JOB_TAIL: u32 = G_JOB_HEAD + 1;
 /// `(mut (ref null $vals))` and `(mut i32)`: promises rejected while unhandled, and their count.
 pub const G_REJECTED: u32 = G_JOB_TAIL + 1;
 pub const G_REJECTED_N: u32 = G_REJECTED + 1;
+/// `(mut (ref null $object))` per timer function (T19, `js2wasi3_ir::TIMER_NAMES`), created on
+/// first use.
+pub const G_TIMER_FNS: u32 = G_REJECTED_N + 1;
+/// `(mut (ref null $vals))` and `(mut i32)`: the active timers (`$timer`s), and their count.
+pub const G_TIMERS: u32 = G_TIMER_FNS + 4;
+pub const G_TIMERS_N: u32 = G_TIMERS + 1;
+/// `(mut i64)`: the event loop's time (ns, `monotonic-clock.now`), set when it wakes up for
+/// timers.
+pub const G_LOOP_NOW: u32 = G_TIMERS_N + 1;
+/// `(mut i32)`: the outstanding `wait-until` subtask (0: none), and `(mut i64)`: its deadline.
+pub const G_WAIT: u32 = G_LOOP_NOW + 1;
+pub const G_WAIT_AT: u32 = G_WAIT + 1;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_REJECTED_N + 1;
+pub const GLOBALS: u32 = G_WAIT_AT + 1;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -136,8 +154,9 @@ pub trait Cx {
     fn bump_global(&mut self) -> u32;
     /// Global index of the first host global (commands only, see [`crate::host`]).
     fn host_globals(&mut self) -> u32;
-    /// Function index of the command's `main`.
-    fn main_func(&mut self) -> u32;
+    /// Function index of the command's `main`, and whether it returns a value (T19: with a
+    /// top-level `await` it's an async function returning its promise).
+    fn main_func(&mut self) -> (u32, bool);
     /// `ref.func` will be used on function `index` (it goes into a declarative element segment).
     fn declare_func(&mut self, index: u32);
 
@@ -248,6 +267,11 @@ pub fn types(types: &mut TypeSection) {
     generator_fields.push(field(StorageType::Val(ValType::I32), true));
     generator_fields.push(field(StorageType::Val(ValType::I32), true));
     generator_fields.push(field(StorageType::Val(ValType::I32), true));
+    let mut timer_fields = object_fields.clone();
+    timer_fields.push(field(StorageType::Val(ValType::I64), true));
+    timer_fields.push(field(StorageType::Val(ValType::I64), false));
+    timer_fields.push(field(StorageType::Val(jsval()), false));
+    timer_fields.push(field(StorageType::Val(rt(false, T_VALS)), false));
     let mut promise_fields = object_fields.clone();
     promise_fields.push(field(StorageType::Val(ValType::I32), true));
     promise_fields.push(field(StorageType::Val(jsval()), true));
@@ -362,6 +386,13 @@ pub fn types(types: &mut TypeSection) {
             [jsval(), ValType::I32, jsval()],
             [jsval()],
         ))),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: timer_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
     ]);
 }
 
@@ -463,6 +494,27 @@ pub fn globals(globals: &mut GlobalSection) {
     globals.global(int, &ConstExpr::i32_const(0));
     globals.global(vals, &null_vals);
     globals.global(int, &ConstExpr::i32_const(0));
+    // Timers (T19): the functions, the list, the loop time, the wait.
+    for _ in 0..4 {
+        globals.global(
+            GlobalType {
+                val_type: rt(true, T_OBJECT),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(object()),
+        );
+    }
+    let long = GlobalType {
+        val_type: ValType::I64,
+        mutable: true,
+        shared: false,
+    };
+    globals.global(vals, &null_vals);
+    globals.global(int, &ConstExpr::i32_const(0));
+    globals.global(long, &ConstExpr::i64_const(0));
+    globals.global(int, &ConstExpr::i32_const(0));
+    globals.global(long, &ConstExpr::i64_const(0));
 }
 
 /// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
@@ -551,6 +603,8 @@ pub enum Helper {
     Prop(props::Helper),
     Prom(promise::Helper),
     Gen(generator::Helper),
+    Async(asyncfn::Helper),
+    Timer(timers::Helper),
     Fmt(inspect::Helper),
     Abi(abi::Helper),
     Host(host::Helper),
@@ -587,6 +641,8 @@ impl Helper {
             Helper::Prop(h) => h.name(),
             Helper::Prom(h) => h.name(),
             Helper::Gen(h) => h.name(),
+            Helper::Async(h) => h.name(),
+            Helper::Timer(h) => h.name(),
             Helper::Fmt(h) => h.name(),
             Helper::Abi(h) => h.name(),
             Helper::Host(h) => h.name(),
@@ -620,6 +676,8 @@ impl Helper {
             Helper::Prop(h) => h.signature(),
             Helper::Prom(h) => h.signature(),
             Helper::Gen(h) => h.signature(),
+            Helper::Async(h) => h.signature(),
+            Helper::Timer(h) => h.signature(),
             Helper::Fmt(h) => h.signature(),
             Helper::Abi(h) => h.signature(),
             Helper::Host(h) => h.signature(),
@@ -656,6 +714,8 @@ impl Helper {
             Helper::Prop(h) => h.body(cx),
             Helper::Prom(h) => h.body(cx),
             Helper::Gen(h) => h.body(cx),
+            Helper::Async(h) => h.body(cx),
+            Helper::Timer(h) => h.body(cx),
             Helper::Fmt(h) => h.body(cx),
             Helper::Host(h) => {
                 let (base, main) = (cx.host_globals(), cx.main_func());

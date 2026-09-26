@@ -113,6 +113,9 @@ pub enum Helper {
     /// `(p: (ref $promise), on_fulfilled, on_rejected, derived: (ref null $promise))`:
     /// PerformPromiseThen.
     PerformThen,
+    /// The same, with handlers that are async function frames (T19, see [`crate::asyncfn`]):
+    /// they're kept as they are.
+    AwaitThen,
     /// The code of `Promise.prototype.then`.
     Then,
     /// `Promise.prototype.catch`.
@@ -148,6 +151,9 @@ pub enum Helper {
     QueueMicrotask,
     /// Its code.
     QueueMicrotaskCall,
+    /// `(v)`: node's TypeError `ERR_INVALID_ARG_TYPE` for a `callback` argument that isn't a
+    /// function (`queueMicrotask`, the timers).
+    CheckCallback,
     /// `() -> eqref`: the reason of the first recorded rejection still unhandled (Wasm null: none);
     /// forgets the records.
     Unhandled,
@@ -174,6 +180,7 @@ impl Helper {
             Helper::Settle { rejected: false } => "fulfill_promise",
             Helper::Settle { rejected: true } => "reject_promise",
             Helper::PerformThen => "perform_promise_then",
+            Helper::AwaitThen => "perform_promise_then_await",
             Helper::Then => "Promise.prototype.then",
             Helper::Catch => "Promise.prototype.catch",
             Helper::Finally => "Promise.prototype.finally",
@@ -195,6 +202,7 @@ impl Helper {
             Helper::ThenableJob => "promise_resolve_thenable_job",
             Helper::QueueMicrotask => "queue_microtask_function",
             Helper::QueueMicrotaskCall => "queueMicrotask",
+            Helper::CheckCallback => "check_callback",
             Helper::Unhandled => "unhandled_rejection",
             Helper::UnhandledText => "unhandled_rejection_text",
             Helper::Describe => "no_side_effects_to_string",
@@ -212,11 +220,12 @@ impl Helper {
             Helper::New => (vec![], vec![p]),
             Helper::Resolvers => (vec![p], vec![v, v]),
             Helper::Resolve | Helper::Settle { .. } => (vec![p, v], vec![]),
-            Helper::PerformThen => (vec![p, v, v, rt(true, T_PROMISE)], vec![]),
+            Helper::PerformThen | Helper::AwaitThen => (vec![p, v, v, rt(true, T_PROMISE)], vec![]),
             Helper::PromiseResolve => (vec![v], vec![v]),
             Helper::Invoke => (vec![v, s, rt(false, T_VALS)], vec![v]),
             Helper::Enqueue => (vec![ValType::I32, v, v, v], vec![]),
             Helper::Drain => (vec![], vec![]),
+            Helper::CheckCallback => (vec![v], vec![]),
             Helper::ReactionJob => (vec![v, ValType::I32, v], vec![]),
             Helper::ThenableJob => (vec![v, v, v], vec![]),
             Helper::Unhandled => (vec![], vec![v]),
@@ -256,7 +265,8 @@ impl Helper {
             Helper::ResolveFn | Helper::RejectFn => resolve_fn(cx, self == Helper::RejectFn),
             Helper::Resolve => resolve(cx),
             Helper::Settle { rejected } => settle(cx, rejected),
-            Helper::PerformThen => perform_then(cx),
+            Helper::PerformThen => perform_then(cx, false),
+            Helper::AwaitThen => perform_then(cx, true),
             Helper::Then => then(cx),
             Helper::Catch => {
                 let invoke = ph(cx, Helper::Invoke);
@@ -381,7 +391,22 @@ impl Helper {
                 s.end();
                 f
             }
-            Helper::QueueMicrotaskCall => queue_microtask(cx),
+            Helper::QueueMicrotaskCall => {
+                let enqueue = ph(cx, Helper::Enqueue);
+                let check = ph(cx, Helper::CheckCallback);
+                const CB: u32 = 3;
+                let mut f = Function::new([(1, jsval())]);
+                let mut s = f.instructions();
+                arg(cx, &mut s, 0);
+                s.local_tee(CB).call(check);
+                s.i32_const(JOB_CALLBACK).local_get(CB);
+                s.global_get(G_UNDEFINED).global_get(G_UNDEFINED);
+                s.call(enqueue);
+                s.global_get(G_UNDEFINED);
+                s.end();
+                f
+            }
+            Helper::CheckCallback => check_callback(cx),
             Helper::Unhandled => unhandled(),
             Helper::UnhandledText => unhandled_text(cx),
             Helper::Describe => {
@@ -457,7 +482,7 @@ fn ph(cx: &mut dyn Cx, h: Helper) -> u32 {
 }
 
 /// Push argument `i` of a `$code` (`undefined` past the end).
-fn arg(cx: &mut dyn Cx, s: &mut InstructionSink, i: i32) {
+pub(crate) fn arg(cx: &mut dyn Cx, s: &mut InstructionSink, i: i32) {
     let arg_get = cx.helper(runtime::Helper::Func(func::Helper::ArgGet));
     s.local_get(ARGS).i32_const(i).call(arg_get);
 }
@@ -472,7 +497,14 @@ fn env(s: &mut InstructionSink) {
 
 /// Push a new function object (not a constructor) running `code`, with the environment in local
 /// `env` (or none).
-fn native(s: &mut InstructionSink, new: u32, code: u32, env: Option<u32>, name: u32, len: i32) {
+pub(crate) fn native(
+    s: &mut InstructionSink,
+    new: u32,
+    code: u32,
+    env: Option<u32>,
+    name: u32,
+    len: i32,
+) {
     s.ref_func(code);
     s.ref_null(HeapType::Concrete(T_CODE));
     match env {
@@ -833,7 +865,8 @@ fn settle(cx: &mut dyn Cx, rejected: bool) -> Function {
     f
 }
 
-fn perform_then(cx: &mut dyn Cx) -> Function {
+/// `frames`: the handlers are async function frames, not filtered.
+fn perform_then(cx: &mut dyn Cx, frames: bool) -> Function {
     let enqueue = ph(cx, Helper::Enqueue);
     const P: u32 = 0;
     const ONF: u32 = 1;
@@ -851,9 +884,12 @@ fn perform_then(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     s.local_get(D);
     for h in [ONF, ONR] {
-        s.local_get(h).global_get(G_UNDEFINED);
-        s.local_get(h).ref_test_non_null(function());
-        s.typed_select(jsval());
+        s.local_get(h);
+        if !frames {
+            s.global_get(G_UNDEFINED);
+            s.local_get(h).ref_test_non_null(function());
+            s.typed_select(jsval());
+        }
     }
     s.struct_new(T_REACTION).local_set(RX);
     s.local_get(P)
@@ -1396,6 +1432,7 @@ fn drain(cx: &mut dyn Cx) -> Function {
 }
 
 fn reaction_job(cx: &mut dyn Cx) -> Function {
+    let step = cx.helper(runtime::Helper::Async(crate::asyncfn::Helper::Step));
     let resolve = ph(cx, Helper::Resolve);
     let reject = ph(cx, Helper::Settle { rejected: true });
     let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
@@ -1419,7 +1456,13 @@ fn reaction_job(cx: &mut dyn Cx) -> Function {
     s.struct_get(T_REACTION, R_REJECTED);
     s.local_get(K).i32_eqz();
     s.typed_select(jsval()).local_tee(H);
-    s.global_get(G_UNDEFINED).ref_eq();
+    // An async function's frame (T19): resume it (fulfilled: next, rejected: throw).
+    s.ref_test_non_null(crate::generator::generator());
+    s.if_(BlockType::Empty);
+    s.local_get(H).local_get(K).local_get(ARG).call(step);
+    s.return_();
+    s.end();
+    s.local_get(H).global_get(G_UNDEFINED).ref_eq();
     s.if_(BlockType::Empty);
     {
         // No handler: pass the value / reason on.
@@ -1464,8 +1507,7 @@ fn reaction_job(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn queue_microtask(cx: &mut dyn Cx) -> Function {
-    let enqueue = ph(cx, Helper::Enqueue);
+fn check_callback(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(runtime::Helper::IsNullish);
     let to_string = cx.helper(runtime::Helper::ToString);
     let typeof_string = cx.helper(runtime::Helper::TypeofString);
@@ -1482,12 +1524,11 @@ fn queue_microtask(cx: &mut dyn Cx) -> Function {
         cx.str("'"),
     );
     let (array_name, object_name) = (cx.str("Array"), cx.str("Object"));
-    const CB: u32 = 3;
-    const N: u32 = 4;
-    let mut f = Function::new([(1, jsval()), (1, rt(true, runtime::T_STRING))]);
+    const CB: u32 = 0;
+    const N: u32 = 1;
+    let mut f = Function::new([(1, rt(true, runtime::T_STRING))]);
     let mut s = f.instructions();
-    arg(cx, &mut s, 0);
-    s.local_tee(CB).ref_test_non_null(function()).i32_eqz();
+    s.local_get(CB).ref_test_non_null(function()).i32_eqz();
     s.if_(BlockType::Empty);
     {
         // node's ERR_INVALID_ARG_TYPE text.
@@ -1543,10 +1584,6 @@ fn queue_microtask(cx: &mut dyn Cx) -> Function {
         s.call(concat).call(throw);
     }
     s.end();
-    s.i32_const(JOB_CALLBACK).local_get(CB);
-    s.global_get(G_UNDEFINED).global_get(G_UNDEFINED);
-    s.call(enqueue);
-    s.global_get(G_UNDEFINED);
     s.end();
     f
 }

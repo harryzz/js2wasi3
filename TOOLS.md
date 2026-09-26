@@ -27,6 +27,7 @@ Checked 2026-09-25 against the latest GitHub releases. Verify with `scripts/chec
 | Component Model threads (🧵) | off | `-W component-model-threading=y`; ~0.75 µs per switch |
 | Stack switching (`cont.new`/`resume`/`suspend`) | off | `-W stack-switching=y`; ~25× or more faster than 🧵 |
 | GC Canonical ABI option (🛸) | off | scalars only; strings/lists **not implemented** |
+| Timers (`monotonic-clock` `[async-lower]wait-until`, `[subtask-cancel]`) | on | probe 8: concurrent waits overlap; a subtask must leave its waitable set (`waitable.join h 0`) before `subtask.cancel`, else trap |
 
 ## Syntax gotchas (wasm-tools 1.259)
 

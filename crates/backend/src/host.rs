@@ -13,20 +13,28 @@
 //!   like node). Output written before the exception is kept.
 //! - **Jobs** (T17): after `main`, `run` drains the promise job queue (in the same `try_table`), then
 //!   reports the first rejection still unhandled ([`Helper::Report`], see [`crate::promise`]).
-//! - **Event loop** (design D3, callback lift): `run` creates the waitable set, runs `main`, then
-//!   [`Helper::Flush`]. Flush advances each open stream: write the unwritten bytes (a write may
+//! - **Event loop** (design D3, callback lift; T19: timers): `run` creates the waitable set, runs
+//!   `main` and the jobs, then [`Helper::Loop`]. While timers are active
+//!   (and nothing failed), Loop keeps one `wait-until` subtask for the earliest deadline in the
+//!   set (a stale later one is cancelled first), writes what it can and returns `WAIT`. The
+//!   callback applies the event: a finished write, or the wait ended ([`Helper::Tick`]: set the
+//!   loop time, run the due timers, see [`crate::timers`]), then Loop again. With no timers left
+//!   Loop is [`Helper::Flush`]: advance each open stream: write the unwritten bytes (a write may
 //!   complete partially, or block: then it waits on the set), then drop the writable end and read
 //!   the future (blocking reads wait too). When nothing waits, `task.return` (`ok`, or `err` if a
-//!   stream failed) and `EXIT`; otherwise `WAIT` on the set. The callback applies the event and
-//!   flushes again.
+//!   stream failed or JS failed) and `EXIT`; otherwise `WAIT` on the set.
+//! - An uncaught exception or an unhandled rejection in a timer's turn ends the program like one
+//!   in `main` (node: exit status 1; the other timers don't run).
 //!
 //! Per stream, [`G_PHASE`]: 0 unused, 1 open, 2 waiting for a write, 3 waiting for the future, 4 done,
 //! 5 the reader went away (later output is dropped; the stream still gets closed, and `run` fails).
 
 use wasm_encoder::{BlockType, Catch, EntityType, Function, ImportSection, MemArg, ValType};
 
-use crate::runtime::{self, Cx};
-use crate::{abi, promise};
+use crate::runtime::{self, Cx, G_LOOP_NOW, G_WAIT, G_WAIT_AT};
+use crate::{abi, promise, timers};
+
+const CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.1";
 
 /// Streams: stdout and stderr.
 pub const STREAMS: u32 = 2;
@@ -43,9 +51,15 @@ pub enum Import {
     WaitableSetNew,
     WaitableJoin,
     TaskReturn,
+    /// `wasi:clocks/monotonic-clock.now` (T19).
+    ClockNow,
+    /// `wait-until`, async-lowered: a subtask.
+    WaitUntil,
+    SubtaskDrop,
+    SubtaskCancel,
 }
 
-pub const IMPORTS: [Import; 15] = [
+pub const IMPORTS: [Import; 19] = [
     Import::WriteViaStream(0),
     Import::StreamNew(0),
     Import::StreamWrite(0),
@@ -61,9 +75,13 @@ pub const IMPORTS: [Import; 15] = [
     Import::WaitableSetNew,
     Import::WaitableJoin,
     Import::TaskReturn,
+    Import::ClockNow,
+    Import::WaitUntil,
+    Import::SubtaskDrop,
+    Import::SubtaskCancel,
 ];
 
-fn import(i: Import) -> u32 {
+pub(crate) fn import(i: Import) -> u32 {
     IMPORTS.iter().position(|x| *x == i).unwrap() as u32
 }
 
@@ -98,6 +116,10 @@ impl Import {
             Import::WaitableSetNew => ("$root", "[waitable-set-new]".into()),
             Import::WaitableJoin => ("$root", "[waitable-join]".into()),
             Import::TaskReturn => ("[export]wasi:cli/run@0.3.1", "[task-return]run".into()),
+            Import::ClockNow => (CLOCK, "now".into()),
+            Import::WaitUntil => (CLOCK, "[async-lower]wait-until".into()),
+            Import::SubtaskDrop => ("$root", "[subtask-drop]".into()),
+            Import::SubtaskCancel => ("$root", "[subtask-cancel]".into()),
         }
     }
 
@@ -113,6 +135,10 @@ impl Import {
             }
             Import::WaitableSetNew => (vec![], vec![I32]),
             Import::WaitableJoin => (vec![I32; 2], vec![]),
+            Import::ClockNow => (vec![], vec![I64]),
+            Import::WaitUntil => (vec![I64], vec![I32]),
+            Import::SubtaskDrop => (vec![I32], vec![]),
+            Import::SubtaskCancel => (vec![I32], vec![I32]),
         }
     }
 }
@@ -161,7 +187,9 @@ const PHASE_DROPPED: i32 = 5;
 /// Canonical ABI constants.
 const BLOCKED: i32 = -1;
 const STATUS_DROPPED: i32 = 1;
+const EVENT_SUBTASK: i32 = 1;
 const EVENT_STREAM_WRITE: i32 = 3;
+const SUBTASK_RETURNED: i32 = 2;
 const EVENT_FUTURE_READ: i32 = 4;
 const CALLBACK_EXIT: i32 = 0;
 const CALLBACK_WAIT: i32 = 2;
@@ -198,6 +226,12 @@ pub enum Helper {
     Uncaught,
     /// `(text: (ref $string))`: `Uncaught <text>` to stderr, `run` fails.
     Report,
+    /// `() -> i32`: the event loop's next step: wait for timers, or [`Helper::Flush`].
+    Loop,
+    /// `()`: the wait ended: set the loop time and run the due timers (catching exceptions).
+    Tick,
+    /// `()`: cancel the outstanding wait, if any.
+    Disarm,
     /// `() -> i32`: the `run` export (async lift with callback).
     Run,
     /// `(event, index, payload: i32) -> i32`: its callback.
@@ -220,6 +254,9 @@ impl Helper {
             Helper::Flush => "flush",
             Helper::Uncaught => "uncaught",
             Helper::Report => "report_uncaught",
+            Helper::Loop => "event_loop",
+            Helper::Tick => "timers_tick",
+            Helper::Disarm => "cancel_wait",
             Helper::Run => "run",
             Helper::Callback => "run_callback",
         }
@@ -232,13 +269,19 @@ impl Helper {
             Helper::Advance(_) | Helper::Closed(_) => (vec![I32], vec![]),
             Helper::Uncaught => (vec![runtime::jsval()], vec![]),
             Helper::Report => (vec![runtime::string_ref()], vec![]),
-            Helper::Pump(_) | Helper::Step(_) | Helper::Flush | Helper::Run => (vec![], vec![I32]),
+            Helper::Pump(_) | Helper::Step(_) | Helper::Flush | Helper::Loop | Helper::Run => {
+                (vec![], vec![I32])
+            }
+            Helper::Tick | Helper::Disarm => (vec![], vec![]),
             Helper::Callback => (vec![I32; 3], vec![I32]),
         }
     }
 
-    /// `base`: global index of the first host global. `main`: function index of `main`.
-    pub fn body(self, cx: &mut dyn Cx, base: u32, main: u32) -> Function {
+    /// `base`: global index of the first host global. `main`: function index of `main`, and
+    /// whether it returns a value (dropped: a top-level `await`'s promise is observed through
+    /// the unhandled-rejection check).
+    pub fn body(self, cx: &mut dyn Cx, base: u32, main: (u32, bool)) -> Function {
+        let (main, main_result) = main;
         let g = |stream: u32, k: u32| base + stream * STREAM_GLOBALS + k;
         let ws = base + G_WS;
         let err = base + G_ERR;
@@ -351,8 +394,113 @@ impl Helper {
                 s.end();
                 f
             }
-            Helper::Run => {
+            Helper::Loop => {
+                let next = cx.helper(runtime::Helper::Timer(timers::Helper::Next));
+                let disarm = cx.helper(runtime::Helper::Host(Helper::Disarm));
+                let tick = cx.helper(runtime::Helper::Host(Helper::Tick));
                 let flush = cx.helper(runtime::Helper::Host(Helper::Flush));
+                let pumps: Vec<u32> = (0..STREAMS)
+                    .map(|st| cx.helper(runtime::Helper::Host(Helper::Pump(st))))
+                    .collect();
+                const D: u32 = 0;
+                const ST: u32 = 1;
+                let mut f = Function::new([(1, ValType::I64), (1, ValType::I32)]);
+                let mut s = f.instructions();
+                s.loop_(BlockType::Empty);
+                s.global_get(err).i32_eqz();
+                s.call(next).local_tee(D).i64_const(0).i64_ge_s();
+                s.i32_and();
+                s.if_(BlockType::Empty);
+                {
+                    // Keep a wait that ends no later than the earliest deadline.
+                    s.global_get(G_WAIT).i32_eqz();
+                    s.global_get(G_WAIT_AT).local_get(D).i64_gt_u();
+                    s.i32_or();
+                    s.if_(BlockType::Empty);
+                    {
+                        s.call(disarm);
+                        s.local_get(D).call(import(Import::WaitUntil)).local_tee(ST);
+                        s.i32_const(0xf)
+                            .i32_and()
+                            .i32_const(SUBTASK_RETURNED)
+                            .i32_eq();
+                        s.if_(BlockType::Empty);
+                        // It ended at once: run the timers and look again.
+                        s.call(tick).br(3);
+                        s.end();
+                        s.local_get(ST).i32_const(4).i32_shr_u().global_set(G_WAIT);
+                        s.local_get(D).global_set(G_WAIT_AT);
+                        s.global_get(G_WAIT)
+                            .global_get(ws)
+                            .call(import(Import::WaitableJoin));
+                    }
+                    s.end();
+                    for p in &pumps {
+                        s.call(*p).drop();
+                    }
+                    s.global_get(ws)
+                        .i32_const(4)
+                        .i32_shl()
+                        .i32_const(CALLBACK_WAIT)
+                        .i32_or()
+                        .return_();
+                }
+                s.end();
+                s.end();
+                s.call(disarm);
+                s.call(flush);
+                s.end();
+                f
+            }
+            Helper::Tick => {
+                let run_due = cx.helper(runtime::Helper::Timer(timers::Helper::RunDue));
+                let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
+                let text = cx.helper(runtime::Helper::Prom(promise::Helper::UnhandledText));
+                let report = cx.helper(runtime::Helper::Host(Helper::Report));
+                const R: u32 = 0;
+                let mut f = Function::new([(1, runtime::jsval())]);
+                let mut s = f.instructions();
+                s.call(import(Import::ClockNow)).global_set(G_LOOP_NOW);
+                s.block(BlockType::Result(runtime::jsval()));
+                s.try_table(
+                    BlockType::Empty,
+                    [Catch::One {
+                        tag: runtime::TAG,
+                        label: 0,
+                    }],
+                );
+                s.call(run_due).local_tee(R).ref_is_null().i32_eqz();
+                s.if_(BlockType::Empty);
+                s.local_get(R).call(text).call(report);
+                s.end();
+                s.return_();
+                s.end();
+                s.unreachable();
+                s.end();
+                s.call(uncaught);
+                s.end();
+                f
+            }
+            Helper::Disarm => {
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.global_get(G_WAIT).i32_eqz().i32_eqz();
+                s.if_(BlockType::Empty);
+                // It must leave the set before it can be cancelled.
+                s.global_get(G_WAIT)
+                    .i32_const(0)
+                    .call(import(Import::WaitableJoin));
+                s.global_get(G_WAIT)
+                    .call(import(Import::SubtaskCancel))
+                    .drop();
+                s.global_get(G_WAIT).call(import(Import::SubtaskDrop));
+                s.i32_const(0).global_set(G_WAIT);
+                s.end();
+                s.end();
+                f
+            }
+            Helper::Run => {
+                let flush = cx.helper(runtime::Helper::Host(Helper::Loop));
                 let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
                 let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
                 let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
@@ -371,6 +519,9 @@ impl Helper {
                     }],
                 );
                 s.call(main);
+                if main_result {
+                    s.drop();
+                }
                 s.call(drain);
                 s.end();
                 // Microtasks drained: an unhandled rejection ends the program (like node).
@@ -389,9 +540,23 @@ impl Helper {
                 const EVENT: u32 = 0;
                 const INDEX: u32 = 1;
                 const PAYLOAD: u32 = 2;
-                let flush = cx.helper(runtime::Helper::Host(Helper::Flush));
+                let flush = cx.helper(runtime::Helper::Host(Helper::Loop));
+                let tick = cx.helper(runtime::Helper::Host(Helper::Tick));
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
+                // The wait ended: run the due timers.
+                s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
+                s.local_get(INDEX).global_get(G_WAIT).i32_eq().i32_and();
+                s.global_get(G_WAIT).i32_eqz().i32_eqz().i32_and();
+                s.local_get(PAYLOAD)
+                    .i32_const(SUBTASK_RETURNED)
+                    .i32_eq()
+                    .i32_and();
+                s.if_(BlockType::Empty);
+                s.global_get(G_WAIT).call(import(Import::SubtaskDrop));
+                s.i32_const(0).global_set(G_WAIT);
+                s.call(tick);
+                s.end();
                 for st in 0..STREAMS {
                     let advance = cx.helper(runtime::Helper::Host(Helper::Advance(st)));
                     let closed = cx.helper(runtime::Helper::Host(Helper::Closed(st)));

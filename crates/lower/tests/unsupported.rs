@@ -92,8 +92,22 @@ fn declarations_and_functions() {
     lowers("export function f() { function g() {} return 0; }");
     assert_eq!(
         one("export async function f() { }"),
-        "1:8 unsupported: async function (planned: T19)"
+        "1:8 unsupported: exported async function (the boundary needs an async export) (planned: T20)"
     );
+    assert_eq!(
+        one("async function* g() { }"),
+        "1:1 unsupported: async generator function (planned: later)"
+    );
+    assert_eq!(
+        one("const g = async function* () { };"),
+        "1:11 unsupported: async generator function (planned: later)"
+    );
+    assert_eq!(
+        one("export function f() { setTimeout(f, 1); return 0; }"),
+        "1:23 unsupported: `setTimeout` in a module with exports (planned: T20)"
+    );
+    lowers("async function f(a) { return (await a) + 1; } f(1);");
+    lowers("await 1;");
     lowers("export function f(a = 1) { return a; }");
     assert_eq!(
         one("export function f(...a) { return 0; }"),
@@ -258,7 +272,7 @@ fn arrays_and_iteration() {
     }
     assert_eq!(
         one("for await (const x of []) {}"),
-        "1:1 unsupported: `for await` (planned: T19)"
+        "1:1 unsupported: `for await` (planned: later)"
     );
     assert_eq!(
         one("export function f(a) { return [...a, , 1]; }"),

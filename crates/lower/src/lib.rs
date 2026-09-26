@@ -338,6 +338,13 @@ impl<'a> FnAst<'a> {
             FnAst::Arrow(a) => a.span,
         }
     }
+
+    fn is_async(self) -> bool {
+        match self {
+            FnAst::Func(f) => f.r#async,
+            FnAst::Arrow(a) => a.r#async,
+        }
+    }
 }
 
 /// The parameters a JS function's IR function takes before the JS ones (T14): the function
@@ -699,6 +706,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let pos = f.pos.expect("declared functions have a position");
             let what = if f.flags.is_generator {
                 "exported generator function (the boundary needs an iterator type)"
+            } else if f.flags.is_async {
+                "exported async function (the boundary needs an async export)"
             } else if self.rest_param.contains(&func) {
                 "rest parameter in an exported function"
             } else {
@@ -828,8 +837,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         fns: &mut Vec<(&'a Function<'a>, FuncId)>,
     ) -> R<()> {
         let id_node = f.id.as_ref().expect("function declarations have a name");
-        if f.r#async {
-            return Err(self.unsupported(f.span, "async function", "T19"));
+        if f.r#async && f.generator {
+            return Err(self.unsupported(f.span, "async generator function", "later"));
         }
         // Simple parameters are typed; the others (defaults, patterns: `None`) are `jsval`s bound
         // in the body's prologue, and a rest parameter is one more `jsval` (an array).
@@ -848,6 +857,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let result = Slot::Result(id);
         // A function has a result if it returns a value, or if its (undefined) result is used.
         let returns_value = f.generator
+            || f.r#async
             || body.statements.iter().any(has_value_return)
             || self.slot_ty(result) == Type::JsVal;
         let scope = f.scope_id.get().expect("functions have scopes");
@@ -876,6 +886,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         );
         if f.generator {
             self.generator_sig(&mut func, result);
+        }
+        if f.r#async {
+            self.async_sig(&mut func, result);
         }
         func.pos = Some(self.pos(f.span));
         self.module.add_function(func);
@@ -1410,7 +1423,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             let result = Slot::Result(id);
             let generator = matches!(f, FnAst::Func(func) if func.generator);
+            let is_async = f.is_async();
             let returns_value = generator
+                || is_async
                 || f.expression().is_some()
                 || f.statements().iter().any(has_value_return)
                 || self.slot_ty(result) == Type::JsVal;
@@ -1426,6 +1441,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             );
             if generator {
                 self.generator_sig(&mut func, result);
+            }
+            if is_async {
+                self.async_sig(&mut func, result);
             }
             func.pos = Some(self.pos(f.span()));
             self.module.add_function(func);
@@ -1531,12 +1549,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Ok(());
         }
         let mut bad = None;
-        let is_async = match f {
-            FnAst::Func(func) => func.r#async,
-            FnAst::Arrow(a) => a.r#async,
-        };
-        if is_async {
-            bad = Some(self.unsupported(f.span(), "async function", "T19"));
+        if matches!(f, FnAst::Func(func) if func.r#async && func.generator) {
+            bad = Some(self.unsupported(f.span(), "async generator function", "later"));
         }
         self.lowered.insert(id);
         if let Some(e) = bad {
@@ -1809,6 +1823,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             length: js_length(f.params()),
             kind: if self.module.function(id).flags.is_generator {
                 ir::FnKind::Generator
+            } else if self.module.function(id).flags.is_async {
+                ir::FnKind::Async
             } else if constructor {
                 ir::FnKind::Ordinary
             } else {
@@ -1882,6 +1898,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             length: self.fn_length[&func],
             kind: if f.flags.is_generator {
                 ir::FnKind::Generator
+            } else if f.flags.is_async {
+                ir::FnKind::Async
             } else {
                 ir::FnKind::Ordinary
             },
@@ -2648,6 +2666,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     ));
                 }
                 if let Some(op) = self.global_function(id) {
+                    if matches!(op, Intrinsic::Timer(_)) && !self.command {
+                        return Err(self.unsupported(
+                            id.span,
+                            &format!("`{}` in a module with exports", id.name),
+                            "T20",
+                        ));
+                    }
                     return Ok(Val::js(Expr::intrinsic(op, vec![]), Kind::Any));
                 }
                 let var = self.resolve(cx, id)?;
@@ -2978,6 +3003,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     self.suspend(cx, ir::SuspendKind::Yield, arg)
                 };
                 Ok(Val::js(e, Kind::Any))
+            }
+            Expression::AwaitExpression(a) => {
+                let arg = jsval_of(self.expr(cx, &a.argument)?);
+                if Some(cx.id) == self.main {
+                    // Top-level `await`: `main` is an async function.
+                    cx.func.flags.is_async = true;
+                    cx.func.result = Some(Type::JsVal);
+                }
+                Ok(Val::js(
+                    self.suspend(cx, ir::SuspendKind::Await, arg),
+                    Kind::Any,
+                ))
             }
             Expression::PrivateInExpression(p) => {
                 let (sym, _) = self.private_sym(cx, &p.left)?;
@@ -3552,7 +3589,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
-    /// A built-in global function that is a value (T17): `Promise`, `queueMicrotask`.
+    /// A built-in global function that is a value (T17): `Promise`, `queueMicrotask`; the timer
+    /// functions (T19).
     fn global_function(&self, id: &IdentifierReference<'a>) -> Option<Intrinsic> {
         if self
             .scoping
@@ -3565,7 +3603,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         match id.name.as_str() {
             "Promise" => Some(Intrinsic::PromiseCtor),
             "queueMicrotask" => Some(Intrinsic::QueueMicrotask),
-            _ => None,
+            name => ir::TIMER_NAMES
+                .iter()
+                .position(|n| *n == name)
+                .map(|k| Intrinsic::Timer(k as u8)),
         }
     }
 
