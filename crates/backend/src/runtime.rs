@@ -159,6 +159,10 @@ pub trait Cx {
     fn main_func(&mut self) -> (u32, bool);
     /// `ref.func` will be used on function `index` (it goes into a declarative element segment).
     fn declare_func(&mut self, index: u32);
+    /// Function index of the prelude's StringToNumber `(jsval) -> f64`, if the module has it (T21).
+    fn string_to_number(&mut self) -> Option<u32>;
+    /// The prelude methods of a built-in prototype (T21): (key, `$code` function index, length).
+    fn builtin_methods(&mut self, b: js2wasi3_ir::Builtin) -> Vec<(String, u32, u32)>;
 
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -595,6 +599,13 @@ pub enum Helper {
     StrAt,
     /// `(s: (ref $string), from: i32) -> (ref $string)`: `s.slice(from)`.
     StrSlice,
+    /// `(s: (ref $string), start, end: i32) -> (ref $string)`: the units `[start, end)` (T21).
+    StrSub,
+    /// `(a, b: jsval) -> i32`: `Intrinsic::JsLess` (T21).
+    JsLess {
+        swap: bool,
+        or_equal: bool,
+    },
     Num(numstr::Helper),
     Obj(object::Helper),
     Func(func::Helper),
@@ -632,6 +643,8 @@ impl Helper {
             Helper::Describe => "describe",
             Helper::StrAt => "string_at",
             Helper::StrSlice => "string_slice",
+            Helper::StrSub => "string_sub",
+            Helper::JsLess { .. } => "js_less",
             Helper::NewSymbol => "new_symbol",
             Helper::Num(h) => h.name(),
             Helper::Obj(h) => h.name(),
@@ -667,6 +680,8 @@ impl Helper {
             Helper::Inspect | Helper::Describe => (vec![v], vec![s]),
             Helper::StrAt => (vec![s, s, ValType::I32], vec![ValType::I32]),
             Helper::StrSlice => (vec![s, ValType::I32], vec![s]),
+            Helper::StrSub => (vec![s, ValType::I32, ValType::I32], vec![s]),
+            Helper::JsLess { .. } => (vec![v, v], vec![ValType::I32]),
             Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
             Helper::Obj(h) => h.signature(),
@@ -705,6 +720,8 @@ impl Helper {
             Helper::Describe => describe(cx),
             Helper::StrAt => str_at(),
             Helper::StrSlice => str_slice(),
+            Helper::StrSub => str_sub(),
+            Helper::JsLess { swap, or_equal } => js_less(cx, swap, or_equal),
             Helper::NewSymbol => new_symbol(cx),
             Helper::Num(h) => h.body(cx),
             Helper::Obj(h) => h.body(cx),
@@ -775,6 +792,7 @@ fn to_number(cx: &mut dyn Cx) -> Function {
     let to_primitive_num = cx.helper(Helper::Obj(object::Helper::ObjectToNumber));
     let throw = cx.helper(Helper::Obj(object::Helper::Throw(ErrorKind::TypeError)));
     let no_num = cx.str("Cannot convert a Symbol value to a number");
+    let str_to_num = cx.string_to_number();
     const V: u32 = 0;
     const K: u32 = 1;
     let mut f = Function::new([(1, ValType::I32)]);
@@ -796,13 +814,17 @@ fn to_number(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(no_num).call(throw);
     s.end();
-    // ToNumber of a string (parsing) isn't implemented yet: trap (F20).
+    // ToNumber of a string: the prelude's StringToNumber (T21). It's linked when the IR converts a
+    // JS value to a number; a runtime-only conversion in a module without one traps (F85).
     s.local_get(V).ref_test_non_null(string());
     s.if_(BlockType::Empty);
-    s.unreachable();
+    match str_to_num {
+        Some(f) => s.local_get(V).call(f).return_(),
+        None => s.unreachable(),
+    };
     s.end();
     // An object's ToPrimitive is a string: "" is 0; one starting with `[` ("[object Object]") or a
-    // letter other than `I` (an error's "Name: message") can't be numeric, so NaN. Others: F20.
+    // letter other than `I` (an error's "Name: message") can't be numeric, so NaN. Others: parsed.
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     s.local_get(V)
@@ -1507,6 +1529,107 @@ fn str_slice() -> Function {
     s.local_get(S).array_len().local_get(FROM).i32_sub();
     s.array_copy(T_STRING, T_STRING);
     s.local_get(R).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `$string_sub(s, start, end) -> (ref $string)`: the units `[start, end)`.
+fn str_sub() -> Function {
+    const S: u32 = 0;
+    const START: u32 = 1;
+    const END: u32 = 2;
+    const R: u32 = 3;
+    let mut f = Function::new([(1, rt(true, T_STRING))]);
+    let mut s = f.instructions();
+    s.local_get(END)
+        .local_get(START)
+        .i32_sub()
+        .array_new_default(T_STRING)
+        .local_set(R);
+    s.local_get(R).ref_as_non_null().i32_const(0);
+    s.local_get(S).local_get(START);
+    s.local_get(END).local_get(START).i32_sub();
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(R).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `$js_less(a, b) -> i32`: `Intrinsic::JsLess`. ToPrimitive (hint number) of `a`, then `b`; two
+/// strings compare by code units, anything else as numbers.
+fn js_less(cx: &mut dyn Cx, swap: bool, or_equal: bool) -> Function {
+    let to_number = cx.helper(Helper::ToNumber);
+    let to_primitive = cx.helper(Helper::Obj(object::Helper::ToPrimitive));
+    const A: u32 = 0;
+    const B: u32 = 1;
+    const I: u32 = 2;
+    const N: u32 = 3;
+    const D: u32 = 4;
+    let (x, y) = if swap { (B, A) } else { (A, B) };
+    let mut f = Function::new([(3, ValType::I32)]);
+    let mut s = f.instructions();
+    for v in [A, B] {
+        s.local_get(v).ref_test_non_null(object());
+        s.if_(BlockType::Empty);
+        s.local_get(v)
+            .ref_cast_non_null(object())
+            .i32_const(1)
+            .call(to_primitive)
+            .local_set(v);
+        s.end();
+    }
+    both_strings(&mut s, A, B);
+    s.local_get(A).ref_test_non_null(symbol());
+    s.local_get(B).ref_test_non_null(symbol());
+    s.i32_or().i32_eqz().i32_and();
+    s.if_(BlockType::Empty);
+    // D = the first differing unit's difference (x - y), else the length difference.
+    s.local_get(x).ref_cast_non_null(string()).array_len();
+    s.local_get(y).ref_cast_non_null(string()).array_len();
+    s.local_get(x).ref_cast_non_null(string()).array_len();
+    s.local_get(y).ref_cast_non_null(string()).array_len();
+    s.i32_lt_u().select().local_set(N);
+    s.local_get(x).ref_cast_non_null(string()).array_len();
+    s.local_get(y).ref_cast_non_null(string()).array_len();
+    s.i32_sub().local_set(D);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(x)
+        .ref_cast_non_null(string())
+        .local_get(I)
+        .array_get_u(T_STRING);
+    s.local_get(y)
+        .ref_cast_non_null(string())
+        .local_get(I)
+        .array_get_u(T_STRING);
+    s.i32_sub().local_tee(D).br_if(1);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.local_get(x).ref_cast_non_null(string()).array_len();
+    s.local_get(y).ref_cast_non_null(string()).array_len();
+    s.i32_sub().local_set(D);
+    s.br(0).end().end();
+    s.local_get(D).i32_const(0);
+    if or_equal {
+        s.i32_ge_s();
+    } else {
+        s.i32_lt_s();
+    }
+    s.return_();
+    s.end();
+    s.local_get(A).call(to_number);
+    s.local_get(B).call(to_number);
+    if swap {
+        // (b, a) on the stack order: compare y op x with y = a.
+        if or_equal {
+            s.f64_le()
+        } else {
+            s.f64_gt()
+        };
+    } else if or_equal {
+        s.f64_ge();
+    } else {
+        s.f64_lt();
+    }
     s.end();
     f
 }

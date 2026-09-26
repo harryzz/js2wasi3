@@ -131,6 +131,13 @@ reachable from the user's code are lowered (`builtins::Prelude`: an AST scan), s
 compiles exactly as without the prelude. Prelude variables with a literal initializer are globals (built-in
 state). User references to prelude names are rejected like unknown globals. Numeric algorithms are ports of
 what V8 uses (fdlibm), so results match node bit for bit where V8 does; see `builtins/math.js`.)
+(T21 slice 2: `$$String_prototype_slice` is `String.prototype.slice`, kept when the user's code names a property `slice`
+(`x.slice`, `x["slice"]`); the lowering lists the kept ones in `ir::Module::builtin_methods` and the backend installs
+them on the prototype over the sentinels, so calls go through the (mutable) prototype. `$$parseInt` is the global
+`parseInt`. String intrinsics read code units and build new strings. The runtime's ToNumber of a string calls the
+prelude's `$$StringToNumber` (`ir::Module::string_to_number`), kept when the IR converts a JS value to a number; its
+decimal conversion is correctly rounded (Clinger's fast path, else big-integer comparisons), `toString(radix)` is V8's
+algorithm and `toFixed` exact, so the digits match node; see `builtins/string.js`.)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

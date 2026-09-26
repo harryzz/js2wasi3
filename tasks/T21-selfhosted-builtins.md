@@ -35,6 +35,46 @@ user code, keeping only what's used. First batch: `Math`, `String.prototype` bas
   needs a second rule: a property name (`.slice`) read anywhere in user code (or any computed key) keeps
   `$$String_prototype_slice`, and `String.prototype`'s sentinels get replaced by the prelude's function objects.
 
+### Slice 2 (2026-09-26): strings, string → number, number formatting — done
+- **Prototype methods from the prelude**: `crates/lower/builtins/string.js`. `$$String_prototype_m` /
+  `$$Number_prototype_m` are kept when user code names a property `m` (`x.m`, `x["m"]`; `builtins::Prelude`),
+  listed in `ir::Module::builtin_methods` (adapter + `length`), and installed by the backend's lazy
+  `object::proto` over the sentinels (`Cx::builtin_methods`). Calls go through the prototype (it's mutable),
+  so their parameters are `Any`. Global functions: `$$parseInt` is `parseInt` (direct call; as a value a
+  function object); `Number.parseInt/parseFloat` are the same objects; `Number.<constant>` folds.
+- **String → number (F20)**: `$$StringToNumber` (hex/octal/binary, `Infinity`, decimal literals); the runtime's
+  `$to_number` calls it (`ir::Module::string_to_number`, `Cx::string_to_number`). The lowering keeps it when
+  the IR converts a JS value to a number, uses `==` on JS values or `JsLess` (`Lowerer::may_convert_string`
+  → `Facts::string_to_number` → one more round with it as a root, kinds reset because function ids shift).
+  Decimal → double is correctly rounded: Clinger's fast path, else a guess refined by big-integer comparisons
+  (base-2^24 limbs in JS arrays). `<`/`>`/`<=`/`>=` on two JS values: `Intrinsic::JsLess` (strings by code units).
+- **Methods**: `String(x)`, `String.fromCharCode/fromCodePoint`; `at charAt charCodeAt codePointAt concat
+  endsWith includes indexOf lastIndexOf padEnd padStart repeat replace replaceAll slice split startsWith
+  substring substr toLowerCase toUpperCase toLocale*Case trim trimStart trimEnd trimLeft trimRight isWellFormed
+  toWellFormed toString valueOf`; `Number(x)`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`,
+  `Number.isNaN/isFinite/isInteger/isSafeInteger`, `Number.prototype.toString(radix)` (V8's
+  DoubleToRadixCString), `toFixed` (exact, big integers), `valueOf`. Errors use node's messages.
+- **New IR**: `Intrinsic::{StrUnit, StrSub, StrNew, StrSet, JsLess, Trap}`; prelude intrinsics `unit`, `sub`,
+  `str_new`, `str_set`, `str_len`, `to_string`, `number_to_string`, `trap` (`Call::Intrinsic(kind)`).
+  `ir::visit_exprs` moved from the backend to `ir`.
+- **Tests**: `tests/fixtures/builtins/{string-methods,string-number}.js` (diff.sh), `builtins/lib.js` (library,
+  `build.rs::builtins_in_a_library`), `unsupported.rs::builtins_prelude`; the F20 rejection test and
+  `tests/fixtures/unsupported/string-to-number.js` are gone. Ad-hoc: 1500 random decimal strings (`Number(s)`) and
+  800 random doubles (`toString(2/3/16/36)`, `toFixed(3/17)`): identical to node. `emit.rs::invoke` now uses a
+  unique temp path per call (three tests wrote the same `…-check/m.wasm` in parallel; it showed up now).
+- **Acceptance**: `hello.js` pulls in no prelude code: 52177 bytes (+3 vs slice 1: `$object_to_number` now hands
+  a remaining string to `$to_number` instead of trapping). A loop like `for (i = 0; i < a.length; i++)` does
+  pull in StringToNumber (`i < a.length` converts a JS value): +10 KB (F86).
+- **Commands run**: `cargo test` (all ok, 64), `scripts/diff.sh` (70 passed, 0 failed, 10 skipped),
+  `wasm-tools validate`, `cargo clippy --all-targets`, `cargo fmt`.
+- **Unsupported / follow-ups**: F85 (runtime-only string → number without the hook traps), F86 (size), F87
+  (missing string methods, case mapping coverage), F88 (`String`/`Number` as values, wrappers, `toPrecision`…,
+  computed method keys), F89 (non-decimal parsing past 2^53), F90 (typed direct calls of string methods).
+- **Next smallest step**: slice 3 (arrays): `$$Array_prototype_map` etc. in a new `builtins/array.js`, same
+  mechanism (the Rust-side `array::proto_methods` stay for `push/pop/join/toString`); needs a callback call
+  (`f(x, i, a)` on a value works already) and `Array(n)`/`Array.from`/`of` (`$$Array_from`, a global `Array`
+  call: `builtin_global` skips names that are `Builtin`s, so `Array(...)` needs its own case).
+
 ## Handoff (written 2026-09-26 at the end of the T19/T24 session)
 
 **State:** `main` at `b55c8cf`, clean, pushed to `github.com/harryzz/js2wasi3` (private). T01–T19 and T24 done.
@@ -122,3 +162,21 @@ compiled by js2wasi3 itself, using intrinsics". Options to weigh, then record th
   ("global"), `Math` as a value ("global `Math`"); a user `$$` name clashing with the prelude gets a help line.
   `Math.max/min/hypot.length` = 2 (`builtins::length`). Tests: `unsupported.rs::builtins_prelude`. Full runs:
   cargo test all ok (64), diff.sh 68 passed / 0 failed / 9 skipped.
+- 2026-09-26: slice 2 (strings) started. Baseline: 64 cargo tests ok, diff.sh 68 passed / 0 failed / 9 skipped.
+  Plan: prototype methods `$$String_prototype_<m>` in `builtins/string.js`, kept when user code names `.m` (or a
+  literal key `"m"`); the lowering lists them in `ir::Module::builtin_methods` and the backend's `String.prototype`
+  installs them over the sentinels (calls go through the prototype: it's mutable). String intrinsics
+  (`unit`/`sub`/`str_new`/`str_set`/`to_string`). String → number (F20) is `$$StringToNumber` in the prelude, a
+  hook the runtime's `$to_number` calls; kept when the IR has a JsVal → f64 conversion or `==` on JS values.
+- 2026-09-26: pipeline for prototype methods works: `builtins/string.js`; `Prelude::new(program, extra)` keeps
+  `$$B_prototype_m` when a property `m` is named, `$$f` for a global `f`; `ir::Module::{builtin_methods,
+  string_to_number}`; `Cx::{builtin_methods, string_to_number}` in the backend (`object::proto` installs them,
+  `$to_number` calls the hook). New IR: `Intrinsic::{StrUnit, StrSub, StrNew, StrSet, JsLess, Trap}`
+  (`JsLess` = `<`/`>`/`<=`/`>=` on two JS values, strings by code units). `ir::visit_exprs` moved to `ir`.
+  Pitfalls found: prelude methods' params must be observed `Any` (only called through the prototype), and a
+  `for (;;)` with only inner returns needs a trailing `return` (else the result joins `undefined`: `Any`).
+- 2026-09-26: `builtins/string.js` written (methods, StringToNumber, parseInt/parseFloat, Number statics,
+  toString(radix), toFixed). Bug found: facts keyed by `FuncId` went stale when StringToNumber was added as a
+  root (ids shift): that round now starts the kinds over. Fixtures string-methods/string-number pass; stress
+  check vs node identical. Library test, unsupported tests updated; docs (D5, keywords.md, README) updated.
+- 2026-09-26: slice 2 done (see Notes / Result). Full runs: cargo test all ok, diff.sh 70/0/10.

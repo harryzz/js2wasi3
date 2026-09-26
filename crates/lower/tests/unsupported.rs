@@ -86,6 +86,21 @@ fn builtins_prelude() {
         one("export function f() { return Math.random(); }"),
         "1:30 unsupported: `Math.random` in a module with exports (planned: T20)"
     );
+    // Slice 2: strings and numbers. String → number is a runtime conversion now (F20).
+    lowers("export function f(s) { return s.slice(1).length + parseInt('7') + ('5' * 2); }");
+    lowers("export function f(n) { return String(n).padStart(3, '0').length + Number('1'); }");
+    lowers(
+        "export function f(n) { const p = parseFloat; return p('1.5') + Number.MAX_SAFE_INTEGER; }",
+    );
+    // `String`/`Number` as values and wrapper objects.
+    assert_eq!(
+        one("export function f() { const s = String; return 1; }"),
+        "1:33 unsupported: global `String` (planned: T21)"
+    );
+    assert_eq!(
+        one("export function f() { return new Number(1); }"),
+        "1:34 unsupported: global `Number` (planned: T21)"
+    );
 }
 
 #[test]
@@ -159,11 +174,11 @@ fn declarations_and_functions() {
 
 #[test]
 fn all_errors_are_reported() {
-    let e = errors("export function f() {\n  let s = 'a' * 2;\n  new Map();\n  return /a/;\n}");
+    let e = errors("export function f() {\n  let s = new.target;\n  new Map();\n  return /a/;\n}");
     assert_eq!(
         e,
         vec![
-            "2:11 unsupported: converting a string to a number (planned: T21)",
+            "2:11 unsupported: `new.target` outside a class constructor (planned: later)",
             "3:7 unsupported: global `Map` (planned: T21)",
             "4:10 unsupported: expression `RegExpLiteral` (planned: later)",
         ]

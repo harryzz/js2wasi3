@@ -54,7 +54,9 @@ mod timers;
 use std::collections::HashMap;
 
 use anyhow::{Context, bail};
-use js2wasi3_ir::{self as ir, AbiType, BinOp, Const, Expr, Intrinsic, LabelId, Stmt, Type, UnOp};
+use js2wasi3_ir::{
+    self as ir, AbiType, BinOp, Const, Expr, Intrinsic, LabelId, Stmt, Type, UnOp, visit_exprs,
+};
 use wasm_encoder::{
     BlockType, Catch, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
     Elements, ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType,
@@ -71,6 +73,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         );
     }
     check_supported(module)?;
+    if let Some(f) = module.string_to_number {
+        let f = module.function(f);
+        if f.params != 1 || f.locals[0].ty != Type::JsVal || f.result != Some(Type::F64) {
+            bail!("internal error: the prelude's StringToNumber must be (jsval) -> f64");
+        }
+    }
 
     // A command (`wasi:cli/run`) always has the JS runtime and memory (for output buffers).
     let command = module.main;
@@ -547,80 +555,6 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
     }
 }
 
-/// Call `f` on every expression in `list`, outer ones first.
-fn visit_exprs(list: &[Stmt], f: &mut dyn FnMut(&Expr)) {
-    fn expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
-        f(e);
-        match e {
-            Expr::Const(_) | Expr::Local(_) | Expr::Global(_) | Expr::Str(_) => {}
-            Expr::Tee(_, a)
-            | Expr::Unary { arg: a, .. }
-            | Expr::Convert { arg: a, .. }
-            | Expr::TypeofIs { arg: a, .. }
-            | Expr::Suspend { arg: a, .. } => expr(a, f),
-            Expr::Binary { lhs, rhs, .. } => {
-                expr(lhs, f);
-                expr(rhs, f);
-            }
-            Expr::Cond {
-                cond, then, els, ..
-            } => {
-                expr(cond, f);
-                expr(then, f);
-                expr(els, f);
-            }
-            Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {
-                args.iter().for_each(|a| expr(a, f))
-            }
-            Expr::Seq { body, value } => {
-                visit_exprs(body, f);
-                expr(value, f);
-            }
-            Expr::Closure(c) => c.env.iter().for_each(|a| expr(a, f)),
-            Expr::Array(elems) => elems.iter().flatten().for_each(|a| expr(a, f)),
-            Expr::CallRef {
-                callee, this, args, ..
-            } => {
-                expr(callee, f);
-                expr(this, f);
-                args.iter().for_each(|a| expr(a, f));
-            }
-            Expr::New {
-                callee,
-                new_target,
-                args,
-                ..
-            } => {
-                expr(callee, f);
-                new_target.iter().for_each(|a| expr(a, f));
-                args.iter().for_each(|a| expr(a, f));
-            }
-        }
-    }
-    for s in list {
-        match s {
-            Stmt::Expr(e)
-            | Stmt::Set(_, e)
-            | Stmt::SetGlobal(_, e)
-            | Stmt::Return(Some(e))
-            | Stmt::Throw(e) => expr(e, f),
-            Stmt::Block { body, .. } | Stmt::Loop { body, .. } => visit_exprs(body, f),
-            Stmt::If { cond, then, els } => {
-                expr(cond, f);
-                visit_exprs(then, f);
-                visit_exprs(els, f);
-            }
-            Stmt::Try {
-                body, catch_body, ..
-            } => {
-                visit_exprs(body, f);
-                visit_exprs(catch_body, f);
-            }
-            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None) => {}
-        }
-    }
-}
-
 // ---- emitter -------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -721,6 +655,20 @@ impl runtime::Cx for Emitter<'_> {
         if !self.declared.contains(&index) {
             self.declared.push(index);
         }
+    }
+
+    fn string_to_number(&mut self) -> Option<u32> {
+        self.m.string_to_number.map(|f| self.func_base + f.0)
+    }
+
+    fn builtin_methods(&mut self, b: ir::Builtin) -> Vec<(String, u32, u32)> {
+        let base = self.func_base;
+        self.m
+            .builtin_methods
+            .iter()
+            .filter(|m| m.proto == b)
+            .map(|m| (m.key.clone(), base + m.code.0, m.length))
+            .collect()
     }
 
     fn main_func(&mut self) -> (u32, bool) {
@@ -1109,7 +1057,11 @@ impl Emitter<'_> {
                         Intrinsic::Concat
                             | Intrinsic::ConsoleWrite { .. }
                             | Intrinsic::StringLength
-                    ) {
+                    ) || (matches!(
+                        op,
+                        Intrinsic::StrUnit | Intrinsic::StrSub | Intrinsic::StrSet
+                    ) && i == 0)
+                    {
                         s.ref_cast_non_null(runtime::string());
                     }
                     if matches!(op, Intrinsic::KeysLen | Intrinsic::KeysGet) && i == 0 {
@@ -1234,7 +1186,10 @@ impl Emitter<'_> {
                         return Ok(true);
                     }
                     Intrinsic::F64Hi => {
-                        s.i64_reinterpret_f64().i64_const(32).i64_shr_u().i32_wrap_i64();
+                        s.i64_reinterpret_f64()
+                            .i64_const(32)
+                            .i64_shr_u()
+                            .i32_wrap_i64();
                         return Ok(true);
                     }
                     Intrinsic::F64Lo => {
@@ -1245,6 +1200,22 @@ impl Emitter<'_> {
                         s.call(host::import(host::Import::InsecureRandom))
                             .i32_wrap_i64();
                         return Ok(true);
+                    }
+                    Intrinsic::StrUnit => {
+                        s.array_get_u(runtime::T_STRING);
+                        return Ok(true);
+                    }
+                    Intrinsic::StrNew => {
+                        s.array_new_default(runtime::T_STRING);
+                        return Ok(true);
+                    }
+                    Intrinsic::StrSet => {
+                        s.array_set(runtime::T_STRING);
+                        return Ok(false);
+                    }
+                    Intrinsic::Trap => {
+                        s.unreachable();
+                        return Ok(false);
                     }
                     _ => {}
                 }
@@ -1271,7 +1242,16 @@ impl Emitter<'_> {
                     | Intrinsic::F64Hi
                     | Intrinsic::F64Lo
                     | Intrinsic::F64FromWords
-                    | Intrinsic::RandomSeed => unreachable!("inline"),
+                    | Intrinsic::RandomSeed
+                    | Intrinsic::StrUnit
+                    | Intrinsic::StrNew
+                    | Intrinsic::StrSet
+                    | Intrinsic::Trap => unreachable!("inline"),
+                    Intrinsic::StrSub => H::StrSub,
+                    Intrinsic::JsLess { swap, or_equal } => H::JsLess {
+                        swap: *swap,
+                        or_equal: *or_equal,
+                    },
                     Intrinsic::ArrayPush => H::Arr(array::Helper::Push),
                     Intrinsic::ArraySpread => H::Iter(iter::Helper::Spread),
                     Intrinsic::IterOpen => H::Iter(iter::Helper::Open),

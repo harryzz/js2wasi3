@@ -248,6 +248,21 @@ fn closures_in_a_library() {
     }
 }
 
+/// T21: prelude built-ins in a library (string → number, string methods, `parseFloat`).
+#[test]
+fn builtins_in_a_library() {
+    let out = out_dir("builtins").join("lib.wasm");
+    let b = build(&fixture("builtins/lib.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    for (call, want) in [
+        ("times(3)", "15"),
+        ("shout(\"  hi \")", "ok(\"HI!!!!\")"),
+        ("parse(\"2.5e1\")", "ok(27)"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+}
+
 /// T12 acceptance: a Wasm trap (here the unimplemented `%` format string) is not a JS exception:
 /// neither `catch` nor `finally` runs, and the command fails with the trap.
 #[test]

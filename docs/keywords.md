@@ -20,11 +20,11 @@ table in [`tasks/README.md`](../tasks/README.md).
 | | ✅ | 🟡 | ❌ | ➖ |
 |---|---|---|---|---|
 | Keywords (66 entries) | 27 | 11 | 4 | 24 |
-| Built-in objects, properties, methods (20) | 7 | 6 | 7 | – |
-| Window/HTML, Java, event handlers | the timer functions ✅; `parseInt`/`parseFloat`/`encodeURI*`/`escape`… ❌ | | | the rest ➖ |
+| Built-in objects, properties, methods (20) | 7 | 8 | 5 | – |
+| Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
-What's most needed, in order: the built-in library (`Number`, `String`, `Object`/`Array` statics and
-prototype methods, `parseInt`…: T21), `arguments` (F42), spread into `console.log` and calls through `console.log`
+What's most needed, in order: the rest of the built-in library (`Object`/`Array` statics and prototype
+methods, `JSON`: T21), `arguments` (F42), spread into `console.log` and calls through `console.log`
 as a value, `typeof` of an undeclared name, then the language gaps below (async generators, `for await`, tagged
 templates, regex, multi-file `import`).
 
@@ -119,11 +119,11 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 | `Math` | 🟡 | T21: every function and constant, matching node bit for bit except `pow`/`**` (last-bit differences on some inexact results: F77). `Math` itself as a value (`console.log(Math)`, `const M = Math`) is rejected (F81); `Math.random` only in commands (F83). |
 | `NaN` | ✅ | |
 | `name` | ✅ | Functions, classes, methods, accessors (`get x`), inferred names. |
-| `Number` | ❌ | `Number(x)` and the statics are rejected; number methods (`toFixed`, `toString(radix)`, …) trap when called (T21). String → number conversion is rejected or traps (F20). |
+| `Number` | 🟡 | T21: `Number(x)`, string → number (correctly rounded), `isNaN`/`isFinite`/`isInteger`/`isSafeInteger`, `parseInt`/`parseFloat`, the constants, `toString(radix)` and `toFixed` (like node's digits). Missing: `toPrecision`, `toExponential`, `toLocaleString`, `Number` as a value, `new Number` (F88); exact non-decimal parsing past 2^53 (F89). |
 | `Object` | 🟡 | `Object.keys`/`values`/`entries`, `defineProperty`, `getOwnPropertyDescriptor`, `freeze`/`seal`/`preventExtensions` and their tests, `getPrototypeOf`/`setPrototypeOf`, `create` (no descriptors). Missing: `assign`, `fromEntries`, `getOwnPropertySymbols`… (F39, F53); `Object(...)` as a function. |
 | `prototype` | ✅ | Function and class `prototype`, prototype chains, `Object.create`. |
-| `String` | ❌ | `String(x)` is rejected (use `"" + x` or a template); **string methods (`slice`, `indexOf`, …) trap when called** (T21). Concatenation, templates, `length`, indexing and iteration work. |
-| `toString` | 🟡 | User `toString` is called by ToPrimitive (T16); arrays' `toString` works. Built-in `toString` of numbers and plain objects traps when called directly (F37, T21); implicit string conversion (`"" + x`, templates) works. |
+| `String` | 🟡 | T21: `String(x)`, `String.fromCharCode`/`fromCodePoint`, and `at`, `charAt`, `charCodeAt`, `codePointAt`, `concat`, `endsWith`, `includes`, `indexOf`, `lastIndexOf`, `padEnd`/`padStart`, `repeat`, `replace`/`replaceAll` (string patterns), `slice`, `split` (string separators), `startsWith`, `substring`/`substr`, `toLowerCase`/`toUpperCase` (common scripts; others trap), `trim*`, `isWellFormed`/`toWellFormed`, `toString`/`valueOf`; `<`/`>` compare strings. Missing: `localeCompare`, `normalize`, RegExp methods (`match`, `search`, regex `split`/`replace`), `String` as a value, `new String` (F87, F88). |
+| `toString` | 🟡 | User `toString` is called by ToPrimitive (T16); arrays' `toString` works. Numbers' `toString(radix)` works (T21); plain objects' built-in `toString` traps when called directly (F37, T21); implicit string conversion (`"" + x`, templates) works. |
 | `undefined` | ✅ | |
 | `valueOf` | ✅ | User `valueOf` is called by ToPrimitive (hint-aware). Calling the built-in one directly traps (F37). |
 
@@ -141,8 +141,8 @@ node/WASI globals:
 
 | Word | Status | Notes |
 |---|---|---|
-| `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` | ✅ | T19, on the P3 event loop (commands only; libraries: T20). Timeout objects are plain objects (F74); string delays trap (F20). |
+| `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` | ✅ | T19, on the P3 event loop (commands only; libraries: T20). Timeout objects are plain objects (F74); a string delay traps if nothing else converts to a number (F85). |
 | `constructor` | ✅ | Classes, functions, built-in prototypes. |
-| `parseInt`, `parseFloat` | ❌ | Rejected (T21). |
+| `parseInt`, `parseFloat` | ✅ | T21 (also `isNaN`, `isFinite`). Non-decimal `parseInt` past 2^53 isn't correctly rounded (F89). |
 | `decodeURI`, `decodeURIComponent`, `encodeURI`, `encodeURIComponent`, `escape`, `unescape` | ❌ | Rejected (T21). |
 | `crypto` | ❌ | Not provided (a WASI `random` import would back `crypto.getRandomValues`; not planned yet). |

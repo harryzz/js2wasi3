@@ -252,10 +252,7 @@ impl V<'_> {
                 let (l, r) = (self.value("binary lhs", lhs), self.value("binary rhs", rhs));
                 self.expect(&format!("{op:?} lhs"), l, *ty);
                 self.expect(&format!("{op:?} rhs"), r, *ty);
-                let f64_only = matches!(
-                    op,
-                    BinOp::Pow | BinOp::Min | BinOp::Max | BinOp::CopySign
-                );
+                let f64_only = matches!(op, BinOp::Pow | BinOp::Min | BinOp::Max | BinOp::CopySign);
                 let ok = match ty {
                     Type::I32 => !f64_only,
                     Type::F64 => !matches!(

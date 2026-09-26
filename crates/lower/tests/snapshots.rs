@@ -35,14 +35,3 @@ fn fixtures_match_ir_snapshots() {
     }
     assert_eq!(checked, 3);
 }
-
-#[test]
-fn string_to_number_is_rejected_precisely() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/unsupported");
-    let err = lower_file(&dir.join("string-to-number.js"))
-        .expect_err("string to number isn't supported yet");
-    assert_eq!(
-        err,
-        "string-to-number.js:3:10: error: unsupported: converting a string to a number (planned: T21)"
-    );
-}

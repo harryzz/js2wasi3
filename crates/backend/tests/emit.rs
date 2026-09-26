@@ -26,7 +26,13 @@ fn fixtures() -> PathBuf {
 
 /// Run an exported function in wasmtime and return its printed result.
 fn invoke(bytes: &[u8], func: &str, args: &[&str]) -> String {
-    let dir = std::env::temp_dir().join(format!("js2wasi3-backend-{}-{func}", std::process::id()));
+    // Unique per call: tests run in parallel and several invoke `check`.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "js2wasi3-backend-{}-{func}-{n}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("m.wasm");
     std::fs::write(&path, bytes).unwrap();

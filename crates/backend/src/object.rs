@@ -1130,7 +1130,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         }
         _ => Vec::new(),
     };
-    let real: Vec<(u32, u32, u32, i32)> = real
+    let mut real: Vec<(u32, u32, u32, i32)> = real
         .into_iter()
         .map(|(h, key, name, len)| {
             let code = cx.helper(h);
@@ -1139,6 +1139,12 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             (key, cx.str(name), code, len)
         })
         .collect();
+    // Methods written in the prelude (T21).
+    for (key, code, len) in cx.builtin_methods(b) {
+        cx.declare_func(code);
+        let key = cx.str(&key);
+        real.push((key, key, code, len as i32));
+    }
     let new_function = cx.helper(runtime::Helper::Func(func::Helper::New));
     // `length: 0` (Function.prototype, Array.prototype).
     let length = matches!(b, Builtin::Function | Builtin::Array).then(|| cx.str("length"));
@@ -2343,8 +2349,8 @@ fn error_to_string(cx: &mut dyn Cx) -> Function {
 }
 
 /// `$object_to_number(o)`: ToNumber of ToPrimitive(o, number). A string result: `""` is 0; one
-/// starting with `[` or a letter other than `I` can't be numeric: NaN. Other strings would need
-/// string parsing (F20): trap.
+/// starting with `[` or a letter other than `I` can't be numeric: NaN (no parsing needed); other
+/// strings go through `$to_number` (the prelude's StringToNumber, T21).
 fn object_to_number(cx: &mut dyn Cx) -> Function {
     let to_primitive = h(cx, Helper::ToPrimitive);
     let to_number = rh(cx, runtime::Helper::ToNumber);
@@ -2385,7 +2391,7 @@ fn object_to_number(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.f64_const(f64::NAN.into()).return_();
     s.end();
-    s.unreachable();
+    s.local_get(P).call(to_number);
     s.end();
     f
 }

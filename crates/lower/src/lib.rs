@@ -35,8 +35,9 @@
 //! and `++`/`--` on properties, `delete`, `in`, `for-in`, `instanceof` with `Object` or a native
 //! error constructor, `Object.create`/`getPrototypeOf`/`hasOwn`, `B.prototype`. The runtime does
 //! the rest (`crates/backend/src/object.rs`); property values are `jsval` of kind `Any`.
-//! Converting a string to a number (`"5" * 2`, `"a" < "b"`) is rejected when the operand is known
-//! to be a string, and traps at run time otherwise (F20).
+//! Converting a string to a number (`"5" * 2`) goes through the runtime's ToNumber, which calls the
+//! prelude's StringToNumber (T21); `<`/`>`/`<=`/`>=` on two JS values is `Intrinsic::JsLess`
+//! (strings compare by code units).
 //!
 //! **Functions** (T14): nested function declarations (hoisted to the start of their block), function
 //! expressions, arrow functions and object-literal methods are values; so are top-level functions
@@ -65,7 +66,10 @@
 //! `Suspend` left. Exported generator functions are rejected (T20).
 //!
 //! **Built-ins** (T21): the prelude (JS in `builtins/`, see [`builtins`]) is parsed with the user's
-//! code; `Math.x(…)` is a direct call of its `$$Math_x`, `Math.<constant>` a number.
+//! code; `Math.x(…)` is a direct call of its `$$Math_x`, `Math.<constant>` a number, `parseInt(…)` a
+//! direct call of `$$parseInt`. Prototype methods (`$$String_prototype_slice`) go into
+//! `ir::Module::builtin_methods`; the StringToNumber hook is kept when the IR can convert a JS value
+//! to a number (another round with it as a root, [`Facts::string_to_number`]).
 //!
 //! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
 //! that converts (box an `f64`, ToNumber / ToString of the result).
@@ -118,8 +122,13 @@ pub use builtins::{PRELUDE, parse};
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
     let mut facts = Facts::default();
     let an = closures::analyze(&program.semantic);
-    let prelude = builtins::Prelude::new(program);
     loop {
+        let extra: &[&str] = if facts.string_to_number {
+            &[builtins::STRING_TO_NUMBER]
+        } else {
+            &[]
+        };
+        let prelude = builtins::Prelude::new(program, extra);
         let mut l = Lowerer {
             p: program,
             prelude: &prelude,
@@ -214,6 +223,8 @@ impl Kind {
 struct Facts {
     kinds: HashMap<Slot, Kind>,
     string_params: HashSet<SymbolId>,
+    /// The IR may convert a string to a number: keep the prelude's StringToNumber (T21).
+    string_to_number: bool,
 }
 
 /// Boundary types from an exported function's JSDoc.
@@ -415,8 +426,8 @@ enum Call {
     Value,
     /// `console.log(…)` and co. (no result).
     Console,
-    /// A prelude intrinsic (T21): an `f64`.
-    Number,
+    /// A prelude intrinsic (T21) with a result of this kind (`None`: no result).
+    Intrinsic(Option<Kind>),
 }
 
 /// A `break`/`continue` target.
@@ -619,11 +630,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Some(Facts {
                 kinds: HashMap::new(),
                 string_params,
+                string_to_number: self.facts.string_to_number,
+            });
+        }
+        if !self.facts.string_to_number && self.may_convert_string() {
+            // More prelude functions: function ids (in result slots) change, so start the kinds
+            // over. This happens once.
+            return Some(Facts {
+                kinds: HashMap::new(),
+                string_params,
+                string_to_number: true,
             });
         }
         let mut next = Facts {
             kinds: self.facts.kinds.clone(),
             string_params,
+            string_to_number: self.facts.string_to_number,
         };
         let mut changed = false;
         for (s, k) in &self.seen {
@@ -636,6 +658,25 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         changed.then_some(next)
     }
 
+    /// Can the IR so far call ToNumber on a string (a `JsVal` → `f64` conversion, `==` on JS
+    /// values, `JsLess`)? Then the runtime needs the prelude's StringToNumber.
+    fn may_convert_string(&self) -> bool {
+        let mut found = false;
+        for f in &self.module.functions {
+            ir::visit_exprs(&f.body, &mut |e| {
+                found |= match e {
+                    Expr::Convert { from, to, .. } => *from == Type::JsVal && *to == Type::F64,
+                    Expr::Binary { op, ty, .. } => {
+                        *ty == Type::JsVal && matches!(op, BinOp::LooseEq | BinOp::LooseNe)
+                    }
+                    Expr::Intrinsic { op, .. } => matches!(op, Intrinsic::JsLess { .. }),
+                    _ => false,
+                };
+            });
+        }
+        found
+    }
+
     /// `v` converted for storing into `slot` of type `ty`.
     fn store(&mut self, slot: Slot, ty: Type, v: Val) -> Expr {
         self.observe(slot, v.kind);
@@ -646,11 +687,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
-    /// JS ToNumber of `v`, rejected for strings (not implemented yet: F20).
+    /// JS ToNumber of `v` (a string goes through the runtime's ToNumber: the prelude's
+    /// StringToNumber, T21).
     fn num(&mut self, v: Val, span: Span) -> R<Expr> {
-        if v.kind == Kind::Str {
-            return Err(self.unsupported(span, "converting a string to a number", "T21"));
-        }
+        let _ = span;
         Ok(number_of(v))
     }
 
@@ -726,6 +766,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             self.func_params.insert(self.main.unwrap(), Vec::new());
         }
         self.declare_nested();
+        self.declare_builtin_methods();
         for e in &self.p.exports {
             if e.from.is_none()
                 && let Some(Binding::Func(f)) = e.local.as_deref().and_then(|l| self.names.get(l))
@@ -794,6 +835,44 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         // Pass 3: exports.
         for e in &self.p.exports {
             let _ = self.export(e);
+        }
+    }
+
+    /// The prelude's prototype methods in use (`$$String_prototype_slice`) and StringToNumber (T21).
+    fn declare_builtin_methods(&mut self) {
+        let mut names: Vec<(&String, &SymbolId)> = self.prelude.names.iter().collect();
+        names.sort();
+        for (name, sym) in names {
+            if !self.prelude.is_live(name) {
+                continue;
+            }
+            let Some(&func) = self.funcs.get(sym) else {
+                continue;
+            };
+            if name == builtins::STRING_TO_NUMBER {
+                // Called by the runtime with a string.
+                self.module.string_to_number = Some(func);
+                if let Some(Some(p)) = self.func_params[&func].first() {
+                    self.observe(Slot::Var(*p), Kind::Str);
+                }
+                continue;
+            }
+            let Some((b, key)) = name[2..].split_once("_prototype_") else {
+                continue;
+            };
+            let proto = Builtin::parse(b).expect("a built-in prototype");
+            let length = builtins::length(name).unwrap_or(self.fn_length[&func]);
+            // Called through the prototype: any arguments.
+            for p in self.func_params[&func].clone().into_iter().flatten() {
+                self.observe(Slot::Var(p), Kind::Any);
+            }
+            let code = self.adapter(func);
+            self.module.builtin_methods.push(ir::BuiltinMethod {
+                proto,
+                key: key.to_string(),
+                code,
+                length,
+            });
         }
     }
 
@@ -2788,6 +2867,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if self.prelude_leak(id) {
                     return Err(Unsupported);
                 }
+                if Builtin::parse(id.name.as_str()).is_none()
+                    && let Some(func) = self.builtin_global(e)
+                {
+                    // `parseInt` as a value: a function object (T21).
+                    return Ok(Val::js(self.func_value(func), Kind::Any));
+                }
                 if let Some(c) = self.global_constant(id) {
                     return Ok(val(Expr::Const(c), c.ty()));
                 }
@@ -2989,7 +3074,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let func = match kind {
                     Call::Direct(func) => func,
                     Call::Value => return Ok(Val::js(call, Kind::Any)),
-                    Call::Number => return Ok(Val::num(call)),
+                    Call::Intrinsic(Some(Kind::Num)) => return Ok(Val::num(call)),
+                    Call::Intrinsic(Some(k)) => return Ok(Val::js(call, k)),
+                    Call::Intrinsic(None) => {
+                        return Ok(Val::js(
+                            Expr::Seq {
+                                body: vec![Stmt::Expr(call)],
+                                value: Box::new(Expr::undefined()),
+                            },
+                            Kind::Any,
+                        ));
+                    }
                     // `console.log(…)` as a value: `undefined`.
                     Call::Console => {
                         return Ok(Val::js(
@@ -3098,6 +3193,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     "SQRT2" => std::f64::consts::SQRT_2,
                     p => return Err(self.unsupported(span, &format!("`Math.{p}`"), "T21")),
                 };
+                Ok(Val::num(Expr::f64(v)))
+            }
+            Expression::StaticMemberExpression(sm)
+                if !sm.optional
+                    && self.is_global(&sm.object, "Number")
+                    && number_constant(&sm.property.name).is_some() =>
+            {
+                let v = number_constant(&sm.property.name).expect("checked");
                 Ok(Val::num(Expr::f64(v)))
             }
             Expression::StaticMemberExpression(sm)
@@ -3268,8 +3371,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Some((op, strict)) = eq {
             return Ok(Val::new(equality(l, r, op, strict), Type::Bool));
         }
+        // Relational operators on two JS values: strings compare as strings (T21).
+        if l.ty == Type::JsVal && r.ty == Type::JsVal {
+            let less = match b.operator {
+                B::LessThan => Some((false, false)),
+                B::GreaterThan => Some((true, false)),
+                B::LessEqualThan => Some((true, true)),
+                B::GreaterEqualThan => Some((false, true)),
+                _ => None,
+            };
+            if let Some((swap, or_equal)) = less {
+                let e = Expr::intrinsic(Intrinsic::JsLess { swap, or_equal }, vec![l.e, r.e]);
+                return Ok(Val::new(e, Type::Bool));
+            }
+        }
         // Arithmetic and relational operators on primitives: ToNumber on both operands.
-        // (`<` on two strings compares them as strings: F20.)
         let op = match b.operator {
             B::Subtraction => BinOp::Sub,
             B::Multiplication => BinOp::Mul,
@@ -3442,16 +3558,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Expression::Identifier(id) = callee
             && id.name.starts_with("__intrinsic_")
             && self.p.in_prelude(span.start)
-            && self.scoping.get_reference(id.reference_id()).symbol_id().is_none()
+            && self
+                .scoping
+                .get_reference(id.reference_id())
+                .symbol_id()
+                .is_none()
         {
-            let e = self.intrinsic_call(cx, c, &id.name["__intrinsic_".len()..])?;
-            return Ok((e, Call::Number));
+            return self.intrinsic_call(cx, c, &id.name["__intrinsic_".len()..]);
         }
         if c.arguments.iter().any(|a| a.is_spread()) {
             return self.spread_call(cx, c);
         }
-        if let Some(func) = self.builtin_static(callee) {
-            // `Math.floor(x)`: a direct call of the prelude function (T21).
+        if let Some(func) = self
+            .builtin_static(callee)
+            .or_else(|| self.builtin_global(callee))
+        {
+            // `Math.floor(x)`, `parseInt(s)`: a direct call of the prelude function (T21).
             self.check_builtin(callee.span(), func)?;
             return self.direct_call(cx, func, None, &c.arguments);
         }
@@ -3963,6 +4085,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         self.funcs.get(self.prelude.names.get(&name)?).copied()
     }
 
+    /// A global function implemented by the prelude (`parseInt` → `$$parseInt`, T21).
+    fn builtin_global(&self, e: &Expression<'a>) -> Option<FuncId> {
+        let Expression::Identifier(id) = e.without_parentheses() else {
+            return None;
+        };
+        if self
+            .scoping
+            .get_reference(id.reference_id())
+            .symbol_id()
+            .is_some()
+        {
+            return None;
+        }
+        let sym = self.prelude.names.get(&format!("$${}", id.name))?;
+        self.funcs.get(sym).copied()
+    }
+
     /// The user's code names a prelude declaration: already reported (see `run`).
     fn prelude_leak(&self, id: &IdentifierReference<'a>) -> bool {
         !self.p.in_prelude(id.span.start)
@@ -3983,11 +4122,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// `__intrinsic_<name>(…)` in the prelude (T21): an IR operation on numbers.
-    fn intrinsic_call(&mut self, cx: &mut FnCx, c: &'a CallExpression<'a>, name: &str) -> R<Expr> {
+    fn intrinsic_call(
+        &mut self,
+        cx: &mut FnCx,
+        c: &'a CallExpression<'a>,
+        name: &str,
+    ) -> R<(Expr, Call)> {
         let arity = match name {
             "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
             "min" | "max" | "copysign" | "imul" | "from_words" => 2,
             "random_seed" => 0,
+            "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
+            "trap" => 0,
+            "unit" => 2,
+            "sub" | "str_set" => 3,
             _ => return Err(self.unsupported(c.span, &format!("intrinsic `{name}`"), "T21")),
         };
         if c.arguments.len() != arity {
@@ -3999,20 +4147,62 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             if !self.command {
                 return Err(Unsupported);
             }
-            return Ok(from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![])));
+            let e = from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![]));
+            return Ok((e, Call::Intrinsic(Some(Kind::Num))));
         }
+        // String intrinsics: the first argument is a JS value (a string), the rest numbers.
+        if name == "trap" {
+            let e = Expr::intrinsic(Intrinsic::Trap, vec![]);
+            return Ok((e, Call::Intrinsic(None)));
+        }
+        let strings = matches!(name, "to_string" | "unit" | "sub" | "str_set" | "str_len");
         let mut args = Vec::new();
-        for a in &c.arguments {
+        for (i, a) in c.arguments.iter().enumerate() {
             let Some(e) = a.as_expression() else {
                 return Err(self.unsupported(a.span(), "spread argument", "T21"));
             };
             let v = self.expr(cx, e)?;
-            args.push(self.num(v, e.span())?);
+            if strings && i == 0 {
+                args.push(jsval_of(v));
+            } else {
+                args.push(self.num(v, e.span())?);
+            }
+        }
+        let str_op = |op, args: Vec<Expr>| {
+            let mut args = args.into_iter();
+            let mut out = vec![];
+            if strings {
+                out.push(args.next().expect("arity checked"));
+            }
+            out.extend(args.map(to_i32));
+            Expr::intrinsic(op, out)
+        };
+        let str_kind = Call::Intrinsic(Some(Kind::Str));
+        match name {
+            "to_string" => {
+                return Ok((str_op(Intrinsic::ToString, args), str_kind));
+            }
+            "number_to_string" => {
+                let e = Expr::intrinsic(Intrinsic::NumberToString, args);
+                return Ok((e, str_kind));
+            }
+            "str_new" => return Ok((str_op(Intrinsic::StrNew, args), str_kind)),
+            "sub" => return Ok((str_op(Intrinsic::StrSub, args), str_kind)),
+            "str_set" => return Ok((str_op(Intrinsic::StrSet, args), Call::Intrinsic(None))),
+            "str_len" => {
+                let e = Expr::intrinsic(Intrinsic::StringLength, args);
+                return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+            }
+            "unit" => {
+                let e = from_i32(str_op(Intrinsic::StrUnit, args));
+                return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+            }
+            _ => {}
         }
         let mut args = args.into_iter();
         let mut arg = || args.next().expect("arity checked");
         let mut f64_un = |op| Expr::unary(op, Type::F64, arg());
-        Ok(match name {
+        let e = match name {
             "abs" => f64_un(UnOp::Abs),
             "sqrt" => f64_un(UnOp::Sqrt),
             "floor" => f64_un(UnOp::Floor),
@@ -4039,7 +4229,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let hi = to_i32(arg());
                 Expr::intrinsic(Intrinsic::F64FromWords, vec![hi, to_i32(arg())])
             }
-        })
+        };
+        Ok((e, Call::Intrinsic(Some(Kind::Num))))
     }
 
     /// `B.prototype` for a built-in constructor `B`.
@@ -5421,6 +5612,21 @@ fn truthy(e: Expr) -> Expr {
         Expr::unary(UnOp::Abs, Type::F64, e),
         Expr::f64(0.0),
     )
+}
+
+/// `Number.<name>` constants (T21).
+fn number_constant(name: &str) -> Option<f64> {
+    Some(match name {
+        "MAX_SAFE_INTEGER" => 9007199254740991.0,
+        "MIN_SAFE_INTEGER" => -9007199254740991.0,
+        "EPSILON" => f64::EPSILON,
+        "MAX_VALUE" => f64::MAX,
+        "MIN_VALUE" => 5e-324,
+        "POSITIVE_INFINITY" => f64::INFINITY,
+        "NEGATIVE_INFINITY" => f64::NEG_INFINITY,
+        "NaN" => f64::NAN,
+        _ => return None,
+    })
 }
 
 fn to_i32(e: Expr) -> Expr {

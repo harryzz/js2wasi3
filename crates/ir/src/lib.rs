@@ -105,6 +105,22 @@ pub struct Module {
     /// The command entry point (a `wasi:cli/run` command runs it), for a module without exports.
     /// Takes no params and has no result.
     pub main: Option<FuncId>,
+    /// Built-in prototype methods implemented by the prelude (T21): installed on their prototype
+    /// in place of the sentinels.
+    pub builtin_methods: Vec<BuiltinMethod>,
+    /// The prelude's StringToNumber `(JsVal) -> F64` (T21), called by the runtime's ToNumber on a
+    /// string; without it, that traps.
+    pub string_to_number: Option<FuncId>,
+}
+
+/// A prototype method implemented in the prelude: `proto.prototype[key]` is a function object
+/// named `key` with this `length`, running `code` (the `$code` signature).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltinMethod {
+    pub proto: Builtin,
+    pub key: String,
+    pub code: FuncId,
+    pub length: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -291,7 +307,9 @@ pub enum Intrinsic {
     /// `console.log` arguments is a format string, which isn't implemented yet (F-item in T10).
     NoFormat,
     /// Append a JS string to stdout (`stderr: false`) or stderr. No result. Commands only.
-    ConsoleWrite { stderr: bool },
+    ConsoleWrite {
+        stderr: bool,
+    },
     /// `new E(message, options)` / `E(…)`: a new error object; an own `message` unless the
     /// message is `undefined`, an own `cause` if `options` is an object with one.
     NewError(ErrorKind),
@@ -401,7 +419,10 @@ pub enum Intrinsic {
     DefineField,
     /// A getter (`setter: false`) or setter of an object literal (`enumerable`) or a class. Args:
     /// object, key, function. No result.
-    DefineAccessor { setter: bool, enumerable: bool },
+    DefineAccessor {
+        setter: bool,
+        enumerable: bool,
+    },
     /// `super[key]`: args: home object, key, `this`.
     SuperGet,
     /// `super[key] = v` (no result): args: home object, key, value, `this`.
@@ -411,7 +432,9 @@ pub enum Intrinsic {
     /// Is the value the uninitialized marker? (`bool`)
     IsHole,
     /// What a constructor returning `value` gives (args: value, `this`).
-    CtorReturn { derived: bool },
+    CtorReturn {
+        derived: bool,
+    },
     /// `Object.defineProperty(o, key, desc)`.
     DefineProperty,
     /// `Object.getOwnPropertyDescriptor(o, key)`.
@@ -437,18 +460,26 @@ pub enum Intrinsic {
     PrivateHas,
     /// Add a private field (or method: read-only) to a new object (no result): args: object, private
     /// symbol, value, the TypeError message if it's already there.
-    PrivateAdd { method: bool },
+    PrivateAdd {
+        method: bool,
+    },
     /// How a generator was resumed after the `Suspend` just before (`i32`): [`RESUME_NEXT`],
     /// [`RESUME_THROW`] or [`RESUME_RETURN`]. Only in generators, before the suspension transform.
     ResumeMode,
     /// From the suspension transform (T18) on: a new generator object (prototype
     /// `%GeneratorPrototype%`) whose frame has `slots` slots and which runs `resume`, a function
     /// `(gen, mode: i32, value) -> jsval` (see [`suspend`]).
-    NewGenerator { resume: FuncId, slots: u32 },
+    NewGenerator {
+        resume: FuncId,
+        slots: u32,
+    },
     /// From the suspension transform on (T19): the frame of an `async function` call, a generator
     /// object that never reaches JS, with `slots` slots for the locals plus one more for the
     /// promise the call returns (a new pending one).
-    NewAsync { resume: FuncId, slots: u32 },
+    NewAsync {
+        resume: FuncId,
+        slots: u32,
+    },
     /// Run an async function's frame (args: the frame) up to its first `await` or its end, and
     /// return its promise. Later steps run from promise jobs; the body's result resolves the
     /// promise and an exception rejects it.
@@ -462,7 +493,9 @@ pub enum Intrinsic {
     /// Record that the generator suspends at a point (args: the generator, the point, an `i32`);
     /// the resume function then returns the value to yield (`raw`: an iterator result object
     /// passed out as is, `yield*`). No result.
-    GenSuspend { raw: bool },
+    GenSuspend {
+        raw: bool,
+    },
     /// `yield* v`: start iterating `v` (a TypeError like node's if it isn't iterable): an internal
     /// iteration state, as `IterOpen` gives.
     DelegateOpen,
@@ -478,6 +511,24 @@ pub enum Intrinsic {
     F64FromWords,
     /// 32 random bits from the host (`wasi:random/insecure`, commands only) (`i32`).
     RandomSeed,
+    /// Code unit `i` (`i32`, in range) of a JS value known to be a string (`i32`, T21).
+    StrUnit,
+    /// The code units `[start, end)` (`i32`s, in range) of a string, as a new string.
+    StrSub,
+    /// A new string of `n` (`i32`) zero code units, to be filled with `StrSet` before it escapes.
+    StrNew,
+    /// Set code unit `i` of a string made by `StrNew` (args: string, i, unit: `i32`s). No result.
+    StrSet,
+    /// JS `a < b` on two JS values (`bool`, IsLessThan with LeftFirst): ToPrimitive (hint number)
+    /// of both, then strings compare by code units, anything else as numbers (NaN: false).
+    /// `swap`: compare `b < a` (for `>`/`<=`), still converting `a` first. `or_equal`: `<=`/`>=`
+    /// (not `b < a`, NaN still false).
+    JsLess {
+        swap: bool,
+        or_equal: bool,
+    },
+    /// A Wasm trap: a built-in case the prelude doesn't implement yet. No result.
+    Trap,
 }
 
 /// [`Intrinsic::Timer`] functions.
@@ -579,6 +630,12 @@ impl Intrinsic {
             Intrinsic::F64Hi | Intrinsic::F64Lo => (&[F64], Some(I32)),
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
+            Intrinsic::StrUnit => (&[JsVal, I32], Some(I32)),
+            Intrinsic::StrSub => (&[JsVal, I32, I32], Some(JsVal)),
+            Intrinsic::StrNew => (&[I32], Some(JsVal)),
+            Intrinsic::StrSet => (&[JsVal, I32, I32], None),
+            Intrinsic::JsLess { .. } => (&[JsVal, JsVal], Some(Bool)),
+            Intrinsic::Trap => (&[], None),
         }
     }
 
@@ -682,6 +739,12 @@ impl Intrinsic {
             Intrinsic::F64Lo => "f64_lo",
             Intrinsic::F64FromWords => "f64_from_words",
             Intrinsic::RandomSeed => "random_seed",
+            Intrinsic::StrUnit => "str_unit",
+            Intrinsic::StrSub => "str_sub",
+            Intrinsic::StrNew => "str_new",
+            Intrinsic::StrSet => "str_set",
+            Intrinsic::JsLess { .. } => "js_less",
+            Intrinsic::Trap => "trap",
         }
     }
 
@@ -1173,3 +1236,77 @@ impl fmt::Display for Type {
 
 #[cfg(test)]
 mod tests;
+
+/// Call `f` on every expression in `list`, outer ones first.
+pub fn visit_exprs(list: &[Stmt], f: &mut dyn FnMut(&Expr)) {
+    fn expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+        f(e);
+        match e {
+            Expr::Const(_) | Expr::Local(_) | Expr::Global(_) | Expr::Str(_) => {}
+            Expr::Tee(_, a)
+            | Expr::Unary { arg: a, .. }
+            | Expr::Convert { arg: a, .. }
+            | Expr::TypeofIs { arg: a, .. }
+            | Expr::Suspend { arg: a, .. } => expr(a, f),
+            Expr::Binary { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            Expr::Cond {
+                cond, then, els, ..
+            } => {
+                expr(cond, f);
+                expr(then, f);
+                expr(els, f);
+            }
+            Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {
+                args.iter().for_each(|a| expr(a, f))
+            }
+            Expr::Seq { body, value } => {
+                visit_exprs(body, f);
+                expr(value, f);
+            }
+            Expr::Closure(c) => c.env.iter().for_each(|a| expr(a, f)),
+            Expr::Array(elems) => elems.iter().flatten().for_each(|a| expr(a, f)),
+            Expr::CallRef {
+                callee, this, args, ..
+            } => {
+                expr(callee, f);
+                expr(this, f);
+                args.iter().for_each(|a| expr(a, f));
+            }
+            Expr::New {
+                callee,
+                new_target,
+                args,
+                ..
+            } => {
+                expr(callee, f);
+                new_target.iter().for_each(|a| expr(a, f));
+                args.iter().for_each(|a| expr(a, f));
+            }
+        }
+    }
+    for s in list {
+        match s {
+            Stmt::Expr(e)
+            | Stmt::Set(_, e)
+            | Stmt::SetGlobal(_, e)
+            | Stmt::Return(Some(e))
+            | Stmt::Throw(e) => expr(e, f),
+            Stmt::Block { body, .. } | Stmt::Loop { body, .. } => visit_exprs(body, f),
+            Stmt::If { cond, then, els } => {
+                expr(cond, f);
+                visit_exprs(then, f);
+                visit_exprs(els, f);
+            }
+            Stmt::Try {
+                body, catch_body, ..
+            } => {
+                visit_exprs(body, f);
+                visit_exprs(catch_body, f);
+            }
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None) => {}
+        }
+    }
+}
