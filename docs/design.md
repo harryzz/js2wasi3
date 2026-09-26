@@ -121,6 +121,16 @@ Parameter and result types (`f64` / `string`) come from JSDoc or usage (T09). Se
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
 plus built-ins written in JS/TS and compiled by js2wasi3 itself, using intrinsics (T20).
+(T21: the **prelude**, `crates/lower/builtins/*.js`, is JS appended to the user's source after that source parsed
+cleanly on its own, and parsed with it as one module (`lower::parse` → `frontend::parse_with_prelude`), so it goes
+through the same lowering, inference and backend. Its top-level names start with `$$`: `$$Math_floor` implements
+`Math.floor` (a static member of an undeclared global `A.b` maps to `$$A_b`: a direct, typed call; as a value, a
+function object named `floor`). A call of an undeclared `__intrinsic_<name>(…)` in the prelude is an IR operation
+(Wasm `f64.floor`/`sqrt`/`min`/`copysign`…, the 32-bit words of an `f64`, a random seed). Only prelude declarations
+reachable from the user's code are lowered (`builtins::Prelude`: an AST scan), so a program that uses no built-in
+compiles exactly as without the prelude. Prelude variables with a literal initializer are globals (built-in
+state). User references to prelude names are rejected like unknown globals. Numeric algorithms are ports of
+what V8 uses (fdlibm), so results match node bit for bit where V8 does; see `builtins/math.js`.)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

@@ -15,7 +15,7 @@ Generators and `async`/`await` are compiled to resumable state machines by an IR
 stack-switching proposal.
 
 > **Status: early and experimental.** A good part of the language works (see below and
-> [docs/keywords.md](docs/keywords.md)). Most of the built-in library (`Math`, `JSON`, string and array methods…)
+> [docs/keywords.md](docs/keywords.md)). Most of the built-in library (`JSON`, string and array methods…; `Math` is done)
 > doesn't exist yet. Unsupported code is rejected at build time with a clear diagnostic rather than
 > miscompiled. The known exception, built-in methods that crash when called, is listed in the docs.
 
@@ -60,7 +60,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Timers (`setTimeout`, `setInterval`, `clear*`) on the WASI 0.3 event loop, using `wasi:clocks`.
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
-Not yet: most built-ins (`Math`, `JSON`, `Date`, `Map`/`Set`, string/array/number methods), `arguments`, regex,
+Not yet: most built-ins (`JSON`, `Date`, `Map`/`Set`, string/array/number methods), `arguments`, regex,
 async generators and `for await`, multi-file `import`, and richer WIT types at the boundary (records, lists,
 async exports). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.

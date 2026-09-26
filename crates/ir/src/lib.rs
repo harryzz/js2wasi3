@@ -471,6 +471,13 @@ pub enum Intrinsic {
     /// (TypeErrors as in the spec), or the uninitialized marker (`Hole`) for a `return` when the
     /// inner iterator has no `return` method.
     DelegateStep,
+    /// The high (`F64Hi`) or low 32 bits of an `f64` (`i32`, T21).
+    F64Hi,
+    F64Lo,
+    /// The `f64` with these high and low 32 bits.
+    F64FromWords,
+    /// 32 random bits from the host (`wasi:random/insecure`, commands only) (`i32`).
+    RandomSeed,
 }
 
 /// [`Intrinsic::Timer`] functions.
@@ -569,6 +576,9 @@ impl Intrinsic {
             Intrinsic::GenSuspend { .. } => (&[JsVal, I32], None),
             Intrinsic::DelegateOpen => (&[JsVal], Some(JsVal)),
             Intrinsic::DelegateStep => (&[JsVal, I32, JsVal], Some(JsVal)),
+            Intrinsic::F64Hi | Intrinsic::F64Lo => (&[F64], Some(I32)),
+            Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
+            Intrinsic::RandomSeed => (&[], Some(I32)),
         }
     }
 
@@ -668,6 +678,10 @@ impl Intrinsic {
             Intrinsic::GenSuspend { raw: true } => "gen_suspend_raw",
             Intrinsic::DelegateOpen => "delegate_open",
             Intrinsic::DelegateStep => "delegate_step",
+            Intrinsic::F64Hi => "f64_hi",
+            Intrinsic::F64Lo => "f64_lo",
+            Intrinsic::F64FromWords => "f64_from_words",
+            Intrinsic::RandomSeed => "random_seed",
         }
     }
 
@@ -817,6 +831,15 @@ pub enum UnOp {
     Not,
     /// `I32`: bitwise not.
     BitNot,
+    /// `F64` (T21): square root, rounding (IEEE, as Wasm's `f64.floor` …), `Fround`: to the nearest
+    /// `f32` and back.
+    Sqrt,
+    Floor,
+    Ceil,
+    Trunc,
+    Fround,
+    /// `I32` (T21): count leading zeros.
+    Clz,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -848,6 +871,11 @@ pub enum BinOp {
     LooseEq,
     /// `JsVal` only: JS `!=`.
     LooseNe,
+    /// `F64` only (T21): Wasm's `f64.min`/`max` (NaN if either is NaN, `-0 < +0`, as JS
+    /// `Math.min`/`max` of two numbers) and `copysign` (`lhs` with the sign of `rhs`).
+    Min,
+    Max,
+    CopySign,
 }
 
 impl BinOp {

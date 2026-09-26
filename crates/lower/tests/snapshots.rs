@@ -4,13 +4,13 @@
 
 use std::path::Path;
 
-use js2wasi3_frontend::{self as frontend, Allocator};
+use js2wasi3_frontend::Allocator;
 
 fn lower_file(path: &Path) -> Result<String, String> {
     let source = std::fs::read_to_string(path).unwrap();
     let alloc = Allocator::default();
     let name = path.file_name().unwrap().to_str().unwrap();
-    let program = frontend::parse(&alloc, name, &source).map_err(|d| d.to_string())?;
+    let program = js2wasi3_lower::parse(&alloc, name, &source).map_err(|d| d.to_string())?;
     js2wasi3_lower::lower(&program)
         .map(|m| m.to_string())
         .map_err(|d| d.to_string())

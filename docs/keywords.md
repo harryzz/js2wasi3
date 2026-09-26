@@ -23,7 +23,7 @@ table in [`tasks/README.md`](../tasks/README.md).
 | Built-in objects, properties, methods (20) | 7 | 6 | 7 | – |
 | Window/HTML, Java, event handlers | the timer functions ✅; `parseInt`/`parseFloat`/`encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
-What's most needed, in order: the built-in library (`Math`, `Number`, `String`, `Object`/`Array` statics and
+What's most needed, in order: the built-in library (`Number`, `String`, `Object`/`Array` statics and
 prototype methods, `parseInt`…: T21), `arguments` (F42), spread into `console.log` and calls through `console.log`
 as a value, `typeof` of an undeclared name, then the language gaps below (async generators, `for await`, tagged
 templates, regex, multi-file `import`).
@@ -116,7 +116,7 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 | `isNaN` | ❌ | Rejected (T21). |
 | `isPrototypeOf` | 🟡 | Traps when called (F37, T21). |
 | `length` | ✅ | Strings, arrays, functions. |
-| `Math` | ❌ | Rejected (T21). `**` works (T24; last-bit differences vs node on some inexact results: F77). |
+| `Math` | 🟡 | T21: every function and constant, matching node bit for bit except `pow`/`**` (last-bit differences on some inexact results: F77). `Math` itself as a value (`console.log(Math)`, `const M = Math`) is rejected (F81); `Math.random` only in commands (F83). |
 | `NaN` | ✅ | |
 | `name` | ✅ | Functions, classes, methods, accessors (`get x`), inferred names. |
 | `Number` | ❌ | `Number(x)` and the statics are rejected; number methods (`toFixed`, `toString(radix)`, …) trap when called (T21). String → number conversion is rejected or traps (F20). |

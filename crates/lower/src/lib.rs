@@ -64,6 +64,9 @@
 //! [`generators`]. [`lower`] finishes with `ir::suspend::lower_generators`, so its IR has no
 //! `Suspend` left. Exported generator functions are rejected (T20).
 //!
+//! **Built-ins** (T21): the prelude (JS in `builtins/`, see [`builtins`]) is parsed with the user's
+//! code; `Math.x(…)` is a direct call of its `$$Math_x`, `Math.<constant>` a number.
+//!
 //! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
 //! that converts (box an `f64`, ToNumber / ToString of the result).
 //!
@@ -82,6 +85,7 @@
 //! position. The lowering never guesses: a construct it can't lower exactly is rejected.
 //! All diagnostics of a file are collected, not just the first.
 
+mod builtins;
 mod classes;
 mod closures;
 mod generators;
@@ -108,13 +112,17 @@ use oxc_syntax::{
 };
 use patterns::{Mode, Pat, Src};
 
+pub use builtins::{PRELUDE, parse};
+
 /// Lower a whole module. Returns every unsupported construct as a diagnostic.
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
     let mut facts = Facts::default();
     let an = closures::analyze(&program.semantic);
+    let prelude = builtins::Prelude::new(program);
     loop {
         let mut l = Lowerer {
             p: program,
+            prelude: &prelude,
             scoping: program.semantic.scoping(),
             module: ir::Module::default(),
             funcs: HashMap::new(),
@@ -229,6 +237,8 @@ enum Binding {
 
 struct Lowerer<'p, 'a> {
     p: &'p Program<'a>,
+    /// The built-ins prelude (T21).
+    prelude: &'p builtins::Prelude,
     scoping: &'p Scoping,
     module: ir::Module,
     funcs: HashMap<SymbolId, FuncId>,
@@ -405,6 +415,8 @@ enum Call {
     Value,
     /// `console.log(…)` and co. (no result).
     Console,
+    /// A prelude intrinsic (T21): an `f64`.
+    Number,
 }
 
 /// A `break`/`continue` target.
@@ -552,9 +564,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     // ---- diagnostics -------------------------------------------------------------------
 
     fn unsupported(&mut self, span: Span, what: &str, planned: &str) -> Unsupported {
-        let (line, col) = line_col(self.p.source, span.start);
+        let (mut line, col) = line_col(self.p.source, span.start);
+        let mut path = self.p.path.clone();
+        if self.p.in_prelude(span.start) {
+            // A built-in the compiler can't lower yet: a bug in the prelude.
+            path = "<builtins>".to_string();
+            line -= line_col(self.p.source, self.p.user_end + 1).0 - 1;
+        }
         self.diags.push(Diagnostic {
-            path: self.p.path.clone(),
+            path,
             line,
             col,
             message: format!("unsupported: {what} (planned: {planned})"),
@@ -663,7 +681,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     fn run(&mut self) {
         for (span, what) in self.an.unsupported.clone() {
-            self.unsupported(span, what, "later");
+            if !self.prelude.is_dead(span.start) {
+                self.unsupported(span, what, "later");
+            }
+        }
+        for (span, name) in self.prelude.user_refs.clone() {
+            self.unsupported(span, &format!("global `{name}`"), "T21");
         }
         let body = &self.p.ast.body;
         // Pass 1: declare every top-level function and global so bodies can refer to them in any order.
@@ -671,6 +694,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         // A command's top-level code, in order (everything but function declarations).
         let mut top: Vec<&'a Statement<'a>> = Vec::new();
         for stmt in body.iter() {
+            if self.p.in_prelude(stmt.span().start) {
+                // Only the needed built-ins (functions, and state variables as globals).
+                if !self.prelude.is_dead(stmt.span().start) {
+                    let _ = self.declare_top(stmt, &mut fns);
+                }
+                continue;
+            }
             if self.command
                 && !matches!(stmt, Statement::FunctionDeclaration(_))
                 && stmt.as_module_declaration().is_none()
@@ -1363,6 +1393,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let nodes = self.p.semantic.nodes();
         let root = self.scoping.root_scope_id();
         for node in nodes.iter() {
+            if self.prelude.is_dead(node.span().start) {
+                continue;
+            }
             let f = match node.kind() {
                 AstKind::Function(f) => FnAst::Func(f),
                 AstKind::ArrowFunctionExpression(a) => FnAst::Arrow(a),
@@ -1894,10 +1927,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let code = self.adapter(func);
         let f = self.module.function(func);
+        // A built-in (`$$Math_floor`) is named after its property (`floor`).
+        let name = match f.name.strip_prefix("$$") {
+            Some(n) => n.rsplit('_').next().unwrap_or(n).to_string(),
+            None => f.name.clone(),
+        };
+        let length = builtins::length(&f.name).unwrap_or(self.fn_length[&func]);
         Expr::Closure(Box::new(ir::Closure {
             code,
-            name: f.name.clone(),
-            length: self.fn_length[&func],
+            name,
+            length,
             kind: if f.flags.is_generator {
                 ir::FnKind::Generator
             } else if f.flags.is_async {
@@ -2746,6 +2785,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Ok(v)
             }
             Expression::Identifier(id) => {
+                if self.prelude_leak(id) {
+                    return Err(Unsupported);
+                }
                 if let Some(c) = self.global_constant(id) {
                     return Ok(val(Expr::Const(c), c.ty()));
                 }
@@ -2947,6 +2989,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let func = match kind {
                     Call::Direct(func) => func,
                     Call::Value => return Ok(Val::js(call, Kind::Any)),
+                    Call::Number => return Ok(Val::num(call)),
                     // `console.log(…)` as a value: `undefined`.
                     Call::Console => {
                         return Ok(Val::js(
@@ -3034,6 +3077,28 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             )),
             Expression::ClassExpression(c) => {
                 Ok(Val::js(self.class_value(cx, c, None, None)?, Kind::Any))
+            }
+            Expression::StaticMemberExpression(_) if self.builtin_static(e).is_some() => {
+                let func = self.builtin_static(e).expect("checked");
+                self.check_builtin(span, func)?;
+                Ok(Val::js(self.func_value(func), Kind::Any))
+            }
+            Expression::StaticMemberExpression(sm) if self.is_global(&sm.object, "Math") => {
+                if sm.optional {
+                    return Err(self.unsupported(span, "`Math?.x`", "later"));
+                }
+                let v = match sm.property.name.as_str() {
+                    "E" => std::f64::consts::E,
+                    "LN10" => std::f64::consts::LN_10,
+                    "LN2" => std::f64::consts::LN_2,
+                    "LOG10E" => std::f64::consts::LOG10_E,
+                    "LOG2E" => std::f64::consts::LOG2_E,
+                    "PI" => std::f64::consts::PI,
+                    "SQRT1_2" => std::f64::consts::FRAC_1_SQRT_2,
+                    "SQRT2" => std::f64::consts::SQRT_2,
+                    p => return Err(self.unsupported(span, &format!("`Math.{p}`"), "T21")),
+                };
+                Ok(Val::num(Expr::f64(v)))
             }
             Expression::StaticMemberExpression(sm)
                 if !sm.optional && self.builtin_ident(&sm.object) == Some(Builtin::Symbol) =>
@@ -3374,12 +3439,33 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Ok((self.super_call(cx, c)?.e, Call::Value));
         }
         let callee = c.callee.without_parentheses();
+        if let Expression::Identifier(id) = callee
+            && id.name.starts_with("__intrinsic_")
+            && self.p.in_prelude(span.start)
+            && self.scoping.get_reference(id.reference_id()).symbol_id().is_none()
+        {
+            let e = self.intrinsic_call(cx, c, &id.name["__intrinsic_".len()..])?;
+            return Ok((e, Call::Number));
+        }
         if c.arguments.iter().any(|a| a.is_spread()) {
             return self.spread_call(cx, c);
+        }
+        if let Some(func) = self.builtin_static(callee) {
+            // `Math.floor(x)`: a direct call of the prelude function (T21).
+            self.check_builtin(callee.span(), func)?;
+            return self.direct_call(cx, func, None, &c.arguments);
+        }
+        if let Expression::StaticMemberExpression(m) = callee
+            && self.is_global(&m.object, "Math")
+        {
+            return Err(self.unsupported(m.span, &format!("`Math.{}`", m.property.name), "T21"));
         }
         if let Expression::Identifier(id) = callee
             && let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id()
         {
+            if self.prelude_leak(id) {
+                return Err(Unsupported);
+            }
             if let Some(&func) = self.funcs.get(&sym) {
                 return self.direct_call(cx, func, None, &c.arguments);
             }
@@ -3485,7 +3571,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let (f, this, pre) = match callee.as_member_expression() {
             Some(m)
                 if !matches!(m, MemberExpression::PrivateFieldExpression(_))
-                    && self.builtin_prototype(m).is_none() =>
+                    && self.builtin_prototype(m).is_none()
+                    && self.builtin_static(callee).is_none() =>
             {
                 let (obj, key) = self.member(cx, m)?;
                 let t = cx.func.add_local("this", Type::JsVal);
@@ -3855,6 +3942,104 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .symbol_id()
             .is_none();
         global.then(|| Builtin::parse(id.name.as_str())).flatten()
+    }
+
+    /// Is `e` the undeclared global `name`?
+    fn is_global(&self, e: &Expression<'a>, name: &str) -> bool {
+        matches!(e.without_parentheses(), Expression::Identifier(id)
+            if id.name == name
+                && self.scoping.get_reference(id.reference_id()).symbol_id().is_none())
+    }
+
+    /// `A.b` (`A` an undeclared global) implemented by a prelude function (`$$A_b`, T21).
+    fn builtin_static(&self, e: &Expression<'a>) -> Option<FuncId> {
+        let Expression::StaticMemberExpression(m) = e.without_parentheses() else {
+            return None;
+        };
+        if m.optional {
+            return None;
+        }
+        let name = builtins::static_name(self.p, &m.object, &m.property.name)?;
+        self.funcs.get(self.prelude.names.get(&name)?).copied()
+    }
+
+    /// The user's code names a prelude declaration: already reported (see `run`).
+    fn prelude_leak(&self, id: &IdentifierReference<'a>) -> bool {
+        !self.p.in_prelude(id.span.start)
+            && self
+                .scoping
+                .get_reference(id.reference_id())
+                .symbol_id()
+                .is_some_and(|s| self.p.in_prelude(self.scoping.symbol_span(s).start))
+    }
+
+    /// Reject a built-in the module can't use (reported where the user's code names it).
+    fn check_builtin(&mut self, span: Span, func: FuncId) -> R<()> {
+        if self.module.function(func).name == "$$Math_random" && !self.command {
+            // It imports `wasi:random`: commands only, like the timers.
+            return Err(self.unsupported(span, "`Math.random` in a module with exports", "T20"));
+        }
+        Ok(())
+    }
+
+    /// `__intrinsic_<name>(…)` in the prelude (T21): an IR operation on numbers.
+    fn intrinsic_call(&mut self, cx: &mut FnCx, c: &'a CallExpression<'a>, name: &str) -> R<Expr> {
+        let arity = match name {
+            "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
+            "min" | "max" | "copysign" | "imul" | "from_words" => 2,
+            "random_seed" => 0,
+            _ => return Err(self.unsupported(c.span, &format!("intrinsic `{name}`"), "T21")),
+        };
+        if c.arguments.len() != arity {
+            return Err(self.unsupported(c.span, &format!("intrinsic `{name}` arity"), "T21"));
+        }
+        if name == "random_seed" {
+            // An import (`wasi:random`): commands only. `check_builtin` reported it where the
+            // user's code names `Math.random`.
+            if !self.command {
+                return Err(Unsupported);
+            }
+            return Ok(from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![])));
+        }
+        let mut args = Vec::new();
+        for a in &c.arguments {
+            let Some(e) = a.as_expression() else {
+                return Err(self.unsupported(a.span(), "spread argument", "T21"));
+            };
+            let v = self.expr(cx, e)?;
+            args.push(self.num(v, e.span())?);
+        }
+        let mut args = args.into_iter();
+        let mut arg = || args.next().expect("arity checked");
+        let mut f64_un = |op| Expr::unary(op, Type::F64, arg());
+        Ok(match name {
+            "abs" => f64_un(UnOp::Abs),
+            "sqrt" => f64_un(UnOp::Sqrt),
+            "floor" => f64_un(UnOp::Floor),
+            "ceil" => f64_un(UnOp::Ceil),
+            "trunc" => f64_un(UnOp::Trunc),
+            "fround" => f64_un(UnOp::Fround),
+            "clz32" => from_i32(Expr::unary(UnOp::Clz, Type::I32, to_i32(arg()))),
+            "hi" => from_i32(Expr::intrinsic(Intrinsic::F64Hi, vec![arg()])),
+            "lo" => from_i32(Expr::intrinsic(Intrinsic::F64Lo, vec![arg()])),
+            "min" | "max" | "copysign" => {
+                let op = match name {
+                    "min" => BinOp::Min,
+                    "max" => BinOp::Max,
+                    _ => BinOp::CopySign,
+                };
+                let a = arg();
+                Expr::binary(op, Type::F64, a, arg())
+            }
+            "imul" => {
+                let a = to_i32(arg());
+                from_i32(Expr::binary(BinOp::Mul, Type::I32, a, to_i32(arg())))
+            }
+            _ => {
+                let hi = to_i32(arg());
+                Expr::intrinsic(Intrinsic::F64FromWords, vec![hi, to_i32(arg())])
+            }
+        })
     }
 
     /// `B.prototype` for a built-in constructor `B`.
@@ -4695,6 +4880,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     fn resolve(&mut self, cx: &FnCx, id: &IdentifierReference<'a>) -> R<Var> {
         let span = id.span;
+        if self.prelude_leak(id) {
+            return Err(Unsupported);
+        }
         let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id() else {
             if id.name == "arguments" && cx.scope.is_some() {
                 return Err(self.unsupported(span, "`arguments`", "T21"));

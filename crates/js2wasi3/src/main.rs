@@ -118,7 +118,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Ir { file } => {
             let source = read(&file)?;
-            let program = frontend::parse(&alloc, &file, &source)?;
+            let program = js2wasi3_lower::parse(&alloc, &file, &source)?;
             print!("{}", js2wasi3_lower::lower(&program)?);
         }
         Cmd::Build {
@@ -132,7 +132,7 @@ fn main() -> anyhow::Result<()> {
                 None => component::WorldName::from_path(Path::new(&entry)),
             };
             let source = read(&entry)?;
-            let program = frontend::parse(&alloc, &entry, &source)?;
+            let program = js2wasi3_lower::parse(&alloc, &entry, &source)?;
             let mut ir = js2wasi3_lower::lower(&program)?;
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?

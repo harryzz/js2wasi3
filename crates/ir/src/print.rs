@@ -342,6 +342,12 @@ fn unop(op: UnOp) -> &'static str {
         UnOp::Abs => "abs",
         UnOp::Not => "not",
         UnOp::BitNot => "bitnot",
+        UnOp::Sqrt => "sqrt",
+        UnOp::Floor => "floor",
+        UnOp::Ceil => "ceil",
+        UnOp::Trunc => "trunc",
+        UnOp::Fround => "fround",
+        UnOp::Clz => "clz",
     }
 }
 
@@ -367,5 +373,8 @@ fn binop(op: BinOp) -> &'static str {
         BinOp::ShrU => "shr_u",
         BinOp::LooseEq => "loose_eq",
         BinOp::LooseNe => "loose_ne",
+        BinOp::Min => "min",
+        BinOp::Max => "max",
+        BinOp::CopySign => "copysign",
     }
 }

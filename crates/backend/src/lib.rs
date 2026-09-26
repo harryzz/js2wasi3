@@ -102,11 +102,24 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     let n = module.functions.len() as u32;
     // Imported functions come first in the function index space.
-    let func_base = if command.is_some() {
-        host::IMPORTS.len() as u32
+    let mut random = false;
+    for f in &module.functions {
+        visit_exprs(&f.body, &mut |x| {
+            random |= matches!(
+                x,
+                Expr::Intrinsic {
+                    op: Intrinsic::RandomSeed,
+                    ..
+                }
+            );
+        });
+    }
+    let import_list = if command.is_some() {
+        host::import_list(random)
     } else {
-        0
+        Vec::new()
     };
+    let func_base = import_list.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let host_base = runtime::GLOBALS + abi as u32;
     let host_globals = if command.is_some() { host::GLOBALS } else { 0 };
@@ -151,7 +164,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
 
     let mut imports = ImportSection::new();
     if command.is_some() {
-        host::imports(&mut imports, &mut |p, r| e.type_id(p, r));
+        host::imports(&mut imports, &import_list, &mut |p, r| e.type_id(p, r));
     }
     // The exception tag (`runtime::TAG`) comes with the JS runtime.
     let mut tags = TagSection::new();
@@ -301,7 +314,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut fnames = NameMap::new();
     let mut lnames = IndirectNameMap::new();
     if command.is_some() {
-        for (i, imp) in host::IMPORTS.iter().enumerate() {
+        for (i, imp) in import_list.iter().enumerate() {
             let (module, field) = imp.names();
             fnames.append(i as u32, &format!("{module}#{field}"));
         }
@@ -934,6 +947,17 @@ impl Emitter<'_> {
                     self.expr(s, frames, arg)?;
                     s.i32_eqz();
                 }
+                UnOp::Sqrt | UnOp::Floor | UnOp::Ceil | UnOp::Trunc | UnOp::Fround | UnOp::Clz => {
+                    self.expr(s, frames, arg)?;
+                    match op {
+                        UnOp::Sqrt => s.f64_sqrt(),
+                        UnOp::Floor => s.f64_floor(),
+                        UnOp::Ceil => s.f64_ceil(),
+                        UnOp::Trunc => s.f64_trunc(),
+                        UnOp::Fround => s.f32_demote_f64().f64_promote_f32(),
+                        _ => s.i32_clz(),
+                    };
+                }
             },
             Expr::Binary { op, ty, lhs, rhs } => {
                 self.expr(s, frames, lhs)?;
@@ -952,6 +976,9 @@ impl Emitter<'_> {
                         BinOp::Le => s.f64_le(),
                         BinOp::Gt => s.f64_gt(),
                         BinOp::Ge => s.f64_ge(),
+                        BinOp::Min => s.f64_min(),
+                        BinOp::Max => s.f64_max(),
+                        BinOp::CopySign => s.f64_copysign(),
                         _ => unreachable!("validator rejects {op:?} on f64"),
                     },
                     Type::I32 => match op {
@@ -973,7 +1000,11 @@ impl Emitter<'_> {
                         BinOp::Shl => s.i32_shl(),
                         BinOp::Shr => s.i32_shr_s(),
                         BinOp::ShrU => s.i32_shr_u(),
-                        BinOp::LooseEq | BinOp::LooseNe => {
+                        BinOp::LooseEq
+                        | BinOp::LooseNe
+                        | BinOp::Min
+                        | BinOp::Max
+                        | BinOp::CopySign => {
                             unreachable!("validator rejects {op:?} on i32")
                         }
                     },
@@ -1062,6 +1093,14 @@ impl Emitter<'_> {
                     && self.m.main.is_none()
                 {
                     bail!("internal error: console output in a module that isn't a command");
+                }
+                if let Intrinsic::F64FromWords = op {
+                    // (hi << 32) | (lo as u32)
+                    self.expr(s, frames, &args[0])?;
+                    s.i64_extend_i32_u().i64_const(32).i64_shl();
+                    self.expr(s, frames, &args[1])?;
+                    s.i64_extend_i32_u().i64_or().f64_reinterpret_i64();
+                    return Ok(true);
                 }
                 for (i, a) in args.iter().enumerate() {
                     self.expr(s, frames, a)?;
@@ -1194,6 +1233,19 @@ impl Emitter<'_> {
                         s.ref_is_null();
                         return Ok(true);
                     }
+                    Intrinsic::F64Hi => {
+                        s.i64_reinterpret_f64().i64_const(32).i64_shr_u().i32_wrap_i64();
+                        return Ok(true);
+                    }
+                    Intrinsic::F64Lo => {
+                        s.i64_reinterpret_f64().i32_wrap_i64();
+                        return Ok(true);
+                    }
+                    Intrinsic::RandomSeed => {
+                        s.call(host::import(host::Import::InsecureRandom))
+                            .i32_wrap_i64();
+                        return Ok(true);
+                    }
                     _ => {}
                 }
                 let h = match op {
@@ -1215,7 +1267,11 @@ impl Emitter<'_> {
                     | Intrinsic::ArgsRest(_)
                     | Intrinsic::IterValue
                     | Intrinsic::SymbolIterator
-                    | Intrinsic::IsArray => unreachable!("inline"),
+                    | Intrinsic::IsArray
+                    | Intrinsic::F64Hi
+                    | Intrinsic::F64Lo
+                    | Intrinsic::F64FromWords
+                    | Intrinsic::RandomSeed => unreachable!("inline"),
                     Intrinsic::ArrayPush => H::Arr(array::Helper::Push),
                     Intrinsic::ArraySpread => H::Iter(iter::Helper::Spread),
                     Intrinsic::IterOpen => H::Iter(iter::Helper::Open),

@@ -31,6 +31,9 @@ pub use oxc_allocator::Allocator;
 pub struct Program<'a> {
     pub path: String,
     pub source: &'a str,
+    /// Where the user's source ends in `source`: past it comes the built-ins prelude
+    /// ([`parse_with_prelude`]), if any.
+    pub user_end: u32,
     pub ast: &'a ast::Program<'a>,
     pub semantic: Semantic<'a>,
     pub exports: Vec<Export>,
@@ -116,13 +119,53 @@ pub fn parse<'a>(
     Ok(Program {
         path: path.to_string(),
         source,
+        user_end: source.len() as u32,
         ast,
         semantic: sem.semantic,
         exports,
     })
 }
 
+/// Parse `source`, then parse it again followed by `prelude` (JS source of built-ins, T21) as
+/// one module. Errors in `source` are reported as if it had been parsed alone; errors in the
+/// prelude (a conflict with a user name) point into the prelude, with the path `<builtins>`.
+pub fn parse_with_prelude<'a>(
+    alloc: &'a Allocator,
+    path: &str,
+    source: &'a str,
+    prelude: &str,
+) -> Result<Program<'a>, Diagnostics> {
+    parse(alloc, path, source)?;
+    let user_end = source.len() as u32;
+    let mut all = String::with_capacity(source.len() + 1 + prelude.len());
+    all.push_str(source);
+    // A trailing line comment in the user's source must not swallow the prelude.
+    all.push('\n');
+    all.push_str(prelude);
+    let all: &'a str = alloc.alloc_str(&all);
+    let mut program = parse(alloc, path, all).map_err(|mut d| {
+        for d in &mut d.0 {
+            let (line, _) = line_col(all, user_end + 1);
+            if d.line >= line {
+                d.path = "<builtins>".to_string();
+                d.line -= line - 1;
+                d.help = Some(format!(
+                    "{path}: a name starting with `$$` clashes with a built-in: rename it"
+                ));
+            }
+        }
+        d
+    })?;
+    program.user_end = user_end;
+    Ok(program)
+}
+
 impl<'a> Program<'a> {
+    /// Is this byte offset in the built-ins prelude (not the user's source)?
+    pub fn in_prelude(&self, offset: u32) -> bool {
+        offset > self.user_end
+    }
+
     /// The text inside the JSDoc comment (`/** ... */`, without the delimiters) that directly
     /// precedes the token starting at `offset`, if any.
     pub fn jsdoc(&self, offset: u32) -> Option<&'a str> {

@@ -231,9 +231,17 @@ impl V<'_> {
                 self.expect(&format!("{op:?} operand"), t, *ty);
                 let ok = matches!(
                     (op, ty),
-                    (UnOp::Neg | UnOp::Abs, Type::F64)
-                        | (UnOp::Not, Type::Bool)
-                        | (UnOp::BitNot, Type::I32)
+                    (
+                        UnOp::Neg
+                            | UnOp::Abs
+                            | UnOp::Sqrt
+                            | UnOp::Floor
+                            | UnOp::Ceil
+                            | UnOp::Trunc
+                            | UnOp::Fround,
+                        Type::F64
+                    ) | (UnOp::Not, Type::Bool)
+                        | (UnOp::BitNot | UnOp::Clz, Type::I32)
                 );
                 if !ok {
                     self.err(format!("{op:?} is not defined on {ty}"));
@@ -244,13 +252,18 @@ impl V<'_> {
                 let (l, r) = (self.value("binary lhs", lhs), self.value("binary rhs", rhs));
                 self.expect(&format!("{op:?} lhs"), l, *ty);
                 self.expect(&format!("{op:?} rhs"), r, *ty);
+                let f64_only = matches!(
+                    op,
+                    BinOp::Pow | BinOp::Min | BinOp::Max | BinOp::CopySign
+                );
                 let ok = match ty {
-                    Type::I32 => *op != BinOp::Pow,
+                    Type::I32 => !f64_only,
                     Type::F64 => !matches!(
                         op,
                         BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr | BinOp::ShrU
                     ),
                     Type::Bool => matches!(op, BinOp::Eq | BinOp::Ne),
+                    _ if f64_only => false,
                     Type::JsVal => {
                         matches!(op, BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe)
                     }

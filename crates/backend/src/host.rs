@@ -57,6 +57,9 @@ pub enum Import {
     WaitUntil,
     SubtaskDrop,
     SubtaskCancel,
+    /// `wasi:random/insecure.get-insecure-random-u64` (T21, `Math.random`): not in [`IMPORTS`],
+    /// imported after them only by modules that use it.
+    InsecureRandom,
 }
 
 pub const IMPORTS: [Import; 19] = [
@@ -82,6 +85,9 @@ pub const IMPORTS: [Import; 19] = [
 ];
 
 pub(crate) fn import(i: Import) -> u32 {
+    if i == Import::InsecureRandom {
+        return IMPORTS.len() as u32;
+    }
     IMPORTS.iter().position(|x| *x == i).unwrap() as u32
 }
 
@@ -120,6 +126,10 @@ impl Import {
             Import::WaitUntil => (CLOCK, "[async-lower]wait-until".into()),
             Import::SubtaskDrop => ("$root", "[subtask-drop]".into()),
             Import::SubtaskCancel => ("$root", "[subtask-cancel]".into()),
+            Import::InsecureRandom => (
+                "wasi:random/insecure@0.3.1",
+                "get-insecure-random-u64".into(),
+            ),
         }
     }
 
@@ -139,16 +149,27 @@ impl Import {
             Import::WaitUntil => (vec![I64], vec![I32]),
             Import::SubtaskDrop => (vec![I32], vec![]),
             Import::SubtaskCancel => (vec![I32], vec![I32]),
+            Import::InsecureRandom => (vec![], vec![I64]),
         }
     }
+}
+
+/// The imports of a command: [`IMPORTS`], then `extra` ([`Import::InsecureRandom`]).
+pub fn import_list(random: bool) -> Vec<Import> {
+    let mut list = IMPORTS.to_vec();
+    if random {
+        list.push(Import::InsecureRandom);
+    }
+    list
 }
 
 /// Add the imports; `type_id` gives the type index of a signature.
 pub fn imports(
     section: &mut ImportSection,
+    list: &[Import],
     type_id: &mut dyn FnMut(Vec<ValType>, Vec<ValType>) -> u32,
 ) {
-    for i in IMPORTS {
+    for &i in list {
         let (params, results) = i.signature();
         let (module, field) = i.names();
         section.import(

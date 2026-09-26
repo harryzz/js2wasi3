@@ -1,10 +1,10 @@
 //! Each rule of the supported subset rejects instead of miscompiling.
 
-use js2wasi3_frontend::{self as frontend, Allocator};
+use js2wasi3_frontend::Allocator;
 
 fn errors(src: &str) -> Vec<String> {
     let alloc = Allocator::default();
-    let program = frontend::parse(&alloc, "t.js", src).expect("valid JS");
+    let program = js2wasi3_lower::parse(&alloc, "t.js", src).expect("valid JS");
     match js2wasi3_lower::lower(&program) {
         Ok(m) => panic!("expected errors, got IR:\n{m}"),
         Err(d) => {
@@ -42,7 +42,7 @@ fn primitive_values_lower() {
         "export function f(a) { return `a${a}b` + 'c'.length; }",
     ] {
         let alloc = Allocator::default();
-        let program = frontend::parse(&alloc, "t.js", src).unwrap();
+        let program = js2wasi3_lower::parse(&alloc, "t.js", src).unwrap();
         if let Err(e) = js2wasi3_lower::lower(&program) {
             panic!("{src}\n{e}");
         }
@@ -54,8 +54,37 @@ fn arity_and_callee() {
     // T14 (F16): extra arguments are evaluated and dropped.
     lowers("function g(a) { return a; }\nexport function f() { return g(1, 2); }");
     assert_eq!(
-        one("export function f() { return Math.abs(1); }"),
-        "1:30 unsupported: global `Math` (planned: T21)"
+        one("export function f() { return JSON.stringify(1); }"),
+        "1:30 unsupported: global `JSON` (planned: T21)"
+    );
+}
+
+/// T21: the built-ins prelude is invisible to user code.
+#[test]
+fn builtins_prelude() {
+    lowers("export function f(x) { return Math.floor(x) + Math.max(x, 2) + Math.PI; }");
+    assert_eq!(
+        one("export function f() { return Math.nope(1); }"),
+        "1:30 unsupported: `Math.nope` (planned: T21)"
+    );
+    // Prelude names and intrinsics aren't globals of the user's code.
+    assert_eq!(
+        one("export function f() { return $$Math_abs(1); }"),
+        "1:30 unsupported: global `$$Math_abs` (planned: T21)"
+    );
+    assert_eq!(
+        one("export function f() { return __intrinsic_floor(1); }"),
+        "1:30 unsupported: global `__intrinsic_floor` (planned: T21)"
+    );
+    // `Math` as a value.
+    assert_eq!(
+        one("export function f() { const m = Math; return 1; }"),
+        "1:33 unsupported: global `Math` (planned: T21)"
+    );
+    // `Math.random` imports `wasi:random`: commands only.
+    assert_eq!(
+        one("export function f() { return Math.random(); }"),
+        "1:30 unsupported: `Math.random` in a module with exports (planned: T20)"
     );
 }
 
@@ -143,7 +172,7 @@ fn all_errors_are_reported() {
 
 fn lowers(src: &str) -> String {
     let alloc = Allocator::default();
-    let program = frontend::parse(&alloc, "t.js", src).unwrap();
+    let program = js2wasi3_lower::parse(&alloc, "t.js", src).unwrap();
     match js2wasi3_lower::lower(&program) {
         Ok(m) => m.to_string(),
         Err(e) => panic!("{src}\n{e}"),

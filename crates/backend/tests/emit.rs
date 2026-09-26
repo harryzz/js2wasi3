@@ -4,12 +4,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use js2wasi3_frontend::{self as frontend, Allocator};
+use js2wasi3_frontend::Allocator;
 use js2wasi3_ir as ir;
 
 fn compile(name: &str, src: &str) -> Vec<u8> {
     let alloc = Allocator::default();
-    let program = frontend::parse(&alloc, name, src).unwrap_or_else(|e| panic!("{e}"));
+    let program = js2wasi3_lower::parse(&alloc, name, src).unwrap_or_else(|e| panic!("{e}"));
     let module = js2wasi3_lower::lower(&program).unwrap_or_else(|e| panic!("{e}"));
     js2wasi3_backend::emit(&module).unwrap_or_else(|e| panic!("{e:#}"))
 }

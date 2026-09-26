@@ -1,6 +1,6 @@
 # T21: Self-hosted built-ins
 
-Status: todo | Depends on: T16 (can start after T13)
+Status: in progress | Depends on: T16 (can start after T13)
 
 ## Goal
 A pipeline that compiles built-ins written in JS/TS (with `__intrinsic_*` calls into the backend runtime) together with
@@ -11,6 +11,29 @@ user code, keeping only what's used. First batch: `Math`, `String.prototype` bas
 - A build of `hello.js` pulls in no unused built-in (check the size in the Result).
 
 ## Notes / Result
+
+### Slice 1 (2026-09-26): the pipeline + `Math` — done
+- **Pipeline** (design in D5): `crates/lower/builtins/math.js` is the prelude; `lower::parse` parses the user's
+  source alone (its diagnostics are unchanged), then user source + `\n` + prelude as one module
+  (`frontend::parse_with_prelude`, `Program::user_end`/`in_prelude`). `lower/src/builtins.rs::Prelude` finds the
+  prelude declarations reachable from the user's code (`Math.floor` → `$$Math_floor`, then references inside
+  them); `Lowerer::run` declares only those, `declare_nested` and closure-analysis diagnostics skip the rest.
+  `Math.x(…)` is a direct typed call (`Lowerer::builtin_static`), `Math.x` a function object named `x`,
+  `Math.<constant>` an `f64`. `__intrinsic_*` calls (`Lowerer::intrinsic_call`, prelude only): new IR ops
+  `UnOp::{Sqrt,Floor,Ceil,Trunc,Fround,Clz}`, `BinOp::{Min,Max,CopySign}`,
+  `Intrinsic::{F64Hi,F64Lo,F64FromWords,RandomSeed}`.
+- **`Math`**: all functions and constants. fdlibm ports (the source of V8's `ieee754.cc`, incl. V8's `exp(1)` special
+  case and the classic `e_log10.c`); `hypot` is V8's algorithm; `pow` is `**` (`backend/src/pow.rs`); `random` is
+  xorshift128+ seeded from `wasi:random/insecure` (imported only when used; commands only).
+- **Tests**: `tests/fixtures/builtins/math-{basic,fdlibm,random}.js` (diff.sh), `unsupported.rs::builtins_prelude`.
+  900 random inputs per function: identical to node 20 except `pow` (F77).
+- **Acceptance**: `hello.js` builds byte-identical to before (52174 bytes): no unused built-in is pulled in.
+- **Commands run**: `cargo test` (64 ok), `scripts/diff.sh` (68 passed, 0 failed, 9 skipped), `wasm-tools validate`.
+- **Unsupported**: `Math` as a value (F81); `Math.random` in libraries (F83); prelude speed (F82); built-ins used as
+  values make their parameters `Any` for every call (F84).
+- **Next smallest step**: slice 2 (strings). String methods live on `String.prototype`, so the reachability scan
+  needs a second rule: a property name (`.slice`) read anywhere in user code (or any computed key) keeps
+  `$$String_prototype_slice`, and `String.prototype`'s sentinels get replaced by the prelude's function objects.
 
 ## Handoff (written 2026-09-26 at the end of the T19/T24 session)
 
@@ -69,3 +92,33 @@ compiled by js2wasi3 itself, using intrinsics". Options to weigh, then record th
 - Unsupported things must be rejected at build time or trap loudly, never give a wrong value silently.
 - Follow-ups aimed at T21 in `tasks/README.md`: F20, F23, F24, F37, F39, F42 (`arguments`), F43, F47, F49, F51,
   F53, F59, F62, F64, F67, F70, F74, F77. Tick the ones each slice resolves.
+
+## Progress
+- 2026-09-26: slice 1 started. Baseline: 63 cargo tests ok, diff.sh 65 passed / 0 failed / 9 skipped.
+- 2026-09-26: design (option a, self-hosted prelude): `crates/lower/builtins/*.js` is appended to the user
+  source (after the user source alone parsed cleanly, so user diagnostics are unchanged) and parsed as one module.
+  Prelude top-level names start with `$$` (`$$Math_floor` is `Math.floor`); unresolved `__intrinsic_*(…)` calls
+  in the prelude map to IR ops / intrinsics. Only prelude functions reachable from the user code (AST scan:
+  `Math.floor` → `$$Math_floor`, then references inside needed prelude functions) are declared and lowered,
+  so programs without built-ins produce the same IR as before. Numeric kernels (sqrt/floor/ceil/trunc/min/max/
+  copysign/f64 bit words) become IR unary/binary ops; fdlibm routines are ported to JS in the prelude.
+- 2026-09-26: pipeline works. `frontend::parse_with_prelude` (+ `Program::user_end`), `lower::parse` (all callers
+  but the `parse` subcommand use it), `lower/src/builtins.rs` (`Prelude`: names, reachability, `is_dead`),
+  `Lowerer::{builtin_static, intrinsic_call}`, `Call::Number`. New IR ops: `UnOp::{Sqrt,Floor,Ceil,Trunc,Fround,Clz}`,
+  `BinOp::{Min,Max,CopySign}`, `Intrinsic::{F64Hi,F64Lo,F64FromWords}`. `builtins/math.js`: abs/floor/ceil/trunc/
+  round/sign/sqrt/fround/clz32/imul/pow/max/min/hypot; `Math.<const>` folded in the lowering; `Math.f` as a value
+  is a function object named `f`. `tests/fixtures/builtins/math-basic.js` passes diff.sh. `hello.js` is
+  byte-identical to the baseline build (52174 bytes).
+- 2026-09-26: fdlibm ported to `builtins/math.js` (sin/cos/tan with `rem_pio2` + `kernel_rem_pio2`, asin/acos/
+  atan/atan2, exp/expm1, log/log1p/log2/log10, cbrt, sinh/cosh/tanh, asinh/acosh/atanh). `math-fdlibm.js`
+  passes; log10 needed fdlibm's classic `e_log10.c` (FreeBSD's differed from node in the last bit on 2 values).
+  Ad-hoc check: 900 random inputs per function, all identical to node except `pow` (22 last-bit, F77).
+- 2026-09-26: `Math.random`: xorshift128+ in the prelude, state in prelude `let`s (prelude variables with a
+  literal initializer become globals, also in commands; reachability covers them), seeded by
+  `Intrinsic::RandomSeed` = `wasi:random/insecure.get-insecure-random-u64`, imported after the fixed imports
+  only when used (`host::import_list`); the command world lists the interface (unused → not in the component).
+  Libraries: rejected where the user names `Math.random` (T20). `math-random.js` passes.
+- 2026-09-26: rejections: `Math.nope` (T21), user references to `$$…` prelude names / `__intrinsic_*`
+  ("global"), `Math` as a value ("global `Math`"); a user `$$` name clashing with the prelude gets a help line.
+  `Math.max/min/hypot.length` = 2 (`builtins::length`). Tests: `unsupported.rs::builtins_prelude`. Full runs:
+  cargo test all ok (64), diff.sh 68 passed / 0 failed / 9 skipped.

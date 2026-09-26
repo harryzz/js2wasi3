@@ -262,14 +262,17 @@ const WASI: [(&str, &str); 5] = [
     ),
 ];
 
-/// The world of a command: it exports `wasi:cli/run` and imports stdout, stderr and (T19, timers)
-/// the monotonic clock (the core module's imports are fixed, see the backend's `host` module).
+/// The world of a command: it exports `wasi:cli/run` and imports stdout, stderr, (T19, timers)
+/// the monotonic clock and (T21, `Math.random`) `wasi:random/insecure`. The core module's imports
+/// are fixed, except `wasi:random` (see the backend's `host` module); a world import the core
+/// module doesn't use isn't in the component.
 pub fn command_world(name: WorldName) -> World {
     let wit = format!(
         "package %{}:%{};\n\nworld %{} {{\n  \
          import wasi:cli/stdout@0.3.1;\n  \
          import wasi:cli/stderr@0.3.1;\n  \
          import wasi:clocks/monotonic-clock@0.3.1;\n  \
+         import wasi:random/insecure@0.3.1;\n  \
          export wasi:cli/run@0.3.1;\n}}\n",
         name.namespace, name.package, name.world
     );
