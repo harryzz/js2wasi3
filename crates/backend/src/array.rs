@@ -445,49 +445,117 @@ fn push(cx: &mut dyn Cx) -> Function {
 /// `join`: `undefined`/`null`/holes are empty, others ToString.
 fn join(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(runtime::Helper::ToString);
-    let concat = cx.helper(runtime::Helper::Concat);
     let is_nullish = cx.helper(runtime::Helper::IsNullish);
     let empty = cx.str("");
     const A: u32 = 0;
     const SEP: u32 = 1;
     const I: u32 = 2;
-    const OUT: u32 = 3;
-    const E: u32 = 4;
-    let mut f = Function::new([(1, ValType::I32), (1, rt(true, T_STRING)), (1, jsval())]);
+    const N: u32 = 3;
+    const TOTAL: u32 = 4;
+    const POS: u32 = 5;
+    const PARTS: u32 = 6;
+    const E: u32 = 7;
+    const P: u32 = 8;
+    const R: u32 = 9;
+    let mut f = Function::new([
+        (4, ValType::I32),
+        (1, rt(true, T_KEYS)),
+        (1, jsval()),
+        (2, rt(true, T_STRING)),
+    ]);
     let mut s = f.instructions();
-    s.global_get(empty).local_set(OUT);
+    // Pass 1: each element's string, in order (ToString may run user code, which may shrink the
+    // array: an index past the current length reads as a hole), and the total length.
+    s.local_get(A)
+        .struct_get(T_ARRAY, F_LENGTH)
+        .local_tee(N)
+        .array_new_default(T_KEYS)
+        .local_set(PARTS);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.global_get(empty).local_set(P);
     s.local_get(I)
         .local_get(A)
         .struct_get(T_ARRAY, F_LENGTH)
-        .i32_ge_u()
-        .br_if(1);
-    s.local_get(I).i32_const(0).i32_gt_u();
+        .i32_lt_u();
     s.if_(BlockType::Empty);
-    s.local_get(OUT)
-        .ref_as_non_null()
-        .local_get(SEP)
-        .call(concat)
-        .local_set(OUT);
-    s.end();
     s.local_get(A)
         .struct_get(T_ARRAY, F_ELEMS)
         .local_get(I)
         .array_get(T_VALS)
         .local_tee(E);
-    s.ref_is_null();
+    s.ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
-    s.else_();
     s.local_get(E).call(is_nullish).i32_eqz();
     s.if_(BlockType::Empty);
-    s.local_get(OUT).ref_as_non_null();
-    s.local_get(E).call(to_string);
-    s.call(concat).local_set(OUT);
+    s.local_get(E).call(to_string).local_set(P);
     s.end();
     s.end();
+    s.end();
+    s.local_get(PARTS)
+        .local_get(I)
+        .local_get(P)
+        .array_set(T_KEYS);
+    s.local_get(TOTAL)
+        .local_get(P)
+        .array_len()
+        .i32_add()
+        .local_set(TOTAL);
     s.local_get(I).i32_const(1).i32_add().local_set(I);
     s.br(0).end().end();
-    s.local_get(OUT).ref_as_non_null();
+    // Pass 2: one string, the parts and separators copied in.
+    s.local_get(N).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.global_get(empty).return_();
+    s.end();
+    s.local_get(N).i32_const(1).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(PARTS)
+        .i32_const(0)
+        .array_get(T_KEYS)
+        .ref_as_non_null()
+        .return_();
+    s.end();
+    s.local_get(TOTAL)
+        .local_get(SEP)
+        .array_len()
+        .local_get(N)
+        .i32_const(1)
+        .i32_sub()
+        .i32_mul()
+        .i32_add()
+        .array_new_default(T_STRING)
+        .local_set(R);
+    s.i32_const(0).local_set(I);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(I).i32_const(0).i32_gt_u();
+    s.if_(BlockType::Empty);
+    // array.copy dst dst_off src src_off len
+    s.local_get(R).local_get(POS).local_get(SEP).i32_const(0);
+    s.local_get(SEP).array_len();
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(POS)
+        .local_get(SEP)
+        .array_len()
+        .i32_add()
+        .local_set(POS);
+    s.end();
+    s.local_get(PARTS)
+        .local_get(I)
+        .array_get(T_KEYS)
+        .local_set(P);
+    s.local_get(R).local_get(POS).local_get(P).i32_const(0);
+    s.local_get(P).array_len();
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(POS)
+        .local_get(P)
+        .array_len()
+        .i32_add()
+        .local_set(POS);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(R).ref_as_non_null();
     s.end();
     f
 }

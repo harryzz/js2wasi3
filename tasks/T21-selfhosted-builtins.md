@@ -1,6 +1,6 @@
 # T21: Self-hosted built-ins
 
-Status: in progress | Depends on: T16 (can start after T13)
+Status: done | Depends on: T16 (can start after T13)
 
 ## Goal
 A pipeline that compiles built-ins written in JS/TS (with `__intrinsic_*` calls into the backend runtime) together with
@@ -100,6 +100,43 @@ user code, keeping only what's used. First batch: `Math`, `String.prototype` bas
   intrinsic) and string quoting (`unit`/`str_new`). Then `Object.assign`/`fromEntries` as `$$Object_assign`
   (note `object_static` maps `Object.*` first: check the prelude before it, or add them there), and
   `Object.prototype.hasOwnProperty`/`isPrototypeOf`/`toString` as `$$Object_prototype_*` (F37).
+
+### Slice 4 (2026-09-26): `JSON.stringify`, `Object` statics and `Object.prototype` methods — done
+- **`crates/lower/builtins/json.js`**: `JSON.stringify(value, replacer, space)` as the spec's algorithm: `toJSON`,
+  a replacer function (called with the holder as `this`) or property list (strings/numbers, deduplicated), a gap
+  from a number (≤ 10 spaces) or string (≤ 10 units); `undefined`/functions/symbols skipped in objects and `null` in
+  arrays; non-finite numbers `null`; QuoteJSONString (short escapes, `\u00xx`, lone surrogates escaped, well-formed
+  pairs kept). Pieces go into one array joined at the end. Cycles throw node's TypeError text (the path from the
+  object that starts the cycle, V8's 2 + `...` + 1 elision, `index n` for array elements, the constructor name).
+- **`crates/lower/builtins/object.js`**: `Object.assign` (string sources give their indices), `Object.fromEntries`
+  (CreateDataProperty: `__proto__` becomes an own key), `Object.prototype` `hasOwnProperty`, `isPrototypeOf`,
+  `propertyIsEnumerable`, `toString` (`[object Undefined/Null/Number/String/Boolean/Symbol/Function/Array/Error/
+  Object]`), `toLocaleString`, `valueOf`; node's messages for `null`/`undefined`. ToPrimitive now finds the prelude's
+  `toString` on `Object.prototype` when the program names `.toString` (a real function: called like a user method).
+- **Lowering**: prelude intrinsic `define(o, k, v)` (= IR `DefineProp`); `Prelude::has_statics`: `A.b(…)` for a
+  global `A` with prelude statics but no `$$A_b` is rejected as `` `A.b` `` (was Math only; now `JSON.parse` too).
+  `Object.assign.length` is 2 (`builtins::length`).
+- **Backend**: `Array.prototype.join` (native, also used by `String(array)`) was quadratic (one concat per
+  element): now two passes (every element's string into a `$keys` list, then one allocation and `array.copy`).
+  60k pieces: 8.3 s → 0.27 s.
+- **Tests**: `tests/fixtures/builtins/{json-stringify,object-methods}.js` (diff.sh), `builtins/lib.js` `json`
+  (library), `unsupported.rs::builtins_prelude` (+ `JSON.parse` / `JSON` as a value rejected; `arity_and_callee`
+  now uses `Reflect` as its unknown global), `build.rs::unimplemented_object_features_trap` reads
+  `__lookupGetter__` (`toString` is real now).
+- **Acceptance**: `hello.js` still 52177 bytes. `.toString` anywhere now also keeps `Object.prototype.toString`
+  (+742 bytes for `(5).toString(2)`). `JSON.stringify({a: 1})` alone: 73715 bytes.
+- **Speed**: 100k + 20k small objects (8 MB of JSON): 5.3 s vs node 0.25 s, linear (~40 µs/object: calls through
+  values and property gets, F92).
+- **Commands run**: `cargo test` (all ok), `scripts/diff.sh -j 4` (73 passed, 0 failed, 10 skipped),
+  `wasm-tools validate`, `cargo clippy --all-targets`, `cargo fmt`.
+- **Unsupported / follow-ups**: F93 (`JSON.parse`, `JSON` as a value, `rawJSON`), F94 (`Object.prototype.toString`
+  without `Symbol.toStringTag`: promises/generators print `[object Object]`; `[[ErrorData]]` approximated by
+  `instanceof Error`; symbol keys skipped by `assign`), F95 (the circular message reads `constructor` and traps on
+  built-in prototypes other than Object's/Array's, e.g. a cycle through an `Error`), F92 (speed). BigInt isn't
+  supported by the compiler, so its `JSON.stringify` TypeError is untested.
+- **Next smallest step**: T21's goal (the first batch) is met. The remaining built-in follow-ups (F23, F24, F37, F42,
+  F43, F47, F51, F53, F59, F62, F64, F67, F70, F74, F81, F87, F88, F91, F93–F95) belong in a second built-ins task
+  (suggested first: `JSON.parse` in `builtins/json.js`, then `Map`/`Set`, which need a new runtime type), or T20.
 
 ## Handoff (written 2026-09-26 at the end of the T19/T24 session)
 
@@ -224,3 +261,8 @@ compiled by js2wasi3 itself, using intrinsics". Options to weigh, then record th
   `builtins/lib.js` `evens` (library). cargo test all ok, diff.sh 71/0/10, hello.js still 52177 bytes.
 - 2026-09-26: slice 3 done (see Notes / Result). `$$Array` kept only where `Array` is called. Full runs: cargo
   test 64 ok, diff.sh -j 4 71/0/10.
+- 2026-09-26: slice 4 (JSON.stringify, Object.assign/fromEntries, Object.prototype methods) started. Baseline: slice 3 committed (1dc088f).
+- 2026-09-26: `builtins/object.js` (Object.assign/fromEntries, Object.prototype hasOwnProperty/isPrototypeOf/propertyIsEnumerable/toString/toLocaleString/valueOf) and `builtins/json.js` (JSON.stringify: toJSON, replacer fn/list, gap, node's circular message) written; new prelude intrinsic `define` (= IR DefineProp). `A.nope(…)` rejection generalized from Math to any global with prelude statics (`Prelude::has_statics`). First samples run.
+- 2026-09-26: fixtures `builtins/json-stringify.js` and `builtins/object-methods.js` pass diff.sh. Fixes: `propertyIsEnumerable` on string primitives (the descriptor lookup doesn't see them); circular-message ctor name stops at Object.prototype (its `constructor` is a trapping sentinel, F37). BigInt isn't supported by the compiler, so no BigInt cases in fixtures.
+- 2026-09-26: perf: JSON.stringify of 2000 objects took 13 s: the native `Array.prototype.join` was quadratic (concat per element). Rewrote `array::join` as two passes (strings of all elements in a `$keys` list, then one allocation + array.copy): 60k pieces 8.3 s → 0.27 s. 100k+20k objects (8 MB JSON): 5.3 s vs node 0.25 s (~40 µs/object, linear; calls through values / property gets, F92).
+- 2026-09-26: tests updated (unsupported.rs, build.rs library + trap test), docs (D5, keywords.md, README). Full runs: cargo test all ok, clippy clean, diff.sh -j 4 73/0/10. Slice 4 done; T21 done (see Notes / Result).

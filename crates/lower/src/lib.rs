@@ -3538,9 +3538,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return self.direct_call(cx, func, None, &c.arguments);
         }
         if let Expression::StaticMemberExpression(m) = callee
-            && self.is_global(&m.object, "Math")
+            && let Expression::Identifier(obj) = m.object.without_parentheses()
+            && self.is_global(&m.object, &obj.name)
+            && self.prelude.has_statics(&obj.name)
         {
-            return Err(self.unsupported(m.span, &format!("`Math.{}`", m.property.name), "T21"));
+            // `Math.nope(…)`, `JSON.parse(…)`: a static the prelude doesn't implement.
+            let what = format!("`{}.{}`", obj.name, m.property.name);
+            return Err(self.unsupported(m.span, &what, "T21"));
         }
         if let Expression::Identifier(id) = callee
             && let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id()
@@ -4140,7 +4144,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
             "trap" => 0,
             "unit" => 2,
-            "sub" | "str_set" => 3,
+            "sub" | "str_set" | "define" => 3,
             _ => return Err(self.unsupported(c.span, &format!("intrinsic `{name}`"), "T21")),
         };
         if c.arguments.len() != arity {
@@ -4154,6 +4158,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             let e = from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![]));
             return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+        }
+        if name == "define" {
+            // CreateDataProperty(o, k, v) on an object.
+            let mut args = Vec::new();
+            for a in &c.arguments {
+                let Some(e) = a.as_expression() else {
+                    return Err(self.unsupported(a.span(), "spread argument", "T21"));
+                };
+                args.push(jsval_of(self.expr(cx, e)?));
+            }
+            let e = Expr::intrinsic(Intrinsic::DefineProp, args);
+            return Ok((e, Call::Intrinsic(None)));
         }
         // String intrinsics: the first argument is a JS value (a string), the rest numbers.
         if name == "trap" {

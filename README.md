@@ -15,7 +15,7 @@ Generators and `async`/`await` are compiled to resumable state machines by an IR
 stack-switching proposal.
 
 > **Status: early and experimental.** A good part of the language works (see below and
-> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`JSON`, `Object` methods…; `Math`, strings, arrays and number parsing/formatting are done)
+> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`JSON.parse`, `Map`/`Set`, `Date`…; `Math`, strings, arrays, `JSON.stringify`, `Object` methods and number parsing/formatting are done)
 > doesn't exist yet. Unsupported code is rejected at build time with a clear diagnostic rather than
 > miscompiled. The known exception, built-in methods that crash when called, is listed in the docs.
 
@@ -55,14 +55,15 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Objects and prototypes, getters/setters, `Object.defineProperty`, `freeze`/`seal`; arrays and the iterator
   protocol.
 - Built-ins written in JS and compiled with the program (only what's used): `Math`, `String`/`Number` methods and
-  parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …), `Array.from`/`of`.
+  parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …), `Array.from`/`of`, `JSON.stringify`, `Object.assign`/`fromEntries`, `hasOwnProperty` and the other
+  `Object.prototype` methods.
 - Classes: fields, static members, private `#x` fields and methods, `extends` (also built-in errors), `super`.
 - Generators (`function*`, `yield`, `yield*`); `Promise` (`then`/`catch`/`finally`, `all`/`allSettled`/`race`),
   `queueMicrotask`; `async`/`await`, including top-level `await`.
 - Timers (`setTimeout`, `setInterval`, `clear*`) on the WASI 0.3 event loop, using `wasi:clocks`.
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
-Not yet: many built-ins (`JSON`, `Date`, `Map`/`Set`, `Object` methods), `arguments`, regex,
+Not yet: many built-ins (`JSON.parse`, `Date`, `Map`/`Set`), `arguments`, regex,
 async generators and `for await`, multi-file `import`, and richer WIT types at the boundary (records, lists,
 async exports). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.

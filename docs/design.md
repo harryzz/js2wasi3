@@ -142,6 +142,11 @@ algorithm and `toFixed` exact, so the digits match node; see `builtins/string.js
 `this.length`), so they take any array-like `this`; `push`/`pop`/`join`/`toString`/`values` stay native. `Array(…)` and
 `new Array(…)` are direct calls of `$$Array`. `sort` is a stable merge sort (the same order as V8's TimSort for a
 consistent comparator). Prelude code is typed by the same inference as user code: `+x.length` keeps a length an `f64`.)
+(T21 slice 4: `builtins/object.js` (`Object.assign`/`fromEntries`, the `Object.prototype` methods, installed over the
+sentinels like the others, so ToPrimitive calls the prelude's `toString`) and `builtins/json.js` (`JSON.stringify`: the
+spec's algorithm writing pieces into one array joined at the end; node's circular-structure message). The intrinsic
+`define(o, k, v)` is CreateDataProperty. A static of a global the prelude has statics for but not this one
+(`JSON.parse`) is rejected by name.)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

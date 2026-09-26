@@ -259,6 +259,10 @@ fn builtins_in_a_library() {
         ("shout(\"  hi \")", "ok(\"HI!!!!\")"),
         ("parse(\"2.5e1\")", "ok(27)"),
         ("evens(7)", "ok(56)"),
+        (
+            "json(2)",
+            "ok(\"{\\\"n\\\":2,\\\"list\\\":[2,\\\"x\\\",null]}\")",
+        ),
     ] {
         assert_eq!(invoke(&out, call), want, "{call}");
     }
@@ -288,7 +292,7 @@ fn unimplemented_object_features_trap() {
     for (name, src, trap) in [
         (
             "method",
-            "const o = {};\nconsole.log(\"before\");\nconsole.log(typeof o.toString);\n",
+            "const o = {};\nconsole.log(\"before\");\nconsole.log(typeof o.__lookupGetter__);\n",
             "builtin_not_implemented",
         ),
         (

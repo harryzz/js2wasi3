@@ -54,8 +54,8 @@ fn arity_and_callee() {
     // T14 (F16): extra arguments are evaluated and dropped.
     lowers("function g(a) { return a; }\nexport function f() { return g(1, 2); }");
     assert_eq!(
-        one("export function f() { return JSON.stringify(1); }"),
-        "1:30 unsupported: global `JSON` (planned: T21)"
+        one("export function f() { return Reflect.ownKeys({}); }"),
+        "1:30 unsupported: global `Reflect` (planned: T21)"
     );
 }
 
@@ -111,6 +111,22 @@ fn builtins_prelude() {
     assert_eq!(
         one("export function f(xs) { return new Array(...xs).length; }"),
         "1:36 unsupported: global `Array` (planned: T21)"
+    );
+    // Slice 4: JSON.stringify, Object statics and Object.prototype methods.
+    lowers("export function f(o) { return JSON.stringify(o, null, 2).length; }");
+    lowers(
+        "export function f(o) { return Object.keys(Object.assign({}, o, Object.fromEntries([['a', 1]]))).length; }",
+    );
+    lowers(
+        "export function f(o) { return o.hasOwnProperty('a') && Object.prototype.isPrototypeOf(o); }",
+    );
+    assert_eq!(
+        one("export function f(s) { return JSON.parse(s); }"),
+        "1:31 unsupported: `JSON.parse` (planned: T21)"
+    );
+    assert_eq!(
+        one("export function f() { const j = JSON; return 1; }"),
+        "1:33 unsupported: global `JSON` (planned: T21)"
     );
 }
 

@@ -20,11 +20,10 @@ table in [`tasks/README.md`](../tasks/README.md).
 | | ✅ | 🟡 | ❌ | ➖ |
 |---|---|---|---|---|
 | Keywords (66 entries) | 27 | 11 | 4 | 24 |
-| Built-in objects, properties, methods (20) | 7 | 8 | 5 | – |
+| Built-in objects, properties, methods (20) | 11 | 6 | 3 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
-What's most needed, in order: the rest of the built-in library (`Object` statics and prototype
-methods, `JSON`: T21), `arguments` (F42), spread into `console.log` and calls through `console.log`
+What's most needed, in order: the rest of the built-in library (`JSON.parse`, `Map`/`Set`, `Date`: T21), `arguments` (F42), spread into `console.log` and calls through `console.log`
 as a value, `typeof` of an undeclared name, then the language gaps below (async generators, `for await`, tagged
 templates, regex, multi-file `import`).
 
@@ -110,17 +109,17 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 | `Date` | ❌ | Rejected (T21). |
 | `eval` | ❌ | See keywords. |
 | `function` | 🟡 | See keywords. |
-| `hasOwnProperty` | 🟡 | Traps when called (a built-in sentinel, F37, T21). |
+| `hasOwnProperty` | ✅ | T21 (also `propertyIsEnumerable`). |
 | `Infinity` | ✅ | |
-| `isFinite` | ❌ | Rejected (T21). |
-| `isNaN` | ❌ | Rejected (T21). |
-| `isPrototypeOf` | 🟡 | Traps when called (F37, T21). |
+| `isFinite` | ✅ | T21 (also `Number.isFinite`). |
+| `isNaN` | ✅ | T21 (also `Number.isNaN`). |
+| `isPrototypeOf` | ✅ | T21. |
 | `length` | ✅ | Strings, arrays, functions. |
 | `Math` | 🟡 | T21: every function and constant, matching node bit for bit except `pow`/`**` (last-bit differences on some inexact results: F77). `Math` itself as a value (`console.log(Math)`, `const M = Math`) is rejected (F81); `Math.random` only in commands (F83). |
 | `NaN` | ✅ | |
 | `name` | ✅ | Functions, classes, methods, accessors (`get x`), inferred names. |
 | `Number` | 🟡 | T21: `Number(x)`, string → number (correctly rounded), `isNaN`/`isFinite`/`isInteger`/`isSafeInteger`, `parseInt`/`parseFloat`, the constants, `toString(radix)` and `toFixed` (like node's digits). Missing: `toPrecision`, `toExponential`, `toLocaleString`, `Number` as a value, `new Number` (F88); exact non-decimal parsing past 2^53 (F89). |
-| `Object` | 🟡 | `Object.keys`/`values`/`entries`, `defineProperty`, `getOwnPropertyDescriptor`, `freeze`/`seal`/`preventExtensions` and their tests, `getPrototypeOf`/`setPrototypeOf`, `create` (no descriptors). Missing: `assign`, `fromEntries`, `getOwnPropertySymbols`… (F39, F53); `Object(...)` as a function. |
+| `Object` | 🟡 | `Object.keys`/`values`/`entries`, `defineProperty`, `getOwnPropertyDescriptor`, `freeze`/`seal`/`preventExtensions` and their tests, `getPrototypeOf`/`setPrototypeOf`, `create` (no descriptors), `assign`, `fromEntries` (T21); `Object.prototype` `toString` (no `Symbol.toStringTag`), `toLocaleString`, `valueOf`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`. Missing: symbol keys in `assign` and `getOwnPropertySymbols` (F53); `Object(...)` as a function, `Object` as a value. |
 | `prototype` | ✅ | Function and class `prototype`, prototype chains, `Object.create`. |
 | `String` | 🟡 | T21: `String(x)`, `String.fromCharCode`/`fromCodePoint`, and `at`, `charAt`, `charCodeAt`, `codePointAt`, `concat`, `endsWith`, `includes`, `indexOf`, `lastIndexOf`, `padEnd`/`padStart`, `repeat`, `replace`/`replaceAll` (string patterns), `slice`, `split` (string separators), `startsWith`, `substring`/`substr`, `toLowerCase`/`toUpperCase` (common scripts; others trap), `trim*`, `isWellFormed`/`toWellFormed`, `toString`/`valueOf`; `<`/`>` compare strings. Missing: `localeCompare`, `normalize`, RegExp methods (`match`, `search`, regex `split`/`replace`), `String` as a value, `new String` (F87, F88). |
 | `toString` | 🟡 | User `toString` is called by ToPrimitive (T16); arrays' `toString` works. Numbers' `toString(radix)` works (T21); plain objects' built-in `toString` traps when called directly (F37, T21); implicit string conversion (`"" + x`, templates) works. |

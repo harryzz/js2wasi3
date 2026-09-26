@@ -1,4 +1,5 @@
-// Built-ins in a library (T21): string → number through the runtime, string and array methods.
+// Built-ins in a library (T21): string → number through the runtime, string and array methods,
+// JSON.stringify and Object statics.
 export function times(n) {
   const s = "5";
   return s * n;
@@ -23,4 +24,13 @@ export function evens(n) {
     .filter((x) => x % 2 === 0)
     .map((x) => x * x)
     .reduce((s, x) => s + x, 0);
+}
+
+/**
+ * @param {number} n
+ * @returns {string}
+ */
+export function json(n) {
+  const o = Object.assign({ n }, Object.fromEntries([["list", [n, "x", null]]]));
+  return JSON.stringify(o);
 }

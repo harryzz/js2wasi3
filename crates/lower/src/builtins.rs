@@ -29,6 +29,8 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/math.js"),
     include_str!("../builtins/string.js"),
     include_str!("../builtins/array.js"),
+    include_str!("../builtins/object.js"),
+    include_str!("../builtins/json.js"),
 );
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
@@ -196,6 +198,14 @@ impl Prelude {
         self.live.contains(name)
     }
 
+    /// Does the prelude implement statics of the global `name` (`Math` → `$$Math_floor`, …)?
+    pub fn has_statics(&self, name: &str) -> bool {
+        let prefix = format!("$${name}_");
+        self.names
+            .keys()
+            .any(|n| n.starts_with(&prefix) && !n[prefix.len()..].starts_with("prototype_"))
+    }
+
     /// Is this offset inside a prelude declaration that isn't needed (so not lowered)?
     pub fn is_dead(&self, offset: u32) -> bool {
         let i = self.dead.partition_point(|s| s.start <= offset);
@@ -239,7 +249,8 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$Array_prototype_indexOf"
         | "$$Array_prototype_includes"
         | "$$Array_prototype_fill" => Some(1),
-        "$$Array_prototype_copyWithin"
+        "$$Object_assign"
+        | "$$Array_prototype_copyWithin"
         | "$$Array_prototype_splice"
         | "$$Array_prototype_toSpliced" => Some(2),
         "$$Array_prototype_flat" => Some(0),
