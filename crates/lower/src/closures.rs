@@ -59,6 +59,10 @@ pub struct Analysis {
     /// Captured `let`/`const` that a closure made before the declaration ends can read: their cell is
     /// created uninitialized at the start of their block and closures check it.
     pub tdz: HashSet<SymbolId>,
+    /// `let`/`const`/`class` declared in a `switch` case and referenced in a later case (T24): a
+    /// jump to that case skips the declaration, so they're TDZ-checked cells (also in `tdz` and
+    /// `captured`) and every read checks them.
+    pub switch_tdz: HashSet<SymbolId>,
     /// Named function expressions' names: the function they name.
     pub self_names: HashMap<SymbolId, ScopeId>,
     /// Functions that refer to themselves by their own (function expression) name.
@@ -418,6 +422,36 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
                 && made_at.get(&o).copied().unwrap_or(0) < declaration_end(semantic, sym)
             {
                 an.tdz.insert(sym);
+            }
+        }
+    }
+    for node in nodes.iter() {
+        let AstKind::SwitchStatement(sw) = node.kind() else {
+            continue;
+        };
+        for (i, case) in sw.cases.iter().enumerate() {
+            let later = &sw.cases[i + 1..];
+            for st in &case.consequent {
+                let ids = match st {
+                    Statement::VariableDeclaration(d) if d.kind.is_lexical() => d
+                        .declarations
+                        .iter()
+                        .flat_map(|d| d.id.get_binding_identifiers())
+                        .collect(),
+                    Statement::ClassDeclaration(c) => c.id.iter().collect(),
+                    _ => Vec::new(),
+                };
+                for sym in ids.into_iter().filter_map(|b| b.symbol_id.get()) {
+                    let in_later = scoping.get_resolved_references(sym).any(|r| {
+                        let at = nodes.get_node(r.node_id()).span().start;
+                        later.iter().any(|c| c.span.start <= at && at < c.span.end)
+                    });
+                    if in_later {
+                        an.switch_tdz.insert(sym);
+                        an.tdz.insert(sym);
+                        an.captured.insert(sym);
+                    }
+                }
             }
         }
     }

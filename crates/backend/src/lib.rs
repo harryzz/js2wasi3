@@ -45,6 +45,7 @@ mod inspect;
 mod iter;
 mod numstr;
 mod object;
+mod pow;
 mod promise;
 mod props;
 mod runtime;
@@ -612,6 +613,7 @@ fn visit_exprs(list: &[Stmt], f: &mut dyn FnMut(&Expr)) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Helper {
     JsRem,
+    JsPow,
     ToInt32,
     Js(runtime::Helper),
 }
@@ -620,6 +622,7 @@ impl Helper {
     fn name(self) -> &'static str {
         match self {
             Helper::JsRem => "js_rem",
+            Helper::JsPow => "js_pow",
             Helper::ToInt32 => "to_int32",
             Helper::Js(h) => h.name(),
         }
@@ -627,7 +630,7 @@ impl Helper {
 
     fn signature(self) -> (Vec<ValType>, Vec<ValType>) {
         match self {
-            Helper::JsRem => (vec![ValType::F64, ValType::F64], vec![ValType::F64]),
+            Helper::JsRem | Helper::JsPow => (vec![ValType::F64, ValType::F64], vec![ValType::F64]),
             Helper::ToInt32 => (vec![ValType::F64], vec![ValType::I32]),
             Helper::Js(h) => h.signature(),
         }
@@ -942,6 +945,7 @@ impl Emitter<'_> {
                         BinOp::Mul => s.f64_mul(),
                         BinOp::Div => s.f64_div(),
                         BinOp::Rem => s.call(self.helper_index(Helper::JsRem)),
+                        BinOp::Pow => s.call(self.helper_index(Helper::JsPow)),
                         BinOp::Eq => s.f64_eq(),
                         BinOp::Ne => s.f64_ne(),
                         BinOp::Lt => s.f64_lt(),
@@ -956,6 +960,7 @@ impl Emitter<'_> {
                         BinOp::Mul => s.i32_mul(),
                         BinOp::Div => s.i32_div_s(),
                         BinOp::Rem => s.i32_rem_s(),
+                        BinOp::Pow => unreachable!("validator rejects pow on i32"),
                         BinOp::Eq => s.i32_eq(),
                         BinOp::Ne => s.i32_ne(),
                         BinOp::Lt => s.i32_lt_s(),
@@ -1505,6 +1510,7 @@ impl Emitter<'_> {
     fn helper(&mut self, h: Helper) -> Function {
         match h {
             Helper::JsRem => js_rem(),
+            Helper::JsPow => pow::js_pow(),
             Helper::ToInt32 => {
                 let rem = self.helper_index(Helper::JsRem);
                 to_int32(rem)

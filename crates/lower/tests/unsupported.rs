@@ -85,9 +85,10 @@ fn declarations_and_functions() {
         one("/** @param {boolean} a */\nexport function f(a) { return 1; }"),
         "2:8 unsupported: JSDoc type `{boolean}` of parameter `a` at the WIT boundary (only `string` and `number` so far) (planned: T20)"
     );
-    assert_eq!(
-        one("export function f(a) { a ||= 1; return a; }"),
-        "1:24 unsupported: operator `||=` (planned: later)"
+    // T24: logical assignment, `**`, `switch`, `debugger`.
+    lowers("export function f(a) { a ||= 1; a &&= 2; a ??= 3; return a ** 2; }");
+    lowers(
+        "export function f(a) { switch (a) { case 1: debugger; return 1; default: return 0; } }",
     );
     lowers("export function f() { function g() {} return 0; }");
     assert_eq!(
@@ -129,13 +130,13 @@ fn declarations_and_functions() {
 
 #[test]
 fn all_errors_are_reported() {
-    let e = errors("export function f() {\n  let s = 'a' * 2;\n  new Map();\n  return 1 ** 2;\n}");
+    let e = errors("export function f() {\n  let s = 'a' * 2;\n  new Map();\n  return /a/;\n}");
     assert_eq!(
         e,
         vec![
             "2:11 unsupported: converting a string to a number (planned: T21)",
             "3:7 unsupported: global `Map` (planned: T21)",
-            "4:10 unsupported: operator `**` (planned: T21 (Math.pow))",
+            "4:10 unsupported: expression `RegExpLiteral` (planned: later)",
         ]
     );
 }

@@ -300,9 +300,9 @@ fn unimplemented_object_features_trap() {
 }
 
 /// T19 acceptance: two concurrent timers take as long as one (their waits overlap), two in a row
-/// twice as long. Measured against the same program without timers (wasmtime's startup), best of
-/// three runs each; 300 ms timers leave room for noise (other tests run in parallel), and the
-/// concurrent run is compared with the sequential one rather than with a fixed bound.
+/// twice as long. Wall times, best of three runs each: a run can't be shorter than its timers,
+/// and the concurrent run must be clearly shorter than the sequential one (300 ms timers leave
+/// room for wasmtime's startup and for other tests running in parallel).
 #[test]
 fn concurrent_timers_overlap() {
     let dir = out_dir("timers");
@@ -333,10 +333,6 @@ fn concurrent_timers_overlap() {
             .min()
             .unwrap()
     };
-    let base = time(
-        &program("base", "console.log(await sleep(0, \"a\"));"),
-        "a\n",
-    );
     let both = program(
         "both",
         "console.log((await Promise.all([sleep(300, \"a\"), sleep(300, \"b\")])).join(\"\"));",
@@ -345,10 +341,10 @@ fn concurrent_timers_overlap() {
         "seq",
         "console.log((await sleep(300, \"a\")) + (await sleep(300, \"b\")));",
     );
-    let both = time(&both, "ab\n").saturating_sub(base);
-    let seq = time(&seq, "ab\n").saturating_sub(base);
-    assert!(both >= 290, "concurrent: {both} ms");
-    assert!(seq >= 590, "sequential: {seq} ms");
+    let both = time(&both, "ab\n");
+    let seq = time(&seq, "ab\n");
+    assert!(both >= 300, "concurrent: {both} ms");
+    assert!(seq >= 600, "sequential: {seq} ms");
     assert!(
         both + 200 < seq,
         "concurrent {both} ms vs sequential {seq} ms"

@@ -827,6 +827,8 @@ pub enum BinOp {
     Div,
     /// `F64`: JS `%` (truncated remainder, sign of dividend). `I32`: signed remainder.
     Rem,
+    /// `**` (T24, `f64` only): Number::exponentiate.
+    Pow,
     Eq,
     Ne,
     Lt,

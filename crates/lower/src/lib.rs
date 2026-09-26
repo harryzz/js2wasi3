@@ -417,6 +417,8 @@ struct Target {
 enum TargetKind {
     /// Labelled non-loop statement: only `break label` may target it.
     Block,
+    /// `switch` (T24): `break` may target it, `continue` goes past it.
+    Switch,
     /// `while`: `continue` jumps straight to the loop head.
     While,
     /// `for` / `do-while`: `continue` must still run the update / test, so it breaks out of
@@ -1963,8 +1965,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// Hoisting at the start of a statement list: uninitialized cells for captured `let`/`const` a
     /// closure may read before their declaration (TDZ), then the function declarations' objects.
-    fn hoist(&mut self, cx: &mut FnCx, list: &'a [Statement<'a>], out: &mut Vec<Stmt>) {
-        for s in list {
+    fn hoist<I>(&mut self, cx: &mut FnCx, list: I, out: &mut Vec<Stmt>)
+    where
+        I: IntoIterator<Item = &'a Statement<'a>> + Clone,
+    {
+        for s in list.clone() {
             // A class declaration is like a `let` (T16).
             if let Statement::ClassDeclaration(c) = s
                 && let Some(b) = &c.id
@@ -1979,7 +1984,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     l,
                     Expr::intrinsic(Intrinsic::NewCellUninit, vec![]),
                 ));
-                cx.cells.insert(sym, (l, false));
+                cx.cells.insert(sym, (l, self.an.switch_tdz.contains(&sym)));
                 cx.pending.insert(sym);
             }
             let Statement::VariableDeclaration(d) = s else {
@@ -1995,14 +2000,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     && self.an.captured.contains(&sym)
                     && !self.globals.contains_key(&sym)
                 {
-                    // Uninitialized means a Wasm null in a `jsval` cell.
+                    // Uninitialized means a Wasm null in a `jsval` cell. (T24: read from a later
+                    // `switch` case, which a jump can reach without the declaration: checked.)
                     self.observe(Slot::Var(sym), Kind::Any);
                     let l = cx.func.add_local(format!("{}.cell", b.name), Type::JsVal);
                     out.push(Stmt::Set(
                         l,
                         Expr::intrinsic(Intrinsic::NewCellUninit, vec![]),
                     ));
-                    cx.cells.insert(sym, (l, false));
+                    cx.cells.insert(sym, (l, self.an.switch_tdz.contains(&sym)));
                     cx.pending.insert(sym);
                 }
             }
@@ -2070,6 +2076,86 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         out
     }
 
+    /// `switch` (T24): the discriminant in a local, the case bodies' declarations hoisted
+    /// together (one scope), then nested blocks, one ending before each case body:
+    ///
+    /// ```text
+    /// block $brk { block $c2 { block $c1 { block $c0 {
+    ///   if d === t0 { br $c0 }  if d === t2 { br $c2 } …  br $default (or $brk)
+    /// } body0 } body1 } body2 }
+    /// ```
+    ///
+    /// The tests run lazily in source order (skipping `default`); a body falls through into the
+    /// next. `break` targets `$brk`.
+    fn switch_stmt(
+        &mut self,
+        cx: &mut FnCx,
+        sw: &'a SwitchStatement<'a>,
+        out: &mut Vec<Stmt>,
+    ) -> R<()> {
+        let d = self.expr(cx, &sw.discriminant)?;
+        let (ty, kind) = (d.ty, d.kind);
+        let tmp = cx.func.add_local("switch", ty);
+        out.push(Stmt::Set(tmp, d.e));
+        if sw.cases.is_empty() {
+            return Ok(());
+        }
+        self.hoist(cx, sw.cases.iter().flat_map(|c| &c.consequent), out);
+        let brk = cx.label();
+        let labels: Vec<LabelId> = sw.cases.iter().map(|_| cx.label()).collect();
+        let mut result = Ok(());
+        let mut dispatch = Vec::new();
+        for (i, c) in sw.cases.iter().enumerate() {
+            let Some(test) = &c.test else { continue };
+            match self.expr(cx, test) {
+                Ok(t) => {
+                    let d = Val {
+                        e: Expr::Local(tmp),
+                        ty,
+                        kind,
+                    };
+                    dispatch.push(Stmt::If {
+                        cond: equality(d, t, BinOp::Eq, true),
+                        then: vec![Stmt::Break(labels[i])],
+                        els: vec![],
+                    });
+                }
+                Err(e) => result = Err(e),
+            }
+        }
+        let default = sw.cases.iter().position(|c| c.test.is_none());
+        dispatch.push(Stmt::Break(default.map_or(brk, |i| labels[i])));
+        cx.targets.push(Target {
+            js_label: None,
+            brk,
+            kind: TargetKind::Switch,
+        });
+        let mut cur = Stmt::Block {
+            label: labels[0],
+            body: dispatch,
+        };
+        let mut last = Vec::new();
+        for (i, c) in sw.cases.iter().enumerate() {
+            let mut body = vec![cur];
+            for s in &c.consequent {
+                let _ = self.stmt(cx, s, &mut body);
+            }
+            match labels.get(i + 1) {
+                Some(&label) => cur = Stmt::Block { label, body },
+                None => {
+                    last = body;
+                    break;
+                }
+            }
+        }
+        cx.targets.pop();
+        out.push(Stmt::Block {
+            label: brk,
+            body: last,
+        });
+        result
+    }
+
     fn stmt_body(&mut self, cx: &mut FnCx, s: &'a Statement<'a>) -> Vec<Stmt> {
         let mut out = Vec::new();
         let _ = self.stmt(cx, s, &mut out);
@@ -2122,6 +2208,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.push(Stmt::If { cond, then, els });
                 Ok(())
             }
+            Statement::SwitchStatement(sw) => self.switch_stmt(cx, sw, out),
+            // No debugger to stop in.
+            Statement::DebuggerStatement(_) => Ok(()),
             Statement::WhileStatement(w) => self.while_loop(cx, None, w, out),
             Statement::ForInStatement(f) => self.for_in(cx, None, f, out),
             Statement::ForOfStatement(f) => self.for_of(cx, None, f, out),
@@ -2157,7 +2246,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let Some(t) = find_target(&cx.targets, name, false) else {
                     return Err(self.unsupported(
                         b.span,
-                        "`break` outside a loop (e.g. in `switch`)",
+                        "`break` outside a loop or `switch`",
                         "later",
                     ));
                 };
@@ -2234,7 +2323,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     cx.targets[t].kind = TargetKind::Wrapped(Some(l));
                     Stmt::Break(l)
                 }
-                TargetKind::Block => unreachable!("find_target skips blocks for continue"),
+                TargetKind::Block | TargetKind::Switch => {
+                    unreachable!("find_target skips blocks and switches for continue")
+                }
             },
             Jump::Return => Stmt::Return(value),
         }]
@@ -2568,6 +2659,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.push(Stmt::Expr(v.e));
                 Ok(())
             }
+            Expression::AssignmentExpression(a) if a.operator.is_logical() => {
+                let v = self.logical_assign(cx, a)?;
+                out.push(Stmt::Expr(v.e));
+                Ok(())
+            }
             Expression::AssignmentExpression(a) if a.left.as_member_expression().is_some() => {
                 let v = self.member_assign(cx, a)?;
                 out.push(Stmt::Expr(v.e));
@@ -2777,6 +2873,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if a.left.as_assignment_target_pattern().is_some() =>
             {
                 self.destructuring_assign(cx, a)
+            }
+            Expression::AssignmentExpression(a) if a.operator.is_logical() => {
+                self.logical_assign(cx, a)
             }
             Expression::AssignmentExpression(a) if a.left.as_member_expression().is_some() => {
                 self.member_assign(cx, a)
@@ -3111,19 +3210,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             B::Multiplication => BinOp::Mul,
             B::Division => BinOp::Div,
             B::Remainder => BinOp::Rem,
+            B::Exponential => BinOp::Pow,
             B::LessThan => BinOp::Lt,
             B::LessEqualThan => BinOp::Le,
             B::GreaterThan => BinOp::Gt,
             B::GreaterEqualThan => BinOp::Ge,
             _ => {
-                let planned = match b.operator {
-                    B::Exponential => "T21 (Math.pow)",
-                    _ => "later",
-                };
                 return Err(self.unsupported(
                     span,
                     &format!("operator `{}`", b.operator.as_str()),
-                    planned,
+                    "later",
                 ));
             }
         };
@@ -4413,6 +4509,94 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// `t &&= e`, `t ||= e`, `t ??= e` (T24): `e` is evaluated and `t` written only when the
+    /// old value asks for it (truthy / falsy / nullish); the result is the old value or the stored
+    /// one. A member target's object and key are evaluated once, before `e`.
+    fn logical_assign(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<Val> {
+        let op = a.operator;
+        // Is the old value (`old`, read once) kept? Else the assignment runs.
+        let keep = |old: Val| match op {
+            AssignmentOperator::LogicalOr => cond_of(old),
+            AssignmentOperator::LogicalAnd => Expr::unary(UnOp::Not, Type::Bool, cond_of(old)),
+            _ => Expr::unary(
+                UnOp::Not,
+                Type::Bool,
+                Expr::binary(
+                    BinOp::LooseEq,
+                    Type::JsVal,
+                    jsval_of(old),
+                    Expr::Const(Const::Null),
+                ),
+            ),
+        };
+        if let Some(m) = a.left.as_member_expression() {
+            let (obj, key, private) = self.member_ref(cx, m)?;
+            let to = cx.func.add_local("obj", Type::JsVal);
+            let tk = cx.func.add_local("key", Type::JsVal);
+            let old = cx.func.add_local("old", Type::JsVal);
+            let tv = cx.func.add_local("value", Type::JsVal);
+            let body = vec![
+                Stmt::Set(to, obj),
+                Stmt::Set(tk, key),
+                Stmt::Set(old, member_get(&private, Expr::Local(to), Expr::Local(tk))),
+            ];
+            let rhs = jsval_of(self.expr(cx, &a.right)?);
+            let assign = Expr::Seq {
+                body: vec![Stmt::Expr(member_set(
+                    &private,
+                    Expr::Local(to),
+                    Expr::Local(tk),
+                    Expr::Tee(tv, Box::new(rhs)),
+                ))],
+                value: Box::new(Expr::Local(tv)),
+            };
+            let e = Expr::Cond {
+                cond: Box::new(keep(Val::js(Expr::Local(old), Kind::Any))),
+                then: Box::new(Expr::Local(old)),
+                els: Box::new(assign),
+                ty: Type::JsVal,
+            };
+            return Ok(Val::js(
+                Expr::Seq {
+                    body,
+                    value: Box::new(e),
+                },
+                Kind::Any,
+            ));
+        }
+        let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
+            return Err(self.unsupported(a.left.span(), "assignment target", "never"));
+        };
+        let var = self.resolve(cx, id)?;
+        let old = self.read_var(&var);
+        if op == AssignmentOperator::LogicalNullish
+            && (var.ty != Type::JsVal || matches!(var.kind, Kind::Num | Kind::Bool | Kind::Str))
+        {
+            // Never null or undefined: nothing is assigned.
+            return Ok(old);
+        }
+        self.check_assignable(&var, id.span)?;
+        let rhs = self.named(cx, &a.right, Some(id.name.as_str()))?;
+        let value = self.store(Slot::Var(var.sym), var.ty, rhs);
+        let assign = self.assign_value(cx, &var, value);
+        let t = cx.func.add_local("old", var.ty);
+        let cond = keep(Val {
+            e: Expr::Tee(t, Box::new(old.e)),
+            ty: var.ty,
+            kind: var.kind,
+        });
+        Ok(Val {
+            e: Expr::Cond {
+                cond: Box::new(cond),
+                then: Box::new(Expr::Local(t)),
+                els: Box::new(assign),
+                ty: var.ty,
+            },
+            ty: var.ty,
+            kind: var.kind,
+        })
+    }
+
     /// `x = e` / `x op= e`: the variable and the converted value to store.
     fn assignment(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<(Var, Expr)> {
         let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
@@ -4452,6 +4636,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             A::Multiplication => Some(BinOp::Mul),
             A::Division => Some(BinOp::Div),
             A::Remainder => Some(BinOp::Rem),
+            A::Exponential => Some(BinOp::Pow),
             _ => None,
         };
         let bitwise = match op {
@@ -4629,6 +4814,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// Store `value` (already converted to the variable's type) into a variable. The TDZ check
     /// comes after the value is computed, as in JS.
     fn write_var(&self, cx: &mut FnCx, var: &Var, value: Expr) -> Vec<Stmt> {
+        if self.scoping.symbol_flags(var.sym).is_const_variable() {
+            // T24: the value is evaluated, then (after the TDZ check) the write throws.
+            let mut out = vec![Stmt::Expr(value)];
+            out.extend(var.guard.map(|(g, sym)| self.tdz_check(g, sym)));
+            out.push(Stmt::Throw(Expr::intrinsic(
+                Intrinsic::NewError(ErrorKind::TypeError),
+                vec![
+                    Expr::str("Assignment to constant variable."),
+                    Expr::undefined(),
+                ],
+            )));
+            return out;
+        }
         match var.guard {
             None => vec![set(var.place, var.ty, value)],
             Some((g, sym)) => {
@@ -4644,8 +4842,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// An assignment used as a value: the stored value.
     fn assign_value(&self, cx: &mut FnCx, var: &Var, value: Expr) -> Expr {
+        let constant = self.scoping.symbol_flags(var.sym).is_const_variable();
         match (var.place, var.guard) {
-            (Place::Local(l), None) => Expr::Tee(l, Box::new(value)),
+            (Place::Local(l), None) if !constant => Expr::Tee(l, Box::new(value)),
             _ => Expr::Seq {
                 body: self.write_var(cx, var, value),
                 value: Box::new(read(var.place, var.ty)),
@@ -5088,6 +5287,7 @@ fn find_target(targets: &[Target], name: Option<&str>, is_continue: bool) -> Opt
         .iter()
         .rposition(|t| match name {
             Some(n) => t.js_label.as_deref() == Some(n),
+            None if is_continue => !matches!(t.kind, TargetKind::Block | TargetKind::Switch),
             None => !matches!(t.kind, TargetKind::Block),
         })
         .filter(|&i| !is_continue || !matches!(targets[i].kind, TargetKind::Block))

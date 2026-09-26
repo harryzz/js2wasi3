@@ -245,7 +245,7 @@ impl V<'_> {
                 self.expect(&format!("{op:?} lhs"), l, *ty);
                 self.expect(&format!("{op:?} rhs"), r, *ty);
                 let ok = match ty {
-                    Type::I32 => true,
+                    Type::I32 => *op != BinOp::Pow,
                     Type::F64 => !matches!(
                         op,
                         BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr | BinOp::ShrU
