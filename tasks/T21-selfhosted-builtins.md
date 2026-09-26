@@ -75,6 +75,32 @@ user code, keeping only what's used. First batch: `Math`, `String.prototype` bas
   (`f(x, i, a)` on a value works already) and `Array(n)`/`Array.from`/`of` (`$$Array_from`, a global `Array`
   call: `builtin_global` skips names that are `Builtin`s, so `Array(...)` needs its own case).
 
+### Slice 3 (2026-09-26): arrays — done
+- **`crates/lower/builtins/array.js`**: `Array.prototype` `map forEach filter reduce reduceRight some every find
+  findIndex findLast findLastIndex indexOf lastIndexOf includes at slice concat flat flatMap fill copyWithin reverse
+  shift unshift splice sort toSorted toReversed toSpliced with` as the spec's generic algorithms (`this[k]`,
+  `k in this`, `this.length`: any array-like `this`, holes skipped where the spec skips them); `Array(…)`,
+  `new Array(…)` (`$$Array`, a direct call from `new_expr`), `Array.of`, `Array.from` (iterables via for-of, else
+  array-likes, with `mapfn`/`thisArg`). `sort` is a stable merge sort (same order as V8's TimSort), undefined
+  last, holes removed; string keys are precomputed when ToString is unobservable. Errors use node's messages
+  (`$$describe`: `3 is not a function`, `#<Foo> …`, `[object Array] …`). `length`s match node.
+- **Lowering/runtime**: `Lowerer::call_result` (factored out of `expr`); `$has` got `$get`'s array fast path; the
+  reachability scan keeps `$$Array` only where `Array` is called (`Array.isArray` doesn't keep it).
+- **Tests**: `tests/fixtures/builtins/array-methods.js` (diff.sh), `builtins/lib.js` `evens` (library),
+  `unsupported.rs::builtins_prelude` (arrays lower; `Array` as a value / spread `new Array(...xs)` rejected).
+- **Acceptance**: `hello.js` still 52177 bytes. `[1, 2, 3].map(…)` alone: 64948 bytes, most of it StringToNumber
+  (`ToLength(o.length)` converts a JS value, F86).
+- **Commands run**: `cargo test` (64 ok), `scripts/diff.sh -j 4` (71 passed, 0 failed, 10 skipped),
+  `wasm-tools validate`, `cargo clippy --all-targets`, `cargo fmt`.
+- **Unsupported / follow-ups**: F91 (`keys`/`entries`/`toLocaleString`, native `push`/`pop`/`join`/`toString` need
+  arrays, species, `isConcatSpreadable`, `Array` as a value, spread into `Array(…)`), F92 (calls through values
+  and element access are slow: `sort` with a comparator ~30× node). F49 resolved.
+- **Next smallest step**: slice 4. `JSON.stringify` in a new `builtins/json.js` as `$$JSON_stringify` (static
+  mapping works as for `Math`); it needs own enumerable string keys in order (`Object.keys` exists as an
+  intrinsic) and string quoting (`unit`/`str_new`). Then `Object.assign`/`fromEntries` as `$$Object_assign`
+  (note `object_static` maps `Object.*` first: check the prelude before it, or add them there), and
+  `Object.prototype.hasOwnProperty`/`isPrototypeOf`/`toString` as `$$Object_prototype_*` (F37).
+
 ## Handoff (written 2026-09-26 at the end of the T19/T24 session)
 
 **State:** `main` at `b55c8cf`, clean, pushed to `github.com/harryzz/js2wasi3` (private). T01–T19 and T24 done.
@@ -180,3 +206,21 @@ compiled by js2wasi3 itself, using intrinsics". Options to weigh, then record th
   root (ids shift): that round now starts the kinds over. Fixtures string-methods/string-number pass; stress
   check vs node identical. Library test, unsupported tests updated; docs (D5, keywords.md, README) updated.
 - 2026-09-26: slice 2 done (see Notes / Result). Full runs: cargo test all ok, diff.sh 70/0/10.
+- 2026-09-26: slice 3 (arrays) started. Plan: `builtins/array.js` with `$$Array_prototype_m` (same mechanism as strings), array intrinsics for length/element access/new array, `Array(n)`/`new Array`/`Array.from`/`Array.of`.
+- 2026-09-26: `builtins/array.js` written: the spec's generic algorithms (`this[k]`, `k in this`, `length`) for
+  map/forEach/filter/reduce(Right)/some/every/find*/indexOf/lastIndexOf/includes/at/slice/concat/flat/flatMap/
+  fill/copyWithin/reverse/shift/unshift/splice/sort (stable merge sort)/toSorted/toReversed/with/toSpliced;
+  `$$Array` (`Array(…)`, and `new Array(…)` via `new_expr` → direct call), `Array.of`, `Array.from`
+  (iterables via for-of, else array-likes). `Lowerer::call_result` factored out of `expr`. `lengths` added to
+  `builtins::length`. Node-style "x is not a function" (`$$describe`). `tests/fixtures/builtins/array-methods.js`
+  passes diff.sh.
+- 2026-09-26: `$has` got the array fast path `$get` has (an element at a small index: no key string). Perf check
+  (300k elements, ×10): `map` ≈ a hand-written user loop (~200 ns/element); `sort` with a comparator ~2.3 s per
+  sort vs node 0.08 s: each `call_ref` costs ~230 ns (args array + boxing) and every element access is a
+  `$get`/`$set` call; a user-code merge sort is as slow. Recorded as a follow-up (codegen, not the prelude).
+  Prelude pitfall: `x.length` is `Any`, so `n = v.length` made the loop indices JS values (`$js_less`); use
+  `+x.length`. Sort: undefineds split out first, string keys precomputed when every value is a primitive.
+- 2026-09-26: tests: `unsupported.rs::builtins_prelude` (arrays lower; `Array` as a value / spread rejected),
+  `builtins/lib.js` `evens` (library). cargo test all ok, diff.sh 71/0/10, hello.js still 52177 bytes.
+- 2026-09-26: slice 3 done (see Notes / Result). `$$Array` kept only where `Array` is called. Full runs: cargo
+  test 64 ok, diff.sh -j 4 71/0/10.

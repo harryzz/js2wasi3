@@ -651,6 +651,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// `new f(…)` for any value `f` (the native errors are handled before).
     pub(crate) fn new_expr(&mut self, cx: &mut FnCx, n: &'a NewExpression<'a>) -> R<Val> {
         let what = self.callee_text(&n.callee);
+        if self.is_global(&n.callee, "Array")
+            && !n.arguments.iter().any(|a| a.is_spread())
+            && let Some(func) = self.builtin_global(&n.callee)
+        {
+            // `new Array(…)` is `Array(…)` (T21).
+            let (e, kind) = self.direct_call(cx, func, None, &n.arguments)?;
+            return self.call_result(e, kind);
+        }
         let f = jsval_of(self.expr(cx, &n.callee)?);
         if n.arguments.iter().any(|a| a.is_spread()) {
             let t = cx.func.add_local("callee", Type::JsVal);

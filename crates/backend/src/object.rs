@@ -1644,8 +1644,36 @@ fn has(cx: &mut dyn Cx) -> Function {
     let in_ = cx.str("' in ");
     const KEY: u32 = 0;
     const V: u32 = 1;
-    let mut f = Function::new([]);
+    const J: u32 = 2;
+    let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
+    // Fast path: an array element at a small integer index (holes take the slow path).
+    s.local_get(V).ref_test_non_null(array::array());
+    s.local_get(KEY)
+        .ref_test_non_null(wasm_encoder::HeapType::I31);
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(KEY)
+        .ref_cast_non_null(wasm_encoder::HeapType::I31)
+        .i31_get_s()
+        .local_tee(J);
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_LENGTH);
+    s.i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_ELEMS)
+        .local_get(J)
+        .array_get(T_VALS)
+        .ref_is_null()
+        .i32_eqz();
+    s.if_(BlockType::Empty);
+    s.i32_const(1).return_();
+    s.end();
+    s.end();
+    s.end();
     s.local_get(V).ref_test_non_null(object()).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(search);

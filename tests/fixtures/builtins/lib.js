@@ -1,4 +1,4 @@
-// Built-ins in a library (T21): string → number through the runtime, string methods.
+// Built-ins in a library (T21): string → number through the runtime, string and array methods.
 export function times(n) {
   const s = "5";
   return s * n;
@@ -15,4 +15,12 @@ export function shout(s) {
 /** @param {string} s */
 export function parse(s) {
   return parseFloat(s) + Number(s.slice(0, 1));
+}
+
+/** @param {number} n */
+export function evens(n) {
+  return Array.from({ length: n }, (_, i) => i)
+    .filter((x) => x % 2 === 0)
+    .map((x) => x * x)
+    .reduce((s, x) => s + x, 0);
 }

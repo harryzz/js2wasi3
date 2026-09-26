@@ -258,6 +258,7 @@ fn builtins_in_a_library() {
         ("times(3)", "15"),
         ("shout(\"  hi \")", "ok(\"HI!!!!\")"),
         ("parse(\"2.5e1\")", "ok(27)"),
+        ("evens(7)", "ok(56)"),
     ] {
         assert_eq!(invoke(&out, call), want, "{call}");
     }

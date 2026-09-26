@@ -23,7 +23,7 @@ table in [`tasks/README.md`](../tasks/README.md).
 | Built-in objects, properties, methods (20) | 7 | 8 | 5 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
-What's most needed, in order: the rest of the built-in library (`Object`/`Array` statics and prototype
+What's most needed, in order: the rest of the built-in library (`Object` statics and prototype
 methods, `JSON`: T21), `arguments` (F42), spread into `console.log` and calls through `console.log`
 as a value, `typeof` of an undeclared name, then the language gaps below (async generators, `for await`, tagged
 templates, regex, multi-file `import`).
@@ -106,7 +106,7 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 
 | Word | Status | Notes / what's missing |
 |---|---|---|
-| `Array` | 🟡 | Literals, indexing, `length`, holes, spread, destructuring, iteration, `Array.isArray`, `push`/`pop`/`join`/`toString`/`values`/`[Symbol.iterator]`. Missing: `Array(...)`/`new Array`, `Array.from`/`of`; **other prototype methods (`map`, `forEach`, `slice`, `indexOf`, … ) trap when called** (F49); sparse arrays past 2^26 (F50). |
+| `Array` | 🟡 | Literals, indexing, `length`, holes, spread, destructuring, iteration, `Array.isArray`, `Array(…)`/`new Array(…)`, `Array.from`/`of`, and every prototype method (T21: `map`, `forEach`, `filter`, `reduce`/`reduceRight`, `some`/`every`, `find*`, `indexOf`/`lastIndexOf`/`includes`, `at`, `slice`, `splice`, `concat`, `flat`/`flatMap`, `fill`, `copyWithin`, `reverse`, `shift`/`unshift`, `sort` (stable), `toSorted`/`toReversed`/`toSpliced`/`with`, `push`/`pop`/`join`/`toString`/`values`) except `keys`/`entries`/`toLocaleString`, which trap when called. Missing: `Array` as a value, spread into `Array(…)`, species/subclass results, `Symbol.isConcatSpreadable` (F91); sparse arrays past 2^26 (F50); callbacks are slow (F92). |
 | `Date` | ❌ | Rejected (T21). |
 | `eval` | ❌ | See keywords. |
 | `function` | 🟡 | See keywords. |

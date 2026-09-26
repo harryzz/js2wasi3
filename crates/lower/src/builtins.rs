@@ -28,6 +28,7 @@ use oxc_syntax::symbol::SymbolId;
 pub const PRELUDE: &str = concat!(
     include_str!("../builtins/math.js"),
     include_str!("../builtins/string.js"),
+    include_str!("../builtins/array.js"),
 );
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
@@ -132,8 +133,16 @@ impl Prelude {
             let (target, span) = match node.kind() {
                 AstKind::IdentifierReference(r) => {
                     let Some(sym) = scoping.get_reference(r.reference_id()).symbol_id() else {
-                        // A global function (`parseInt` → `$$parseInt`).
-                        if let Some(sym) = out.names.get(&format!("$${}", r.name)) {
+                        // A global function (`parseInt` → `$$parseInt`); a built-in constructor
+                        // only when called (`Array(3)`, not `Array.isArray`).
+                        let called = || match p.semantic.nodes().parent_kind(node.id()) {
+                            AstKind::CallExpression(c) => c.callee.span() == r.span,
+                            AstKind::NewExpression(n) => n.callee.span() == r.span,
+                            _ => false,
+                        };
+                        if (js2wasi3_ir::Builtin::parse(&r.name).is_none() || called())
+                            && let Some(sym) = out.names.get(&format!("$${}", r.name))
+                        {
                             add(item_of[sym], r.span, &mut roots);
                         }
                         continue;
@@ -209,7 +218,31 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$String_prototype_lastIndexOf"
         | "$$String_prototype_includes"
         | "$$String_prototype_startsWith"
-        | "$$String_prototype_endsWith" => Some(1),
+        | "$$String_prototype_endsWith"
+        | "$$Array"
+        | "$$Array_from"
+        | "$$Array_prototype_concat"
+        | "$$Array_prototype_unshift"
+        | "$$Array_prototype_reduce"
+        | "$$Array_prototype_reduceRight"
+        | "$$Array_prototype_lastIndexOf"
+        | "$$Array_prototype_forEach"
+        | "$$Array_prototype_map"
+        | "$$Array_prototype_filter"
+        | "$$Array_prototype_some"
+        | "$$Array_prototype_every"
+        | "$$Array_prototype_find"
+        | "$$Array_prototype_findIndex"
+        | "$$Array_prototype_findLast"
+        | "$$Array_prototype_findLastIndex"
+        | "$$Array_prototype_flatMap"
+        | "$$Array_prototype_indexOf"
+        | "$$Array_prototype_includes"
+        | "$$Array_prototype_fill" => Some(1),
+        "$$Array_prototype_copyWithin"
+        | "$$Array_prototype_splice"
+        | "$$Array_prototype_toSpliced" => Some(2),
+        "$$Array_prototype_flat" => Some(0),
         _ => None,
     }
 }

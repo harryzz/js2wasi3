@@ -138,6 +138,10 @@ them on the prototype over the sentinels, so calls go through the (mutable) prot
 prelude's `$$StringToNumber` (`ir::Module::string_to_number`), kept when the IR converts a JS value to a number; its
 decimal conversion is correctly rounded (Clinger's fast path, else big-integer comparisons), `toString(radix)` is V8's
 algorithm and `toFixed` exact, so the digits match node; see `builtins/string.js`.)
+(T21 slice 3: `Array.prototype` methods are the spec's generic algorithms in `builtins/array.js` (`this[k]`, `k in this`,
+`this.length`), so they take any array-like `this`; `push`/`pop`/`join`/`toString`/`values` stay native. `Array(…)` and
+`new Array(…)` are direct calls of `$$Array`. `sort` is a stable merge sort (the same order as V8's TimSort for a
+consistent comparator). Prelude code is typed by the same inference as user code: `+x.length` keeps a length an `f64`.)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

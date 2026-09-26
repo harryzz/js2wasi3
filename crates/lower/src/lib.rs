@@ -3071,47 +3071,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Expression::CallExpression(c) => {
                 let (call, kind) = self.call(cx, c)?;
-                let func = match kind {
-                    Call::Direct(func) => func,
-                    Call::Value => return Ok(Val::js(call, Kind::Any)),
-                    Call::Intrinsic(Some(Kind::Num)) => return Ok(Val::num(call)),
-                    Call::Intrinsic(Some(k)) => return Ok(Val::js(call, k)),
-                    Call::Intrinsic(None) => {
-                        return Ok(Val::js(
-                            Expr::Seq {
-                                body: vec![Stmt::Expr(call)],
-                                value: Box::new(Expr::undefined()),
-                            },
-                            Kind::Any,
-                        ));
-                    }
-                    // `console.log(…)` as a value: `undefined`.
-                    Call::Console => {
-                        return Ok(Val::js(
-                            Expr::Seq {
-                                body: vec![Stmt::Expr(call)],
-                                value: Box::new(Expr::undefined()),
-                            },
-                            Kind::Any,
-                        ));
-                    }
-                };
-                match self.module.function(func).result {
-                    Some(Type::F64) => Ok(Val {
-                        e: call,
-                        ty: Type::F64,
-                        kind: self.slot_kind(Slot::Result(func)),
-                    }),
-                    Some(ty) => {
-                        let kind = self.slot_kind(Slot::Result(func));
-                        Ok(Val { e: call, ty, kind })
-                    }
-                    None => {
-                        // Its `undefined` result is used, so the function gets a result.
-                        self.observe(Slot::Result(func), Kind::Any);
-                        Ok(self.undefined_val())
-                    }
-                }
+                self.call_result(call, kind)
             }
             Expression::SequenceExpression(s) => {
                 let (last, init) = s.expressions.split_last().expect("non-empty sequence");
@@ -3730,6 +3690,51 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             },
             Call::Value,
         ))
+    }
+
+    /// The value of a call (`call` + what `Lowerer::call` said about it).
+    pub(crate) fn call_result(&mut self, call: Expr, kind: Call) -> R<Val> {
+        let func = match kind {
+            Call::Direct(func) => func,
+            Call::Value => return Ok(Val::js(call, Kind::Any)),
+            Call::Intrinsic(Some(Kind::Num)) => return Ok(Val::num(call)),
+            Call::Intrinsic(Some(k)) => return Ok(Val::js(call, k)),
+            Call::Intrinsic(None) => {
+                return Ok(Val::js(
+                    Expr::Seq {
+                        body: vec![Stmt::Expr(call)],
+                        value: Box::new(Expr::undefined()),
+                    },
+                    Kind::Any,
+                ));
+            }
+            // `console.log(…)` as a value: `undefined`.
+            Call::Console => {
+                return Ok(Val::js(
+                    Expr::Seq {
+                        body: vec![Stmt::Expr(call)],
+                        value: Box::new(Expr::undefined()),
+                    },
+                    Kind::Any,
+                ));
+            }
+        };
+        match self.module.function(func).result {
+            Some(Type::F64) => Ok(Val {
+                e: call,
+                ty: Type::F64,
+                kind: self.slot_kind(Slot::Result(func)),
+            }),
+            Some(ty) => {
+                let kind = self.slot_kind(Slot::Result(func));
+                Ok(Val { e: call, ty, kind })
+            }
+            None => {
+                // Its `undefined` result is used, so the function gets a result.
+                self.observe(Slot::Result(func), Kind::Any);
+                Ok(self.undefined_val())
+            }
+        }
     }
 
     /// A call of a known function with its typed signature. `self_obj`: its function object, if it

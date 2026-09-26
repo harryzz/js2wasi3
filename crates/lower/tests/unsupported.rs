@@ -101,6 +101,17 @@ fn builtins_prelude() {
         one("export function f() { return new Number(1); }"),
         "1:34 unsupported: global `Number` (planned: T21)"
     );
+    // Slice 3: arrays. `Array` as a value and a spread `Array(...xs)` are still rejected.
+    lowers("export function f(a) { return a.map((x) => x + 1).indexOf(2) + Array(3).length; }");
+    lowers("export function f(n) { return new Array(n).fill(0).concat(Array.of(1)).length; }");
+    assert_eq!(
+        one("export function f() { const A = Array; return 1; }"),
+        "1:33 unsupported: global `Array` (planned: T21)"
+    );
+    assert_eq!(
+        one("export function f(xs) { return new Array(...xs).length; }"),
+        "1:36 unsupported: global `Array` (planned: T21)"
+    );
 }
 
 #[test]
