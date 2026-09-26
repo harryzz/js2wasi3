@@ -136,6 +136,12 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
             module: ir::Module {
                 bind: prelude.bind,
                 to_string: prelude.to_string,
+                ctor_stubs: prelude.constructor,
+                names: builtins::GATED
+                    .iter()
+                    .filter(|n| prelude.user_props.contains(**n))
+                    .map(|n| n.to_string())
+                    .collect(),
                 ..ir::Module::default()
             },
             funcs: HashMap::new(),
@@ -874,6 +880,38 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 continue;
             }
             let Some((b, key)) = name[2..].split_once("_prototype_") else {
+                // A constructor used as a value (`$$Array`) and its statics (`$$Array_from`, T25).
+                let (b, key) = name[2..].split_once('_').unwrap_or((&name[2..], ""));
+                if !self.prelude.ctor_values.contains(b) {
+                    continue;
+                }
+                let length = builtins::length(name).unwrap_or(self.fn_length[&func]);
+                for p in self.func_params[&func].clone().into_iter().flatten() {
+                    self.observe(Slot::Var(p), Kind::Any);
+                }
+                let code = self.adapter(func);
+                if let Some(ns) = ir::Namespace::parse(b) {
+                    let m = ir::BuiltinMethod {
+                        proto: Builtin::Object,
+                        key: key.to_string(),
+                        code,
+                        length,
+                    };
+                    self.module.namespace_methods.push((ns, m));
+                    continue;
+                }
+                let owner = Builtin::parse(b).expect("a built-in constructor");
+                let m = ir::BuiltinMethod {
+                    proto: owner,
+                    key: key.to_string(),
+                    code,
+                    length,
+                };
+                if key.is_empty() {
+                    self.module.builtin_ctors.push(m);
+                } else {
+                    self.module.builtin_statics.push(m);
+                }
                 continue;
             };
             let proto = Builtin::parse_prelude(b).expect("a built-in prototype");
@@ -2986,6 +3024,30 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 {
                     return Ok(Val::js(self.func_value(func), Kind::Any));
                 }
+                if let Some(ns) = ir::Namespace::parse(&id.name)
+                    && self.prelude.ctor_values.contains(id.name.as_str())
+                    && self
+                        .scoping
+                        .get_reference(id.reference_id())
+                        .symbol_id()
+                        .is_none()
+                {
+                    // `Math`/`JSON` as a value (T25).
+                    self.module.namespaces = true;
+                    return Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::Namespace(ns), vec![]),
+                        Kind::Any,
+                    ));
+                }
+                if let Some(b) = self.builtin_ident(e)
+                    && self.prelude.ctor_values.contains(id.name.as_str())
+                {
+                    // A built-in constructor as a value (T25).
+                    return Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::BuiltinCtor(b), vec![]),
+                        Kind::Any,
+                    ));
+                }
                 if let Some(k) = self.error_ctor(e) {
                     // A native error constructor as a value (T16).
                     return Ok(Val::js(
@@ -3247,16 +3309,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if sm.optional {
                     return Err(self.unsupported(span, "`Math?.x`", "later"));
                 }
-                let v = match sm.property.name.as_str() {
-                    "E" => std::f64::consts::E,
-                    "LN10" => std::f64::consts::LN_10,
-                    "LN2" => std::f64::consts::LN_2,
-                    "LOG10E" => std::f64::consts::LOG10_E,
-                    "LOG2E" => std::f64::consts::LOG2_E,
-                    "PI" => std::f64::consts::PI,
-                    "SQRT1_2" => std::f64::consts::FRAC_1_SQRT_2,
-                    "SQRT2" => std::f64::consts::SQRT_2,
-                    p => return Err(self.unsupported(span, &format!("`Math.{p}`"), "T21")),
+                let p = sm.property.name.as_str();
+                let Some(&(_, v)) = ir::MATH_CONSTANTS.iter().find(|(n, _)| *n == p) else {
+                    return Err(self.unsupported(span, &format!("`Math.{p}`"), "T21"));
                 };
                 Ok(Val::num(Expr::f64(v)))
             }
@@ -3667,6 +3722,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && let Expression::Identifier(obj) = m.object.without_parentheses()
             && self.is_global(&m.object, &obj.name)
             && self.prelude.has_statics(&obj.name)
+            && !(self.prelude.ctor_values.contains(obj.name.as_str())
+                && builtins::FUNCTION_PROPS.contains(&m.property.name.as_str()))
         {
             // `Math.nope(…)`, `JSON.parse(…)`: a static the prelude doesn't implement.
             let what = format!("`{}.{}`", obj.name, m.property.name);
@@ -5811,17 +5868,10 @@ fn truthy(e: Expr) -> Expr {
 
 /// `Number.<name>` constants (T21).
 fn number_constant(name: &str) -> Option<f64> {
-    Some(match name {
-        "MAX_SAFE_INTEGER" => 9007199254740991.0,
-        "MIN_SAFE_INTEGER" => -9007199254740991.0,
-        "EPSILON" => f64::EPSILON,
-        "MAX_VALUE" => f64::MAX,
-        "MIN_VALUE" => 5e-324,
-        "POSITIVE_INFINITY" => f64::INFINITY,
-        "NEGATIVE_INFINITY" => f64::NEG_INFINITY,
-        "NaN" => f64::NAN,
-        _ => return None,
-    })
+    ir::NUMBER_CONSTANTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, v)| *v)
 }
 
 fn to_i32(e: Expr) -> Expr {

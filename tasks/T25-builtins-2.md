@@ -196,6 +196,47 @@ when used. **Speed:** 300k string-keyed set/get/delete + 300k numeric for-of + 3
 as values (F81), then `String`/`Number`/`Array`/`Object` as function values with their prototypes' `constructor`
 (F37), which F95's circular-JSON message needs.
 
+### Slice 4: built-ins as values, missing methods (done 2026-09-26)
+- **Constructors as values** (`Object`, `String`, `Number`, `Boolean`, `Array`, `Map`, `Set`): the prelude marks a
+  global used other than called / `B.x` / `instanceof B` (plus spread calls and `B.apply|call|bind|name|length`) as a
+  value use (`Prelude::ctor_values`), roots `$$B` and the statics the code names; the lowering emits
+  `Intrinsic::BuiltinCtor(b)`, the backend `func::Helper::BuiltinCtor` makes the function object once (globals
+  `G_CTORS`): code and construct = the prelude adapter (`Map`/`Set` calls throw "Constructor Map requires 'new'",
+  `new String/Number/Boolean` trap: wrappers are F106), `prototype` = the built-in prototype, which gets it as
+  `constructor`; `Number` gets its constants. New prelude functions `$$Object` (`Object(v)`, `new Object`) and
+  `$$Boolean`. A program that names `constructor` but not the constructor gets **stubs** (`ir::Module::ctor_stubs`:
+  identity, `name`, `length`, `prototype`; calling traps): +783 bytes instead of +20 KB of `$$Number`/`$$String`.
+  This also fixes F95 (JSON's circular message reads `constructor`).
+- **`Math`/`JSON` as values** (`ir::Namespace`, `Intrinsic::Namespace`, `func::Helper::Namespace`): an object of class
+  `CLASS_MATH`/`CLASS_JSON` (printed `Object [Math] {}`) with `Math`'s constants and the prelude functions the code
+  names, non-enumerable. `ir::MATH_CONSTANTS`/`NUMBER_CONSTANTS` are shared with the lowering.
+- **Names from strings:** string literals in the user's code count as names for statics (`Math[k]`) and prototype
+  methods (`s[m]()`), so a key read from a string finds its method when the name appears in the code. A name built
+  at run time (`"fl" + "oor"`) finds nothing: F109.
+- **Methods:** `Object.groupBy`; the ES2025 `Set` methods (GetSetRecord, node's messages); `__defineGetter__`,
+  `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__`; `Array.prototype.keys`/`entries` (native: `iter.rs`
+  kinds `ARRAY_KEYS`/`ARRAY_ENTRIES`, printed `Object [Array Iterator] {}`), `Array.prototype.toLocaleString`,
+  `Number.prototype.toLocaleString` (en-US: grouping, ≤ 3 fraction digits), `toExponential`/`toPrecision` (exact
+  decimal expansion, ties up: `$$exactDigits`, `$$roundDigits`), `String.prototype.localeCompare` (ICU root
+  collation for ASCII, order derived from node, verified on 2000 random pairs; other characters trap) and
+  `normalize` (strings no form changes; others trap).
+- **Gates** (`ir::Module::names`, the lowering's `GATED`): `keys`/`entries`, the iterator-step branch and the
+  array-iterator printing are linked only when the code names `keys`/`entries`/`values`/`iterator`; the
+  `Math`/`JSON` printing only when they're used as values.
+- Tests: fixtures `builtins/ctor-values.js`, `namespaces.js`, `more-methods.js`, `number-format.js` (with a 300-value
+  sweep; built without `**` because of F77), `locale.js`; `unsupported.rs` (values now lower; `Symbol` as the
+  rejected example), `build.rs` (the sentinel example is now `String.prototype.match`). `cargo test` ok;
+  `scripts/diff.sh -j 4`: 82 passed, 0 failed, 11 skipped.
+- `hello.js`: 53043 bytes (+178 over 52865: the global slots for constructor and namespace values).
+
+**Not done (follow-ups):** F109 (built-ins named only at run time aren't linked), F106 (wrapper objects, subclassing built-ins, native statics on constructor values,
+stubs trap when called), F107 (`localeCompare`/`normalize`/`toLocaleString` beyond ASCII/en-US), F108 (arrays:
+species, `isConcatSpreadable`, generic `push`/`join`; `Array.fromAsync`, iterator helpers). `[object Math]` and
+`Symbol.toStringTag` are slice 5 (F94).
+
+**Next smallest step:** slice 5 (symbols and printing) or T20, the user's choice. Slice 5's first piece:
+`Symbol.toStringTag` on the built-in prototypes (F94), which `Object.prototype.toString` and `console.log` read.
+
 ## Handoff for the rest of slice 3 (written 2026-09-26, end of the slices 1–3 session; done, kept for reference)
 
 **State:** `main`, committed, not pushed. Slices 1 (`JSON.parse`) and 2 (`Map`/`Set`, `Map.groupBy`) are done; slice 3
@@ -352,3 +393,13 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 - 2026-09-26: Function.prototype.toString done: `$function` gets field 11 `source` (mut, null = native); ir::Closure::source (lowerer fn_source spans: methods from the key without `static`, accessors from get/set, classes c.span), set after New via func::Helper::SetSource; real toString (func::Helper::ToString) installed and sources emitted only when user code names `toString` (ir::Module::to_string); else sentinel/trap as before. Probes (methods, accessors, static, arrows, class exprs, bound, built-ins, template/String/+ conversion) match node.
 - 2026-09-26: F59 done: Intrinsic::SetFunctionName (func::Helper::SetName: prefix + ToString(key), a symbol as [desc], empty desc -> ''), applied to anonymous functions/classes under computed or numeric keys: object literal values/methods/accessors, class methods/accessors, class fields (instance computed field keys stay unsupported). Probe matches node.
 - 2026-09-26: slice 3 done: function-source.js fixture PASS, cargo test ok, diff.sh 77/0/11, hello.js 52865. Notes / Result, README (F43, F47, F59 ticked; F104, F105), D5, keywords.md updated.
+- 2026-09-26: slice 4 (built-ins as values) started.
+- 2026-09-26: 4a step 1: `$$Object` (Object(v)/new Object(v); primitives trap, F88) and `$$Boolean` in object.js; `new Object` direct-calls $$Object. Smoke test matches node.
+- 2026-09-26: 4a done: built-in constructors as values (Object/String/Number/Boolean/Array/Map/Set): Intrinsic::BuiltinCtor -> func::Helper::BuiltinCtor (function object over the prelude $$B code; Map/Set calls throw 'requires new', new String/Number/Boolean trap (F88); prototype <-> constructor; prelude statics the code names as own methods; globals G_CTORS). Prelude detects value uses (not called, not `B.x`, not instanceof RHS). Naming `constructor` gives the other prototypes stub constructors (trap when called; +783 bytes instead of +20 KB for full ones). F95 fixed by it. ctor-values.js PASS; hello.js 53024 (+159: 21 global slots).
+- 2026-09-26: 4b done: `Math`/`JSON` as values (ir::Namespace, Intrinsic::Namespace -> func::Helper::Namespace: object class CLASS_MATH/CLASS_JSON printed 'Object [Math] {}', Math constants + prelude functions the code names (property names or string literals: `Math[k]`), non-enumerable); Number constants on the Number ctor value; ir::MATH_CONSTANTS/NUMBER_CONSTANTS shared with the lowerer. console.log checks gated on use (ir::Module::namespaces). namespaces.js PASS; hello.js 53038. `[object Math]` (toStringTag) left for slice 5 (F94).
+- 2026-09-26: 4c part 1 done: Object.groupBy, the ES2025 Set methods (union/intersection/difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom over GetSetRecord, node's messages), __defineGetter__/__defineSetter__/__lookupGetter__/__lookupSetter__ (object.js), Array.prototype.toLocaleString + Number.prototype.toLocaleString (en-US: ≤3 fraction digits, grouping; locales/options trap), Array.prototype.keys/entries natively (iter.rs ARRAY_KEYS/ARRAY_ENTRIES), console.log 'Object [Array Iterator] {}'. Gates: ir::Module::names (user property names in lowering's GATED) links keys/entries and the iterator print only when named. more-methods.js PASS; full diff.sh 80/0/11; hello.js 53043.
+- 2026-09-26: 4c part 2 done: Number.prototype.toExponential/toPrecision in string.js ($$exactDigits: exact decimal expansion m·5^-k; $$roundDigits ties up; undefined digits: the shortest digits from Number::toString). number-format.js (edge cases + 300-value LCG sweep, built without ** because of F77) PASS.
+- 2026-09-26: 4c part 3 done: String.prototype.localeCompare (ICU root collation for ASCII: ignorable controls, primary order derived from node, then lowercase-first case difference; other chars/locales/options trap; 2000-pair sweep matches), normalize (ASCII for all forms, < U+0300 for NFC; else trap; RangeError text), string literals in user code root prototype methods too (`s[m]()`, F88). locale.js PASS; diff.sh 82/0/11; hello.js 53043.
+- 2026-09-26: spread calls of built-in constructors (`Array(...xs)`) and their function properties (`Array.apply`, `String.name`: builtins::FUNCTION_PROPS) go through the constructor value. ctor-values.js PASS.
+- 2026-09-26: slice 4 done: Notes / Result, README (F37, F81, F87, F88, F91, F95, F97, F101 ticked; F106–F108; Next up), D5, keywords.md updated.
+- 2026-09-26: recorded F109 (built-ins linked only when named in the code) in README, D5, keywords.md, slice 4 notes.

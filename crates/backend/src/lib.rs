@@ -674,6 +674,47 @@ impl runtime::Cx for Emitter<'_> {
         self.m.to_string
     }
 
+    fn builtin_ctor(&mut self, b: ir::Builtin) -> Option<(u32, u32)> {
+        let base = self.func_base;
+        self.m
+            .builtin_ctors
+            .iter()
+            .find(|m| m.proto == b)
+            .map(|m| (base + m.code.0, m.length))
+    }
+
+    fn namespace_methods(&mut self, ns: ir::Namespace) -> Vec<(String, u32, u32)> {
+        let base = self.func_base;
+        self.m
+            .namespace_methods
+            .iter()
+            .filter(|(n, _)| *n == ns)
+            .map(|(_, m)| (m.key.clone(), base + m.code.0, m.length))
+            .collect()
+    }
+
+    fn names(&mut self, name: &str) -> bool {
+        self.m.names.contains(name)
+    }
+
+    fn has_namespaces(&mut self) -> bool {
+        self.m.namespaces
+    }
+
+    fn ctor_stubs(&mut self) -> bool {
+        self.m.ctor_stubs
+    }
+
+    fn builtin_statics(&mut self, b: ir::Builtin) -> Vec<(String, u32, u32)> {
+        let base = self.func_base;
+        self.m
+            .builtin_statics
+            .iter()
+            .filter(|m| m.proto == b)
+            .map(|m| (m.key.clone(), base + m.code.0, m.length))
+            .collect()
+    }
+
     fn builtin_methods(&mut self, b: ir::Builtin) -> Vec<(String, u32, u32)> {
         let base = self.func_base;
         self.m
@@ -1328,6 +1369,8 @@ impl Emitter<'_> {
                     Intrinsic::Map(op) => H::Map(mapset::Helper::Op(*op)),
                     Intrinsic::MakeArguments => H::Obj(object::Helper::MakeArguments),
                     Intrinsic::SetFunctionName => H::Func(func::Helper::SetName),
+                    Intrinsic::BuiltinCtor(b) => H::Func(func::Helper::BuiltinCtor(*b)),
+                    Intrinsic::Namespace(ns) => H::Func(func::Helper::Namespace(*ns)),
                     Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
                     Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
                     Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),

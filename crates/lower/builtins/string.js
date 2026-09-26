@@ -713,6 +713,99 @@ function $$String_prototype_replaceAll(searchValue, replaceValue) {
   return r;
 }
 
+// `localeCompare` as node's ICU root collation orders ASCII (T25): control characters are
+// ignored; then, by primary weight, whitespace < punctuation and symbols (`$$collation`'s order)
+// < digits < letters (case-insensitive); then the first case difference (lowercase first).
+// Other characters, locales and options aren't implemented (they trap).
+function $$collationWeight(c) {
+  if (c >= 128) {
+    __intrinsic_trap();
+  }
+  if (c >= 97 && c <= 122) {
+    return c;
+  }
+  if (c >= 65 && c <= 90) {
+    return c + 32;
+  }
+  const order = "\t\n\v\f\r _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789";
+  for (let i = 0; i < 48; i++) {
+    if (__intrinsic_unit(order, i) === c) {
+      return i + 1;
+    }
+  }
+  // Ignorable.
+  return 0;
+}
+
+// The next non-ignorable index at or after `i`, or `len`.
+function $$collationNext(s, i, len) {
+  while (i < len && $$collationWeight(__intrinsic_unit(s, i)) === 0) {
+    i++;
+  }
+  return i;
+}
+
+function $$String_prototype_localeCompare(that, locales, options) {
+  const s = $$thisString(this, "localeCompare");
+  const t = $$String(that);
+  if (locales !== undefined || options !== undefined) {
+    __intrinsic_trap();
+  }
+  const n = __intrinsic_str_len(s);
+  const m = __intrinsic_str_len(t);
+  let i = $$collationNext(s, 0, n);
+  let j = $$collationNext(t, 0, m);
+  while (i < n && j < m) {
+    const a = $$collationWeight(__intrinsic_unit(s, i));
+    const b = $$collationWeight(__intrinsic_unit(t, j));
+    if (a !== b) {
+      return a < b ? -1 : 1;
+    }
+    i = $$collationNext(s, i + 1, n);
+    j = $$collationNext(t, j + 1, m);
+  }
+  if (i < n) {
+    return 1;
+  }
+  if (j < m) {
+    return -1;
+  }
+  // The same letters: the first case difference.
+  i = $$collationNext(s, 0, n);
+  j = $$collationNext(t, 0, m);
+  while (i < n) {
+    const a = __intrinsic_unit(s, i);
+    const b = __intrinsic_unit(t, j);
+    if (a !== b) {
+      return a > b ? -1 : 1;
+    }
+    i = $$collationNext(s, i + 1, n);
+    j = $$collationNext(t, j + 1, m);
+  }
+  return 0;
+}
+
+// `normalize(form)` (T25): strings no form changes (ASCII; below U+0300 for NFC) are returned
+// as they are; the others need Unicode's tables (they trap).
+function $$String_prototype_normalize(form) {
+  const s = $$thisString(this, "normalize");
+  let f = "NFC";
+  if (form !== undefined) {
+    f = $$String(form);
+  }
+  if (f !== "NFC" && f !== "NFD" && f !== "NFKC" && f !== "NFKD") {
+    throw new RangeError("The normalization form should be one of NFC, NFD, NFKC, NFKD.");
+  }
+  const limit = f === "NFC" ? 768 : 128;
+  const n = __intrinsic_str_len(s);
+  for (let i = 0; i < n; i++) {
+    if (__intrinsic_unit(s, i) >= limit) {
+      __intrinsic_trap();
+    }
+  }
+  return s;
+}
+
 function $$String_prototype_isWellFormed() {
   const s = $$thisString(this, "isWellFormed");
   const len = s.length;
@@ -1414,6 +1507,222 @@ function $$bigToDecimal(a) {
     r = __intrinsic_sub("0000000", 0, 7 - digits.length) + digits + r;
   }
   return r;
+}
+
+// The exact decimal expansion of a finite x > 0 (T25): [digits without leading zeros, e] with
+// x = 0.digits × 10^e.
+function $$exactDigits(x) {
+  const hi = __intrinsic_hi(x);
+  const be = (hi >>> 20) & 0x7ff;
+  let m = (hi & 0xfffff) * 4294967296 + (__intrinsic_lo(x) >>> 0);
+  let k = -1074;
+  if (be !== 0) {
+    m = m + 4503599627370496;
+    k = be - 1075;
+  }
+  const n = $$bigFrom(m);
+  if (k >= 0) {
+    $$bigMulPow2(n, k);
+  } else {
+    // x = m·5^-k / 10^-k.
+    let q = -k;
+    while (q >= 10) {
+      $$bigMulAdd(n, 9765625, 0);
+      q -= 10;
+    }
+    while (q > 0) {
+      $$bigMulAdd(n, 5, 0);
+      q--;
+    }
+  }
+  const digits = $$bigToDecimal(n);
+  return [digits, digits.length + (k < 0 ? k : 0)];
+}
+
+// The shortest digits that round-trip (Number::toString's), as [digits, e] with
+// x = 0.digits × 10^e, for a finite x > 0.
+function $$shortestDigits(x) {
+  const s = __intrinsic_number_to_string(x);
+  const len = __intrinsic_str_len(s);
+  let e = 0;
+  let end = len;
+  for (let i = 0; i < len; i++) {
+    if (__intrinsic_unit(s, i) === 101) {
+      end = i;
+      e = +__intrinsic_sub(s, i + 1, len);
+    }
+  }
+  let digits = "";
+  let point = end;
+  for (let i = 0; i < end; i++) {
+    const c = __intrinsic_unit(s, i);
+    if (c === 46) {
+      point = i;
+    } else {
+      digits += __intrinsic_sub(s, i, i + 1);
+    }
+  }
+  let lead = 0;
+  while (__intrinsic_unit(digits, lead) === 48) {
+    lead++;
+  }
+  let tail = __intrinsic_str_len(digits);
+  while (tail > lead + 1 && __intrinsic_unit(digits, tail - 1) === 48) {
+    tail--;
+  }
+  return [__intrinsic_sub(digits, lead, tail), point - lead + e];
+}
+
+// `digits` rounded to p digits (ties: up, which is the larger n for an exact expansion), padded
+// with zeros: [p digits, e + 1 if it carried into a new digit].
+function $$roundDigits(digits, e, p) {
+  const len = __intrinsic_str_len(digits);
+  const out = __intrinsic_str_new(p);
+  for (let i = 0; i < p; i++) {
+    __intrinsic_str_set(out, i, i < len ? __intrinsic_unit(digits, i) : 48);
+  }
+  if (p < len && __intrinsic_unit(digits, p) >= 53) {
+    let i = p - 1;
+    while (i >= 0 && __intrinsic_unit(out, i) === 57) {
+      __intrinsic_str_set(out, i, 48);
+      i--;
+    }
+    if (i < 0) {
+      __intrinsic_str_set(out, 0, 49);
+      return [out, e + 1];
+    }
+    __intrinsic_str_set(out, i, __intrinsic_unit(out, i) + 1);
+  }
+  return [out, e];
+}
+
+function $$zeros(n) {
+  const z = __intrinsic_str_new(n);
+  for (let i = 0; i < n; i++) {
+    __intrinsic_str_set(z, i, 48);
+  }
+  return z;
+}
+
+// d.ddd e±n from p digits and the exponent of the first one.
+function $$expForm(digits, e) {
+  const p = __intrinsic_str_len(digits);
+  let r = __intrinsic_sub(digits, 0, 1);
+  if (p > 1) {
+    r += "." + __intrinsic_sub(digits, 1, p);
+  }
+  return r + (e < 0 ? "e-" + $$String(-e) : "e+" + $$String(e));
+}
+
+function $$Number_prototype_toExponential(fractionDigits) {
+  let x = $$thisNumber(this, "toExponential");
+  const f = $$toInteger(fractionDigits);
+  if (x !== x || x === Infinity || x === -Infinity) {
+    return $$String(x);
+  }
+  if (f < 0 || f > 100) {
+    throw new RangeError("toExponential() argument must be between 0 and 100");
+  }
+  let sign = "";
+  if (x < 0) {
+    sign = "-";
+    x = -x;
+  }
+  if (x === 0) {
+    return sign + $$expForm($$zeros(fractionDigits === undefined ? 1 : f + 1), 0);
+  }
+  if (fractionDigits === undefined) {
+    const d = $$shortestDigits(x);
+    return sign + $$expForm(d[0], d[1] - 1);
+  }
+  const d = $$exactDigits(x);
+  const r = $$roundDigits(d[0], d[1], f + 1);
+  return sign + $$expForm(r[0], r[1] - 1);
+}
+
+function $$Number_prototype_toPrecision(precision) {
+  let x = $$thisNumber(this, "toPrecision");
+  if (precision === undefined) {
+    return $$String(x);
+  }
+  const p = $$toInteger(precision);
+  if (x !== x || x === Infinity || x === -Infinity) {
+    return $$String(x);
+  }
+  if (p < 1 || p > 100) {
+    throw new RangeError("toPrecision() argument must be between 1 and 100");
+  }
+  let sign = "";
+  if (x < 0) {
+    sign = "-";
+    x = -x;
+  }
+  let m;
+  let e;
+  if (x === 0) {
+    m = $$zeros(p);
+    e = 0;
+  } else {
+    const d = $$exactDigits(x);
+    const r = $$roundDigits(d[0], d[1], p);
+    m = r[0];
+    e = r[1] - 1;
+  }
+  if (e < -6 || e >= p) {
+    return sign + $$expForm(m, e);
+  }
+  if (e === p - 1) {
+    return sign + m;
+  }
+  if (e >= 0) {
+    return sign + __intrinsic_sub(m, 0, e + 1) + "." + __intrinsic_sub(m, e + 1, p);
+  }
+  return sign + "0." + $$zeros(-(e + 1)) + m;
+}
+
+// `toLocaleString()` as node's default locale (en-US) prints: at most 3 fraction digits, the
+// integer digits grouped by 3 (T25). Locales and options aren't implemented (they trap).
+function $$Number_prototype_toLocaleString(locales, options) {
+  const x = $$thisNumber(this, "toLocaleString");
+  if (locales !== undefined || options !== undefined) {
+    __intrinsic_trap();
+  }
+  if (x !== x) {
+    return "NaN";
+  }
+  if (x === Infinity) {
+    return "∞";
+  }
+  if (x === -Infinity) {
+    return "-∞";
+  }
+  if (x >= 1e21 || x <= -1e21) {
+    __intrinsic_trap();
+  }
+  let s = x.toFixed(3);
+  if (x === 0 && 1 / x < 0) {
+    s = "-" + s;
+  }
+  let end = s.length;
+  while (s[end - 1] === "0") {
+    end--;
+  }
+  if (s[end - 1] === ".") {
+    end--;
+  }
+  s = s.slice(0, end);
+  let start = s[0] === "-" ? 1 : 0;
+  let dot = s.indexOf(".");
+  if (dot < 0) {
+    dot = s.length;
+  }
+  let out = s.slice(dot);
+  let i = dot;
+  while (i - start > 3) {
+    out = "," + s.slice(i - 3, i) + out;
+    i -= 3;
+  }
+  return s.slice(0, i) + out;
 }
 
 function $$Number_prototype_toFixed(fractionDigits) {

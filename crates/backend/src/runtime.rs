@@ -137,8 +137,13 @@ pub const G_WAIT: u32 = G_LOOP_NOW + 1;
 pub const G_WAIT_AT: u32 = G_WAIT + 1;
 /// `(mut i32)`: the last identity hash handed out (T25, see [`crate::mapset`]).
 pub const G_ID_HASH: u32 = G_WAIT_AT + 1;
+/// `(mut (ref null $object))` per [`js2wasi3_ir::Builtin`]: the constructor as a value (T25),
+/// created on first use.
+pub const G_CTORS: u32 = G_ID_HASH + 1;
+/// `(mut (ref null $object))` per [`js2wasi3_ir::Namespace`]: `Math`/`JSON` as values (T25).
+pub const G_NAMESPACES: u32 = G_CTORS + js2wasi3_ir::Builtin::ALL.len() as u32;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_ID_HASH + 1;
+pub const GLOBALS: u32 = G_NAMESPACES + js2wasi3_ir::Namespace::ALL.len() as u32;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -178,6 +183,23 @@ pub trait Cx {
     fn has_bind(&mut self) -> bool;
     /// Does the code name a property `toString` (T25: `Function.prototype.toString`)?
     fn has_to_string(&mut self) -> bool;
+    /// A built-in constructor used as a value (T25): its prelude code (a `$code`) and `length`.
+    fn builtin_ctor(&mut self, b: js2wasi3_ir::Builtin) -> Option<(u32, u32)>;
+    /// Do built-in prototypes without one get a constructor stub (T25: the code names
+    /// `constructor`)?
+    fn ctor_stubs(&mut self) -> bool;
+    /// Does built-in `b`'s prototype have a constructor value (real or stub)?
+    fn has_ctor(&mut self, b: js2wasi3_ir::Builtin) -> bool {
+        self.builtin_ctor(b).is_some() || (b.ctor_length().is_some() && self.ctor_stubs())
+    }
+    /// `Math`/`JSON` as values (T25): their prelude functions in use, (key, code, length).
+    fn namespace_methods(&mut self, ns: js2wasi3_ir::Namespace) -> Vec<(String, u32, u32)>;
+    /// Does the user's code name property `name` (one of the lowering's gated names, T25)?
+    fn names(&mut self, name: &str) -> bool;
+    /// Is `Math` or `JSON` used as a value?
+    fn has_namespaces(&mut self) -> bool;
+    /// Its statics implemented by the prelude: (key, code, length).
+    fn builtin_statics(&mut self, b: js2wasi3_ir::Builtin) -> Vec<(String, u32, u32)>;
 
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -569,6 +591,17 @@ pub fn globals(globals: &mut GlobalSection) {
     globals.global(long, &ConstExpr::i64_const(0));
     // T25: the identity hash counter.
     globals.global(int, &ConstExpr::i32_const(0));
+    // T25: the built-in constructors and namespaces as values.
+    for _ in 0..js2wasi3_ir::Builtin::ALL.len() + js2wasi3_ir::Namespace::ALL.len() {
+        globals.global(
+            GlobalType {
+                val_type: rt(true, T_OBJECT),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(object()),
+        );
+    }
 }
 
 /// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.

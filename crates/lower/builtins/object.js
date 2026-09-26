@@ -14,6 +14,24 @@ function $$toObjectCheck(v) {
 
 // ---- Object ------------------------------------------------------------------------------
 
+// `Object(v)` / `new Object(v)` (T25): a new object for `undefined`/`null`, objects unchanged.
+function $$Object(v) {
+  if (v === undefined || v === null) {
+    return {};
+  }
+  const t = typeof v;
+  if (t !== "object" && t !== "function") {
+    // A wrapper object (F88).
+    __intrinsic_trap();
+  }
+  return v;
+}
+
+// `Boolean(v)` (T25; `new Boolean` wrapper objects: F88).
+function $$Boolean(v) {
+  return !!v;
+}
+
 function $$Object_assign(target, ...sources) {
   const to = $$toObjectCheck(target);
   const t = typeof to;
@@ -59,7 +77,74 @@ function $$Object_fromEntries(iterable) {
   return obj;
 }
 
+// `Object.groupBy(items, callbackfn)` (node 21+): a null-prototype object of arrays, in
+// first-seen key order.
+function $$Object_groupBy(items, callbackfn) {
+  if (items === undefined || items === null) {
+    throw new TypeError("Object.groupBy called on null or undefined");
+  }
+  if (typeof callbackfn !== "function") {
+    throw new TypeError($$describe(callbackfn) + " is not a function");
+  }
+  $$mapIterable(items);
+  const o = Object.create(null);
+  let k = 0;
+  for (const v of items) {
+    let key = callbackfn(v, k);
+    if (typeof key !== "symbol") {
+      key = $$String(key);
+    }
+    let group = o[key];
+    if (group === undefined) {
+      group = [];
+      __intrinsic_define(o, key, group);
+    }
+    group.push(v);
+    k++;
+  }
+  return o;
+}
+
 // ---- Object.prototype --------------------------------------------------------------------
+
+// The legacy accessor methods (Annex B).
+function $$Object_prototype___defineGetter__(p, getter) {
+  const o = $$toObjectCheck(this);
+  if (typeof getter !== "function") {
+    throw new TypeError("Object.prototype.__defineGetter__: Expecting function");
+  }
+  Object.defineProperty(o, p, { get: getter, enumerable: true, configurable: true });
+}
+
+function $$Object_prototype___defineSetter__(p, setter) {
+  const o = $$toObjectCheck(this);
+  if (typeof setter !== "function") {
+    throw new TypeError("Object.prototype.__defineSetter__: Expecting function");
+  }
+  Object.defineProperty(o, p, { set: setter, enumerable: true, configurable: true });
+}
+
+function $$lookupAccessor(o, p, setter) {
+  for (;;) {
+    const d = Object.getOwnPropertyDescriptor(o, p);
+    if (d !== undefined) {
+      return setter ? d.set : d.get;
+    }
+    o = Object.getPrototypeOf(o);
+    if (o === null) {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function $$Object_prototype___lookupGetter__(p) {
+  return $$lookupAccessor($$toObjectCheck(this), p, false);
+}
+
+function $$Object_prototype___lookupSetter__(p) {
+  return $$lookupAccessor($$toObjectCheck(this), p, true);
+}
 
 function $$Object_prototype_hasOwnProperty(v) {
   $$toObjectCheck(this);

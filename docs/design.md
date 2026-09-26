@@ -162,6 +162,13 @@ direct call of `$$Map`; `Map` itself isn't a value yet.)
 only when the code names a `toString` property, and `Function.prototype.toString` is installed only then; otherwise
 functions print as native code and `"" + f` traps (F104). Anonymous functions under computed keys are named at run
 time (`Intrinsic::SetFunctionName`).)
+(T25 slice 4: a built-in constructor used as a value (`arr.map(String)`, `x.constructor === Array`) is a function
+object over its prelude function (`$$Array`), made on first use (`Intrinsic::BuiltinCtor`), with `prototype` and the
+prelude statics the code names; its prototype's `constructor` is it. A program that only names `constructor` gets
+stubs (same identity and `name`, calling traps) so it doesn't link every constructor's code. `Math`/`JSON` values
+are objects of the prelude functions the code names (`Intrinsic::Namespace`). What the prelude links is decided by
+the names in the user's code: property names, and string literals (`s[m]()`, `Math[k]`); native methods that are
+not always needed are gated the same way (`ir::Module::names`). A name built at run time finds nothing (F109).)
 
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.

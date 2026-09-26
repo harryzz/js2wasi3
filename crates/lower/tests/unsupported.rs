@@ -76,11 +76,8 @@ fn builtins_prelude() {
         one("export function f() { return __intrinsic_floor(1); }"),
         "1:30 unsupported: global `__intrinsic_floor` (planned: T21)"
     );
-    // `Math` as a value.
-    assert_eq!(
-        one("export function f() { const m = Math; return 1; }"),
-        "1:33 unsupported: global `Math` (planned: T21)"
-    );
+    // `Math` as a value (T25 slice 4).
+    lowers("export function f(x) { const m = Math; return m.floor(x) + m.PI; }");
     // `Math.random` imports `wasi:random`: commands only.
     assert_eq!(
         one("export function f() { return Math.random(); }"),
@@ -92,25 +89,16 @@ fn builtins_prelude() {
     lowers(
         "export function f(n) { const p = parseFloat; return p('1.5') + Number.MAX_SAFE_INTEGER; }",
     );
-    // `String`/`Number` as values and wrapper objects.
-    assert_eq!(
-        one("export function f() { const s = String; return 1; }"),
-        "1:33 unsupported: global `String` (planned: T21)"
-    );
-    assert_eq!(
-        one("export function f() { return new Number(1); }"),
-        "1:34 unsupported: global `Number` (planned: T21)"
-    );
-    // Slice 3: arrays. `Array` as a value and a spread `Array(...xs)` are still rejected.
+    // `String`/`Number` as values (T25 slice 4; `new Number` lowers, its wrapper object traps).
+    lowers("export function f() { const s = String; return s(1).length; }");
+    lowers("export function f() { return new Number(1); }");
+    // Slice 3: arrays. `Array` as a value and a spread `Array(...xs)` too since T25 slice 4.
     lowers("export function f(a) { return a.map((x) => x + 1).indexOf(2) + Array(3).length; }");
     lowers("export function f(n) { return new Array(n).fill(0).concat(Array.of(1)).length; }");
+    lowers("export function f(xs) { const A = Array; return new A(...xs).length; }");
     assert_eq!(
-        one("export function f() { const A = Array; return 1; }"),
-        "1:33 unsupported: global `Array` (planned: T21)"
-    );
-    assert_eq!(
-        one("export function f(xs) { return new Array(...xs).length; }"),
-        "1:36 unsupported: global `Array` (planned: T21)"
+        one("export function f() { const s = Symbol; return 1; }"),
+        "1:33 unsupported: global `Symbol` (planned: T21)"
     );
     // Slice 4: JSON.stringify, Object statics and Object.prototype methods.
     lowers("export function f(o) { return JSON.stringify(o, null, 2).length; }");
@@ -126,20 +114,15 @@ fn builtins_prelude() {
         one("export function f(s) { return JSON.rawJSON(s); }"),
         "1:31 unsupported: `JSON.rawJSON` (planned: T21)"
     );
-    assert_eq!(
-        one("export function f() { const j = JSON; return 1; }"),
-        "1:33 unsupported: global `JSON` (planned: T21)"
-    );
-    // T25 slice 2: Map and Set; as values (and subclassing) not yet.
+    lowers("export function f(v) { const j = JSON; return j.stringify(v).length; }");
+    // T25 slice 2: Map and Set (subclassing not yet).
     lowers(
         "export function f(a) { const m = new Map([[1, a]]); m.set(2, 3); return new Set(m.keys()).size + m.get(1); }",
     );
     lowers("export function f(m) { return m instanceof Map && Map.prototype.has.call(m, 1); }");
     lowers("export function f(a) { return Map.groupBy(a, (x) => x % 2).size; }");
-    assert_eq!(
-        one("export function f() { const M = Map; return 1; }"),
-        "1:33 unsupported: global `Map` (planned: T21)"
-    );
+    // As values since T25 slice 4.
+    lowers("export function f() { const M = Map; return new M().size; }");
 }
 
 #[test]

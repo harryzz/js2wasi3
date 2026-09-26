@@ -6,7 +6,7 @@
 // throws in the lowering). `Map.prototype[Symbol.iterator]` is `entries`, `Set.prototype.keys` and
 // `[Symbol.iterator]` are `values`, `size` is a getter (installed by the backend). Iterator modes
 // (`__intrinsic_map_iter_kind`): 0–2 a Map's keys/values/entries, 3–5 a Set's.
-// Not implemented: `Map`/`Set` as values and subclassing (T25 slice 4), `WeakMap`/`WeakSet`. The constructors add entries directly, not through a user-replaced
+// Not implemented: subclassing, `WeakMap`/`WeakSet`. The constructors add entries directly, not through a user-replaced
 // `set`/`add`.
 // Uses array.js's `$$describe`, `$$typeDescribe`, `$$call3`; string.js's `$$String`.
 
@@ -192,6 +192,206 @@ function $$Set_prototype_values() {
 function $$Set_prototype_entries() {
   $$mapThis(this, 1, "Set.prototype.entries");
   return __intrinsic_map_iter_entries(this);
+}
+
+// The ES2025 set methods over a set-like `other` (GetSetRecord: `size`, `has`, `keys`).
+function $$setRecord(other, name) {
+  if (typeof other !== "object" || other === null) {
+    if (typeof other !== "function") {
+      throw new TypeError("Set.prototype." + name + " argument must be an object");
+    }
+  }
+  const rawSize = other.size;
+  const numSize = +rawSize;
+  if (numSize !== numSize) {
+    throw new TypeError("The .size property is NaN");
+  }
+  const size = $$toInteger(numSize);
+  if (size < 0) {
+    throw new RangeError("'" + $$String(size) + "' is an invalid size");
+  }
+  const has = other.has;
+  if (typeof has !== "function") {
+    throw new TypeError('string "has" is not a function');
+  }
+  const keys = other.keys;
+  if (typeof keys !== "function") {
+    throw new TypeError('string "keys" is not a function');
+  }
+  return [size, has, keys];
+}
+
+// The iterator `other.keys()` returned, checked.
+function $$setKeys(other, keys) {
+  const it = keys.call(other);
+  if (typeof it !== "object" || it === null) {
+    throw new TypeError($$describe(it) + " is not an object");
+  }
+  return it;
+}
+
+function $$setStep(it) {
+  const r = it.next();
+  if (typeof r !== "object" || r === null) {
+    throw new TypeError("Iterator result " + $$describe(r) + " is not an object");
+  }
+  return r;
+}
+
+function $$setCopy(s) {
+  const out = __intrinsic_map_new_set();
+  for (const v of s) {
+    __intrinsic_map_set(out, v, undefined);
+  }
+  return out;
+}
+
+function $$setClose(it) {
+  const ret = it.return;
+  if (ret !== undefined && ret !== null) {
+    ret.call(it);
+  }
+}
+
+function $$Set_prototype_union(other) {
+  $$mapThis(this, 1, "Set.prototype.union");
+  const rec = $$setRecord(other, "union");
+  const it = $$setKeys(other, rec[2]);
+  const out = $$setCopy(this);
+  for (;;) {
+    const r = $$setStep(it);
+    if (r.done) {
+      return out;
+    }
+    __intrinsic_map_set(out, r.value, undefined);
+  }
+  return out;
+}
+
+function $$Set_prototype_intersection(other) {
+  $$mapThis(this, 1, "Set.prototype.intersection");
+  const rec = $$setRecord(other, "intersection");
+  const out = __intrinsic_map_new_set();
+  if (__intrinsic_map_size(this) <= rec[0]) {
+    for (const e of $$setCopy(this)) {
+      if (rec[1].call(other, e)) {
+        __intrinsic_map_set(out, e, undefined);
+      }
+    }
+    return out;
+  }
+  const it = $$setKeys(other, rec[2]);
+  for (;;) {
+    const r = $$setStep(it);
+    if (r.done) {
+      return out;
+    }
+    if (__intrinsic_map_has(this, r.value)) {
+      __intrinsic_map_set(out, r.value, undefined);
+    }
+  }
+  return out;
+}
+
+function $$Set_prototype_difference(other) {
+  $$mapThis(this, 1, "Set.prototype.difference");
+  const rec = $$setRecord(other, "difference");
+  const out = $$setCopy(this);
+  if (__intrinsic_map_size(this) <= rec[0]) {
+    for (const e of $$setCopy(this)) {
+      if (rec[1].call(other, e)) {
+        __intrinsic_map_delete(out, e);
+      }
+    }
+    return out;
+  }
+  const it = $$setKeys(other, rec[2]);
+  for (;;) {
+    const r = $$setStep(it);
+    if (r.done) {
+      return out;
+    }
+    __intrinsic_map_delete(out, r.value);
+  }
+  return out;
+}
+
+function $$Set_prototype_symmetricDifference(other) {
+  $$mapThis(this, 1, "Set.prototype.symmetricDifference");
+  const rec = $$setRecord(other, "symmetricDifference");
+  const it = $$setKeys(other, rec[2]);
+  const out = $$setCopy(this);
+  for (;;) {
+    const r = $$setStep(it);
+    if (r.done) {
+      return out;
+    }
+    if (__intrinsic_map_has(this, r.value)) {
+      __intrinsic_map_delete(out, r.value);
+    } else {
+      __intrinsic_map_set(out, r.value, undefined);
+    }
+  }
+  return out;
+}
+
+function $$Set_prototype_isSubsetOf(other) {
+  $$mapThis(this, 1, "Set.prototype.isSubsetOf");
+  const rec = $$setRecord(other, "isSubsetOf");
+  if (__intrinsic_map_size(this) > rec[0]) {
+    return false;
+  }
+  for (const e of $$setCopy(this)) {
+    if (!rec[1].call(other, e)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function $$Set_prototype_isSupersetOf(other) {
+  $$mapThis(this, 1, "Set.prototype.isSupersetOf");
+  const rec = $$setRecord(other, "isSupersetOf");
+  if (__intrinsic_map_size(this) < rec[0]) {
+    return false;
+  }
+  const it = $$setKeys(other, rec[2]);
+  for (;;) {
+    const r = $$setStep(it);
+    if (r.done) {
+      return true;
+    }
+    if (!__intrinsic_map_has(this, r.value)) {
+      $$setClose(it);
+      return false;
+    }
+  }
+  return true;
+}
+
+function $$Set_prototype_isDisjointFrom(other) {
+  $$mapThis(this, 1, "Set.prototype.isDisjointFrom");
+  const rec = $$setRecord(other, "isDisjointFrom");
+  if (__intrinsic_map_size(this) <= rec[0]) {
+    for (const e of $$setCopy(this)) {
+      if (rec[1].call(other, e)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  const it = $$setKeys(other, rec[2]);
+  for (;;) {
+    const r = $$setStep(it);
+    if (r.done) {
+      return true;
+    }
+    if (__intrinsic_map_has(this, r.value)) {
+      $$setClose(it);
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---- iterators -----------------------------------------------------------------------------

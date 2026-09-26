@@ -133,6 +133,17 @@ pub enum Helper {
     /// `(f, key, prefix: jsval (a string)) -> jsval`: `f.name = prefix + key` (a symbol key:
     /// `[description]`, none for an empty one), F59.
     SetName,
+    /// `() -> jsval`: a built-in constructor as a value (T25), made on first use: its prelude
+    /// code, `prototype` (whose `constructor` it becomes) and prelude statics.
+    BuiltinCtor(Builtin),
+    /// `() -> jsval`: `Math`/`JSON` as a value (T25), made on first use: its constants and the
+    /// prelude functions in use, all non-enumerable.
+    Namespace(js2wasi3_ir::Namespace),
+    /// The code of `Map`/`Set` called without `new`: node's TypeError.
+    RequiresNew(Builtin),
+    /// The construct code of `String`/`Number`/`Boolean` (wrapper objects, F88), and the code of
+    /// a constructor stub (see `ir::Module::ctor_stubs`): traps.
+    WrapperTrap,
     /// The code of `Function.prototype.toString` (T25): the source text, or
     /// `function name() { [native code] }`.
     ToString,
@@ -167,6 +178,10 @@ impl Helper {
             Helper::Empty => "Function.prototype",
             Helper::SetSource => "set_function_source",
             Helper::SetName => "set_function_name",
+            Helper::BuiltinCtor(_) => "builtin_constructor",
+            Helper::Namespace(_) => "namespace",
+            Helper::RequiresNew(_) => "requires_new",
+            Helper::WrapperTrap => "wrapper_object_not_implemented",
             Helper::ToString => "Function.prototype.toString",
         }
     }
@@ -204,7 +219,10 @@ impl Helper {
             | Helper::BoundCall
             | Helper::BoundConstruct
             | Helper::Empty
-            | Helper::ToString => (vec![v, v, v], vec![v]),
+            | Helper::ToString
+            | Helper::RequiresNew(_)
+            | Helper::WrapperTrap => (vec![v, v, v], vec![v]),
+            Helper::BuiltinCtor(_) | Helper::Namespace(_) => (vec![], vec![v]),
             Helper::SetSource => (vec![v, s], vec![v]),
             Helper::SetName => (vec![v, v, v], vec![v]),
             Helper::CallList => (vec![v, v, v, s], vec![v]),
@@ -288,6 +306,24 @@ impl Helper {
             }
             Helper::ToString => to_string(cx),
             Helper::SetName => set_name(cx),
+            Helper::BuiltinCtor(b) => builtin_ctor(cx, b),
+            Helper::Namespace(ns) => namespace(cx, ns),
+            Helper::RequiresNew(b) => {
+                let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+                let msg = cx.str(&format!("Constructor {} requires 'new'", b.name()));
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.global_get(msg).call(throw);
+                s.unreachable().end();
+                f
+            }
+            Helper::WrapperTrap => {
+                let trap = oh(cx, object::Helper::BuiltinTrap);
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.call(trap).unreachable().end();
+                f
+            }
         }
     }
 }
@@ -1159,5 +1195,150 @@ fn set_name(cx: &mut dyn Cx) -> Function {
     s.call(concat);
     s.i32_const(object::HIDDEN | object::READONLY).call(define);
     s.local_get(F).end();
+    f
+}
+
+/// A built-in constructor as a value (T25): calls run its prelude code (`Map`/`Set` throw without
+/// `new`), `new` runs it too (`String`/`Number`/`Boolean` wrappers trap, F88); `prototype` is the
+/// built-in prototype, whose `constructor` it becomes; the prelude statics are own methods.
+fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
+    // A stub (only reached through `constructor`): its code traps.
+    let (code, length) = cx.builtin_ctor(b).unwrap_or_else(|| {
+        (
+            fh(cx, Helper::WrapperTrap),
+            b.ctor_length().expect("a built-in constructor"),
+        )
+    });
+    let new = fh(cx, Helper::New);
+    let proto = oh(cx, object::Helper::Proto(b));
+    let define = oh(cx, object::Helper::Define);
+    cx.declare_func(code);
+    let call = match b {
+        Builtin::Map | Builtin::Set => fh(cx, Helper::RequiresNew(b)),
+        _ => code,
+    };
+    let construct = match b {
+        Builtin::String | Builtin::Number | Builtin::Boolean => fh(cx, Helper::WrapperTrap),
+        _ => code,
+    };
+    cx.declare_func(call);
+    cx.declare_func(construct);
+    let statics: Vec<(u32, u32, u32)> = cx
+        .builtin_statics(b)
+        .into_iter()
+        .map(|(key, code, len)| {
+            cx.declare_func(code);
+            (cx.str(&key), code, len)
+        })
+        .collect();
+    let (name, prototype, constructor) =
+        (cx.str(b.name()), cx.str("prototype"), cx.str("constructor"));
+    let g = runtime::G_CTORS + b.index();
+    const F: u32 = 0;
+    const P: u32 = 1;
+    let mut f = Function::new([(1, jsval()), (1, rt(true, T_OBJECT))]);
+    let mut s = f.instructions();
+    s.global_get(g).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.global_get(g).return_();
+    s.end();
+    s.ref_func(call).ref_func(construct);
+    s.ref_null(HeapType::Concrete(T_VALS));
+    s.global_get(name).i32_const(length as i32).i32_const(0);
+    s.call(new).local_tee(F);
+    s.ref_cast_non_null(runtime::object()).global_set(g);
+    s.call(proto).local_set(P);
+    s.local_get(F).ref_cast_non_null(runtime::object());
+    s.global_get(prototype).local_get(P);
+    s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+        .call(define);
+    s.local_get(P).ref_as_non_null().global_get(constructor);
+    s.local_get(F).i32_const(object::HIDDEN).call(define);
+    if b == Builtin::Number {
+        define_constants(cx, &mut s, F, &js2wasi3_ir::NUMBER_CONSTANTS);
+    }
+    for (key, code, len) in statics {
+        s.local_get(F)
+            .ref_cast_non_null(runtime::object())
+            .global_get(key);
+        s.ref_func(code);
+        s.ref_null(HeapType::Concrete(T_CODE));
+        s.ref_null(HeapType::Concrete(T_VALS));
+        s.global_get(key).i32_const(len as i32).i32_const(0);
+        s.call(new);
+        s.i32_const(object::HIDDEN).call(define);
+    }
+    s.local_get(F);
+    s.end();
+    f
+}
+
+/// Define `constants` on the object in local `o`: read-only, non-enumerable, non-configurable.
+fn define_constants(
+    cx: &mut dyn Cx,
+    s: &mut wasm_encoder::InstructionSink,
+    o: u32,
+    constants: &[(&str, f64)],
+) {
+    let define = oh(cx, object::Helper::Define);
+    let box_ = cx.helper(runtime::Helper::Box);
+    for (key, v) in constants {
+        let key = cx.str(key);
+        s.local_get(o)
+            .ref_cast_non_null(runtime::object())
+            .global_get(key);
+        s.f64_const((*v).into()).call(box_);
+        s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+            .call(define);
+    }
+}
+
+/// `Math`/`JSON` as a value (T25): a plain object (class [`object::CLASS_MATH`] /
+/// [`object::CLASS_JSON`] for `console.log`) with `Math`'s constants and the prelude functions in
+/// use, all non-enumerable.
+fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
+    use js2wasi3_ir::Namespace;
+    let new = fh(cx, Helper::New);
+    let alloc = oh(cx, object::Helper::Alloc);
+    let obj_proto = oh(cx, object::Helper::Proto(Builtin::Object));
+    let define = oh(cx, object::Helper::Define);
+    let methods: Vec<(u32, u32, u32)> = cx
+        .namespace_methods(ns)
+        .into_iter()
+        .map(|(key, code, len)| {
+            cx.declare_func(code);
+            (cx.str(&key), code, len)
+        })
+        .collect();
+    let g = runtime::G_NAMESPACES + ns.index();
+    const O: u32 = 0;
+    let mut f = Function::new([(1, jsval())]);
+    let mut s = f.instructions();
+    s.global_get(g).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.global_get(g).return_();
+    s.end();
+    s.i32_const(match ns {
+        Namespace::Math => object::CLASS_MATH,
+        Namespace::Json => object::CLASS_JSON,
+    });
+    s.call(obj_proto).call(alloc).local_tee(O);
+    s.ref_cast_non_null(runtime::object()).global_set(g);
+    if ns == Namespace::Math {
+        define_constants(cx, &mut s, O, &js2wasi3_ir::MATH_CONSTANTS);
+    }
+    for (key, code, len) in methods {
+        s.local_get(O)
+            .ref_cast_non_null(runtime::object())
+            .global_get(key);
+        s.ref_func(code);
+        s.ref_null(HeapType::Concrete(T_CODE));
+        s.ref_null(HeapType::Concrete(T_VALS));
+        s.global_get(key).i32_const(len as i32).i32_const(0);
+        s.call(new);
+        s.i32_const(object::HIDDEN).call(define);
+    }
+    s.local_get(O);
+    s.end();
     f
 }

@@ -46,6 +46,9 @@ pub const CLASS_PLAIN: i32 = 0;
 pub const CLASS_ERROR: i32 = 1;
 /// A function's `arguments` object (T25; 2 and 3 are `Map`/`Set`, see `crate::mapset`).
 pub const CLASS_ARGUMENTS: i32 = 4;
+/// `Math` and `JSON` as values (T25): printed `Object [Math] {}`.
+pub const CLASS_MATH: i32 = 5;
+pub const CLASS_JSON: i32 = 6;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -1072,6 +1075,10 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     // Real methods (function objects), replacing their sentinels: (code, key, name, length).
     // (A `None` key is `Symbol.iterator`.)
     let values = runtime::Helper::Iter(crate::iter::Helper::ProtoValues);
+    let named: Vec<&str> = ["keys", "entries"]
+        .into_iter()
+        .filter(|k| cx.names(k))
+        .collect();
     let real: Vec<(runtime::Helper, Option<&str>, &str, i32)> = match b {
         Builtin::Function => vec![
             (
@@ -1110,6 +1117,16 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
                 (values, Some("values"), "values", 0),
                 (values, None, "values", 0),
             ])
+            // `keys`/`entries` only when the code names them (T25).
+            .chain(
+                [
+                    (crate::iter::Helper::ProtoKeys, "keys"),
+                    (crate::iter::Helper::ProtoEntries, "entries"),
+                ]
+                .into_iter()
+                .filter(|(_, k)| named.contains(k))
+                .map(|(h, k)| (runtime::Helper::Iter(h), Some(k), k, 0)),
+            )
             .collect(),
         Builtin::String => vec![(values, None, "[Symbol.iterator]", 0)],
         Builtin::Error(ErrorKind::Error) => vec![(
@@ -1286,6 +1303,11 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     }
     if b == Builtin::Promise {
         let ctor = cx.helper(runtime::Helper::Prom(crate::promise::Helper::Ctor));
+        s.call(ctor).drop();
+    }
+    if cx.has_ctor(b) {
+        // `constructor`: the constructor value (T25).
+        let ctor = cx.helper(runtime::Helper::Func(func::Helper::BuiltinCtor(b)));
         s.call(ctor).drop();
     }
     s.local_get(O).ref_as_non_null();

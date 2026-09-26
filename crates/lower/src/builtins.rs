@@ -89,7 +89,30 @@ pub(crate) struct Prelude {
     /// Does it name a property `toString` (T25: functions keep their source text for
     /// `Function.prototype.toString` only then)?
     pub to_string: bool,
+    /// Built-in constructors the user's code uses as values (T25: `arr.map(String)`,
+    /// `x.constructor === Array`), and `Math`/`JSON`.
+    pub ctor_values: HashSet<String>,
+    /// Does it name a `constructor` property (T25: the other built-in prototypes then get
+    /// constructor stubs)?
+    pub constructor: bool,
+    /// The property names (and strings) in the user's code (T25: native methods are linked only
+    /// when named, see `ir::Module::names`).
+    pub user_props: HashSet<String>,
 }
+
+/// Properties a built-in constructor has as a function (`Array.apply`, `String.name`): reading
+/// them uses the constructor value (T25).
+pub(crate) const FUNCTION_PROPS: &[&str] = &["apply", "call", "bind", "name", "length"];
+
+/// Names that gate native built-in code (T25): `keys`/`entries` are linked only when the user's
+/// code names them; `console.log` recognizes array iterators only when it can make one.
+pub(crate) const GATED: &[&str] = &["keys", "entries", "values", "iterator"];
+
+/// The built-in constructors that can be values (T25): their prelude function (`$$Array`) is what
+/// calling and constructing them runs.
+pub(crate) const CTOR_VALUES: &[&str] = &[
+    "Object", "String", "Number", "Boolean", "Array", "Map", "Set",
+];
 
 impl Prelude {
     /// `extra`: prelude names needed by what the lowering emits (not visible in the AST).
@@ -146,6 +169,7 @@ impl Prelude {
                     .push(item_of[sym]);
             }
         }
+        let mut user_props: HashSet<String> = HashSet::new();
         let mut deps: HashMap<usize, Vec<usize>> = HashMap::new();
         for (from, tos) in IMPLIED {
             let Some(from) = out.names.get(*from) else {
@@ -169,6 +193,17 @@ impl Prelude {
             }
         };
         for node in p.semantic.nodes().iter() {
+            // A string in the user's code may name a static read with a computed key
+            // (`Math[k]`, T25)…
+            if let AstKind::StringLiteral(s) = node.kind()
+                && !p.in_prelude(s.span.start)
+            {
+                user_props.insert(s.value.to_string());
+                // …or a prototype method (`s[m]()` with `m = "slice"`).
+                for &t in methods.get(s.value.as_str()).into_iter().flatten() {
+                    roots.push(t);
+                }
+            }
             // A property name: the prototype methods it may read.
             let prop = match node.kind() {
                 AstKind::StaticMemberExpression(m) => Some((m.property.name.as_str(), m.span)),
@@ -182,6 +217,8 @@ impl Prelude {
                 if !p.in_prelude(span.start) {
                     out.bind |= name == "bind";
                     out.to_string |= name == "toString";
+                    out.constructor |= name == "constructor";
+                    user_props.insert(name.to_string());
                 }
                 for &t in methods.get(name).into_iter().flatten() {
                     add(t, span, &mut roots);
@@ -197,6 +234,34 @@ impl Prelude {
                             AstKind::NewExpression(n) => n.callee.span() == r.span,
                             _ => false,
                         };
+                        // A constructor as a value (T25): not called, not `Array.x`, not the
+                        // right side of `instanceof`.
+                        let value = || match p.semantic.nodes().parent_kind(node.id()) {
+                            AstKind::StaticMemberExpression(m) => {
+                                m.object.span() != r.span
+                                    || FUNCTION_PROPS.contains(&m.property.name.as_str())
+                            }
+                            // A spread call goes through the value.
+                            AstKind::CallExpression(c) if c.callee.span() == r.span => {
+                                c.arguments.iter().any(|a| a.is_spread())
+                            }
+                            AstKind::BinaryExpression(b) => {
+                                b.operator != oxc_syntax::operator::BinaryOperator::Instanceof
+                                    || b.right.span() != r.span
+                            }
+                            // `new String(…)`: through the value (wrapper objects trap, F88).
+                            AstKind::NewExpression(n) if n.callee.span() == r.span => {
+                                matches!(r.name.as_str(), "String" | "Number" | "Boolean")
+                            }
+                            _ => !called(),
+                        };
+                        if (CTOR_VALUES.contains(&r.name.as_str())
+                            || js2wasi3_ir::Namespace::parse(&r.name).is_some())
+                            && !p.in_prelude(r.span.start)
+                            && value()
+                        {
+                            out.ctor_values.insert(r.name.to_string());
+                        }
                         if (js2wasi3_ir::Builtin::parse(&r.name).is_none() || called())
                             && let Some(sym) = out.names.get(&format!("$${}", r.name))
                         {
@@ -226,6 +291,20 @@ impl Prelude {
             };
             add(target, span, &mut roots);
         }
+        // Constructors used as values: their function, and the statics the code names.
+        for (name, sym) in &out.names {
+            let Some(rest) = name.strip_prefix("$$") else {
+                continue;
+            };
+            let (b, key) = rest.split_once('_').unwrap_or((rest, ""));
+            if out.ctor_values.contains(b)
+                && !key.starts_with("prototype")
+                && (key.is_empty() || user_props.contains(key))
+            {
+                roots.push(item_of[sym]);
+            }
+        }
+        out.user_props = user_props;
         let mut live = vec![false; items.len()];
         while let Some(i) = roots.pop() {
             if !live[i] {
@@ -310,7 +389,7 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$Array_prototype_copyWithin"
         | "$$Array_prototype_splice"
         | "$$Array_prototype_toSpliced" => Some(2),
-        "$$Array_prototype_flat" => Some(0),
+        "$$Array_prototype_flat" | "$$Map" | "$$Set" => Some(0),
         _ => None,
     }
 }

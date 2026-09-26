@@ -8,6 +8,7 @@
 //!   `next` method, read once.
 //! - [`DONE`]: finished (or closed).
 //! - [`ARRAY_LIKE`]: `Array.prototype.values` on another object (T25): `length` and `obj[i]`.
+//! - [`ARRAY_KEYS`], [`ARRAY_ENTRIES`]: `Array.prototype.keys`/`entries` (T25), the same way.
 //!
 //! Arrays and strings don't look at `Symbol.iterator` (a replaced `Array.prototype[Symbol.iterator]`
 //! isn't seen).
@@ -29,6 +30,10 @@ pub const DONE: i32 = 3;
 /// Any other object iterated by `Array.prototype.values` (T25: `arguments`, array-likes): `length`
 /// and `obj[i]` are read at every step.
 pub const ARRAY_LIKE: i32 = 4;
+/// `Array.prototype.keys` / `entries` on any object (T25): like [`ARRAY_LIKE`], the value is the
+/// index / `[index, obj[index]]`.
+pub const ARRAY_KEYS: i32 = 5;
+pub const ARRAY_ENTRIES: i32 = 6;
 
 pub const F_KIND: u32 = 0;
 pub const F_OBJ: u32 = 1;
@@ -55,6 +60,9 @@ pub enum Helper {
     /// The code of `Array.prototype.values` / `[Symbol.iterator]` and `String.prototype[Symbol.iterator]`:
     /// an iterator object (prototype `%ArrayIteratorPrototype%`) holding a `$iter` under a private symbol.
     ProtoValues,
+    /// `Array.prototype.keys` / `entries` (T25): the same iterator objects.
+    ProtoKeys,
+    ProtoEntries,
     /// `%ArrayIteratorPrototype%.next`: `{ value, done }`.
     Next,
     /// `%ArrayIteratorPrototype%[Symbol.iterator]`: `this`.
@@ -70,6 +78,8 @@ impl Helper {
             Helper::Rest => "iter_rest",
             Helper::Spread => "array_spread",
             Helper::ProtoValues => "Array.prototype.values",
+            Helper::ProtoKeys => "Array.prototype.keys",
+            Helper::ProtoEntries => "Array.prototype.entries",
             Helper::Next => "%ArrayIteratorPrototype%.next",
             Helper::This => "%ArrayIteratorPrototype%[Symbol.iterator]",
         }
@@ -83,7 +93,11 @@ impl Helper {
             Helper::Close => (vec![v, ValType::I32], vec![]),
             Helper::Rest => (vec![v], vec![v]),
             Helper::Spread => (vec![v, v, v], vec![]),
-            Helper::ProtoValues | Helper::Next | Helper::This => (vec![v, v, v], vec![v]),
+            Helper::ProtoValues
+            | Helper::ProtoKeys
+            | Helper::ProtoEntries
+            | Helper::Next
+            | Helper::This => (vec![v, v, v], vec![v]),
         }
     }
 
@@ -94,7 +108,9 @@ impl Helper {
             Helper::Close => close(cx),
             Helper::Rest => rest(cx),
             Helper::Spread => spread(cx),
-            Helper::ProtoValues => proto_values(cx),
+            Helper::ProtoValues => proto_values(cx, ARRAY_LIKE),
+            Helper::ProtoKeys => proto_values(cx, ARRAY_KEYS),
+            Helper::ProtoEntries => proto_values(cx, ARRAY_ENTRIES),
             Helper::Next => next(cx),
             Helper::This => {
                 let mut f = Function::new([]);
@@ -253,7 +269,16 @@ fn step(cx: &mut dyn Cx) -> Function {
     s.end();
     // Array-likes (T25): ToLength(obj.length) and obj[i] at every step.
     it(&mut s, IT);
-    s.struct_get(T_ITER, F_KIND).i32_const(ARRAY_LIKE).i32_eq();
+    // (`keys`/`entries` iterators only when the code names them, T25.)
+    let keys_entries = cx.names("keys") || cx.names("entries");
+    s.struct_get(T_ITER, F_KIND)
+        .local_tee(N)
+        .i32_const(ARRAY_LIKE);
+    if keys_entries {
+        s.i32_ge_s();
+    } else {
+        s.i32_eq();
+    }
     s.if_(BlockType::Empty);
     {
         s.local_get(I).f64_convert_i32_u();
@@ -264,10 +289,31 @@ fn step(cx: &mut dyn Cx) -> Function {
         finish(&mut s);
         s.end();
         it(&mut s, IT);
-        it(&mut s, IT);
-        s.struct_get(T_ITER, F_OBJ);
-        s.local_get(I).ref_i31();
-        s.call(get);
+        if keys_entries {
+            // keys: the index; values: obj[i]; entries: [i, obj[i]].
+            let new_array = cx.helper(runtime::Helper::Arr(array::Helper::New));
+            s.local_get(N).i32_const(ARRAY_KEYS).i32_eq();
+            s.if_(BlockType::Result(jsval()));
+            s.local_get(I).ref_i31();
+            s.else_();
+            it(&mut s, IT);
+            s.struct_get(T_ITER, F_OBJ);
+            s.local_get(I).ref_i31();
+            s.call(get).local_set(R);
+            s.local_get(N).i32_const(ARRAY_ENTRIES).i32_eq();
+            s.if_(BlockType::Empty);
+            s.local_get(I).ref_i31().local_get(R);
+            s.array_new_fixed(T_VALS, 2).i32_const(2).call(new_array);
+            s.local_set(R);
+            s.end();
+            s.local_get(R);
+            s.end();
+        } else {
+            it(&mut s, IT);
+            s.struct_get(T_ITER, F_OBJ);
+            s.local_get(I).ref_i31();
+            s.call(get);
+        }
         set_value(&mut s);
         it(&mut s, IT);
         s.local_get(I)
@@ -487,7 +533,9 @@ fn spread(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn proto_values(cx: &mut dyn Cx) -> Function {
+/// `kind`: [`ARRAY_LIKE`] (`values`: arrays and strings take `Open`'s fast paths), [`ARRAY_KEYS`]
+/// or [`ARRAY_ENTRIES`] (any object).
+fn proto_values(cx: &mut dyn Cx, kind: i32) -> Function {
     let open = ih(cx, Helper::Open);
     let alloc = oh(cx, object::Helper::Alloc);
     let define = oh(cx, object::Helper::Define);
@@ -517,10 +565,11 @@ fn proto_values(cx: &mut dyn Cx) -> Function {
     s.local_get(THIS).ref_test_non_null(array::array());
     runtime::is_string(&mut s, THIS);
     s.i32_or();
+    s.i32_const((kind == ARRAY_LIKE) as i32).i32_and();
     s.if_(BlockType::Result(jsval()));
     s.local_get(THIS).global_get(msg).call(open);
     s.else_();
-    s.i32_const(ARRAY_LIKE);
+    s.i32_const(kind);
     s.local_get(THIS);
     s.global_get(G_UNDEFINED);
     s.i32_const(0);

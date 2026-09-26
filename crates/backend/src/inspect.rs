@@ -659,6 +659,27 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(generator_prefix).local_set(PREFIX);
     s.end();
+    // An array iterator (T25): `Object [Array Iterator] ` (only if the code can make one).
+    if ["values", "keys", "entries", "iterator"]
+        .into_iter()
+        .any(|k| cx.names(k))
+    {
+        let array_iterator_prefix = cx.str("Object [Array Iterator] ");
+        s.local_get(PREFIX).ref_is_null();
+        s.local_get(O)
+            .struct_get(runtime::T_OBJECT, object::F_PROTO)
+            .global_get(runtime::G_PROTOS + js2wasi3_ir::Builtin::ArrayIterator.index())
+            .ref_eq();
+        s.i32_and();
+        s.local_get(O)
+            .struct_get(runtime::T_OBJECT, object::F_PROTO)
+            .ref_is_null()
+            .i32_eqz()
+            .i32_and();
+        s.if_(BlockType::Empty);
+        s.global_get(array_iterator_prefix).local_set(PREFIX);
+        s.end();
+    }
     // An `arguments` object (T25): `[Arguments] `.
     s.local_get(PREFIX).ref_is_null();
     s.local_get(O)
@@ -671,6 +692,28 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(arguments_prefix).local_set(PREFIX);
     s.end();
+    // `Math`/`JSON` (T25): node's `Symbol.toStringTag` form.
+    let namespaces = if cx.has_namespaces() {
+        vec![
+            (object::CLASS_MATH, cx.str("Object [Math] ")),
+            (object::CLASS_JSON, cx.str("Object [JSON] ")),
+        ]
+    } else {
+        vec![]
+    };
+    for (class, prefix) in namespaces {
+        s.local_get(PREFIX).ref_is_null();
+        s.local_get(O)
+            .struct_get(runtime::T_OBJECT, object::F_CLASS)
+            .i32_const(object::CLASS_MASK)
+            .i32_and()
+            .i32_const(class)
+            .i32_eq();
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.global_get(prefix).local_set(PREFIX);
+        s.end();
+    }
     // The prefix: `Name ` from the constructor on the chain; none for `Object`; for no constructor,
     // `[Object: null prototype] ` unless the chain reaches Object.prototype.
     s.local_get(PREFIX).ref_is_null();

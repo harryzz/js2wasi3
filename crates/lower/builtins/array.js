@@ -191,6 +191,23 @@ function $$Array_from(items, mapfn, thisArg) {
 
 // ---- iteration with a callback -----------------------------------------------------------
 
+// Each element's `toLocaleString()`, joined with "," (`undefined`/`null`: empty), T25.
+function $$Array_prototype_toLocaleString() {
+  const o = $$thisObject(this, "toLocaleString");
+  const len = $$lengthOf(o);
+  let r = "";
+  for (let k = 0; k < len; k++) {
+    if (k > 0) {
+      r += ",";
+    }
+    const e = o[k];
+    if (e !== undefined && e !== null) {
+      r += $$String(e.toLocaleString());
+    }
+  }
+  return r;
+}
+
 function $$Array_prototype_forEach(callbackfn, thisArg) {
   const o = $$thisObject(this, "forEach");
   const len = $$lengthOf(o);

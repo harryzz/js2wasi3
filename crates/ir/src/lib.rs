@@ -108,6 +108,24 @@ pub struct Module {
     /// Built-in prototype methods implemented by the prelude (T21): installed on their prototype
     /// in place of the sentinels.
     pub builtin_methods: Vec<BuiltinMethod>,
+    /// Built-in constructors used as values (T25): `proto` is the built-in, `code` its prelude
+    /// function (`$$Array`), called and constructed; `key` is unused.
+    pub builtin_ctors: Vec<BuiltinMethod>,
+    /// Statics of those constructors implemented by the prelude (`Array.from`): own properties of
+    /// the constructor value.
+    pub builtin_statics: Vec<BuiltinMethod>,
+    /// The code names a `constructor` property (T25): the built-in prototypes of
+    /// [`Builtin::ctor_length`] without a constructor in [`Module::builtin_ctors`] get a stub one
+    /// (identity, `name`, `length`, `prototype`; calling it traps).
+    pub ctor_stubs: bool,
+    /// `Math`/`JSON` used as values (T25): their prelude functions the code names, as own
+    /// methods (`key` is the property; `proto` unused, `Object`).
+    pub namespace_methods: Vec<(Namespace, BuiltinMethod)>,
+    /// `Math` or `JSON` is used as a value: `console.log` checks for them.
+    pub namespaces: bool,
+    /// Property names in the user's code that gate native built-in methods (T25: `keys`,
+    /// `entries`): see `js2wasi3_lower`'s `GATED`.
+    pub names: std::collections::BTreeSet<String>,
     /// The prelude's StringToNumber `(JsVal) -> F64` (T21), called by the runtime's ToNumber on a
     /// string; without it, that traps.
     pub string_to_number: Option<FuncId>,
@@ -227,6 +245,56 @@ impl ErrorKind {
     }
 }
 
+/// A namespace object of built-in functions (T25: `Math`, `JSON` as values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Namespace {
+    Math,
+    Json,
+}
+
+impl Namespace {
+    pub const ALL: [Namespace; 2] = [Namespace::Math, Namespace::Json];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Namespace::Math => "Math",
+            Namespace::Json => "JSON",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Namespace> {
+        Namespace::ALL.into_iter().find(|n| n.name() == s)
+    }
+
+    pub fn index(self) -> u32 {
+        Namespace::ALL.iter().position(|n| *n == self).unwrap() as u32
+    }
+}
+
+/// `Math`'s constants.
+pub const MATH_CONSTANTS: [(&str, f64); 8] = [
+    ("E", std::f64::consts::E),
+    ("LN10", std::f64::consts::LN_10),
+    ("LN2", std::f64::consts::LN_2),
+    ("LOG10E", std::f64::consts::LOG10_E),
+    ("LOG2E", std::f64::consts::LOG2_E),
+    ("PI", std::f64::consts::PI),
+    ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+    ("SQRT2", std::f64::consts::SQRT_2),
+];
+
+/// `Number`'s constants.
+pub const NUMBER_CONSTANTS: [(&str, f64); 8] = [
+    ("MAX_SAFE_INTEGER", 9007199254740991.0),
+    ("MIN_SAFE_INTEGER", -9007199254740991.0),
+    ("EPSILON", f64::EPSILON),
+    ("MAX_VALUE", f64::MAX),
+    ("MIN_VALUE", 5e-324),
+    ("POSITIVE_INFINITY", f64::INFINITY),
+    ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
+    ("NaN", f64::NAN),
+];
+
 /// A built-in constructor whose prototype object the runtime provides (T13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Builtin {
@@ -309,6 +377,19 @@ impl Builtin {
 
     pub fn parse(s: &str) -> Option<Builtin> {
         Builtin::ALL.into_iter().find(|b| b.name() == s)
+    }
+
+    /// The `length` of the built-in constructors that can be values (T25), `None` for the others.
+    pub fn ctor_length(self) -> Option<u32> {
+        match self {
+            Builtin::Object
+            | Builtin::String
+            | Builtin::Number
+            | Builtin::Boolean
+            | Builtin::Array => Some(1),
+            Builtin::Map | Builtin::Set => Some(0),
+            _ => None,
+        }
     }
 
     pub fn index(self) -> u32 {
@@ -567,6 +648,10 @@ pub enum Intrinsic {
     /// `(f, key, prefix: a string) -> f`: SetFunctionName at run time (F59, a computed key): `name`
     /// becomes `prefix` + the key (a symbol: `[description]`).
     SetFunctionName,
+    /// `() -> jsval`: a built-in constructor as a value (T25; see [`Module::builtin_ctors`]).
+    BuiltinCtor(Builtin),
+    /// `() -> jsval`: `Math` or `JSON` as a value (T25; see [`Module::namespace_methods`]).
+    Namespace(Namespace),
 }
 
 /// [`Intrinsic::Map`] operations. `m` is a `$map` and `it` a `$mapiter` (the prelude checks
@@ -714,6 +799,7 @@ impl Intrinsic {
             Intrinsic::Trap => (&[], None),
             Intrinsic::MakeArguments => (&[JsVal], Some(JsVal)),
             Intrinsic::SetFunctionName => (&[JsVal, JsVal, JsVal], Some(JsVal)),
+            Intrinsic::BuiltinCtor(_) | Intrinsic::Namespace(_) => (&[], Some(JsVal)),
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => (&[], Some(JsVal)),
                 MapOp::Kind | MapOp::Size | MapOp::IterKind | MapOp::Step => (&[JsVal], Some(I32)),
@@ -835,6 +921,8 @@ impl Intrinsic {
             Intrinsic::Trap => "trap",
             Intrinsic::MakeArguments => "make_arguments",
             Intrinsic::SetFunctionName => "set_function_name",
+            Intrinsic::BuiltinCtor(_) => "builtin_ctor",
+            Intrinsic::Namespace(_) => "namespace",
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => "map_new",
                 MapOp::Kind => "map_kind",
