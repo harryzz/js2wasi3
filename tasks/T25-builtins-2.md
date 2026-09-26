@@ -274,6 +274,46 @@ species, `isConcatSpreadable`, generic `push`/`join`; `Array.fromAsync`, iterato
 **Next smallest step:** slice 6 (promises and timers: F64, F67, F74) or T20, the user's choice. Slice 6's first
 piece: `Promise.withResolvers` and `Promise.any` + `AggregateError` (F64).
 
+## Handoff for slice 6 (written 2026-09-26, end of the slices 3–5 session)
+
+**State:** `main` at `31a8218`, pushed. Slices 1–5 are done (Notes / Result above). Slice 6 is the last one:
+F64, F67, F74 (rows in `tasks/README.md`). T25 is done when those are ticked or moved with a reason.
+Commit/push only when the user asks; no attribution lines.
+
+**Run first (baseline):**
+```sh
+scripts/check-tools.sh
+cargo build -q --release && cargo test -q --no-fail-fast 2>&1 | grep -E 'FAILED|panicked'   # nothing
+scripts/diff.sh -j 4 | tail -1                              # 86 passed, 0 failed, 11 skipped
+target/release/js2wasi3 build tests/fixtures/hello.js -o /tmp/h.wasm && stat -c %s /tmp/h.wasm   # 55175
+```
+
+**Slice 6, smallest first:**
+1. F64: `Promise.withResolvers` (`{ promise, resolve, reject }`), `Promise.any` + `AggregateError` (a new
+   `ErrorKind`? check `ir::ErrorKind` and `object::Helper::NewError`; message `All promises were rejected`,
+   `errors` own property). Promise code is native: `crates/backend/src/promise.rs`; statics are lowered from
+   `Promise.x` (grep `PromiseCtor` in `crates/lower/src/lib.rs`). `Promise.prototype[Symbol.toStringTag]` is already
+   handled by `object::builtin_tag_name`. Species/subclassing and statics honouring `this`: likely a follow-up.
+2. F67: `queueMicrotask`'s `code: 'ERR_INVALID_ARG_TYPE'` (uncaught print `TypeError [ERR_INVALID_ARG_TYPE]: …`);
+   unhandled rejection of a function (node prints its source: needs F104's gating); errors' stacks stay F31.
+3. F74: Timeout objects (`crates/backend/src/timers.rs`): printing (`Timeout {…}` is long in node; check first),
+   `ref`/`unref`/`hasRef`/`refresh`, `[Symbol.toPrimitive]` (numeric id) and `clearTimeout(id)`;
+   `setImmediate`/`clearImmediate`, `process.nextTick` (ordering vs microtasks: check node). Warnings are optional.
+
+**Pitfalls learned in slices 3–5:**
+- Wasm `select` picks its **first** operand when the condition is non-zero: three bugs this session came from
+  swapped operands. Check every `select`/`typed_select`.
+- An `if` with `BlockType::Empty` can't consume stack values; `local_tee` of a nullable local gives a nullable ref
+  (add `ref_as_non_null`).
+- `cargo fmt --all` reflows code, so later scripted string replacements must match the formatted text.
+- Size: anything not always needed is gated. Gates: `ir::Module::names` (user property names/strings listed in
+  `builtins::GATED`: add a name there, test with `cx.names("…")`), `has_maps`, `has_tags`, `has_namespaces`,
+  `has_bind`, `has_to_string`, `ctor_stubs`. `cx.str(…)` emits a string global even if unused: intern inside the
+  gate. The object formatter is linked into every command (uncaught-exception path), so inspect code costs size.
+- Prelude: string literals and property names in user code root prelude methods/statics (F109); intrinsics are
+  listed in `Lowerer::intrinsic_call`. Scratch `.js` files run as CommonJS in node; wrap fixture sections in `{}`.
+- `10 ** k` differs from V8 in last bits (F77): don't use `**` to generate test inputs.
+
 ## Handoff for the rest of slice 3 (written 2026-09-26, end of the slices 1–3 session; done, kept for reference)
 
 **State:** `main`, committed, not pushed. Slices 1 (`JSON.parse`) and 2 (`Map`/`Set`, `Map.groupBy`) are done; slice 3
@@ -448,3 +488,4 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 - 2026-09-26: 5d done (F23): console.js prelude `$$consoleFormat` (node's formatWithOptions: %s %d %i %f %j %O %o(primitives; objects trap) %c %%), linked only when a user string has a `%` (then console.log calls it when the first of several arguments may be a string); intrinsics inspect(v, depth) (Intrinsic::InspectAt, inspect::Helper::At) and builtin_to_string (hasBuiltInToString). Trap tests (exceptions/trap.js, streamed output) now use `new Number(1)`. console-format.js PASS; cargo test ok; hello.js 55169.
 - 2026-09-26: 5e done (F51): KIND_VALUES/NEW_VALUES; one function object for Array.prototype.values and [Symbol.iterator]; Open keeps the fast path only while [Symbol.iterator] is a built-in values (gated on `iterator`); values() builds its state directly. iterator-lookup.js PASS; diff.sh 86/0/11; hello.js 55175.
 - 2026-09-26: slice 5 done: Notes / Result, README (F23, F24, F51, F52, F53, F62, F94, F99 ticked; F70 moved to F110; Next up), D5, keywords.md updated.
+- 2026-09-26: handoff for slice 6 written.
