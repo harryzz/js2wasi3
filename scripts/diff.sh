@@ -30,7 +30,8 @@ one() {
     return
   fi
   local t0; t0=$(now_ms)
-  timeout "$TIMEOUT" node "$f" >"$d/node.out" 2>"$d/node.err"
+  # --no-warnings: process warnings (node 24: TimeoutNegativeWarning, …) carry the pid.
+  timeout "$TIMEOUT" node --no-warnings "$f" >"$d/node.out" 2>"$d/node.err"
   echo $? >"$d/node.status"
   if [ -f "${f%.js}.uncaught" ]; then
     mv "$d/node.err" "$d/node.err.raw"

@@ -1,0 +1,1 @@
+F77: node 24 uses V8's own pow (deps/v8/src/base/ieee754.cc pow(), nearly rounded), not glibc; port the differences (see tasks/README.md F77).

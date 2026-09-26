@@ -2,9 +2,9 @@
 //!
 //! A line-by-line port of fdlibm's `__ieee754_pow` (e_pow.c, the algorithm V8's pow comes
 //! from), with the ECMAScript difference that `(±1) ** ±Infinity` is NaN. Error < 1 ulp.
-//! Measured against node 20 (V8 11.3) on 200k random pairs: identical except ~3% of inexact
-//! results, which differ in the last bit (V8's variant isn't classic fdlibm, nor glibc). See
-//! the Follow-ups in `tasks/README.md`.
+//! Node 24 no longer matches it: its pow is bit for bit glibc's (the ARM optimized-routines
+//! algorithm, almost always correctly rounded); this one differs in the last bit on ~10% of
+//! random pairs. Node 20 differed on ~3%. See F77 in `tasks/README.md`.
 
 // The constants are copied digit for digit from e_pow.c.
 #![allow(clippy::excessive_precision, clippy::approx_constant)]

@@ -149,7 +149,7 @@ spec's algorithm writing pieces into one array joined at the end; node's circula
 (`JSON.rawJSON`) is rejected by name.)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude
 globals (no user code runs while parsing), members stored with `define` (`__proto__` is an own key), numbers other
-than short integers through `$$StringToNumber`, then the reviver walk; node 20's SyntaxError messages and context
+than short integers through `$$StringToNumber`, then the reviver walk; node's SyntaxError messages (with node 24's line/column) and context
 excerpts reproduced exactly.)
 (T25 slice 2: `Map`/`Set` keep their storage native and their methods in the prelude: `$map` (a subtype of `$object`)
 holds an ordered SameValueZero hash table (`crates/backend/src/mapset.rs`: insertion order, deleted entries as holes,
@@ -179,6 +179,8 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 - A command fixture is self-checking: it prints its results, and node's output is the expectation, so no `.out`
   file is needed. Keep each one under 2 s. Constructs that aren't supported yet show up as build failures.
 - `cargo test` doesn't run it (it needs node, F30).
+- node runs with `--no-warnings`: process warnings (node 24's `TimeoutNegativeWarning`, …) start with `(node:<pid>)`
+  and aren't JS behaviour.
 - Timers (T19): node refreshes its clock whenever a timer is made (ms steps), so the order of near-tied deadlines,
   or of a timer made inside a callback against others due soon, depends on node's speed and the machine's load.
   Keep such deadlines far apart in fixtures (see `tests/fixtures/async/timers.js`).

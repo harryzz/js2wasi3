@@ -39,7 +39,29 @@ function $$has(o, k) {
   return false;
 }
 
-// How V8 names a value in "… is not a function".
+// V8's name for a value that isn't callable, in "… is not a function" (node 24: every built-in's
+// callback; also "… is not iterable").
+function $$typeDescribe(v) {
+  if (v === undefined) {
+    return "undefined";
+  }
+  if (v === null) {
+    return "object null";
+  }
+  const t = typeof v;
+  if (t === "string") {
+    return 'string "' + v + '"';
+  }
+  if (t === "number" || t === "boolean") {
+    return t + " " + $$String(v);
+  }
+  if (t === "symbol" || t === "function") {
+    return t;
+  }
+  return "object";
+}
+
+// How V8 names a receiver ("… called on incompatible receiver …") or a bad comparator.
 function $$describe(v) {
   const t = typeof v;
   if (t === "object" && v !== null) {
@@ -50,6 +72,11 @@ function $$describe(v) {
     const kind = __intrinsic_map_kind(v);
     if (kind >= 0) {
       return kind === 0 ? "#<Map>" : "#<Set>";
+    }
+    // Their iterators by `Symbol.toStringTag` (node 24).
+    const mode = __intrinsic_map_iter_kind(v);
+    if (mode >= 0) {
+      return mode < 3 ? "[object Map Iterator]" : "[object Set Iterator]";
     }
     let p = Object.getPrototypeOf(v);
     if (p === null) {
@@ -74,7 +101,7 @@ function $$describe(v) {
 // Throw unless `f` is callable.
 function $$callable(f) {
   if (typeof f !== "function") {
-    throw new TypeError($$describe(f) + " is not a function");
+    throw new TypeError($$typeDescribe(f) + " is not a function");
   }
 }
 
@@ -130,7 +157,7 @@ function $$Array_of(...items) {
 
 function $$Array_from(items, mapfn, thisArg) {
   if (mapfn !== undefined && typeof mapfn !== "function") {
-    throw new TypeError($$describe(mapfn) + " is not a function");
+    throw new TypeError($$typeDescribe(mapfn) + " is not a function");
   }
   if (items === undefined || items === null) {
     throw new TypeError(
@@ -438,7 +465,7 @@ function $$Array_prototype_flat(depth) {
 function $$Array_prototype_flatMap(mapper, thisArg) {
   const o = $$thisObject(this, "flatMap");
   if (typeof mapper !== "function") {
-    throw new TypeError("flatMap mapper function is not callable");
+    throw new TypeError($$typeDescribe(mapper) + " is not a function");
   }
   const a = [];
   $$flatten(a, o, 0, 1, mapper, thisArg);
@@ -690,7 +717,9 @@ function $$sortValues(o, len, comparefn, skipHoles) {
 
 function $$checkCompare(comparefn) {
   if (comparefn !== undefined && typeof comparefn !== "function") {
-    throw new TypeError("The comparison function must be either a function or undefined");
+    throw new TypeError(
+      "The comparison function must be either a function or undefined: " + $$describe(comparefn),
+    );
   }
 }
 

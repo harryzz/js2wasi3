@@ -1,5 +1,5 @@
 // JSON.parse (T25 slice 1): values, escapes, numbers, duplicate keys, `__proto__`, the reviver,
-// and node 20's SyntaxError messages.
+// and node's SyntaxError messages.
 
 function show(text) {
   try {
@@ -141,3 +141,8 @@ console.log(text);
 console.log(JSON.stringify(JSON.parse(text)) === text);
 const pretty = JSON.stringify(data, null, 2);
 console.log(JSON.stringify(JSON.parse(pretty)) === text);
+
+// Line and column in the position form (node 24): \n, \r\n and \r end lines.
+for (const t of ["[1,\n2 x]", "[1,\r\n2 x]", "[1,\r2 x]", "\n\n  {\"a\" 1}", "\n\"\u0001\"", "[1]\r\n\r\n x"]) {
+  show(t);
+}

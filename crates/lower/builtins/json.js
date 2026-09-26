@@ -2,7 +2,7 @@
 // `$$JSON_stringify` is `JSON.stringify`: the spec's algorithm (toJSON, replacer function or
 // property list, gap), writing the pieces into one array that is joined at the end. Circular
 // structures throw node's TypeError (the path to the cycle). `$$JSON_parse` is `JSON.parse`
-// (T25 slice 1): a recursive-descent parser over code units with node 20's SyntaxError messages,
+// (T25 slice 1): a recursive-descent parser over code units with node 24's SyntaxError messages,
 // then the reviver walk. Not implemented: wrapper objects (`new Number(1)`, F88), `rawJSON`.
 // Uses string.js's `$$toInteger`, `$$String`, `$$fromUnit`, `$$StringToNumber`.
 
@@ -328,8 +328,9 @@ function $$JSON_parse(text, reviver) {
   const value = $$jsonParseValue();
   $$jsonSkipSpace();
   if ($$jsonPos < $$jsonLen) {
-    $$jsonSrc = null;
-    throw new SyntaxError("Unexpected non-whitespace character after JSON at position " + $$jsonPos);
+    throw new SyntaxError(
+      "Unexpected non-whitespace character after JSON at position " + $$jsonWhere($$jsonPos),
+    );
   }
   $$jsonSrc = null;
   if (typeof reviver === "function") {
@@ -341,8 +342,26 @@ function $$JSON_parse(text, reviver) {
 }
 
 function $$jsonFail(msg, pos) {
+  throw new SyntaxError(msg + " in JSON at position " + $$jsonWhere(pos));
+}
+
+// `n (line l column c)` for a position (node 24); `\n`, `\r\n` and `\r` end lines. Resets the state.
+function $$jsonWhere(pos) {
+  const src = $$jsonSrc;
   $$jsonSrc = null;
-  throw new SyntaxError(msg + " in JSON at position " + pos);
+  let line = 1;
+  let start = 0;
+  for (let i = 0; i < pos; i++) {
+    const c = __intrinsic_unit(src, i);
+    if (c === 13 && i + 1 < pos && __intrinsic_unit(src, i + 1) === 10) {
+      i++;
+    }
+    if (c === 10 || c === 13) {
+      line++;
+      start = i + 1;
+    }
+  }
+  return pos + " (line " + line + " column " + (pos - start + 1) + ")";
 }
 
 // V8's error for an unexpected token at `pos` (or the end of the input).
@@ -652,8 +671,7 @@ function $$jsonParseArray() {
   return arr;
 }
 
-// V8 reports a missing `:` after the first property name with its own message, after the
-// others as an unexpected token.
+// A missing property name has one message for the first property, another after a comma.
 function $$jsonParseObject() {
   const obj = {};
   $$jsonPos++;
@@ -673,10 +691,7 @@ function $$jsonParseObject() {
     const key = $$jsonParseString();
     $$jsonSkipSpace();
     if ($$jsonAt($$jsonPos) !== 58) {
-      if (first) {
-        $$jsonFail("Expected ':' after property name", $$jsonPos);
-      }
-      $$jsonUnexpected($$jsonPos);
+      $$jsonFail("Expected ':' after property name", $$jsonPos);
     }
     $$jsonPos++;
     // CreateDataProperty: `__proto__` is an own key; a repeated key keeps its first position.

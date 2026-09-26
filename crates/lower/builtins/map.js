@@ -6,37 +6,15 @@
 // throws in the lowering). `Map.prototype[Symbol.iterator]` is `entries`, `Set.prototype.keys` and
 // `[Symbol.iterator]` are `values`, `size` is a getter (installed by the backend). Iterator modes
 // (`__intrinsic_map_iter_kind`): 0–2 a Map's keys/values/entries, 3–5 a Set's.
-// Not implemented: `Map`/`Set` as values and subclassing (T25 slice 4), `Map.groupBy` (not in
-// node 20), `WeakMap`/`WeakSet`. The constructors add entries directly, not through a user-replaced
+// Not implemented: `Map`/`Set` as values and subclassing (T25 slice 4), `WeakMap`/`WeakSet`. The constructors add entries directly, not through a user-replaced
 // `set`/`add`.
-// Uses array.js's `$$describe`, `$$call3`; string.js's `$$String`.
+// Uses array.js's `$$describe`, `$$typeDescribe`, `$$call3`; string.js's `$$String`.
 
 // Throw unless `v` is a Map (kind 0) or a Set (kind 1).
 function $$mapThis(v, kind, name) {
   if (__intrinsic_map_kind(v) !== kind) {
     throw new TypeError("Method " + name + " called on incompatible receiver " + $$describe(v));
   }
-}
-
-// V8's name for a value that isn't callable, in a Map/Set method's "… is not a function".
-function $$typeDescribe(v) {
-  if (v === undefined) {
-    return "undefined";
-  }
-  if (v === null) {
-    return "object null";
-  }
-  const t = typeof v;
-  if (t === "string") {
-    return 'string "' + v + '"';
-  }
-  if (t === "number" || t === "boolean") {
-    return t + " " + $$String(v);
-  }
-  if (t === "symbol" || t === "function") {
-    return t;
-  }
-  return "object";
 }
 
 // The constructors' check (for-of would name the variable instead).
@@ -73,6 +51,30 @@ function $$Set(iterable) {
     __intrinsic_map_set(s, v, undefined);
   }
   return s;
+}
+
+// `Map.groupBy(items, callbackfn)` (node 21+): groups in first-seen order, keys by SameValueZero.
+function $$Map_groupBy(items, callbackfn) {
+  if (items === undefined || items === null) {
+    throw new TypeError("Map.groupBy called on null or undefined");
+  }
+  if (typeof callbackfn !== "function") {
+    throw new TypeError($$describe(callbackfn) + " is not a function");
+  }
+  $$mapIterable(items);
+  const m = __intrinsic_map_new_map();
+  let k = 0;
+  for (const v of items) {
+    const key = callbackfn(v, k);
+    let group = __intrinsic_map_get(m, key);
+    if (group === undefined) {
+      group = [];
+      __intrinsic_map_set(m, key, group);
+    }
+    group.push(v);
+    k++;
+  }
+  return m;
 }
 
 // ---- Map.prototype -------------------------------------------------------------------------

@@ -45,7 +45,7 @@ Every open follow-up whose "Pick up in" is T25 belongs to one of the slices abov
 | 1 | F93 |
 | 2 | (none: `Map`/`Set` had no follow-up; slice 2 found F97–F100) |
 | 3 | F42, F43, F47, F59 |
-| 4 | F37, F81, F87 (`localeCompare`, `normalize`), F88, F91, F95, F97 |
+| 4 | F37, F81, F87 (`localeCompare`, `normalize`), F88, F91, F95, F97, F101 |
 | 5 | F23, F24, F51, F52, F53, F62, F70, F94, F99 |
 | 6 | F64, F67, F74 |
 
@@ -75,7 +75,8 @@ Every open follow-up whose "Pick up in" is T25 belongs to one of the slices abov
   the last value wins). Arrays: `[]` + native `push`. The reviver walk (`$$jsonInternalize`/`$$jsonRevive`):
   depth first, holder as `this`, array length read once, keys from `Object.keys` read before the walk, `undefined`
   deletes (holes in arrays), the root is called with `""` on a `{"": value}` wrapper.
-- node 20's messages, all reproduced exactly (probed with node 20.19.2): the position form (`… in JSON at position
+- node's messages, all reproduced exactly (probed with node 20.19.2; node 24 adds ` (line l column c)` and drops the
+  first-property quirk below, see Progress): the position form (`… in JSON at position
   n`), "Unexpected end of JSON input", "Unexpected string/number in JSON at position n" (a token starting with `"`,
   a digit or `-` where it doesn't fit), `"undefined" is not valid JSON` (whole source `undefined`, `NaN`,
   `Infinity` or `[object Object]`), and "Unexpected token 'c', <context> is not valid JSON": the whole source if it
@@ -98,7 +99,7 @@ stale). **Speed:** a 5.1 MB array of 40k small objects: ~0.8–1.4 s per parse v
 machine is noisy), recorded as F96.
 
 **Unsupported / left:** `JSON.rawJSON`/`isRawJSON`, `JSON` as a value (slice 4, F93); the reviver's third
-`context` argument (not in node 20); deep nesting recurses (Wasm stack trap, F33); speed (F96).
+`context` argument (node 24 doesn't pass one either); deep nesting recurses (Wasm stack trap, F33); speed (F96).
 
 **Next smallest step:** slice 2, `Map`/`Set`: decide native helpers vs prelude over intrinsics (D5) and start with
 the backend hash table keyed by SameValueZero.
@@ -144,8 +145,7 @@ globals (four prototypes, `G_ID_HASH`), which every module has. Map printing and
 when used. **Speed:** 300k string-keyed set/get/delete + 300k numeric for-of + 300k object adds: ~4.3–5.1 s vs node
 0.76 s (~6×, F100).
 
-**Unsupported / left:** `Map`/`Set` as values and subclassing (F97, slice 4), `WeakMap`/`WeakSet`, `Map.groupBy`
-(not in node 20) (F98), printing iterators / own properties / > 100 entries (F99, slice 5), speed (F100).
+**Unsupported / left:** `Map`/`Set` as values and subclassing (F97, slice 4), `WeakMap`/`WeakSet` (F98), printing iterators / own properties / > 100 entries (F99, slice 5), speed (F100).
 
 **Next smallest step:** slice 3: `Function.prototype.bind` (a bound-function object kind in `func.rs`: target, bound
 `this`, bound args; `name` `bound f`, `length`, `new` through it).
@@ -246,3 +246,7 @@ error above printed as `e.name + ": " + e.message` in try/catch; round trip with
 - 2026-09-26: slice 2 design: native storage `backend/src/mapset.rs` (`$map`/`$mtable`/`$mapiter`, SameValueZero hash table in insertion order, V8-style obsolete-table transitions for live iterators, identity hashes in `class` bits ≥ 12 from `G_ID_HASH`), JS-visible methods in `builtins/map.js` over `__intrinsic_map_*` (`Intrinsic::Map(MapOp)`); `new Map/Set(…)` direct-calls `$$Map/$$Set`, `Map(…)` throws; `instanceof Map`/`Map.prototype` via `Builtin::Map`; `Map` as a value deferred (slice 4); `Map.groupBy` skipped (node 20 lacks it). Smoke test (get/set/has/delete, -0/NaN keys, for-of, spread, forEach) matches node.
 - 2026-09-26: slice 2 done: map-set.js PASS, lib `distinct` ok, unsupported.rs updated (WeakMap as the unsupported example), full diff.sh 75/0/10, cargo test ok; hello.js 52534 (+199, types/globals); console.log map printing gated on `ir::Module::maps`; Map/Set iterators print as a trap (was `{}`). F97–F100 recorded.
 - 2026-09-26: tools: node oracle pinned to v24.21.0 (latest LTS; was 20.19.2) in TOOLS.md, check-tools.sh, CLAUDE.md. Other tools already latest. With node 24, diff.sh: 70 passed / 5 failed (json-parse: '(line 1 column n)' suffix; array-methods: 'not a function' texts, sort comparator message; map-set: '[object Map Iterator]' receiver; exponent: pow last digits; async/timers: TimeoutNegativeWarning/TimeoutNaNWarning on stderr).
+- 2026-09-26: node 24 fix 1/5: JSON.parse position errors get ` (line l column c)` (`$$jsonWhere`: \n, \r\n, \r end lines); a missing ':' is 'Expected ':' after property name' for every property now (node 24 dropped the first-property quirk). json-parse.js PASS on node 24.
+- 2026-09-26: node 24 fixes 2–3/5: callbacks' 'X is not a function' use `$$typeDescribe` everywhere (moved to array.js; flatMap too), the sort comparator error appends `: $$describe(v)`; map/set iterators as receivers are '[object Map Iterator]'/'[object Set Iterator]'. array-methods.js (+ a loop over value types) and map-set.js PASS.
+- 2026-09-26: node 24 fix 4/5: diff.sh runs node with --no-warnings (warnings carry the pid); timers.js PASS. Map.groupBy added (`$$Map_groupBy`; node's own messages, incl. the plain '5 is not a function'); map-set.js PASS. exponent.js: node 24's pow is bit for bit glibc 2.41's (0 diffs on 20k pairs vs Python math.pow; ARM optimized-routines algorithm), ours (fdlibm) differs on ~10% — F77 updated; porting it needs the user's go (numeric work). F101: Object.groupBy + Set methods.
+- 2026-09-26: pow investigation stopped at the user's request (time/credits): node 24 uses V8's own pow (deps/v8/src/base/ieee754.cc), not glibc (666/1M diffs vs glibc 2.41 FMA and non-FMA builds). Recorded in F77; tests/fixtures/syntax/exponent.js skipped (exponent.skip) until F77. F102 recorded: optional Wasm SIMD speed-ups.

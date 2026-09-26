@@ -116,3 +116,15 @@ for (const f of [
     console.log(e.name, e.message);
   }
 }
+
+// node 24's messages for callbacks and comparators of every type.
+for (const v of [3, "x", true, null, undefined, {}, [1], Symbol("s"), -0, NaN]) {
+  for (const f of [() => [1].forEach(v), () => Array.from([1], v), () => [2, 1].sort(v), () => [1].flatMap(v), () => [1].find(v)]) {
+    try {
+      f();
+      console.log("ok");
+    } catch (e) {
+      console.log(e.name, e.message);
+    }
+  }
+}

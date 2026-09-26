@@ -135,6 +135,7 @@ fn builtins_prelude() {
         "export function f(a) { const m = new Map([[1, a]]); m.set(2, 3); return new Set(m.keys()).size + m.get(1); }",
     );
     lowers("export function f(m) { return m instanceof Map && Map.prototype.has.call(m, 1); }");
+    lowers("export function f(a) { return Map.groupBy(a, (x) => x % 2).size; }");
     assert_eq!(
         one("export function f() { const M = Map; return 1; }"),
         "1:33 unsupported: global `Map` (planned: T21)"

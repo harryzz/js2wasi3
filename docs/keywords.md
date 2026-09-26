@@ -115,7 +115,7 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 | `isNaN` | ✅ | T21 (also `Number.isNaN`). |
 | `isPrototypeOf` | ✅ | T21. |
 | `length` | ✅ | Strings, arrays, functions. |
-| `Map` / `Set` | 🟡 | T25: `new Map(iterable)`/`new Set(iterable)`, every method (`get`/`set`/`has`/`delete`/`clear`/`size`/`forEach`/`keys`/`values`/`entries`/`add`), SameValueZero keys, insertion order, iteration that sees changes, `instanceof`, printed like node. Missing: as values / subclassing (F97), `WeakMap`/`WeakSet`, `Map.groupBy` (F98), printing their iterators (F99). |
+| `Map` / `Set` | 🟡 | T25: `new Map(iterable)`/`new Set(iterable)`, every method (`get`/`set`/`has`/`delete`/`clear`/`size`/`forEach`/`keys`/`values`/`entries`/`add`), SameValueZero keys, insertion order, iteration that sees changes, `instanceof`, printed like node. Also `Map.groupBy`. Missing: as values / subclassing (F97), `WeakMap`/`WeakSet` (F98), printing their iterators (F99), the ES2025 `Set` methods (F101). |
 | `Math` | 🟡 | T21: every function and constant, matching node bit for bit except `pow`/`**` (last-bit differences on some inexact results: F77). `Math` itself as a value (`console.log(Math)`, `const M = Math`) is rejected (F81); `Math.random` only in commands (F83). |
 | `NaN` | ✅ | |
 | `name` | ✅ | Functions, classes, methods, accessors (`get x`), inferred names. |

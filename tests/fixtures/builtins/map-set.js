@@ -200,3 +200,19 @@ console.log(new Map([[1, "a".repeat(30)], [2, "b".repeat(40)]]));
 show("not iterable sym", () => new Map(Symbol("q")));
 show("not iterable fn", () => new Set(function f() {}));
 show("not iterable nan", () => new Set(NaN));
+show("next map", () => new Map().keys().next.call(new Set().values()));
+show("get iter", () => Map.prototype.get.call(new Map().entries()));
+
+// Map.groupBy.
+console.log(Map.groupBy([1, 2, 3, 4, -0, 0], (x) => (x % 2 === 0 ? "even" : "odd")));
+console.log(Map.groupBy([-0, 0, NaN, NaN], (x) => x));
+console.log(Map.groupBy("abca", (c, i) => c + (i > 1)));
+const byLen = Map.groupBy(new Set(["aa", "b", "cc", "d"]), function (w) {
+  return [w.length, this === undefined][0];
+});
+console.log([...byLen.keys()].join(), byLen.get(2).join(), byLen.get(1).length);
+show("groupBy null", () => Map.groupBy(null, (x) => x));
+show("groupBy undefined", () => Map.groupBy(undefined, (x) => x));
+show("groupBy fn", () => Map.groupBy([1], 5));
+show("groupBy iterable", () => Map.groupBy(5, (x) => x));
+show("groupBy object", () => Map.groupBy({}, (x) => x));
