@@ -136,7 +136,9 @@ returning `result<T, js-error>`, `T` being what the promise settles to (JSDoc `@
 `return` values); a world with one imports `wasi:clocks/monotonic-clock` for timers. Slice 4a: `--wit` takes a user
 world; its scalar types decide the boundary: numbers ToNumber, integers ToInt32 and then narrowed to their width
 (64-bit ones: numbers, saturated), `bool` ToBoolean, `char` ↔ a one-code-point string, and without a `result`
-a throw traps.)
+a throw traps. Slice 4b-1: `option`, `result` (at the top: return or throw, `E` by jco's `payload` rule),
+`tuple`, `record`, `enum`, `flags` with jco's JS shapes; `crates/backend/src/wit.rs` has the Canonical ABI
+flattening, layout and conversions.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

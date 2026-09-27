@@ -552,6 +552,65 @@ fn user_world_scalars() {
 }
 
 #[test]
+fn user_world_compound_types() {
+    let out = out_dir("compound").join("shapes.wasm");
+    let dir = fixture("library/compound");
+    let b = build(
+        &dir.join("shapes.js"),
+        &out,
+        &["--wit", dir.join("world.wit").to_str().unwrap()],
+    );
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    // jco's shapes: records/flags as objects (camelCase keys), tuples as arrays, options as
+    // the value or `undefined`, enums as their names, nested results as `{tag, val}`; a
+    // `result` result is return or throw (an own `payload`, else the thrown value).
+    for (call, want) in [
+        ("norm({x: 3.0, y: 4.0})", "5"),
+        ("make-point(1.5, -2.0)", "{x: 1.5, y: -2}"),
+        (
+            "describe({label: \"a\", at: {x: 1.0, y: 2.0}, max-size: some(5)})",
+            "\"a@1,2 max=5\"",
+        ),
+        (
+            "describe({label: \"b\", at: {x: 0.0, y: 0.0}, max-size: none})",
+            "\"b@0,0 max=undefined\"",
+        ),
+        (
+            "relabel({label: \"a\", at: {x: 1.0, y: 2.0}, max-size: none}, \"z\")",
+            "{label: \"z\", at: {x: 1, y: 2}, max-size: some(7)}",
+        ),
+        ("next-color(dark-blue)", "red"),
+        ("perms-of({read, exec-now})", "{exec-now}"),
+        ("swap((\"x\", 5))", "(5, \"x\")"),
+        ("maybe-half(some(3.0))", "some(1.5)"),
+        ("maybe-half(none)", "none"),
+        ("deep(some(some(4)))", "\"4\""),
+        ("parse(\"42\")", "ok(42)"),
+        ("parse(\"x\")", "err(\"not a number: x\")"),
+        ("check(1)", "ok"),
+        ("check(-1)", "err(dark-blue)"),
+        ("unit-result(true)", "ok"),
+        ("unit-result(false)", "err"),
+        ("nested(ok(\"hi\"))", "ok(some(\"hi\"))"),
+        ("nested(ok(\"\"))", "ok(none)"),
+        ("nested(err(7))", "err((7, 8))"),
+        ("slow-point(2.0)", "ok({x: 2, y: -2})"),
+        ("slow-point(-1.0)", "err(\"negative\")"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+    // A value that doesn't fit (not a case of the enum), or an Error without `payload`: traps.
+    for call in ["bad-color()", "error-thrown()"] {
+        let r = Command::new("wasmtime")
+            .args(["run", "--invoke", call])
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert!(!r.status.success(), "{call}");
+    }
+}
+
+#[test]
 fn user_world_mismatches() {
     let dir = out_dir("world-mismatch");
     std::fs::create_dir_all(&dir).unwrap();
@@ -593,7 +652,7 @@ fn user_world_mismatches() {
         "package a:b;\nworld w { export f: func(a: list<u8>); }\n",
         "export function f(a) {}\n",
     );
-    assert!(e.contains("parameter `a` of `f` has type `list<…>`"), "{e}");
+    assert!(e.contains("parameter `a` of `f`: type `list<…>` (a list) isn't supported yet (planned: T20 slice 4b-2)"), "{e}");
     let e = err(
         "package a:b;\nworld w { export f: async func() -> u32; }\n",
         "export async function f() { await new Promise((r) => setTimeout(r, 1)); return 1; }\n",

@@ -191,6 +191,41 @@ pub enum AbiType {
     F64,
     Char,
     String,
+    /// A compound WIT type (T20 slice 4b): [`AbiSig::types`]`[i]`, passed as a JS value.
+    Compound(u32),
+}
+
+/// A compound WIT type of a user world (T20 slice 4b) and its JS shape (jco's):
+/// `option` ↔ the value or `undefined`, `result` (not at the top) ↔ `{ tag: "ok" | "err", val }`,
+/// `tuple` ↔ an array, `record` / `flags` ↔ an object (keys: the camelCase field / flag names),
+/// `enum` ↔ the case's WIT name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WitType {
+    Scalar(AbiType),
+    Option(Box<WitType>),
+    Result {
+        ok: Option<Box<WitType>>,
+        err: Option<Box<WitType>>,
+    },
+    Tuple(Vec<WitType>),
+    /// Fields: (JS key, type).
+    Record(Vec<(String, WitType)>),
+    /// Case names.
+    Enum(Vec<String>),
+    /// Flag JS keys (at most 32).
+    Flags(Vec<String>),
+}
+
+/// The `err` of a throwing export's `result`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ErrType {
+    /// A generated world's `js-error` record, made from the exception (T12).
+    #[default]
+    JsError,
+    /// A user world's `result<T>` / `result<T, E>` (T20): no payload, or the thrown value's
+    /// (jco's convention: an own `payload` property, else a thrown Error traps, else the value).
+    Empty,
+    Of(AbiType),
 }
 
 impl AbiType {
@@ -199,7 +234,7 @@ impl AbiType {
     pub fn param_type(self) -> Type {
         match self {
             AbiType::Bool => Type::Bool,
-            AbiType::Char | AbiType::String => Type::JsVal,
+            AbiType::Char | AbiType::String | AbiType::Compound(_) => Type::JsVal,
             _ => Type::F64,
         }
     }
@@ -231,6 +266,20 @@ pub struct AbiSig {
     /// An `async` function (T20): a WIT `async func`, lifted with the callback ABI; `result` is
     /// what the promise it returns settles to (`throws` is set).
     pub is_async: bool,
+    /// With `throws`: the `result`'s `err` (T20).
+    pub err: ErrType,
+    /// The compound types [`AbiType::Compound`] refers to (T20).
+    pub types: Vec<WitType>,
+}
+
+impl AbiSig {
+    /// The WIT type of `t` (a compound one from [`AbiSig::types`]).
+    pub fn wit(&self, t: AbiType) -> WitType {
+        match t {
+            AbiType::Compound(i) => self.types[i as usize].clone(),
+            t => WitType::Scalar(t),
+        }
+    }
 }
 
 impl AbiSig {
@@ -242,6 +291,8 @@ impl AbiSig {
             throws: false,
             jobs: false,
             is_async: false,
+            err: ErrType::JsError,
+            types: Vec::new(),
         }
     }
 }

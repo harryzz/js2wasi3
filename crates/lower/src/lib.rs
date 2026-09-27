@@ -128,6 +128,10 @@ pub struct WorldSig {
     pub result: Option<ir::AbiType>,
     pub throws: bool,
     pub is_async: bool,
+    /// With `throws`: the `result`'s `err`.
+    pub err: ir::ErrType,
+    /// The compound types (`AbiType::Compound`).
+    pub types: Vec<ir::WitType>,
 }
 
 /// The exports of a user world, by JS export name.
@@ -906,6 +910,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     let kind = match a {
                         ir::AbiType::String | ir::AbiType::Char => Kind::Str,
                         ir::AbiType::Bool => Kind::Bool,
+                        ir::AbiType::Compound(_) => Kind::Any,
                         _ => Kind::Num,
                     };
                     self.observe(Slot::Var(sym), kind);
@@ -1608,6 +1613,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     throws: w.throws,
                     jobs,
                     is_async,
+                    err: w.err,
+                    types: w.types.clone(),
                 }
             } else {
                 let result = if !is_async {
@@ -1644,6 +1651,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     throws: throws[func.0 as usize] || jobs || init_throws || is_async,
                     jobs,
                     is_async,
+                    err: ir::ErrType::JsError,
+                    types: Vec::new(),
                 }
             };
             if let Some((_, _, w)) = done.iter().find(|(g, s, _)| *g == func && *s == sig) {
@@ -6279,6 +6288,8 @@ fn convert_any(from: Type, to: Type, e: Expr) -> Expr {
 /// ([`ir::AbiType::result_type`]): JS ToNumber / ToInt32 / ToBoolean / ToString.
 fn to_boundary(e: Expr, ty: Type, kind: Kind, a: ir::AbiType) -> Expr {
     match a.result_type() {
+        // The adapter lowers a compound value (T20).
+        Type::JsVal if matches!(a, ir::AbiType::Compound(_)) => convert_any(ty, Type::JsVal, e),
         Type::JsVal => match ty {
             Type::F64 => Expr::intrinsic(ir::Intrinsic::NumberToString, vec![e]),
             Type::JsVal if kind == Kind::Str => e,

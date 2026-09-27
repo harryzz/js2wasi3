@@ -182,13 +182,30 @@ fn match_world(
             ));
             continue;
         };
+        // Compound types go to the signature's table.
+        let mut types = Vec::new();
+        let mut abi = |t: &component::Ty| match t {
+            component::Ty::Scalar(v) => ty(*v),
+            t => {
+                types.push(wit_type(t, &ty));
+                ir::AbiType::Compound(types.len() as u32 - 1)
+            }
+        };
+        let params = w.params.iter().map(|(_, t)| abi(t)).collect();
+        let result = w.result.as_ref().map(&mut abi);
+        let err = match &w.err {
+            None => ir::ErrType::Empty,
+            Some(t) => ir::ErrType::Of(abi(t)),
+        };
         boundary.insert(
             e.name.clone(),
             js2wasi3_lower::WorldSig {
-                params: w.params.iter().map(|(_, t)| ty(*t)).collect(),
-                result: w.result.map(ty),
+                params,
+                result,
                 throws: w.throws,
                 is_async: w.is_async,
+                err,
+                types,
             },
         );
         names.insert(e.name.clone(), w.name.clone());
@@ -197,6 +214,45 @@ fn match_world(
         return Err(frontend::Diagnostics(diags).into());
     }
     Ok((boundary, names))
+}
+
+/// A compound WIT type as the IR describes it: record fields and flags get jco's camelCase JS
+/// keys (`max-size` → `maxSize`).
+fn wit_type(t: &component::Ty, scalar: &dyn Fn(component::ValType) -> ir::AbiType) -> ir::WitType {
+    use component::Ty;
+    let sub = |t: &Ty| wit_type(t, scalar);
+    match t {
+        Ty::Scalar(v) => ir::WitType::Scalar(scalar(*v)),
+        Ty::Option(t) => ir::WitType::Option(Box::new(sub(t))),
+        Ty::Result { ok, err } => ir::WitType::Result {
+            ok: ok.as_deref().map(|t| Box::new(sub(t))),
+            err: err.as_deref().map(|t| Box::new(sub(t))),
+        },
+        Ty::Tuple(ts) => ir::WitType::Tuple(ts.iter().map(sub).collect()),
+        Ty::Record(fs) => {
+            ir::WitType::Record(fs.iter().map(|(n, t)| (camel_case(n), sub(t))).collect())
+        }
+        Ty::Enum(cs) => ir::WitType::Enum(cs.clone()),
+        Ty::Flags(fs) => ir::WitType::Flags(fs.iter().map(|f| camel_case(f)).collect()),
+    }
+}
+
+/// `max-size` → `maxSize`, `HTTP-code` → `httpCode`.
+fn camel_case(wit: &str) -> String {
+    let mut out = String::new();
+    for (i, w) in wit.split('-').enumerate() {
+        let w = w.to_lowercase();
+        if i == 0 {
+            out.push_str(&w);
+        } else {
+            let mut cs = w.chars();
+            if let Some(c) = cs.next() {
+                out.extend(c.to_uppercase());
+                out.push_str(cs.as_str());
+            }
+        }
+    }
+    out
 }
 
 fn read(path: &str) -> anyhow::Result<String> {

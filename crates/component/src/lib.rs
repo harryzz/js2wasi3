@@ -270,15 +270,33 @@ fn ty(t: ValType) -> &'static str {
     }
 }
 
+/// A WIT type at a user world's boundary (T20: scalars, slice 4b-1: the fixed-size compound
+/// types). Names are WIT names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ty {
+    Scalar(ValType),
+    Option(Box<Ty>),
+    Result {
+        ok: Option<Box<Ty>>,
+        err: Option<Box<Ty>>,
+    },
+    Tuple(Vec<Ty>),
+    Record(Vec<(String, Ty)>),
+    Enum(Vec<String>),
+    Flags(Vec<String>),
+}
+
 /// A function a user world exports (T20).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldExport {
     /// Its WIT name.
     pub name: String,
-    pub params: Vec<(String, ValType)>,
-    pub result: Option<ValType>,
-    /// Its result is a `result<T, E>` (not yet: slice 4b).
+    pub params: Vec<(String, Ty)>,
+    /// `T` of a `result<T, E>` result.
+    pub result: Option<Ty>,
+    /// Its result is a `result<T, E>`: the function throws `E` (`err`; `None`: no payload).
     pub throws: bool,
+    pub err: Option<Ty>,
     pub is_async: bool,
     /// Its WIT signature, for messages.
     pub signature: String,
@@ -315,44 +333,48 @@ pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld>
         match item {
             WorldItem::Function(f) => {
                 let mut ok = true;
-                let mut scalar = |t: &Type, what: String| match scalar_type(&resolve, t) {
-                    Some(v) => Some(v),
-                    None => {
-                        errs.push(format!(
-                            "unsupported: {what} of `{}` has type `{}` (only scalar types so far; planned: T20 slice 4b)",
-                            f.name,
-                            type_name(&resolve, t)
-                        ));
+                let mut ty = |t: &Type, what: String| match boundary_type(&resolve, t) {
+                    Ok(v) => Some(v),
+                    Err(why) => {
+                        errs.push(format!("unsupported: {what} of `{}`: {why}", f.name));
                         ok = false;
                         None
                     }
                 };
-                let params: Vec<(String, ValType)> = f
+                let params: Vec<(String, Ty)> = f
                     .params
                     .iter()
                     .filter_map(|p| {
-                        scalar(&p.ty, format!("parameter `{}`", p.name)).map(|v| (p.name.clone(), v))
+                        ty(&p.ty, format!("parameter `{}`", p.name)).map(|v| (p.name.clone(), v))
                     })
                     .collect();
-                let result = f.result.as_ref().and_then(|t| scalar(t, "the result".into()));
+                // A `result<T, E>` result: return `T` or throw `E`.
+                let (result, throws, err) = match f.result.as_ref().map(|t| ty(t, "the result".into())) {
+                    Some(Some(Ty::Result { ok, err })) => (ok.map(|t| *t), true, err.map(|t| *t)),
+                    Some(t) => (t, false, None),
+                    None => (None, false, None),
+                };
                 if !ok {
                     continue;
                 }
                 let signature = format!(
                     "{}func({}){}",
                     if f.kind.is_async() { "async " } else { "" },
-                    params
+                    f.params
                         .iter()
-                        .map(|(n, t)| format!("{n}: {}", ty(*t)))
+                        .map(|p| format!("{}: {}", p.name, type_name(&resolve, &p.ty)))
                         .collect::<Vec<_>>()
                         .join(", "),
-                    result.map_or(String::new(), |t| format!(" -> {}", ty(t)))
+                    f.result
+                        .as_ref()
+                        .map_or(String::new(), |t| format!(" -> {}", type_name(&resolve, t)))
                 );
                 exports.push(WorldExport {
                     name: f.name.clone(),
                     params,
                     result,
-                    throws: false,
+                    throws,
+                    err,
                     is_async: f.kind.is_async(),
                     signature,
                 });
@@ -371,6 +393,51 @@ pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld>
         resolve,
         id,
         exports,
+    })
+}
+
+/// A type at the boundary, or why it isn't supported.
+fn boundary_type(resolve: &Resolve, t: &Type) -> Result<Ty, String> {
+    if let Some(v) = scalar_type(resolve, t) {
+        return Ok(Ty::Scalar(v));
+    }
+    let Type::Id(id) = t else {
+        return Err(format!("type `{}` isn't supported", type_name(resolve, t)));
+    };
+    let later = |what: &str, when: &str| {
+        Err(format!(
+            "type `{}` ({what}) isn't supported yet (planned: {when})",
+            type_name(resolve, t)
+        ))
+    };
+    let sub = |t: &Type| boundary_type(resolve, t);
+    Ok(match &resolve.types[*id].kind {
+        TypeDefKind::Type(t) => return sub(t),
+        TypeDefKind::Option(t) => Ty::Option(Box::new(sub(t)?)),
+        TypeDefKind::Result(r) => Ty::Result {
+            ok: r.ok.as_ref().map(sub).transpose()?.map(Box::new),
+            err: r.err.as_ref().map(sub).transpose()?.map(Box::new),
+        },
+        TypeDefKind::Tuple(tu) => Ty::Tuple(tu.types.iter().map(sub).collect::<Result<_, _>>()?),
+        TypeDefKind::Record(r) => Ty::Record(
+            r.fields
+                .iter()
+                .map(|f| Ok((f.name.clone(), sub(&f.ty)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+        TypeDefKind::Enum(e) => Ty::Enum(e.cases.iter().map(|c| c.name.clone()).collect()),
+        TypeDefKind::Flags(f) if f.flags.len() > 32 => {
+            return later("flags with more than 32 flags", "later");
+        }
+        TypeDefKind::Flags(f) => Ty::Flags(f.flags.iter().map(|f| f.name.clone()).collect()),
+        TypeDefKind::List(_) | TypeDefKind::FixedLengthList(..) => {
+            return later("a list", "T20 slice 4b-2");
+        }
+        TypeDefKind::Variant(_) => return later("a variant", "T20 slice 4b-2"),
+        TypeDefKind::Future(_) | TypeDefKind::Stream(_) => {
+            return later("a future or stream", "T20 slice 6");
+        }
+        _ => return later("a resource", "later"),
     })
 }
 

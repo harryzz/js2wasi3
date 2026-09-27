@@ -53,6 +53,7 @@ mod props;
 mod runtime;
 mod timers;
 mod typed;
+mod wit;
 
 use std::collections::HashMap;
 
@@ -103,7 +104,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let abi = adapted.iter().any(|x| abi::needs_memory(&x.sig)) || command.is_some();
     for x in &adapted {
         // More flat params than this are passed through memory: not implemented (F21).
-        if abi::flat_params(&x.sig.params).len() > abi::MAX_FLAT_PARAMS {
+        if abi::flat_params(&x.sig).len() > abi::MAX_FLAT_PARAMS {
             bail!(
                 "unsupported: export `{}` has more than {} parameter values at the boundary (a string counts twice) (planned: F21)",
                 x.name,
@@ -231,7 +232,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     let mut adapter_names = Vec::new();
     for x in &adapted {
-        let params = abi::flat_params(&x.sig.params);
+        let params = abi::flat_params(&x.sig);
         // An async export's adapter starts the call (T20).
         let (results, mode) = if x.sig.is_async {
             (vec![], abi::Mode::Start)
@@ -256,20 +257,15 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     for (j, x) in lifted.iter().enumerate() {
         let finish = func_base + n + adapted.len() as u32 + 3 * j as u32;
         let task_return = j as u32;
-        funcs.function(e.type_id(vec![], abi::flat_result(&x.sig)));
+        funcs.function(e.type_id(vec![], vec![]));
         let bump = e.bump;
-        code.function(&abi::adapter(&mut e, bump, 0, &x.sig, abi::Mode::Finish));
-        let params = abi::flat_params(&x.sig.params);
+        let mode = abi::Mode::Finish(task_return);
+        code.function(&abi::adapter(&mut e, bump, 0, &x.sig, mode));
+        let params = abi::flat_params(&x.sig);
         funcs.function(e.type_id(params, vec![ValType::I32]));
-        code.function(&abi::async_lift(
-            &mut e,
-            adapter_index(x),
-            finish,
-            task_return,
-            &x.sig,
-        ));
+        code.function(&abi::async_lift(&mut e, adapter_index(x), finish, &x.sig));
         funcs.function(e.type_id(vec![ValType::I32; 3], vec![ValType::I32]));
-        code.function(&abi::async_callback(&mut e, finish, task_return, &x.sig));
+        code.function(&abi::async_callback(&mut e, finish));
     }
     let realloc =
         abi.then(|| e.helper_index(Helper::Js(runtime::Helper::Abi(abi::Helper::Realloc))));

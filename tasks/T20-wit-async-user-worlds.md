@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slices 1–3 and 4a done; next: slice 4b) | Depends on: T19
+Status: in progress (slices 1–3, 4a, 4b-1 done; next: slice 4b-2) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -157,6 +157,39 @@ maps to `E`: `string` = its message, a record like `js-error`, …), then `optio
 `record` (↔ plain object), `enum` (↔ string), `list<T>` (`list<u8>` ↔ `Uint8Array`), `variant`, `flags`; these
 need the canonical ABI in memory (lists, > 16 flat params, F21).
 
+### Slice 4b-1: fixed-size compound types (done 2026-09-27)
+- **Types:** `ir::WitType` (a tree: `Scalar`, `Option`, `Result`, `Tuple`, `Record`, `Enum`, `Flags`) referred
+  to by `AbiType::Compound(i)` into `AbiSig::types`; `AbiSig::err` (`ErrType::JsError` for generated worlds,
+  `Empty`, `Of(t)`). `component::Ty` / `boundary_type` read them from wit-parser (aliases resolved; `list`,
+  `variant`, `future`/`stream`, resources and flags > 32 are errors naming the slice that adds them); a top-level
+  `result<T, E>` becomes `throws` + `err`. The CLI converts record fields and flags to camelCase JS keys (`wit_type`).
+- **JS shapes (jco):** record / flags ↔ object (camelCase keys), tuple ↔ array, option ↔ the value or
+  `undefined` (`null` lowers to `none` too), enum ↔ its WIT case name, a `result` below the top ↔
+  `{ tag: "ok" | "err", val }`. A top-level `result` is return or throw, the thrown value made `E` by jco's
+  `getErrorPayload` (own `payload`, else an Error traps, else the value; decided with the user). A value that
+  doesn't fit (an enum string that isn't a case, a `tag` that's neither) traps.
+- **Backend:** `crates/backend/src/wit.rs`: `flatten` (with variant joins), `size_align` / `variant_layout`,
+  `lift_flat` (params → JS values), `lower_mem` (JS values → memory), `flat_load` (memory → flat values, per case
+  in an `if`, coerced to the joined types). The adapter is built in a buffer with `wit::Gen` locals; every
+  result goes through one path: the return area, then its one flat value or the pointer. An async export's
+  `Mode::Finish(task_return)` adapter now calls `task.return` itself (flat values loaded from the return area, a
+  pointer past 16), so the lift and callback shrink to `step` / `finish` / `end` (the hand-written `js-error`
+  loads are gone).
+- Tests: `tests/fixtures/library/compound/{world.wit,shapes.js}` (every type, nested ones, `result<_, enum>`,
+  `result` with no payload, a thrown Error with `payload`, an async `result<record, string>`, two traps) in
+  `crates/js2wasi3/tests/build.rs` (`user_world_compound_types`). `cargo test` ok; `scripts/diff.sh -j 4`: 97
+  passed, 0 failed, 16 skipped; `hello.js` 55715, `add.js` 289; `library/async.js` 76153 (+174: the generic
+  `js-error` load in 11 `finish` adapters), `library/jobs.js` +12.
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets`, `scripts/diff.sh -j 4`,
+  `wasm-tools validate`, `wasmtime run --invoke`.
+
+**Not done (follow-ups):** F127 (`option<option<T>>`: `some(none)` and `none` are both `undefined`), F128 (a JS
+value that doesn't fit its WIT type traps; jco throws a TypeError, which a `result` export would return).
+
+**Next smallest step:** slice 4b-2: `list<T>` (params: lift from memory into an array; `list<u8>` ↔ `Uint8Array`
+with the typed-array runtime; results: allocate with `cabi_realloc`, lower each element), then `variant`
+(`{tag, val}`, like the nested `result`), then parameters in memory past 16 flat values (F21).
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -250,3 +283,6 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: 4a implemented: `ir::AbiType` = all WIT scalars (`param_type`/`result_type`), `lower_with(program, Some(&Boundary))` (world sigs by JS export name; pass 1 checks sync/async and param count, observes param kinds; `wrap_exports` converts via `convert_any`/`to_boundary`), backend adapter rewritten (per-type lifting/narrowing, `result` return areas and joined `task.return` params for any scalar, `FromCodePoint`/`CodePointAt0`, conversion helpers gated), component `load_world` (vendored WASI + `push_path`, aliases resolved, non-scalars and interface exports rejected), CLI `--wit` + `match_world` (missing / extra exports). Fixture `library/scalars/{world.wit,scalars.js}`: every result as ToInt32 + narrowing; a throw without `result` traps.
 - 2026-09-27: found while testing: a numbers-only library with a `u32` world had no JS runtime but its adapter requested the string/allocator helpers and the bump global (invalid module): helpers and memory are now requested only when needed (`abi::needs_memory`). Tests added.
 - 2026-09-27: 4a done: Notes / Result, README (Next up: 4b; F124–F126; F13/F34/F60/F119 notes), design.md D4, wit-names.md, README.md.
+- 2026-09-27: 4b agreed with the user: a throw becomes `err` by jco's convention (a thrown value's own `payload` property, else a thrown Error traps, else the value itself, lowered as `E`; a mismatch traps). Split: 4b-1 = `result`, `option`, `tuple`, `record`, `enum`, `flags` (≤ 16 flat params, results in a return area, JS shapes as jco: option ↔ value/undefined, tuple ↔ array, record/flags ↔ object with camelCase keys, enum ↔ its WIT name, a nested `result` ↔ `{tag, val}`); 4b-2 = `list<T>` (`list<u8>` ↔ Uint8Array), `variant`, params in memory (F21).
+- 2026-09-27: 4b-1 plan: IR `AbiType::Compound(id)` into `Module::wit_types` (a `WitType` tree), `AbiSig::err` (js-error / none / a type); backend `wit.rs`: `flatten`/`size_align` (joins), `lift_flat` (params → JS values), `lower_mem` (JS value → memory), `flat_load` (memory → flat values, for `task.return`), with locals allocated while generating (body built in a buffer, then `Function::raw`).
+- 2026-09-27: 4b-1 done: `ir::WitType`/`ErrType`, `backend/src/wit.rs`, adapter rebuilt around the return area (+ `Finish(task_return)`), component `Ty`, CLI camelCase keys. Size: first +1.9 KB on library/async.js (the flat load was emitted in both the ok and err paths of every `finish`); one delivery point and merged local declarations brought it to +174. Fixture `library/compound`, test `user_world_compound_types`. cargo test ok; diff.sh 97/0/16; hello.js 55715.

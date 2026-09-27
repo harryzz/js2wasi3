@@ -1,0 +1,26 @@
+package acme:shapes;
+
+world shapes {
+  record point { x: f64, y: f64 }
+  record labeled-point { label: string, at: point, max-size: option<u32> }
+  enum color { red, green, dark-blue }
+  flags perms { read, write, exec-now }
+  type pair = tuple<string, s32>;
+
+  export norm: func(p: point) -> f64;
+  export make-point: func(x: f64, y: f64) -> point;
+  export describe: func(p: labeled-point) -> string;
+  export relabel: func(p: labeled-point, label: string) -> labeled-point;
+  export next-color: func(c: color) -> color;
+  export perms-of: func(p: perms) -> perms;
+  export swap: func(p: pair) -> tuple<s32, string>;
+  export maybe-half: func(x: option<f64>) -> option<f64>;
+  export deep: func(x: option<option<u8>>) -> string;
+  export parse: func(s: string) -> result<u32, string>;
+  export check: func(n: s32) -> result<_, color>;
+  export unit-result: func(ok: bool) -> result;
+  export nested: func(r: result<string, u32>) -> result<option<string>, tuple<u8, u8>>;
+  export slow-point: async func(x: f64) -> result<point, string>;
+  export bad-color: func() -> color;
+  export error-thrown: func() -> result<u32, string>;
+}
