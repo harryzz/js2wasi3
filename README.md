@@ -15,7 +15,7 @@ Generators and `async`/`await` are compiled to resumable state machines by an IR
 stack-switching proposal.
 
 > **Status: early and experimental.** A good part of the language works (see below and
-> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`Date`, regex…; `Math`, strings, arrays, `JSON`, `Map`/`Set`, `Object` methods and number parsing/formatting are done)
+> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`Date`, regex…; `Math`, strings, arrays, `JSON`, `Map`/`Set`, `Object` methods, `Reflect` and number parsing/formatting are done)
 > doesn't exist yet. Unsupported code is rejected at build time with a clear diagnostic rather than
 > miscompiled. The known exception, built-in methods that crash when called, is listed in the docs.
 

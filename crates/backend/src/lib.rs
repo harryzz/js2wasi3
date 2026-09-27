@@ -1382,6 +1382,9 @@ impl Emitter<'_> {
                             Intrinsic::EnvGet(_) => {
                                 s.ref_cast_non_null(func::function());
                             }
+                            Intrinsic::ObjectDesc => {
+                                s.ref_cast_non_null(runtime::object());
+                            }
                             Intrinsic::ArrayPush => {
                                 s.ref_cast_non_null(array::array());
                             }
@@ -1636,6 +1639,7 @@ impl Emitter<'_> {
                     Intrinsic::PrivateAdd { kind } => H::Prop(props::Helper::PrivateAdd(*kind)),
                     Intrinsic::NewAccessor => H::Prop(props::Helper::NewAccessor),
                     Intrinsic::ToPropertyKey => H::Obj(object::Helper::ToKey),
+                    Intrinsic::ObjectDesc => H::Prop(props::Helper::Desc),
                     Intrinsic::Hole | Intrinsic::IsHole => unreachable!("inline"),
                     Intrinsic::ResumeMode
                     | Intrinsic::NewGenerator { .. }

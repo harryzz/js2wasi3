@@ -12,12 +12,13 @@ DIR="$ROOT/test262"
 
 if [ ! -d "$DIR/.git" ]; then
   git clone -q --filter=blob:none --no-checkout https://github.com/tc39/test262 "$DIR"
-  git -C "$DIR" sparse-checkout set --cone harness \
-    test/language/expressions test/language/statements \
-    test/built-ins/Array test/built-ins/String test/built-ins/Math test/built-ins/JSON \
-    test/built-ins/Promise test/built-ins/Map test/built-ins/Set
 else
   git -C "$DIR" fetch -q origin
 fi
+# Set on every run, so an existing clone gets directories added to the subset (T36: Reflect).
+git -C "$DIR" sparse-checkout set --cone harness \
+  test/language/expressions test/language/statements \
+  test/built-ins/Array test/built-ins/String test/built-ins/Math test/built-ins/JSON \
+  test/built-ins/Promise test/built-ins/Map test/built-ins/Set test/built-ins/Reflect
 git -C "$DIR" checkout -q "$COMMIT"
 echo "test262 at $COMMIT"

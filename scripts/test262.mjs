@@ -57,6 +57,7 @@ const SUBSET = [
   "built-ins/Promise",
   "built-ins/Map",
   "built-ins/Set",
+  "built-ins/Reflect",
 ];
 // Features node 24.21.0 (the oracle, TOOLS.md) doesn't implement: proper tail calls and proposals it
 // doesn't ship yet. Tests using them are skipped.

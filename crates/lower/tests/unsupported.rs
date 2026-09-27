@@ -53,9 +53,11 @@ fn primitive_values_lower() {
 fn arity_and_callee() {
     // T14 (F16): extra arguments are evaluated and dropped.
     lowers("function g(a) { return a; }\nexport function f() { return g(1, 2); }");
+    // T36: `Reflect` is a namespace; `Proxy` isn't implemented.
+    lowers("export function f() { return Reflect.ownKeys({}); }");
     assert_eq!(
-        one("export function f() { return Reflect.ownKeys({}); }"),
-        "1:30 unsupported: global `Reflect` (planned: T21)"
+        one("export function f() { return new Proxy({}, {}); }"),
+        "1:34 unsupported: global `Proxy` (planned: T21)"
     );
 }
 
@@ -199,9 +201,10 @@ fn declarations_and_functions() {
         one("export function f(...a) { return 0; }"),
         "1:8 unsupported: rest parameter in an exported function (planned: T20)"
     );
+    lowers("export function f() { return Reflect; }");
     assert_eq!(
-        one("export function f() { return Reflect; }"),
-        "1:30 unsupported: global `Reflect` (planned: T21)"
+        one("export function f() { return Proxy; }"),
+        "1:30 unsupported: global `Proxy` (planned: T21)"
     );
     // A name that isn't a global in node either throws a ReferenceError when read (F139).
     lowers("export function f() { return x; }");

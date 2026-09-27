@@ -34,6 +34,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/string.js"),
     include_str!("../builtins/array.js"),
     include_str!("../builtins/object.js"),
+    include_str!("../builtins/reflect.js"),
     include_str!("../builtins/json.js"),
     include_str!("../builtins/map.js"),
     include_str!("../builtins/symbol.js"),

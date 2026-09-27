@@ -53,6 +53,8 @@ pub const CLASS_JSON: i32 = 6;
 pub const CLASS_ASYNC_GEN: i32 = 7;
 /// A primitive wrapper object (T30, a `$wrapper`, see `crate::wrapper`).
 pub const CLASS_WRAPPER: i32 = 8;
+/// `Reflect` as a value (T36), like [`CLASS_MATH`].
+pub const CLASS_REFLECT: i32 = 9;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -3555,6 +3557,8 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
         tag(cx, &mut s, "Math");
         class(&mut s, CLASS_JSON);
         tag(cx, &mut s, "JSON");
+        class(&mut s, CLASS_REFLECT);
+        tag(cx, &mut s, "Reflect");
     }
     s.global_get(G_UNDEFINED);
     s.end();

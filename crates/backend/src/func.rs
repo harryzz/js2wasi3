@@ -1389,6 +1389,7 @@ fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
     s.i32_const(match ns {
         Namespace::Math => object::CLASS_MATH,
         Namespace::Json => object::CLASS_JSON,
+        Namespace::Reflect => object::CLASS_REFLECT,
     });
     s.call(obj_proto).call(alloc).local_tee(O);
     s.ref_cast_non_null(runtime::object()).global_set(g);

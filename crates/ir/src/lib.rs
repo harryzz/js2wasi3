@@ -455,20 +455,22 @@ impl ErrorKind {
     }
 }
 
-/// A namespace object of built-in functions (T25: `Math`, `JSON` as values).
+/// A namespace object of built-in functions (T25: `Math`, `JSON` as values; T36: `Reflect`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Namespace {
     Math,
     Json,
+    Reflect,
 }
 
 impl Namespace {
-    pub const ALL: [Namespace; 2] = [Namespace::Math, Namespace::Json];
+    pub const ALL: [Namespace; 3] = [Namespace::Math, Namespace::Json, Namespace::Reflect];
 
     pub fn name(self) -> &'static str {
         match self {
             Namespace::Math => "Math",
             Namespace::Json => "JSON",
+            Namespace::Reflect => "Reflect",
         }
     }
 
@@ -905,6 +907,8 @@ pub enum Intrinsic {
     /// ToPropertyKey (a string or a symbol): a computed class field key, converted once when the
     /// class is evaluated (T31).
     ToPropertyKey,
+    /// `(o) -> jsval`: an object as node shows it in TypeErrors (`#<Foo>`, `[object Array]`; T36).
+    ObjectDesc,
     /// A getter/setter pair (args: getter, setter, each a function or `undefined`) as a value for
     /// [`Intrinsic::PrivateAdd`] with [`PrivateKind::Accessor`].
     NewAccessor,
@@ -1195,7 +1199,7 @@ impl Intrinsic {
             }
             Intrinsic::PrivateHas => (&[JsVal, JsVal], Some(Bool)),
             Intrinsic::NewAccessor => (&[JsVal, JsVal], Some(JsVal)),
-            Intrinsic::ToPropertyKey => (&[JsVal], Some(JsVal)),
+            Intrinsic::ToPropertyKey | Intrinsic::ObjectDesc => (&[JsVal], Some(JsVal)),
             Intrinsic::IsHole | Intrinsic::TestIntegrity(_) => (&[JsVal], Some(Bool)),
             Intrinsic::CtorReturn { .. } | Intrinsic::GetOwnPropertyDescriptor => {
                 (&[JsVal, JsVal], Some(JsVal))
@@ -1359,6 +1363,7 @@ impl Intrinsic {
             },
             Intrinsic::NewAccessor => "new_accessor",
             Intrinsic::ToPropertyKey => "to_property_key",
+            Intrinsic::ObjectDesc => "object_desc",
             Intrinsic::ResumeMode => "resume_mode",
             Intrinsic::NewGenerator { .. } => "new_generator",
             Intrinsic::NewAsync { .. } => "new_async",

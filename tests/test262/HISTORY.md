@@ -3,6 +3,16 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T36 `Reflect` (targeted reruns; subset + `built-ins/Reflect`)
+
+- Compiler: T36 (`Reflect` namespace, all 13 functions in the prelude; built-in functions as values aren't
+  constructors).
+- Subset change: `built-ins/Reflect` added (153 files: 135 pass, 1 fail, 17 unsupported).
+- Runs: the 239 subset tests using `Reflect` (source or `isConstructor.js`/`deepEqual.js`/… harness) that didn't
+  pass: 179 → pass; then every `built-ins/*` directory of the old subset (6,116 tests, 2,201 s at -j 4) as a
+  regression check for the constructor change: 1 fail → pass, 0 regressions.
+  Subset: 22,146 of 24,973 run pass (88.7%; was 21,831 of 24,820, 88.0%).
+
 ## 2026-09-27: T35 arrays: generic methods, `isConcatSpreadable`, species, `fromAsync` (targeted rerun)
 
 - Compiler: T35 (the native `push`/`pop`/`join`/`toString` fall back to the prelude's generic algorithms; `concat`'s

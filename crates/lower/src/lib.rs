@@ -2797,7 +2797,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             code,
             name,
             length,
-            kind: if f.flags.is_generator && f.flags.is_async {
+            // Built-in functions other than constructors (made by `BuiltinCtor`) aren't
+            // constructors (T36: `Reflect.construct`).
+            kind: if f.name.starts_with("$$") {
+                ir::FnKind::Plain
+            } else if f.flags.is_generator && f.flags.is_async {
                 ir::FnKind::AsyncGenerator
             } else if f.flags.is_generator {
                 ir::FnKind::Generator
@@ -5193,6 +5197,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
             "trap" => 0,
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
+            "to_key" | "object_desc" => 1,
+            "set_proto" => 2,
+            "call_list" | "construct_list" => 3,
             "inspect" => 2,
             "unit" => 2,
             "sub" | "str_set" | "define" => 3,
@@ -5230,6 +5237,30 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 None => Expr::intrinsic(Intrinsic::Inspect, vec![v]),
             };
             return Ok((e, Call::Intrinsic(Some(Kind::Str))));
+        }
+        if let Some(op) = match name {
+            "call_list" => Some(Intrinsic::CallList),
+            "construct_list" => Some(Intrinsic::ConstructList),
+            "set_proto" => Some(Intrinsic::SetProto),
+            "to_key" => Some(Intrinsic::ToPropertyKey),
+            "object_desc" => Some(Intrinsic::ObjectDesc),
+            _ => None,
+        } {
+            // `Reflect` (T36): `call_list(f, this, args)`, `construct_list(f, args, new_target)`
+            // (the prelude checked `f`, so no "not a function" text), `set_proto(o, p)`,
+            // `to_key(v)` (ToPropertyKey), `object_desc(o)` (`#<Foo>`).
+            let mut args = Vec::new();
+            for a in &c.arguments {
+                let Some(e) = a.as_expression() else {
+                    return Err(self.unsupported(a.span(), "spread argument", "T21"));
+                };
+                args.push(jsval_of(self.expr(cx, e)?));
+            }
+            if matches!(op, Intrinsic::CallList | Intrinsic::ConstructList) {
+                args.push(Expr::str(""));
+            }
+            let kind = op.signature().1.map(|_| Kind::Any);
+            return Ok((Expr::intrinsic(op, args), Call::Intrinsic(kind)));
         }
         if name == "is_constructor" {
             // IsConstructor (T35).

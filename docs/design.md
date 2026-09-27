@@ -198,6 +198,11 @@ algorithm and `toFixed` exact, so the digits match node; see `builtins/string.js
 `this.length`), so they take any array-like `this`; `push`/`pop`/`join`/`toString`/`values` stay native. `Array(…)` and
 `new Array(…)` are direct calls of `$$Array`. `sort` is a stable merge sort (the same order as V8's TimSort for a
 consistent comparator). Prelude code is typed by the same inference as user code: `+x.length` keeps a length an `f64`.)
+(T36: `Reflect` is a namespace like `Math` (`CLASS_REFLECT`), all in `builtins/reflect.js`: `get`/`set` with a receiver
+are the spec's OrdinaryGet/OrdinarySet walks over `Object.getOwnPropertyDescriptor`/`getPrototypeOf`; the writers that
+return `false` convert the key, the descriptor and an array `length` first, then catch only the native rejection.
+Intrinsics `call_list`, `construct_list` (a `new.target`), `set_proto`, `to_key`, `object_desc`. Built-in functions
+as values (`$$…`) are `FnKind::Plain`: not constructors.)
 (T35: prelude intrinsics `__intrinsic_is_constructor(v)` and `__intrinsic_named("x")`, a compile-time constant telling
 whether the user's code names property `x`, so the prelude can skip paths that can't happen, like species.)
 (T21 slice 4: `builtins/object.js` (`Object.assign`/`fromEntries`, the `Object.prototype` methods, installed over the

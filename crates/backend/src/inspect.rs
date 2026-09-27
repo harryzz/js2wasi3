@@ -1078,6 +1078,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         vec![
             (object::CLASS_MATH, cx.str("Object [Math] ")),
             (object::CLASS_JSON, cx.str("Object [JSON] ")),
+            (object::CLASS_REFLECT, cx.str("Object [Reflect] ")),
         ]
     } else {
         vec![]
