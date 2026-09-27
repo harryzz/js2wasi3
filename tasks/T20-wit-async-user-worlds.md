@@ -295,6 +295,7 @@ rejections), F83 (`wasi:random` in library worlds).
 - Fixtures are ES modules (`tests/fixtures/package.json`); scratch files outside run as CommonJS in node, which
   changes `process.nextTick` vs microtask order.
 - Subtasks must leave their waitable set (`waitable.join h 0`) before `subtask.cancel` (probe 8).
+- New boundary features (imports, `future`/`stream`, …) go into the user guide `docs/user-worlds.md` too.
 
 ## Progress
 - 2026-09-26: plan: slice 1 = for await (1a), async generators (1b), typed arrays (1c), before the WIT slices (user's choice). Status in progress.
@@ -322,3 +323,4 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: 4b-2 started: list<T> (list<u8> ↔ Uint8Array), variant, params in memory past 16 flat values (F21).
 - 2026-09-27: 4b-2 implemented: `ir::WitType::{List, Variant}` (`typed_kind`: numeric lists up to 32 bits and `f64` are typed arrays, as in jco; 64-bit lists plain arrays), component `Ty::{List, Variant}`; backend `wit.rs`: flatten/layout, `lift_mem` (flat_load + lift_flat), lists lifted from memory (typed arrays by byte copy, others element by element) and lowered with `cabi_realloc` (a typed array of the same kind: byte copy; any array-like: `length` + indices), variants and nested results share `lift_cases`/`lower_cases` (a variant case without payload has no `val`, like jco); params past 16 flat values come as a pointer to their tuple (F21; the backend's bail removed). Lowering sets `$typed` when a world has typed lists. Fixture `library/lists/{world.wit,lists.js}`: every call as expected on the first build.
 - 2026-09-27: 4b-2 done: user_world_lists_and_variants passes; cargo test ok, clippy (old warning only), diff.sh 97/0/16, sizes unchanged (hello.js 55715, add.js 289, library/async.js 76153). Notes / Result, README (Next up: slice 5; F21 ticked; F127/F128 retargeted; F129), design.md D4, README.md.
+- 2026-09-27: docs/user-worlds.md: user guide for --wit (type shapes, result return/throw with the payload rule, async, limits), examples run on wasmtime; linked from README.md and design.md D4.
