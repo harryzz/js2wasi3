@@ -33,7 +33,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 |---|---|---|
 | `abstract` | ➖ | Removed in ES5 (Java-era reserved word). |
 | `arguments` | 🟡 | T25: in ordinary functions, methods, generators and async functions (unmapped, as in strict mode; iterable, printed `[Arguments] {…}`). Rejected in arrow functions, class constructors, with a rest parameter and in exported functions (F103). |
-| `async` | 🟡 | T19: `async function`, async arrows, methods, static methods. T20: async generators (`async function*`, methods), except `yield*` in them (F115). Missing: exported async functions at the WIT boundary (T20). |
+| `async` | 🟡 | T19: `async function`, async arrows, methods, static methods. T20: async generators (`async function*`, methods), except `yield*` in them (F115). T20 slice 3: exported async functions are WIT `async func`s. |
 | `await` | 🟡 | T19: in async functions and at top level; T20: `for await` (async and sync iterables, node's microtask ticks). Missing: an unsettled top-level `await` exits 0 instead of node's 13 (F76). |
 | `boolean` | ➖ | Removed in ES5. |
 | `break` | ✅ | Loops, `switch`, labeled statements and blocks; through `finally`. |
@@ -52,7 +52,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `else` | ✅ | |
 | `enum` | ➖ | Reserved; a syntax error in node too. |
 | `eval` | ❌ | Rejected. An ahead-of-time compiler can't compile code built at run time; not planned (would need an interpreter). |
-| `export` | 🟡 | Named functions and `export default function f` become WIT exports (T07–T09). Missing: exporting variables/classes, async and generator exports, rest parameters in exports, WIT types beyond `f64`/`string` (T20: F13, F55); library top-level code (F11). |
+| `export` | 🟡 | Named functions and `export default function f` become WIT exports (T07–T09). T20: `export async function` is an `async func`. Missing: exporting variables/classes, generator exports, rest parameters in exports, WIT types beyond `f64`/`string` (T20: F13, F55); library top-level code (F11). |
 | `extends` | ✅ | Classes and native errors (T16). |
 | `false` | ✅ | |
 | `final` | ➖ | Removed in ES5. |

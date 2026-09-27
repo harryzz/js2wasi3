@@ -116,7 +116,10 @@ See `crates/backend/src/timers.rs`.)
 (T20: `for await` is lowered like `for-of` on `Intrinsic::AsyncIter*` (sync iterables get node's
 CreateAsyncFromSyncIterator ticks). Async generators are transformed like generators (`NewAsyncGenerator`, `await`
 points marked) and driven by a request queue in `crates/backend/src/asyncgen.rs`. Every suspension point breaks to
-one shared "save the locals" tail per resume function.)
+one shared "save the locals" tail per resume function. Slice 3: a library's `export async function` is lifted
+with the callback ABI too: the lift starts the call and steps it (jobs, then one `wait-until` subtask for the
+earliest timer, backpressure raised while it waits); when the promise settles the callback `task.return`s its
+`result` and exits. See `crates/backend/src/abi.rs`.)
 
 ### D4. The WIT boundary follows jco/componentize-js conventions
 The entry module's ES exports become the world's exports. WIT types map to JS:
@@ -128,7 +131,9 @@ Parameter and result types (`f64` / `string`) come from JSDoc or usage (T09). Se
 (T20 slice 2: a library's top-level code is `ir::Module::init`, run once by the first export call through the
 export adapters (`abi::Helper::Init`); an `init` that threw fails every later call with the same error. When the
 module can queue jobs (`ir::can_queue`), each call ends by draining them (`abi::Helper::Settle`), and an unhandled
-rejection (or a job's exception) makes the call return `err`.)
+rejection (or a job's exception) makes the call return `err`. Slice 3: an `async` export is an `async func`
+returning `result<T, js-error>`, `T` being what the promise settles to (JSDoc `@returns {Promise<T>}`, else the
+`return` values); a world with one imports `wasi:clocks/monotonic-clock` for timers.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

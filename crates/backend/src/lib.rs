@@ -132,12 +132,22 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     } else {
         Vec::new()
     };
-    let func_base = import_list.len() as u32;
+    // A library's async exports (T20): each imports its `task.return` and exports a lift and a
+    // callback (after the adapters).
+    let lifted: Vec<&ir::Export> = adapted.iter().copied().filter(|x| x.sig.is_async).collect();
+    // A library's timers run while an async export waits (T20).
+    let lib_timers = !lifted.is_empty() && uses_timers(module);
+    let import_list = if lib_timers {
+        host::LIBRARY_TIMER_IMPORTS.to_vec()
+    } else {
+        import_list
+    };
+    let func_base = import_list.len() as u32 + lifted.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let host_base = runtime::GLOBALS + abi as u32;
     let host_globals = if command.is_some() {
         host::GLOBALS
-    } else if module.init.is_some() {
+    } else if module.init.is_some() || module.exports.iter().any(|x| x.sig.is_async) {
         abi::LIB_GLOBALS
     } else {
         0
@@ -157,6 +167,10 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let type_base = if js { runtime::TYPES } else { 0 };
     let mut e = Emitter {
         m: module,
+        imports: host::Imports {
+            base: lifted.len() as u32,
+            list: import_list.clone(),
+        },
         types,
         next_type: type_base,
         global_base: if js { host_base + host_globals } else { 0 },
@@ -164,7 +178,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         host_base,
         func_base,
         type_ids: HashMap::new(),
-        helper_base: func_base + n + adapted.len() as u32,
+        helper_base: func_base + n + adapted.len() as u32 + 3 * lifted.len() as u32,
         helpers: Vec::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
@@ -182,9 +196,15 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
 
     let mut imports = ImportSection::new();
-    if command.is_some() {
-        host::imports(&mut imports, &import_list, &mut |p, r| e.type_id(p, r));
+    for x in &lifted {
+        let ty = e.type_id(abi::task_return_params(&x.sig), vec![]);
+        imports.import(
+            "[export]$root",
+            &format!("[task-return]{}", x.name),
+            wasm_encoder::EntityType::Function(ty),
+        );
     }
+    host::imports(&mut imports, &import_list, &mut |p, r| e.type_id(p, r));
     // The exception tag (`runtime::TAG`) comes with the JS runtime.
     let mut tags = TagSection::new();
     if js {
@@ -210,11 +230,44 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut adapter_names = Vec::new();
     for x in &adapted {
         let params = abi::flat_params(&x.sig.params);
-        let results = abi::flat_result(&x.sig);
+        // An async export's adapter starts the call (T20).
+        let (results, mode) = if x.sig.is_async {
+            (vec![], abi::Mode::Start)
+        } else {
+            (abi::flat_result(&x.sig), abi::Mode::Sync)
+        };
         funcs.function(e.type_id(params, results));
         let bump = e.bump;
-        code.function(&abi::adapter(&mut e, bump, func_base + x.func.0, &x.sig));
+        code.function(&abi::adapter(
+            &mut e,
+            bump,
+            func_base + x.func.0,
+            &x.sig,
+            mode,
+        ));
         adapter_names.push(format!("{}$abi", x.name));
+    }
+    let adapter_index = |x: &ir::Export| {
+        func_base + n + adapted.iter().position(|a| std::ptr::eq(*a, x)).unwrap() as u32
+    };
+    // Per async export: the adapter that finishes the call, the lift and its callback.
+    for (j, x) in lifted.iter().enumerate() {
+        let finish = func_base + n + adapted.len() as u32 + 3 * j as u32;
+        let task_return = j as u32;
+        funcs.function(e.type_id(vec![], vec![ValType::I32]));
+        let bump = e.bump;
+        code.function(&abi::adapter(&mut e, bump, 0, &x.sig, abi::Mode::Finish));
+        let params = abi::flat_params(&x.sig.params);
+        funcs.function(e.type_id(params, vec![ValType::I32]));
+        code.function(&abi::async_lift(
+            &mut e,
+            adapter_index(x),
+            finish,
+            task_return,
+            &x.sig,
+        ));
+        funcs.function(e.type_id(vec![ValType::I32; 3], vec![ValType::I32]));
+        code.function(&abi::async_callback(&mut e, finish, task_return, &x.sig));
     }
     let realloc =
         abi.then(|| e.helper_index(Helper::Js(runtime::Helper::Abi(abi::Helper::Realloc))));
@@ -248,27 +301,26 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             &ConstExpr::i32_const(abi::HEAP_BASE),
         );
     }
-    if module.init.is_some() {
-        // `abi::LIB_GLOBALS`: the init state and its error.
-        globals.global(
-            GlobalType {
-                val_type: ValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i32_const(0),
-        );
-        globals.global(
-            GlobalType {
-                val_type: runtime::jsval(),
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::ref_null(wasm_encoder::HeapType::Abstract {
-                shared: false,
-                ty: wasm_encoder::AbstractHeapType::Eq,
-            }),
-        );
+    if command.is_none() && host_globals == abi::LIB_GLOBALS {
+        // `abi::LIB_GLOBALS`: `init`'s state and error, an async call's state (T20).
+        for ty in abi::lib_global_types() {
+            let init = if ty == ValType::I32 {
+                ConstExpr::i32_const(0)
+            } else {
+                ConstExpr::ref_null(wasm_encoder::HeapType::Abstract {
+                    shared: false,
+                    ty: wasm_encoder::AbstractHeapType::Eq,
+                })
+            };
+            globals.global(
+                GlobalType {
+                    val_type: ty,
+                    mutable: true,
+                    shared: false,
+                },
+                &init,
+            );
+        }
     }
     for _ in 0..if command.is_some() { host_globals } else { 0 } {
         globals.global(
@@ -322,6 +374,17 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut exports = ExportSection::new();
     let mut next_adapter = func_base + n;
     for x in &module.exports {
+        if let Some(j) = lifted.iter().position(|a| std::ptr::eq(*a, x)) {
+            let lift = func_base + n + adapted.len() as u32 + 3 * j as u32 + 1;
+            exports.export(&format!("[async-lift]{}", x.name), ExportKind::Func, lift);
+            exports.export(
+                &format!("[callback][async-lift]{}", x.name),
+                ExportKind::Func,
+                lift + 1,
+            );
+            next_adapter += 1;
+            continue;
+        }
         let index = if adapted.iter().any(|a| std::ptr::eq(*a, x)) {
             next_adapter += 1;
             next_adapter - 1
@@ -354,11 +417,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut names = NameSection::new();
     let mut fnames = NameMap::new();
     let mut lnames = IndirectNameMap::new();
-    if command.is_some() {
-        for (i, imp) in import_list.iter().enumerate() {
-            let (module, field) = imp.names();
-            fnames.append(i as u32, &format!("{module}#{field}"));
-        }
+    for (j, x) in lifted.iter().enumerate() {
+        fnames.append(j as u32, &format!("[task-return]{}", x.name));
+    }
+    for (i, imp) in import_list.iter().enumerate() {
+        let (module, field) = imp.names();
+        fnames.append(lifted.len() as u32 + i as u32, &format!("{module}#{field}"));
     }
     for (i, f) in module.functions.iter().enumerate() {
         fnames.append(func_base + i as u32, &f.name);
@@ -371,6 +435,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     for (k, name) in adapter_names.iter().enumerate() {
         fnames.append(func_base + n + k as u32, name);
     }
+    for (j, x) in lifted.iter().enumerate() {
+        let lift = func_base + n + adapted.len() as u32 + 3 * j as u32 + 1;
+        fnames.append(lift - 1, &format!("{}$finish", x.name));
+        fnames.append(lift, &format!("{}$lift", x.name));
+        fnames.append(lift + 1, &format!("{}$callback", x.name));
+    }
     for (k, h) in e.helpers.iter().enumerate() {
         fnames.append(e.helper_base + k as u32, h.name());
     }
@@ -379,7 +449,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
 
     let mut out = wasm_encoder::Module::new();
     out.section(&e.types);
-    if command.is_some() {
+    if !imports.is_empty() {
         out.section(&imports);
     }
     out.section(&funcs);
@@ -409,6 +479,13 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     out.section(&names);
     Ok(out.finish())
+}
+
+/// Does the module use timers, immediates or `process.nextTick` (T19, T25)?
+fn uses_timers(module: &ir::Module) -> bool {
+    ["$timers", "$immediates", "$ticks"]
+        .iter()
+        .any(|n| module.names.contains(*n))
 }
 
 /// The cell struct for a variable of type `t`.
@@ -628,6 +705,7 @@ enum Frame {
 
 struct Emitter<'m> {
     m: &'m ir::Module,
+    imports: host::Imports,
     types: TypeSection,
     /// Runtime globals that come before the module's own (see `global_base`).
     /// Index of the next function type.
@@ -682,6 +760,10 @@ impl runtime::Cx for Emitter<'_> {
 
     fn host_globals(&mut self) -> u32 {
         self.host_base
+    }
+
+    fn imports(&mut self) -> host::Imports {
+        self.imports.clone()
     }
 
     fn declare_func(&mut self, index: u32) {
@@ -1310,7 +1392,7 @@ impl Emitter<'_> {
                         return Ok(true);
                     }
                     Intrinsic::RandomSeed => {
-                        s.call(host::import(host::Import::InsecureRandom))
+                        s.call(self.imports.get(host::Import::InsecureRandom))
                             .i32_wrap_i64();
                         return Ok(true);
                     }

@@ -425,6 +425,75 @@ fn library_init_runs_first() {
 /// T20 (F65): jobs queued by a library call run before it returns; a rejection nobody handled
 /// (also one from a job) fails the call.
 #[test]
+fn async_exports_await_their_promise() {
+    let out = out_dir("async").join("async.wasm");
+    let b = build(&fixture("library/async.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let wit = Command::new("wasm-tools")
+        .args(["component", "wit"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let wit = String::from_utf8(wit.stdout).unwrap();
+    for line in [
+        "export add: async func(a: f64, b: f64) -> result<f64, js-error>;",
+        "export greet: async func(name: string) -> result<string, js-error>;",
+        "export nothing: async func() -> result<_, js-error>;",
+    ] {
+        assert!(wit.contains(line), "{line}\n{wit}");
+    }
+    // As node gives them (`await m.f(...)`).
+    for (call, want) in [
+        ("add(1, 2)", "ok(4)"),
+        ("greet(\"bob\")", "ok(\"hi bob\")"),
+        ("inferred()", "ok(\"str1\")"),
+        ("nothing()", "ok"),
+        (
+            "fails(1)",
+            "err({name: \"RangeError\", message: \"too big: 1\"})",
+        ),
+        ("fails(-1)", "ok(-1)"),
+        ("rejects-string()", "err({name: \"\", message: \"plain\"})"),
+        ("len(\"h\u{e9}llo\")", "ok(5)"),
+        ("default()", "ok(1)"),
+        // Not in node's terms: nothing can settle the promise, another rejection went unhandled.
+        (
+            "never()",
+            "err({name: \"Error\", message: \"the promise of an async export never settled (nothing is left that could settle it)\"})",
+        ),
+        (
+            "stray-rejection()",
+            "err({name: \"TypeError\", message: \"nobody handled me\"})",
+        ),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+}
+
+#[test]
+fn async_exports_wait_for_timers() {
+    let out = out_dir("async-timers").join("async-timers.wasm");
+    let b = build(&fixture("library/async-timers.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    for (call, want) in [
+        ("waits()", "ok(\"init timer;slept;tick;immediate;\")"),
+        ("interval()", "ok(3)"),
+        // node crashes with the exception; the call fails.
+        (
+            "timer-throws()",
+            "err({name: \"TypeError\", message: \"in a timer\"})",
+        ),
+        (
+            "rejects-later()",
+            "err({name: \"RangeError\", message: \"later\"})",
+        ),
+        ("race()", "ok(2)"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+}
+
+#[test]
 fn library_calls_run_their_jobs() {
     let out = out_dir("jobs").join("jobs.wasm");
     let b = build(&fixture("library/jobs.js"), &out, &[]);

@@ -29,7 +29,7 @@ use js2wasi3_ir::{
 };
 use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
 
-use crate::host::{self, Import};
+use crate::host::Import;
 use crate::runtime::{
     self, Cx, G_FALSE, G_IMMEDIATES, G_IMMEDIATES_N, G_LOOP_NOW, G_TICKS, G_TICKS_N, G_TIMER_FNS,
     G_TIMER_ID, G_TIMERS, G_TIMERS_N, G_TRUE, G_UNDEFINED, T_BYTES, T_I32S, T_KEYS, T_TIMER,
@@ -70,8 +70,8 @@ const TIMEOUT_MAX: f64 = 2147483647.0;
 const NS_PER_MS: f64 = 1e6;
 
 /// Push the current time truncated to a whole ms (ns, an `i64`).
-fn now_ms(s: &mut InstructionSink) {
-    s.call(host::import(Import::ClockNow));
+fn now_ms(s: &mut InstructionSink, clock: u32) {
+    s.call(clock);
     s.i64_const(NS_PER_MS as i64).i64_div_u();
     s.i64_const(NS_PER_MS as i64).i64_mul();
 }
@@ -291,6 +291,7 @@ fn rest_args(s: &mut InstructionSink, first: i32, n: u32, rest: u32) {
 
 /// `setTimeout(callback, delay, ...args)` / `setInterval` / `setImmediate(callback, ...args)`.
 fn set(cx: &mut dyn Cx, k: u8) -> Function {
+    let clock = cx.imports().get(Import::ClockNow);
     let repeat = k == TIMER_SET_INTERVAL;
     let immediate = k == TIMER_SET_IMMEDIATE;
     let check = cx.helper(runtime::Helper::Prom(promise::Helper::CheckCallback));
@@ -350,7 +351,7 @@ fn set(cx: &mut dyn Cx, k: u8) -> Function {
     if immediate {
         s.i64_const(0);
     } else {
-        now_ms(&mut s);
+        now_ms(&mut s, clock);
         s.local_get(DELAY).i64_add();
     }
     if repeat {
@@ -513,6 +514,7 @@ fn clear(cx: &mut dyn Cx, immediate: bool) -> Function {
 /// `timeout.refresh()`: due one delay from now, again active if it ran already (not if it was
 /// cleared); it moves to the end of the list, like node's.
 fn refresh(cx: &mut dyn Cx) -> Function {
+    let clock = cx.imports().get(Import::ClockNow);
     let remove = th(cx, Helper::Remove(LIST_TIMERS));
     let append = th(cx, Helper::Append(LIST_TIMERS));
     method(cx, move |_, s| {
@@ -523,7 +525,7 @@ fn refresh(cx: &mut dyn Cx) -> Function {
         s.if_(BlockType::Empty);
         s.local_get(3).ref_as_non_null().call(remove);
         s.local_get(3).ref_as_non_null();
-        now_ms(s);
+        now_ms(s, clock);
         get(s, 3, F_DELAY);
         s.i64_add();
         s.struct_set(T_TIMER, F_DEADLINE);
@@ -644,6 +646,7 @@ fn run_callback(cx: &mut dyn Cx, s: &mut InstructionSink, t: u32, r: u32) {
 }
 
 fn run_due(cx: &mut dyn Cx) -> Function {
+    let clock = cx.imports().get(Import::ClockNow);
     let remove = th(cx, Helper::Remove(LIST_TIMERS));
     let immediates = cx
         .names("$immediates")
@@ -704,7 +707,7 @@ fn run_due(cx: &mut dyn Cx) -> Function {
         s.local_get(T).ref_as_non_null().call(remove);
         s.else_();
         s.local_get(T).ref_as_non_null();
-        now_ms(&mut s);
+        now_ms(&mut s, clock);
         get(&mut s, T, F_INTERVAL);
         s.i64_add();
         s.struct_set(T_TIMER, F_DEADLINE);

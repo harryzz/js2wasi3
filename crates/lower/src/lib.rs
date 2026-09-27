@@ -197,6 +197,8 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
 enum Slot {
     Var(SymbolId),
     Result(FuncId),
+    /// What an async function's promise settles to: the values its `return`s give (T20).
+    Settled(FuncId),
 }
 
 /// What a value is known to hold: a lattice `Bottom < Num | Bool | Str < Any`.
@@ -245,6 +247,8 @@ struct Facts {
 struct JsDoc {
     params: HashMap<String, ir::AbiType>,
     result: Option<ir::AbiType>,
+    /// `@returns {Promise<T>}` (T20): `result` is `T` (`None` for `void`/`undefined`).
+    promise: bool,
     /// Unsupported types, reported if the function is exported.
     errors: Vec<String>,
 }
@@ -814,8 +818,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let pos = f.pos.expect("declared functions have a position");
             let what = if f.flags.is_generator {
                 "exported generator function (the boundary needs an iterator type)"
-            } else if f.flags.is_async {
-                "exported async function (the boundary needs an async export)"
             } else if self
                 .fn_scope
                 .get(&func)
@@ -855,7 +857,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let kind = if string { Kind::Str } else { Kind::Num };
                 self.observe(Slot::Var(sym), kind);
             }
-            for e in &doc.errors {
+            let mut errors = doc.errors.clone();
+            if doc.promise && !self.module.function(func).flags.is_async {
+                errors
+                    .push("JSDoc return type `Promise<…>` on a function that isn't `async`".into());
+            }
+            for e in &errors {
                 self.diags.push(Diagnostic {
                     path: self.p.path.clone(),
                     line: pos.line,
@@ -1510,7 +1517,29 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let params = &f.locals[lead..f.params as usize];
             let syms = &self.func_params[&func];
             let doc = self.jsdoc.get(&func);
-            let result_kind = self.slot_kind(Slot::Result(func));
+            let is_async = f.flags.is_async;
+            let result_kind = self.slot_kind(if is_async {
+                Slot::Settled(func)
+            } else {
+                Slot::Result(func)
+            });
+            let result = if !is_async {
+                f.result.map(|_| match doc.and_then(|d| d.result) {
+                    Some(t) => t,
+                    None if result_kind == Kind::Str => AbiType::String,
+                    None => AbiType::F64,
+                })
+            } else {
+                // What the promise settles to: `@returns {Promise<T>}`, else the `return`s' values.
+                match doc {
+                    Some(d) if d.promise || d.result.is_some() => d.result,
+                    _ => match result_kind {
+                        Kind::Bottom => None,
+                        Kind::Str => Some(AbiType::String),
+                        _ => Some(AbiType::F64),
+                    },
+                }
+            };
             let sig = ir::AbiSig {
                 params: params
                     .iter()
@@ -1523,21 +1552,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         None => AbiType::F64,
                     })
                     .collect(),
-                result: f.result.map(|_| match doc.and_then(|d| d.result) {
-                    Some(t) => t,
-                    None if result_kind == Kind::Str => AbiType::String,
-                    None => AbiType::F64,
-                }),
-                throws: throws[func.0 as usize] || jobs || init_throws,
+                result,
+                // An async function's promise can reject.
+                throws: throws[func.0 as usize] || jobs || init_throws || is_async,
                 jobs,
+                is_async,
             };
             let direct = lead == 0
                 && params
                     .iter()
                     .zip(&sig.params)
                     .all(|(l, a)| l.ty == a.ir_type())
-                && f.result == sig.result.map(|a| a.ir_type())
-                && (sig.result != Some(AbiType::String) || result_kind == Kind::Str);
+                && (is_async
+                    || f.result == sig.result.map(|a| a.ir_type())
+                        && (sig.result != Some(AbiType::String) || result_kind == Kind::Str));
             let target = if direct {
                 func
             } else {
@@ -1546,11 +1574,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     .zip(&sig.params)
                     .map(|(l, a)| (l.name.as_str(), a.ir_type()))
                     .collect();
-                let mut w = ir::Function::new(
-                    format!("{}$export", f.name),
-                    &wsig,
-                    sig.result.map(|a| a.ir_type()),
-                );
+                // An async function's wrapper returns its promise (the backend converts the value).
+                let wresult = if is_async {
+                    f.result
+                } else {
+                    sig.result.map(|a| a.ir_type())
+                };
+                let mut w = ir::Function::new(format!("{}$export", f.name), &wsig, wresult);
                 w.pos = f.pos;
                 let mut args = vec![Expr::undefined(); lead];
                 args.extend(
@@ -1569,6 +1599,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 );
                 let call = Expr::Call { func, args };
                 w.body = vec![match (sig.result, f.result) {
+                    _ if is_async => Stmt::Return(Some(call)),
                     (None, _) | (_, None) => Stmt::Expr(call),
                     (Some(AbiType::F64), Some(Type::F64)) => Stmt::Return(Some(call)),
                     (Some(AbiType::F64), Some(_)) => {
@@ -2506,7 +2537,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                                 let v = jsval_of(self.expr(cx, a)?);
                                 Val::js(self.await_value(cx, v), Kind::Any)
                             }
-                            Some(a) => self.expr(cx, a)?,
+                            Some(a) => {
+                                let v = self.expr(cx, a)?;
+                                if cx.func.flags.is_async {
+                                    self.observe(Slot::Settled(cx.id), v.kind);
+                                }
+                                v
+                            }
                             None => self.undefined_val(),
                         };
                         if cx.ctor.is_some() {
@@ -4216,14 +4253,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
-    /// A timer function as a value (T19; T25: immediates, `process.nextTick`): commands only.
+    /// A timer function as a value (T19; T25: immediates, `process.nextTick`): commands, and
+    /// libraries with an async export (T20: timers run while an async call waits).
     /// Notes the kinds used for the backend (`$timers`, `$immediates`, `$ticks` in `names`).
     fn timer_value(&mut self, span: Span, k: u8) -> R<Val> {
         let name = ir::TIMER_NAMES[k as usize];
-        if !self.command {
+        let async_export = self
+            .exported
+            .iter()
+            .any(|f| self.module.function(*f).flags.is_async);
+        if !self.command && !async_export {
             return Err(self.unsupported(
                 span,
-                &format!("`{name}` in a module with exports"),
+                &format!(
+                    "`{name}` in a library without async exports (timers run while an async export's call waits)"
+                ),
                 "T20",
             ));
         }
@@ -6013,11 +6057,23 @@ fn parse_jsdoc(text: &str) -> JsDoc {
         let (ty, tail) = ty_text;
         rest = tail;
         let ty = ty.trim();
-        let abi = match ty {
+        let inner = (tag != "param")
+            .then(|| ty.strip_prefix("Promise<")?.strip_suffix('>'))
+            .flatten()
+            .map(str::trim);
+        if matches!(inner, Some("void" | "undefined")) {
+            doc.promise = true;
+            doc.result = None;
+            continue;
+        }
+        let abi = match inner.unwrap_or(ty) {
             "string" => Some(ir::AbiType::String),
             "number" => Some(ir::AbiType::F64),
             _ => None,
         };
+        if inner.is_some() && abi.is_some() {
+            doc.promise = true;
+        }
         let name: String = tail
             .trim_start()
             .chars()
@@ -6032,7 +6088,7 @@ fn parse_jsdoc(text: &str) -> JsDoc {
                 "JSDoc type `{{{ty}}}` of parameter `{name}` at the WIT boundary (only `string` and `number` so far)"
             )),
             (_, None) => doc.errors.push(format!(
-                "JSDoc return type `{{{ty}}}` at the WIT boundary (only `string` and `number` so far)"
+                "JSDoc return type `{{{ty}}}` at the WIT boundary (only `string`, `number` and `Promise<string|number|void>` so far)"
             )),
         }
     }

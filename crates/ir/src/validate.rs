@@ -76,7 +76,13 @@ pub fn validate(m: &Module) -> Result<(), Vec<String>> {
         };
         let params: Vec<Type> = f.locals[..f.params as usize].iter().map(|l| l.ty).collect();
         let want: Vec<Type> = e.sig.params.iter().map(|a| a.ir_type()).collect();
-        if params != want || f.result != e.sig.result.map(|a| a.ir_type()) {
+        // An async export returns its promise (T20).
+        let result = if e.sig.is_async {
+            Some(Type::JsVal)
+        } else {
+            e.sig.result.map(|a| a.ir_type())
+        };
+        if params != want || f.result != result {
             errs.push(format!(
                 "export {:?}: function {} doesn't match its boundary signature {:?}",
                 e.name, f.name, e.sig

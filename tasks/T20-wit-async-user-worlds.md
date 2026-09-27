@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slices 1–2 done; next: slice 3) | Depends on: T19
+Status: in progress (slices 1–3 done; next: slice 4) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -77,6 +77,46 @@ libraries stay open: they need imports in library worlds, and timers need async 
 lifted with the async callback ABI (reuse `host::Helper::Loop` for timers and jobs), `task.return` of the settled
 value or `js-error`; test with `wasmtime run --invoke`.
 
+### Slice 3: async exports (done 2026-09-27)
+- **`export async function f`** is a WIT `async func` (`AbiSig::is_async`; `ExportSig::is_async`), always
+  returning `result<T, js-error>` (the promise can reject). `T` is what the promise settles to: JSDoc
+  `@returns {Promise<string|number|void>}` (or a plain `{string}`/`{number}`), else the kinds of the `return`
+  values (`Slot::Settled`: none → `_`, strings → `string`, else `f64` by ToNumber). `Promise<…>` on a non-async
+  function is an error. The `$export` wrapper converts only params; the backend converts the settled value.
+- **Lift (callback ABI, D3):** per async export the core module has its adapter in `abi::Mode::Start` (runs
+  `init`, calls the function, keeps the promise in the library globals, now `abi::LIB_GLOBALS` = 7), a
+  `Mode::Finish` adapter (the `result` in a return area, via `abi::Helper::Await`), `[async-lift]f`
+  (`abi::async_lift`) and `[callback][async-lift]f` (`abi::async_callback`), and imports `[export]$root`
+  `[task-return]f` (the return area loaded as flat values: `result<f64, js-error>` is `i32 i64 i32×6`, the others
+  `i32×8`). `abi::Helper::Step` runs the jobs (and `nextTick`s); the call is done when its promise settled, a job
+  threw, a rejection went unhandled, or nothing is left to wait for (then `err`: "the promise of an async export
+  never settled …"); otherwise it arms one `wait-until` subtask for the earliest timer (like `host::Helper::Loop`),
+  raises backpressure (no other call starts while it waits: they would share the timers) and returns `WAIT`. The
+  callback (`Event` → `Tick`) runs the due timers; an exception there or an unhandled rejection fails the call
+  (node would crash). `End` cancels the wait and lowers backpressure; timers still pending run in a later async call.
+- **Timers in libraries:** allowed when the library has an async export (else rejected with the reason). Host
+  imports are now looked up through `Cx::imports()` (`host::Imports`; a library imports its `task.return`s,
+  then `host::LIBRARY_TIMER_IMPORTS` if it uses timers). A world with an async export imports
+  `wasi:clocks/monotonic-clock` (wit-component drops it when unused).
+- Tests: `tests/fixtures/library/async.js` (values, strings, void, rejections, a pending promise, a stray
+  rejection, `export default async`), `library/async-timers.js` (sleep, interval, immediate + nextTick order, a
+  throwing timer, `Promise.race`), checked in `crates/js2wasi3/tests/build.rs` (`async_exports_await_their_promise`,
+  `async_exports_wait_for_timers`; results as node's `await m.f()`); `unsupported.rs` and the component unit test
+  updated. `cargo test` ok; `scripts/diff.sh -j 4`: 97 passed, 0 failed, 16 skipped; `hello.js` 55715 (commands
+  unchanged).
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets` (one old warning),
+  `scripts/diff.sh -j 4`, `wasm-tools validate`, `wasm-tools component wit`, `wasmtime run --invoke` on the fixtures.
+
+**Not done (follow-ups):** F120 (top-level `await` in a library) stays open; F121 (timers left after an async call,
+and timers set by sync exports, run only during a later async call), F122 (async export calls ignore
+cancellation), F123 (never-settling promise: `err` instead of node's hang / exit 13). F118 and F119 apply to
+async exports too.
+
+**Next smallest step:** slice 4, user worlds: `--wit <file|dir> --world <name>` parsed with `wit-parser`; check
+the module's exports against the world (sync vs `async func`, parameter count), map the scalar WIT types first
+(`bool`, integers, `f32`/`f64`, `char`, `string`), then `list`, `option`, `result`, `record`, `variant`, `enum`,
+`flags`, `tuple` (F13, F21, F55); the world decides which exports return `result` (F34/F60/F119).
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -98,7 +138,7 @@ Notes / Result). The slice numbers below are the pre-slice-1 ones: "Suggested sl
 ```sh
 scripts/check-tools.sh
 cargo build -q --release && cargo test -q --no-fail-fast 2>&1 | grep -E 'FAILED|panicked'   # nothing
-scripts/diff.sh -j 4 | tail -1                              # 97 passed, 0 failed, 14 skipped (after slice 2)
+scripts/diff.sh -j 4 | tail -1                              # 97 passed, 0 failed, 16 skipped (after slice 3)
 target/release/js2wasi3 build tests/fixtures/hello.js -o /tmp/h.wasm && stat -c %s /tmp/h.wasm   # 55715
 ```
 
@@ -162,3 +202,7 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: F11 + F65 implemented. IR: `Module::init`, `AbiSig::jobs`, `ir::can_queue` (module-wide: implicit calls can run any function); lowering: library top-level code goes through the command path into `init` (top-level `await` in a library rejected); backend: `abi::Helper::Init` (`module_init`: state + error globals, only in libraries with init) and `Helper::Settle` (`settle_jobs`: drain, throw the first unhandled rejection's reason), every export of a library with init goes through the adapter. Fixtures `library/{init,init-throws,jobs}.js`: all `--invoke` results as node gives (init's Map/class/JSON, init error on every call, jobs drained before returning, rejection in a job → err).
 - 2026-09-27: libraries with only literal globals keep the old path (no `init`: `static_globals`); a numbers-only library with `init` now links the JS runtime (its globals were misnumbered: emit test). unsupported tests updated. cargo test ok; diff.sh 97/0/14; hello.js 55715.
 - 2026-09-27: slice 2 done: Notes / Result, README (F11, F65 ticked; F118–F120; Next up: slice 3), design.md D4, lower docs.
+- 2026-09-27: slice 3 started (async exports). Checked: `wasmtime run --invoke` runs an `[async-lift]` callback export without flags; wit-component names `[async-lift]f`, `[callback][async-lift]f`, import `[export]$root` `[task-return]f` (flat params: `result<f64, js-error>` = i32 i64 i32×6, `result<string|_, js-error>` = i32×8). Plan: 3a = microtasks only: `AbiSig::is_async`; the lift calls the usual adapter (init, call, then `abi::Helper::Await`: drain, mark the promise handled, its reason → err, still pending → err, other unhandled rejection → err, else convert the value), loads the return area into the flat `task.return` params, returns EXIT (the callback is never called yet). Result type: JSDoc `@returns {Promise<string|number|void>}`, else the kinds `return` values have (new `Slot::Settled`). 3b = timers in libraries (clock imports, the loop, WAIT), if 3a lands.
+- 2026-09-27: 3a done. IR `AbiSig::is_async` (validate: an async export's function returns the promise); lowering: async exports allowed, result from JSDoc `@returns {Promise<T>}` (`Promise<…>` on a non-async function is an error) or `Slot::Settled` (the kinds of `return` values), `$export` wrappers convert params only; component: `async func`; backend: `abi::Helper::Await` (`await_export`), the adapter awaits + converts (ToNumber/ToString), `abi::async_lift` (return area → flat `task.return` params, EXIT), `abi::async_callback` (unreachable), `[task-return]<name>` imports in libraries. Fixture `library/async.js` (all results as node's `await m.f()`), test `async_exports_await_their_promise`; unsupported test updated. cargo test ok; diff.sh 97/0/15; hello.js 55715.
+- 2026-09-27: 3b done: timers in libraries with an async export. Backend: host imports are looked up through `Cx::imports()` (`host::Imports`: a library's `task.return`s come first, then `LIBRARY_TIMER_IMPORTS`: waitable set, clock, wait-until, subtask drop/cancel, backpressure inc/dec); an async export is 3 functions + its adapter: `Mode::Start` (init + call, promise in `LIB_GLOBALS`, now 7), `abi::Helper::Step` (jobs + nextTicks, done when settled/failed/unhandled/nothing to wait for, else arm `wait-until`, backpressure up, `WAIT`), `Event`/`Tick` (run due timers; exception or unhandled rejection fails the call), `Mode::Finish` (the `result` via `Await`), `End` (disarm, backpressure down). Found: `promise::Helper::Unhandled` forgets what it looked at, so Step keeps the reason. World: `import wasi:clocks/monotonic-clock` when an export is async (dropped when unused). Lowering: timers allowed in libraries with an async export. Fixture `library/async-timers.js` (as node; a throwing timer fails the call where node crashes). cargo test ok; diff.sh 97/0/16; hello.js 55715.
+- 2026-09-27: slice 3 done: Notes / Result, README (Next up: slice 4; F120 retargeted; F121–F123), design.md D3/D4, keywords.md, README.md; handoff baseline 97/0/16.

@@ -200,6 +200,9 @@ pub struct AbiSig {
     /// The call may queue promise jobs (T20, F65): they run after it, and an unhandled rejection
     /// fails the call (`throws` is set too).
     pub jobs: bool,
+    /// An `async` function (T20): a WIT `async func`, lifted with the callback ABI; `result` is
+    /// what the promise it returns settles to (`throws` is set).
+    pub is_async: bool,
 }
 
 impl AbiSig {
@@ -210,6 +213,7 @@ impl AbiSig {
             result: result.then_some(AbiType::F64),
             throws: false,
             jobs: false,
+            is_async: false,
         }
     }
 }

@@ -14,11 +14,12 @@
 //! - An export that may throw (T12) also goes through an adapter: it catches the JS exception
 //!   and returns `result<T, js-error>` through a return area (see [`adapter`]).
 
-use js2wasi3_ir::{AbiSig, AbiType};
+use js2wasi3_ir::{AbiSig, AbiType, ErrorKind};
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType};
 
-use crate::runtime::{self, Cx, T_STRING};
-use crate::{object, promise};
+use crate::host::{self, Import};
+use crate::runtime::{self, Cx, G_LOOP_NOW, G_WAIT, G_WAIT_AT, T_STRING};
+use crate::{object, promise, timers};
 
 /// First address the allocator hands out (keeps 0 an invalid pointer).
 pub const HEAP_BASE: i32 = 8;
@@ -39,6 +40,24 @@ pub enum Helper {
     /// `()`: after a library call (T20, F65): run the queued jobs, then throw the reason of the
     /// first rejection nobody handled.
     Settle,
+    /// `(promise: jsval) -> jsval`: the end of an async export's call (T20): run the queued jobs,
+    /// then give the value the promise settled to. A rejection throws its reason, a promise
+    /// still pending throws an `Error` (nothing could settle it later), and then, like
+    /// [`Helper::Settle`], another rejection nobody handled throws its reason.
+    Await,
+    /// `() -> i32`: move an async call forward (T20): run the jobs; done (0) once its promise
+    /// settled, it failed, a rejection went unhandled or nothing is left to wait for; else wait
+    /// for the earliest timer (backpressure up, so no other call starts meanwhile) and return
+    /// the callback code (`WAIT` on the set).
+    Step,
+    /// `()`: the wait ended: set the loop time and run the due timers; an exception or an
+    /// unhandled rejection fails the call.
+    Tick,
+    /// `(event, index, payload: i32)`: an event for an async call's callback.
+    Event,
+    /// `()`: an async call is over: cancel the wait, lower the backpressure. Timers left run in
+    /// a later async call.
+    End,
 }
 
 impl Helper {
@@ -51,6 +70,11 @@ impl Helper {
             Helper::Utf8Encode => "utf8_encode",
             Helper::Init => "module_init",
             Helper::Settle => "settle_jobs",
+            Helper::Await => "await_export",
+            Helper::Step => "async_step",
+            Helper::Tick => "async_tick",
+            Helper::Event => "async_event",
+            Helper::End => "async_end",
         }
     }
 
@@ -63,6 +87,10 @@ impl Helper {
             Helper::Utf8Len => (vec![runtime::string_ref()], vec![I32]),
             Helper::Utf8Encode => (vec![runtime::string_ref(), I32], vec![]),
             Helper::Init | Helper::Settle => (vec![], vec![]),
+            Helper::Await => (vec![runtime::jsval()], vec![runtime::jsval()]),
+            Helper::Step => (vec![], vec![I32]),
+            Helper::Tick | Helper::End => (vec![], vec![]),
+            Helper::Event => (vec![I32; 3], vec![]),
         }
     }
 
@@ -98,15 +126,293 @@ impl Helper {
                 s.end();
                 f
             }
+            Helper::Await => {
+                let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
+                let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
+                let new_error = cx.helper(runtime::Helper::Obj(object::Helper::NewError(
+                    ErrorKind::Error,
+                )));
+                let pending = cx.str(
+                    "the promise of an async export never settled (nothing is left that could settle it)",
+                );
+                const PROMISE: u32 = 0;
+                const P: u32 = 1;
+                const R: u32 = 2;
+                let t = runtime::T_PROMISE;
+                let mut f = Function::new([
+                    (1, runtime::rt(true, runtime::T_PROMISE)),
+                    (1, runtime::jsval()),
+                ]);
+                let mut s = f.instructions();
+                s.call(drain);
+                // An async function's promise: always a `$promise`.
+                s.local_get(PROMISE)
+                    .ref_cast_non_null(promise::promise())
+                    .local_set(P);
+                // The call's result: not an unhandled rejection.
+                s.local_get(P)
+                    .i32_const(1)
+                    .struct_set(t, promise::P_HANDLED);
+                s.local_get(P)
+                    .struct_get(t, promise::P_STATE)
+                    .i32_const(promise::REJECTED)
+                    .i32_eq();
+                s.if_(BlockType::Empty);
+                s.local_get(P)
+                    .struct_get(t, promise::P_RESULT)
+                    .throw(runtime::TAG);
+                s.end();
+                s.call(unhandled).local_tee(R).ref_is_null().i32_eqz();
+                s.if_(BlockType::Empty);
+                s.local_get(R).throw(runtime::TAG);
+                s.end();
+                s.local_get(P)
+                    .struct_get(t, promise::P_STATE)
+                    .i32_const(promise::PENDING)
+                    .i32_eq();
+                s.if_(BlockType::Empty);
+                s.global_get(pending)
+                    .global_get(runtime::G_UNDEFINED)
+                    .call(new_error)
+                    .throw(runtime::TAG);
+                s.end();
+                s.local_get(P).struct_get(t, promise::P_RESULT);
+                s.end();
+                f
+            }
+            Helper::Step => step(cx),
+            Helper::Tick => {
+                let lib = cx.host_globals();
+                let im = cx.imports();
+                let run_due = cx.helper(runtime::Helper::Timer(timers::Helper::RunDue));
+                const R: u32 = 0;
+                let mut f = Function::new([(1, runtime::jsval())]);
+                let mut s = f.instructions();
+                s.call(im.get(Import::ClockNow)).global_set(G_LOOP_NOW);
+                s.block(BlockType::Result(runtime::jsval()));
+                s.try_table(
+                    BlockType::Empty,
+                    [Catch::One {
+                        tag: runtime::TAG,
+                        label: 0,
+                    }],
+                );
+                s.call(run_due).local_tee(R).ref_is_null();
+                s.if_(BlockType::Empty);
+                s.return_();
+                s.end();
+                s.local_get(R).br(1);
+                s.end();
+                s.unreachable();
+                s.end();
+                s.global_set(lib + G_ERROR);
+                s.i32_const(1).global_set(lib + G_FAILED);
+                s.end();
+                f
+            }
+            Helper::Event => {
+                const EVENT: u32 = 0;
+                const INDEX: u32 = 1;
+                const PAYLOAD: u32 = 2;
+                let im = cx.imports();
+                let mut f = Function::new([]);
+                if im.list.is_empty() {
+                    // No timers: nothing to wait for.
+                    f.instructions().end();
+                    return f;
+                }
+                let tick = cx.helper(runtime::Helper::Abi(Helper::Tick));
+                let mut s = f.instructions();
+                // The wait ended: run the due timers.
+                s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
+                s.local_get(INDEX).global_get(G_WAIT).i32_eq().i32_and();
+                s.global_get(G_WAIT).i32_eqz().i32_eqz().i32_and();
+                s.local_get(PAYLOAD)
+                    .i32_const(SUBTASK_RETURNED)
+                    .i32_eq()
+                    .i32_and();
+                s.if_(BlockType::Empty);
+                s.global_get(G_WAIT).call(im.get(Import::SubtaskDrop));
+                s.i32_const(0).global_set(G_WAIT);
+                s.call(tick);
+                s.end();
+                s.end();
+                f
+            }
+            Helper::End => {
+                let lib = cx.host_globals();
+                let im = cx.imports();
+                let timers = !im.list.is_empty();
+                let disarm = timers.then(|| cx.helper(runtime::Helper::Host(host::Helper::Disarm)));
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                if let Some(disarm) = disarm {
+                    s.call(disarm);
+                    s.global_get(lib + G_BP);
+                    s.if_(BlockType::Empty);
+                    s.call(im.get(Import::BackpressureDec));
+                    s.i32_const(0).global_set(lib + G_BP);
+                    s.end();
+                }
+                s.end();
+                f
+            }
         }
     }
 }
 
+/// Canonical ABI constants (see [`crate::host`]).
+const EVENT_SUBTASK: i32 = 1;
+const SUBTASK_RETURNED: i32 = 2;
+const CALLBACK_EXIT: i32 = 0;
+const CALLBACK_WAIT: i32 = 2;
+
+/// `$async_step() -> i32`: see [`Helper::Step`].
+fn step(cx: &mut dyn Cx) -> Function {
+    let lib = cx.host_globals();
+    let im = cx.imports();
+    let timers = !im.list.is_empty();
+    let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
+    let ticks = cx
+        .names("$ticks")
+        .then(|| cx.helper(runtime::Helper::Timer(timers::Helper::RunTicks)));
+    let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
+    const D: u32 = 0;
+    const ST: u32 = 1;
+    const R: u32 = 2;
+    let mut f = Function::new([(1, ValType::I64), (1, ValType::I32), (1, runtime::jsval())]);
+    let mut s = f.instructions();
+    s.loop_(BlockType::Empty);
+    {
+        // The jobs (and the `nextTick` queue); an exception fails the call.
+        s.block(BlockType::Empty);
+        s.block(BlockType::Result(runtime::jsval()));
+        s.try_table(
+            BlockType::Empty,
+            [Catch::One {
+                tag: runtime::TAG,
+                label: 0,
+            }],
+        );
+        s.call(drain);
+        if let Some(ticks) = ticks {
+            s.call(ticks);
+        }
+        s.br(2);
+        s.end();
+        s.unreachable();
+        s.end();
+        s.global_set(lib + G_ERROR);
+        s.i32_const(1).global_set(lib + G_FAILED);
+        s.i32_const(0).return_();
+        s.end();
+        // Done: failed, settled, or a rejection nobody handled.
+        s.global_get(lib + G_FAILED);
+        s.if_(BlockType::Empty);
+        s.i32_const(0).return_();
+        s.end();
+        s.global_get(lib + G_PROMISE)
+            .ref_cast_non_null(promise::promise())
+            .struct_get(runtime::T_PROMISE, promise::P_STATE)
+            .i32_const(promise::PENDING)
+            .i32_ne();
+        s.if_(BlockType::Empty);
+        s.i32_const(0).return_();
+        s.end();
+        // (`unhandled` forgets the rejections it looked at: keep the reason.)
+        s.call(unhandled).local_tee(R).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(R).global_set(lib + G_ERROR);
+        s.i32_const(1).global_set(lib + G_FAILED);
+        s.i32_const(0).return_();
+        s.end();
+        if timers {
+            let next = cx.helper(runtime::Helper::Timer(timers::Helper::Next));
+            let disarm = cx.helper(runtime::Helper::Host(host::Helper::Disarm));
+            let tick = cx.helper(runtime::Helper::Abi(Helper::Tick));
+            // Nothing to wait for: done (the promise never settles).
+            s.call(next).local_tee(D).i64_const(0).i64_lt_s();
+            s.if_(BlockType::Empty);
+            s.i32_const(0).return_();
+            s.end();
+            // Keep a wait that ends no later than the earliest deadline (like `host::Helper::Loop`).
+            s.global_get(G_WAIT).i32_eqz();
+            s.global_get(G_WAIT_AT).local_get(D).i64_gt_u();
+            s.i32_or();
+            s.if_(BlockType::Empty);
+            {
+                s.call(disarm);
+                s.local_get(D).call(im.get(Import::WaitUntil)).local_tee(ST);
+                s.i32_const(0xf)
+                    .i32_and()
+                    .i32_const(SUBTASK_RETURNED)
+                    .i32_eq();
+                s.if_(BlockType::Empty);
+                // It ended at once: run the timers and look again.
+                s.call(tick).br(2);
+                s.end();
+                s.local_get(ST).i32_const(4).i32_shr_u().global_set(G_WAIT);
+                s.local_get(D).global_set(G_WAIT_AT);
+                s.global_get(lib + G_WS).i32_eqz();
+                s.if_(BlockType::Empty);
+                s.call(im.get(Import::WaitableSetNew))
+                    .global_set(lib + G_WS);
+                s.end();
+                s.global_get(G_WAIT)
+                    .global_get(lib + G_WS)
+                    .call(im.get(Import::WaitableJoin));
+            }
+            s.end();
+            // No other call may start while this one waits: they would share the timers.
+            s.global_get(lib + G_BP).i32_eqz();
+            s.if_(BlockType::Empty);
+            s.call(im.get(Import::BackpressureInc));
+            s.i32_const(1).global_set(lib + G_BP);
+            s.end();
+            s.global_get(lib + G_WS)
+                .i32_const(4)
+                .i32_shl()
+                .i32_const(CALLBACK_WAIT)
+                .i32_or()
+                .return_();
+        }
+    }
+    s.end();
+    s.i32_const(0);
+    s.end();
+    f
+}
+
 /// Library globals (after the bump pointer, where a command has its host globals): the `init`
-/// state (0: not run, 1: done, 2: threw) and the error it threw.
-pub const LIB_GLOBALS: u32 = 2;
+/// state (0: not run, 1: done, 2: threw) and the error it threw; for an async call (T20) its
+/// promise, whether it failed and the error, the waitable set (0: none yet) and whether
+/// backpressure is raised.
+pub const LIB_GLOBALS: u32 = 7;
 const G_INIT_STATE: u32 = 0;
 const G_INIT_ERROR: u32 = 1;
+const G_PROMISE: u32 = 2;
+const G_FAILED: u32 = 3;
+const G_ERROR: u32 = 4;
+const G_WS: u32 = 5;
+const G_BP: u32 = 6;
+
+/// The types of the [`LIB_GLOBALS`] (all start as 0 / null).
+pub fn lib_global_types() -> [ValType; LIB_GLOBALS as usize] {
+    use ValType::I32;
+    let v = runtime::jsval();
+    [I32, v, v, I32, v, I32, I32]
+}
+
+/// What an [`adapter`] does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Call the function, return its result (or `result`).
+    Sync,
+    /// An async export's first half (T20): run `init`, call the function, keep its promise.
+    Start,
+    /// Its second half, once [`Helper::Step`] is done: the `result` in a return area.
+    Finish,
+}
 
 /// `$module_init()`: see [`Helper::Init`]. `settle`: drain the jobs `init` queued.
 fn module_init(base: u32, init: u32, fails: bool, settle: Option<u32>) -> Function {
@@ -187,19 +493,30 @@ pub fn flat_result(sig: &AbiSig) -> Vec<ValType> {
 /// `f64`, else 4). The `js-error` payload is `{ name: string, message: string, stack: option<string> }`
 /// at offsets 0, 8 and 16 (option discriminant; `stack` is always `none`). An error gives its
 /// `name` and `message`; any other thrown value gives `name: ""` and its `console.log` text.
-pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function {
+pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) -> Function {
+    let lib = cx.host_globals();
     let utf8_to_string = cx.helper(runtime::Helper::Abi(Helper::Utf8ToString));
     let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
     let to_utf8 = (sig.result == Some(AbiType::String) || sig.throws)
         .then(|| cx.helper(runtime::Helper::Abi(Helper::StringToUtf8)));
     // A library's `init` runs first, its jobs after the call (T20).
-    let init = cx
-        .has_init()
+    let init = (cx.has_init() && mode != Mode::Finish)
         .then(|| cx.helper(runtime::Helper::Abi(Helper::Init)));
-    let settle = sig
-        .jobs
-        .then(|| cx.helper(runtime::Helper::Abi(Helper::Settle)));
-    let nflat = flat_params(&sig.params).len() as u32;
+    // An async export's promise is awaited (which runs the jobs), then its value converted.
+    let settle =
+        (sig.jobs && !sig.is_async).then(|| cx.helper(runtime::Helper::Abi(Helper::Settle)));
+    let await_ = sig
+        .is_async
+        .then(|| cx.helper(runtime::Helper::Abi(Helper::Await)));
+    let to_number = (sig.is_async && sig.result == Some(AbiType::F64))
+        .then(|| cx.helper(runtime::Helper::ToNumber));
+    let value_to_string = (sig.is_async && sig.result == Some(AbiType::String))
+        .then(|| cx.helper(runtime::Helper::ToString));
+    let nflat = if mode == Mode::Finish {
+        0
+    } else {
+        flat_params(&sig.params).len() as u32
+    };
     // Locals after the params: the (ptr, len) of a string, the return area, an f64 result,
     // the thrown value.
     let (ptr, len, ret, num, exc) = (nflat, nflat + 1, nflat + 2, nflat + 3, nflat + 4);
@@ -239,6 +556,31 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
             .local_get(len)
             .i32_store(mem(offset + 4, 2));
     };
+    if mode == Mode::Start {
+        // Start the call; its promise (or the error `init` threw) waits in the library globals.
+        s.block(BlockType::Result(runtime::jsval()));
+        s.try_table(
+            BlockType::Empty,
+            [Catch::One {
+                tag: runtime::TAG,
+                label: 0,
+            }],
+        );
+        if let Some(init) = init {
+            s.call(init);
+        }
+        args(&mut s);
+        s.call(func).global_set(lib + G_PROMISE);
+        s.i32_const(0).global_set(lib + G_FAILED);
+        s.return_();
+        s.end();
+        s.unreachable();
+        s.end();
+        s.global_set(lib + G_ERROR);
+        s.i32_const(1).global_set(lib + G_FAILED);
+        s.end();
+        return f;
+    }
     if !sig.throws {
         if let Some(init) = init {
             s.call(init);
@@ -276,11 +618,34 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
         }],
     );
     // Inside the `try_table`, which takes no values from outside.
-    if let Some(init) = init {
-        s.call(init);
+    if mode == Mode::Finish {
+        // The call failed to start (`init` threw), or a job or timer threw.
+        s.global_get(lib + G_FAILED);
+        s.if_(BlockType::Empty);
+        s.global_get(lib + G_ERROR).throw(runtime::TAG);
+        s.end();
+        s.global_get(lib + G_PROMISE);
+    } else {
+        if let Some(init) = init {
+            s.call(init);
+        }
+        args(&mut s);
+        s.call(func);
     }
-    args(&mut s);
-    s.call(func);
+    if let Some(await_) = await_ {
+        s.call(await_);
+        match sig.result {
+            None => {
+                s.drop();
+            }
+            Some(AbiType::F64) => {
+                s.call(to_number.unwrap());
+            }
+            Some(AbiType::String) => {
+                s.call(value_to_string.unwrap());
+            }
+        }
+    }
     // The result waits in a local while the jobs run.
     let settle = |s: &mut InstructionSink| {
         if let Some(settle) = settle {
@@ -339,6 +704,104 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
     s.local_get(ret);
     s.end();
     f
+}
+
+/// Core params of an async export's `task.return` (T20): its `result<T, js-error>` flattened.
+/// The cases' values are joined: `f64` with the first `i32` of `js-error` makes an `i64`.
+pub fn task_return_params(sig: &AbiSig) -> Vec<ValType> {
+    use ValType::{I32, I64};
+    assert!(sig.throws, "async exports return a `result`");
+    let first = if sig.result == Some(AbiType::F64) {
+        I64
+    } else {
+        I32
+    };
+    let mut v = vec![I32, first];
+    v.extend([I32; 6]);
+    v
+}
+
+/// `[async-lift]<name>` (T20): start the call (`start`: the [`Mode::Start`] adapter), then
+/// [`Helper::Step`]; when that's done, [`complete`] it.
+pub fn async_lift(
+    cx: &mut dyn Cx,
+    start: u32,
+    finish: u32,
+    task_return: u32,
+    sig: &AbiSig,
+) -> Function {
+    let step = cx.helper(runtime::Helper::Abi(Helper::Step));
+    let end = cx.helper(runtime::Helper::Abi(Helper::End));
+    let nflat = flat_params(&sig.params).len() as u32;
+    let mut f = Function::new([(2, ValType::I32)]);
+    let mut s = f.instructions();
+    for i in 0..nflat {
+        s.local_get(i);
+    }
+    s.call(start);
+    complete(&mut s, step, end, finish, task_return, sig, nflat);
+    s.end();
+    f
+}
+
+/// `[callback][async-lift]<name>`: apply the event ([`Helper::Event`]), then as in [`async_lift`].
+pub fn async_callback(cx: &mut dyn Cx, finish: u32, task_return: u32, sig: &AbiSig) -> Function {
+    let step = cx.helper(runtime::Helper::Abi(Helper::Step));
+    let end = cx.helper(runtime::Helper::Abi(Helper::End));
+    let event = cx.helper(runtime::Helper::Abi(Helper::Event));
+    let mut f = Function::new([(2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(0).local_get(1).local_get(2).call(event);
+    complete(&mut s, step, end, finish, task_return, sig, 3);
+    s.end();
+    f
+}
+
+/// Step the call; while it waits, return the callback code. When it's done: the `result` from
+/// `finish` (a return area) goes to `task.return` as flat values, the call [`Helper::End`]s, and
+/// `EXIT`. Values a case doesn't have are ignored by the lift. Locals `l`, `l + 1`: i32.
+fn complete(
+    s: &mut InstructionSink,
+    step: u32,
+    end: u32,
+    finish: u32,
+    task_return: u32,
+    sig: &AbiSig,
+    l: u32,
+) {
+    let (code, ret) = (l, l + 1);
+    s.call(step).local_tee(code);
+    s.if_(BlockType::Empty);
+    s.local_get(code).return_();
+    s.end();
+    s.call(finish).local_set(ret);
+    let payload: u64 = if sig.result == Some(AbiType::F64) {
+        8
+    } else {
+        4
+    };
+    s.local_get(ret).i32_load8_u(mem(0, 0));
+    if sig.result == Some(AbiType::F64) {
+        // `ok`: the f64's bits; `err`: `name`'s pointer.
+        s.local_get(ret).i64_load(mem(payload, 3));
+        s.local_get(ret)
+            .i32_load(mem(payload, 2))
+            .i64_extend_i32_u();
+        s.local_get(ret).i32_load8_u(mem(0, 0)).i32_eqz();
+        s.select();
+    } else {
+        s.local_get(ret).i32_load(mem(payload, 2));
+    }
+    for off in [4, 8, 12, 16, 20, 24] {
+        if off == 16 {
+            s.local_get(ret).i32_load8_u(mem(payload + off, 0));
+        } else {
+            s.local_get(ret).i32_load(mem(payload + off, 2));
+        }
+    }
+    s.call(task_return);
+    s.call(end);
+    s.i32_const(CALLBACK_EXIT);
 }
 
 /// Size of the `js-error` record: two strings and an `option<string>` (u8 + padding + string).

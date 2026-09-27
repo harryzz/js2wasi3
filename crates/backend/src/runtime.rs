@@ -191,6 +191,8 @@ pub trait Cx {
     fn bump_global(&mut self) -> u32;
     /// Global index of the first host global (commands only, see [`crate::host`]).
     fn host_globals(&mut self) -> u32;
+    /// The host imports (commands; libraries with async exports, T20).
+    fn imports(&mut self) -> crate::host::Imports;
     /// Does the library have top-level code (`init`, T20)?
     fn has_init(&mut self) -> bool;
     /// A library's `init`: its function index, whether it may throw (or leave a rejection), and
@@ -903,8 +905,8 @@ impl Helper {
             Helper::Map(h) => h.body(cx),
             Helper::Fmt(h) => h.body(cx),
             Helper::Host(h) => {
-                let (base, main) = (cx.host_globals(), cx.main_func());
-                h.body(cx, base, main)
+                let base = cx.host_globals();
+                h.body(cx, base)
             }
             Helper::Abi(h) => {
                 let bump = cx.bump_global();

@@ -167,9 +167,11 @@ fn declarations_and_functions() {
         "export function f(a) { switch (a) { case 1: debugger; return 1; default: return 0; } }",
     );
     lowers("export function f() { function g() {} return 0; }");
+    // T20 slice 3: an async export is a WIT `async func`.
+    lowers("export async function f() { await null; return 1; }");
     assert_eq!(
-        one("export async function f() { }"),
-        "1:8 unsupported: exported async function (the boundary needs an async export) (planned: T20)"
+        one("/** @returns {Promise<number>} */\nexport function f() { return 1; }"),
+        "2:8 unsupported: JSDoc return type `Promise<…>` on a function that isn't `async` (planned: T20)"
     );
     // T20 slice 1b: async generators; `yield*` in them isn't supported yet.
     lowers("async function* g() { yield 1; } g();");
@@ -180,15 +182,17 @@ fn declarations_and_functions() {
     );
     assert_eq!(
         one("export function f() { setTimeout(f, 1); return 0; }"),
-        "1:23 unsupported: `setTimeout` in a module with exports (planned: T20)"
+        "1:23 unsupported: `setTimeout` in a library without async exports (timers run while an async export's call waits) (planned: T20)"
     );
+    // T20 slice 3: an async export's call runs the timers while it waits.
+    lowers("export async function f() { setTimeout(f, 1); return 0; }");
     assert_eq!(
         one("export function f() { process.nextTick(f); return 0; }"),
-        "1:23 unsupported: `nextTick` in a module with exports (planned: T20)"
+        "1:23 unsupported: `nextTick` in a library without async exports (timers run while an async export's call waits) (planned: T20)"
     );
     assert_eq!(
         one("export function f() { setImmediate(f); return 0; }"),
-        "1:23 unsupported: `setImmediate` in a module with exports (planned: T20)"
+        "1:23 unsupported: `setImmediate` in a library without async exports (timers run while an async export's call waits) (planned: T20)"
     );
     lowers("setImmediate(() => {}); process.nextTick(() => {});");
     lowers("async function f(a) { return (await a) + 1; } f(1);");

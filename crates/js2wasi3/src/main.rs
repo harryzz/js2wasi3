@@ -64,6 +64,7 @@ fn plan_world(
                 .collect(),
             result: e.sig.result.map(ty),
             throws: e.sig.throws,
+            is_async: e.sig.is_async,
             line: pos.line,
             col: pos.col,
         });

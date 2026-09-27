@@ -60,6 +60,10 @@ pub enum Import {
     /// `wasi:random/insecure.get-insecure-random-u64` (T21, `Math.random`): not in [`IMPORTS`],
     /// imported after them only by modules that use it.
     InsecureRandom,
+    /// `backpressure.inc` / `.dec` (T20: a library's async call holds off other calls while it
+    /// waits for timers). Not in [`IMPORTS`].
+    BackpressureInc,
+    BackpressureDec,
 }
 
 pub const IMPORTS: [Import; 19] = [
@@ -84,11 +88,20 @@ pub const IMPORTS: [Import; 19] = [
     Import::SubtaskCancel,
 ];
 
-pub(crate) fn import(i: Import) -> u32 {
-    if i == Import::InsecureRandom {
-        return IMPORTS.len() as u32;
+/// The host imports of a module and where they start in the function index space (a library's
+/// `task.return`s come first, T20).
+#[derive(Clone, Debug, Default)]
+pub struct Imports {
+    pub base: u32,
+    pub list: Vec<Import>,
+}
+
+impl Imports {
+    /// Function index of import `i`.
+    pub fn get(&self, i: Import) -> u32 {
+        let at = self.list.iter().position(|x| *x == i);
+        self.base + at.unwrap_or_else(|| panic!("internal error: {i:?} isn't imported")) as u32
     }
-    IMPORTS.iter().position(|x| *x == i).unwrap() as u32
 }
 
 impl Import {
@@ -130,6 +143,8 @@ impl Import {
                 "wasi:random/insecure@0.3.1",
                 "get-insecure-random-u64".into(),
             ),
+            Import::BackpressureInc => ("$root", "[backpressure-inc]".into()),
+            Import::BackpressureDec => ("$root", "[backpressure-dec]".into()),
         }
     }
 
@@ -150,6 +165,7 @@ impl Import {
             Import::SubtaskDrop => (vec![I32], vec![]),
             Import::SubtaskCancel => (vec![I32], vec![I32]),
             Import::InsecureRandom => (vec![], vec![I64]),
+            Import::BackpressureInc | Import::BackpressureDec => (vec![], vec![]),
         }
     }
 }
@@ -162,6 +178,18 @@ pub fn import_list(random: bool) -> Vec<Import> {
     }
     list
 }
+
+/// The host imports of a library whose async exports wait for timers (T20).
+pub const LIBRARY_TIMER_IMPORTS: [Import; 8] = [
+    Import::WaitableSetNew,
+    Import::WaitableJoin,
+    Import::ClockNow,
+    Import::WaitUntil,
+    Import::SubtaskDrop,
+    Import::SubtaskCancel,
+    Import::BackpressureInc,
+    Import::BackpressureDec,
+];
 
 /// Add the imports; `type_id` gives the type index of a signature.
 pub fn imports(
@@ -298,11 +326,10 @@ impl Helper {
         }
     }
 
-    /// `base`: global index of the first host global. `main`: function index of `main`, and
-    /// whether it returns a value (dropped: a top-level `await`'s promise is observed through
-    /// the unhandled-rejection check).
-    pub fn body(self, cx: &mut dyn Cx, base: u32, main: (u32, bool)) -> Function {
-        let (main, main_result) = main;
+    /// `base`: global index of the first host global. [`Helper::Disarm`] is also used by
+    /// libraries (T20).
+    pub fn body(self, cx: &mut dyn Cx, base: u32) -> Function {
+        let im = &cx.imports();
         let g = |stream: u32, k: u32| base + stream * STREAM_GLOBALS + k;
         let ws = base + G_WS;
         let err = base + G_ERR;
@@ -312,11 +339,11 @@ impl Helper {
                 let len = cx.helper(runtime::Helper::Abi(abi::Helper::Utf8Len));
                 let encode = cx.helper(runtime::Helper::Abi(abi::Helper::Utf8Encode));
                 let pump = cx.helper(runtime::Helper::Host(Helper::Pump(st)));
-                append(st, &g, len, encode, realloc, pump)
+                append(im, st, &g, len, encode, realloc, pump)
             }
             Helper::Pump(st) => {
                 let advance = cx.helper(runtime::Helper::Host(Helper::Advance(st)));
-                pump(st, &g, ws, advance)
+                pump(im, st, &g, ws, advance)
             }
             Helper::Advance(st) => {
                 const PACKED: u32 = 0;
@@ -358,7 +385,7 @@ impl Helper {
                 s.i32_const(1).global_set(err);
                 s.end();
                 s.global_get(g(st, G_F))
-                    .call(import(Import::FutureDropReadable(st)));
+                    .call(im.get(Import::FutureDropReadable(st)));
                 s.i32_const(PHASE_DONE).global_set(g(st, G_PHASE));
                 s.end();
                 f
@@ -366,7 +393,7 @@ impl Helper {
             Helper::Step(st) => {
                 let pump = cx.helper(runtime::Helper::Host(Helper::Pump(st)));
                 let closed = cx.helper(runtime::Helper::Host(Helper::Closed(st)));
-                step(st, &g, ws, pump, closed)
+                step(im, st, &g, ws, pump, closed)
             }
             Helper::Flush => {
                 let steps: Vec<u32> = (0..STREAMS)
@@ -387,7 +414,7 @@ impl Helper {
                     .return_();
                 s.end();
                 // `result<_, _>`: 0 is `ok`, 1 is `err`.
-                s.global_get(err).call(import(Import::TaskReturn));
+                s.global_get(err).call(im.get(Import::TaskReturn));
                 s.i32_const(CALLBACK_EXIT);
                 s.end();
                 f
@@ -440,7 +467,7 @@ impl Helper {
                     s.if_(BlockType::Empty);
                     {
                         s.call(disarm);
-                        s.local_get(D).call(import(Import::WaitUntil)).local_tee(ST);
+                        s.local_get(D).call(im.get(Import::WaitUntil)).local_tee(ST);
                         s.i32_const(0xf)
                             .i32_and()
                             .i32_const(SUBTASK_RETURNED)
@@ -453,7 +480,7 @@ impl Helper {
                         s.local_get(D).global_set(G_WAIT_AT);
                         s.global_get(G_WAIT)
                             .global_get(ws)
-                            .call(import(Import::WaitableJoin));
+                            .call(im.get(Import::WaitableJoin));
                     }
                     s.end();
                     for p in &pumps {
@@ -481,7 +508,7 @@ impl Helper {
                 const R: u32 = 0;
                 let mut f = Function::new([(1, runtime::jsval())]);
                 let mut s = f.instructions();
-                s.call(import(Import::ClockNow)).global_set(G_LOOP_NOW);
+                s.call(im.get(Import::ClockNow)).global_set(G_LOOP_NOW);
                 s.block(BlockType::Result(runtime::jsval()));
                 s.try_table(
                     BlockType::Empty,
@@ -510,17 +537,20 @@ impl Helper {
                 // It must leave the set before it can be cancelled.
                 s.global_get(G_WAIT)
                     .i32_const(0)
-                    .call(import(Import::WaitableJoin));
+                    .call(im.get(Import::WaitableJoin));
                 s.global_get(G_WAIT)
-                    .call(import(Import::SubtaskCancel))
+                    .call(im.get(Import::SubtaskCancel))
                     .drop();
-                s.global_get(G_WAIT).call(import(Import::SubtaskDrop));
+                s.global_get(G_WAIT).call(im.get(Import::SubtaskDrop));
                 s.i32_const(0).global_set(G_WAIT);
                 s.end();
                 s.end();
                 f
             }
             Helper::Run => {
+                // `main`, and whether it returns a value (dropped: a top-level `await`'s promise
+                // is observed through the unhandled-rejection check).
+                let (main, main_result) = cx.main_func();
                 let flush = cx.helper(runtime::Helper::Host(Helper::Loop));
                 let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
                 let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
@@ -530,7 +560,7 @@ impl Helper {
                 const R: u32 = 0;
                 let mut f = Function::new([(1, runtime::jsval())]);
                 let mut s = f.instructions();
-                s.call(import(Import::WaitableSetNew)).global_set(ws);
+                s.call(im.get(Import::WaitableSetNew)).global_set(ws);
                 s.block(BlockType::Result(runtime::jsval()));
                 s.try_table(
                     BlockType::Empty,
@@ -579,7 +609,7 @@ impl Helper {
                     .i32_eq()
                     .i32_and();
                 s.if_(BlockType::Empty);
-                s.global_get(G_WAIT).call(import(Import::SubtaskDrop));
+                s.global_get(G_WAIT).call(im.get(Import::SubtaskDrop));
                 s.i32_const(0).global_set(G_WAIT);
                 s.call(tick);
                 s.end();
@@ -618,6 +648,7 @@ impl Helper {
 
 /// `$append(str)`: see [`Helper::Append`].
 fn append(
+    im: &Imports,
     st: u32,
     g: &dyn Fn(u32, u32) -> u32,
     len: u32,
@@ -641,7 +672,7 @@ fn append(
     // Open on first use: the readable end goes to the host, which returns the result future.
     s.global_get(g(st, G_PHASE)).i32_eqz();
     s.if_(BlockType::Empty);
-    s.call(import(Import::StreamNew(st))).local_set(PAIR);
+    s.call(im.get(Import::StreamNew(st))).local_set(PAIR);
     s.local_get(PAIR)
         .i64_const(32)
         .i64_shr_u()
@@ -649,7 +680,7 @@ fn append(
         .global_set(g(st, G_W));
     s.local_get(PAIR)
         .i32_wrap_i64()
-        .call(import(Import::WriteViaStream(st)))
+        .call(im.get(Import::WriteViaStream(st)))
         .global_set(g(st, G_F));
     s.i32_const(PHASE_OPEN).global_set(g(st, G_PHASE));
     s.end();
@@ -700,7 +731,7 @@ fn append(
 }
 
 /// `$pump() -> i32`: see [`Helper::Pump`].
-fn pump(st: u32, g: &dyn Fn(u32, u32) -> u32, ws: u32, advance: u32) -> Function {
+fn pump(im: &Imports, st: u32, g: &dyn Fn(u32, u32) -> u32, ws: u32, advance: u32) -> Function {
     const RC: u32 = 0;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
@@ -731,12 +762,12 @@ fn pump(st: u32, g: &dyn Fn(u32, u32) -> u32, ws: u32, advance: u32) -> Function
     s.global_get(g(st, G_LEN))
         .global_get(g(st, G_OFF))
         .i32_sub();
-    s.call(import(Import::StreamWrite(st))).local_tee(RC);
+    s.call(im.get(Import::StreamWrite(st))).local_tee(RC);
     s.i32_const(BLOCKED).i32_eq();
     s.if_(BlockType::Empty);
     s.global_get(g(st, G_W))
         .global_get(ws)
-        .call(import(Import::WaitableJoin));
+        .call(im.get(Import::WaitableJoin));
     s.i32_const(PHASE_WRITING).global_set(g(st, G_PHASE));
     s.i32_const(1).return_();
     s.end();
@@ -749,7 +780,14 @@ fn pump(st: u32, g: &dyn Fn(u32, u32) -> u32, ws: u32, advance: u32) -> Function
 }
 
 /// `$step() -> i32`: see [`Helper::Step`].
-fn step(st: u32, g: &dyn Fn(u32, u32) -> u32, ws: u32, pump: u32, closed: u32) -> Function {
+fn step(
+    im: &Imports,
+    st: u32,
+    g: &dyn Fn(u32, u32) -> u32,
+    ws: u32,
+    pump: u32,
+    closed: u32,
+) -> Function {
     const RC: u32 = 0;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
@@ -778,16 +816,16 @@ fn step(st: u32, g: &dyn Fn(u32, u32) -> u32, ws: u32, pump: u32, closed: u32) -
     s.end();
     // All written: close the stream, then read the future.
     s.global_get(g(st, G_W))
-        .call(import(Import::StreamDropWritable(st)));
+        .call(im.get(Import::StreamDropWritable(st)));
     s.global_get(g(st, G_F))
         .i32_const(result_addr(st))
-        .call(import(Import::FutureRead(st)))
+        .call(im.get(Import::FutureRead(st)))
         .local_tee(RC);
     s.i32_const(BLOCKED).i32_eq();
     s.if_(BlockType::Empty);
     s.global_get(g(st, G_F))
         .global_get(ws)
-        .call(import(Import::WaitableJoin));
+        .call(im.get(Import::WaitableJoin));
     s.i32_const(PHASE_CLOSING).global_set(g(st, G_PHASE));
     s.i32_const(1).return_();
     s.end();

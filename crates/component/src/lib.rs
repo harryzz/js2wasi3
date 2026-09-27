@@ -32,6 +32,8 @@ pub struct ExportSig {
     pub result: Option<ValType>,
     /// The function may throw: its WIT result is `result<T, js-error>` ([`JS_ERROR`]).
     pub throws: bool,
+    /// An `async func` (T20: an async JS function; `result` is what its promise settles to).
+    pub is_async: bool,
     /// 1-based source position of the export, for diagnostics.
     pub line: u32,
     pub col: u32,
@@ -191,6 +193,10 @@ pub fn world(name: WorldName, exports: &[ExportSig]) -> Result<World, Vec<NameEr
         "package %{}:%{};\n\nworld %{} {{\n",
         name.namespace, name.package, name.world
     );
+    // Async exports wait for timers (T20); unused, the import isn't in the component.
+    if exports.iter().any(|e| e.is_async) {
+        let _ = writeln!(wit, "  import wasi:clocks/monotonic-clock@0.3.1;");
+    }
     if exports.iter().any(|e| e.throws) {
         let _ = writeln!(wit, "  {JS_ERROR}");
     }
@@ -203,7 +209,8 @@ pub fn world(name: WorldName, exports: &[ExportSig]) -> Result<World, Vec<NameEr
         };
         let _ = writeln!(
             wit,
-            "  export %{wit_name}: func({}){result};",
+            "  export %{wit_name}: {}func({}){result};",
+            if e.is_async { "async " } else { "" },
             params(&e.params).join(", "),
         );
     }
@@ -322,6 +329,7 @@ mod tests {
                 .collect(),
             result: Some(ValType::F64),
             throws: false,
+            is_async: false,
             line: 1,
             col: 1,
         }
@@ -374,14 +382,16 @@ mod tests {
         (g.throws, g.result) = (true, None);
         let mut h = sig("h", false, &[]);
         (h.throws, h.result) = (true, Some(ValType::String));
+        h.is_async = true;
         let w = world(WorldName::from_path(Path::new("m.js")), &[f, g, h]).unwrap();
         assert_eq!(
             w.wit,
             format!(
-                "package %js2wasi3:%m;\n\nworld %m {{\n  {JS_ERROR}\n\
+                "package %js2wasi3:%m;\n\nworld %m {{\n  \
+                 import wasi:clocks/monotonic-clock@0.3.1;\n  {JS_ERROR}\n\
                  \x20 export %f: func(%x: f64) -> result<f64, js-error>;\n\
                  \x20 export %g: func() -> result<_, js-error>;\n\
-                 \x20 export %h: func() -> result<string, js-error>;\n}}\n"
+                 \x20 export %h: async func() -> result<string, js-error>;\n}}\n"
             )
         );
         // The name is taken only when an export throws.
