@@ -341,7 +341,7 @@ fn match_world(
 
 /// A compound WIT type as the IR describes it: record fields and flags get jco's camelCase JS
 /// keys (`max-size` → `maxSize`).
-/// `site`: the core module and function name a `future`'s intrinsics are imported with.
+/// `site`: the core module and function name a `future`'s or `stream`'s intrinsics are imported with.
 fn wit_type(
     t: &component::Ty,
     scalar: &dyn Fn(component::ValType) -> ir::AbiType,
@@ -373,6 +373,14 @@ fn wit_type(
             func: site.1.clone(),
             index: *index,
             elem: elem.as_deref().map(sub),
+            stream: false,
+        })),
+        Ty::Stream { elem, index } => ir::WitType::Stream(Box::new(ir::Payload {
+            module: site.0.clone(),
+            func: site.1.clone(),
+            index: *index,
+            elem: Some(sub(elem)),
+            stream: true,
         })),
     }
 }

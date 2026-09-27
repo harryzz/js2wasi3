@@ -160,6 +160,21 @@ pub struct Boundary {
     pub imports: HashMap<String, Vec<WorldImport>>,
 }
 
+impl Boundary {
+    /// Does a signature take or return a `stream` (T20 slice 6b: the prelude's reader and pump
+    /// are needed)?
+    fn has_streams(&self) -> bool {
+        let mut found = Vec::new();
+        self.exports
+            .values()
+            .map(|w| &w.types)
+            .chain(self.imports.values().flatten().map(|i| &i.import.sig.types))
+            .flatten()
+            .for_each(|t| t.payloads(&mut found));
+        found.iter().any(|p| p.stream)
+    }
+}
+
 /// Lower a whole module. Returns every unsupported construct as a diagnostic.
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
     lower_with(program, None)
@@ -173,12 +188,14 @@ pub fn lower_with(
     let mut facts = Facts::default();
     let an = closures::analyze(&program.semantic);
     loop {
-        let extra: &[&str] = if facts.string_to_number {
-            &[builtins::STRING_TO_NUMBER]
-        } else {
-            &[]
-        };
-        let prelude = builtins::Prelude::new(program, extra);
+        let mut extra = Vec::new();
+        if facts.string_to_number {
+            extra.push(builtins::STRING_TO_NUMBER);
+        }
+        if boundary.is_some_and(Boundary::has_streams) {
+            extra.extend(builtins::STREAMS);
+        }
+        let prelude = builtins::Prelude::new(program, &extra);
         let mut l = Lowerer {
             p: program,
             boundary,
@@ -1064,6 +1081,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let Some(&func) = self.funcs.get(sym) else {
                 continue;
             };
+            if builtins::STREAMS.contains(&name.as_str()) {
+                // Called by the backend's stream lifting / lowering (T20 slice 6b): JS values.
+                if name == builtins::STREAMS[0] {
+                    self.module.stream_reader = Some(func);
+                } else {
+                    self.module.stream_pump = Some(func);
+                }
+                for p in self.func_params[&func].clone().into_iter().flatten() {
+                    self.observe(Slot::Var(p), Kind::Any);
+                }
+                continue;
+            }
             if name == builtins::STRING_TO_NUMBER {
                 // Called by the runtime with a string.
                 self.module.string_to_number = Some(func);
@@ -5070,6 +5099,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Some(op) = typed_op(name) {
             return self.map_intrinsic(cx, c, name, Intrinsic::Typed(op));
         }
+        if let Some(op) = stream_op(name) {
+            return self.map_intrinsic(cx, c, name, Intrinsic::Stream(op));
+        }
         let arity = match name {
             "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
             "min" | "max" | "copysign" | "imul" | "from_words" => 2,
@@ -6811,6 +6843,18 @@ fn typed_op(name: &str) -> Option<ir::TypedOp> {
         "buffer_length" => T::BufferLength,
         "buffer_slice" => T::BufferSlice,
         "typed_copy" => T::Copy,
+        _ => return None,
+    })
+}
+
+/// `__intrinsic_stream_*` (T20 slice 6b): see [`ir::StreamOp`].
+fn stream_op(name: &str) -> Option<ir::StreamOp> {
+    use ir::StreamOp as S;
+    Some(match name {
+        "stream_read" => S::Read,
+        "stream_write" => S::Write,
+        "stream_drop_readable" => S::DropReadable,
+        "stream_drop_writable" => S::DropWritable,
         _ => return None,
     })
 }

@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slices 1–5 and 6a done; next: slice 6b, `stream<u8>`) | Depends on: T19
+Status: done (slices 1–6b; both acceptance criteria met) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -340,6 +340,47 @@ count; DROPPED ends the iteration); lowering an async iterable makes a stream an
 `next()`, write the chunk, wait for STREAM_WRITE, repeat; drop the writable end at the end). Acceptance: an
 `echo: async func(input: stream<u8>) -> stream<u8>` export returns its input, composed with a JS caller via `wac`.
 
+### Slice 6b: `stream<T>` ↔ async iterables (done 2026-09-28)
+- **Types:** `component::Ty::Stream { elem, index }` (numbered with the futures); a `stream` without an element
+  type, or of futures/streams, is rejected ("later"). `ir::WitType::Stream(Payload)` with `Payload::stream`; the
+  user chose any `T` a `list<T>` takes: chunks are shaped like `list<T>` (`stream<u8>`: `Uint8Array`s).
+- **Prelude** (`crates/lower/builtins/stream.js`, kept as roots by `lower_with` when the boundary has a stream;
+  params observed `Any`; `ir::Module::stream_reader`/`stream_pump`): `$$StreamReader(h, id)` is an async
+  generator awaiting `__intrinsic_stream_read` (`[chunk, ended]`) until the writer drops its end;
+  `$$StreamPump(src, w, id)` starts in a job, `for await`s `src` and awaits `__intrinsic_stream_write` per chunk
+  (`false`: the reader dropped, `break` closes `src`). Both drop their end in `finally`. New `ir::StreamOp`
+  intrinsics (`Read`, `Write` (may throw), `DropReadable`, `DropWritable`).
+- **Backend** (`abi.rs`): `PayloadOp` names/signatures by kind (`[stream-new-N]f`, `[async-lower][stream-read-N]f`
+  `(h, ptr, len)` …); `Helper::StreamLower` (`stream.new`, one more pending, calls the pump), `StreamRead` (a 64 KiB
+  buffer, `stream.read`, blocked → pending table), `StreamReadDone` (lift the chunk with `wit::lift_flat` of
+  `list<T>`, free the buffer if it's the last allocation, resolve `[chunk, ended]`), `StreamWrite` (the chunk
+  lowered as `list<T>` with `wit::lower_mem`), `StreamWriteStep` (writes the rest after a partial write; the
+  pending entry is `[promise, ptr, id, len, start, end]` (`add_pending` takes extra fields); frees `start..end`
+  if last), `Stream(op)` (dispatch on the stream type id; `DropWritable` ends the pump's pending count).
+  `Helper::Event` handles STREAM_READ / STREAM_WRITE. `wit.rs`: the `Stream` arms (lift: the reader; lower:
+  `StreamLower`).
+- **Tests:** `tests/fixtures/library/streams/{world.wit,provider.js,app.js}` and `streams_compose_with_wac`:
+  `echo` (the acceptance: returns its input bytes, also 300 KB through several reads, checksum as node computes),
+  `upper` (an async generator over the input), `take` (stops reading an endless sync generator: the pump sees
+  the drop), a sync iterable, `words` (`stream<string>` from a provider timer). Rejections in
+  `user_world_mismatches`. Checked by hand: a source that throws ends the stream and the call returns `err`.
+- Sizes unchanged: `hello.js` 55715, `add.js` 289, `library/async.js` 76170, `library/async-timers.js` 77503,
+  `library/jobs.js` 65445 (the stream code is linked only when a world has a stream). `cargo test` ok; clippy:
+  the old warning only; `scripts/diff.sh -j 4`: 97 passed, 0 failed, 16 skipped.
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets`, `scripts/diff.sh -j 4`,
+  `wasm-tools validate`, `wac plug`, `wasmtime run -Sp3 --invoke` (with `-C collector=drc`,
+  `-O gc-zeal-alloc-counter=50`, `-O gc-heap-initial-size=67108864`).
+- **Found:** chunk boundaries aren't kept across a stream (wasmtime merged writes), so tests count bytes, not
+  chunks. F134 widened: the streams composition crashes wasmtime without the big heap even with one empty
+  `echo` and no app timers (an `invalid VMGcKind` panic / segfault with the default collector, a cast failure
+  with `drc`); not linked to memory growth.
+
+**Not done (follow-ups):** F137 (stream semantics leftovers: unread received streams stay open, errors after
+return, cancellation, other shapes), F138 (memory while streaming). F134–F136 stay open.
+
+**Next smallest step (after T20):** F134 is the biggest risk for real use of compositions: minimize it (two
+small components or WAT) and report it upstream (ask first); then resources (F131) if WIT work continues.
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -509,3 +550,7 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: user chose the workaround for the GC failures (tests with a larger initial GC heap, F134) over minimizing the wasmtime bug now. Rejected promise for a future: wasmtime traps on dropping an unwritten future, so `FutureAbandon` traps. Tests added/updated; cargo test ok; clippy old warning only; diff.sh 97/0/16; sizes: hello.js 55715, async.js 76170 (+5).
 - 2026-09-27: slice 6a done: Notes / Result 6a, README (F134–F136, Next up: 6b), docs/user-worlds.md (Futures, limits), design.md D4.
 - 2026-09-27: handoff for slice 6b written (state 9b59194, baseline, read-first list, 6a facts, pitfalls incl. F134 / issue #1).
+- 2026-09-27: slice 6b started. Baseline: tools ok, cargo test ok, diff.sh 97/0/16, hello.js 55715. Plan agreed with the user: `stream<T>` for any `T` a `list<T>` takes (chunks shaped like `list<T>`: `Uint8Array` for u8); the reader is a prelude `async function*` (`$$StreamReader`) over `__intrinsic_stream_read`, the writer a prelude `async function` (`$$StreamPump`: `for await` + `__intrinsic_stream_write`), both dropping their end in `finally`; `PayloadOp` gets a future/stream kind; STREAM_READ/WRITE events via the pending table. A source that throws ends the stream and fails the call (unhandled rejection) if it hasn't returned yet.
+- 2026-09-28: 6b implemented: component `Ty::Stream` (no element type, or elements holding futures/streams: rejected), `ir::WitType::Stream(Payload { stream: true })`, `ir::StreamOp` intrinsics, `Module::stream_reader`/`stream_pump`; prelude `builtins/stream.js` (`$$StreamReader` async generator, `$$StreamPump` for-await; kept as roots when the world has streams, params observed `Any`); backend: `PayloadOp` names/signatures by kind, `abi::Helper::{StreamLower, StreamRead, StreamReadDone, StreamWrite, StreamWriteStep, Stream(op)}` (64 KiB reads; chunks lifted/lowered as `list<T>`; partial writes continue from the pending entry `[promise, ptr, id, len, start, end]`; buffers freed when they're the last allocation), `Event` handles STREAM_READ/WRITE. Fixture `library/streams/{world.wit,provider.js,app.js}` + test `streams_compose_with_wac`: echo, upper, take (drops an endless source), 300 KB echo, `stream<string>` from a timer: all as expected on wasmtime.
+- 2026-09-28: found: a stream write boundary isn't kept (wasmtime merges chunks), so fixtures mustn't count chunks. F134 again: without the big initial heap the composition crashes wasmtime (default collector: `invalid VMGcKind` panic / segfault; drc: cast failure in the first step), even for an empty echo and without app timers; not memory growth (same with 1 KiB reads). Same pattern as the pre-existing slice 5b failure under drc: async calls between composed components + GC. The test uses the big-heap workaround.
+- 2026-09-28: slice 6b done (T20 done): Notes / Result 6b, README (T20 done, Next up, F134 widened, F137–F138), docs/user-worlds.md (Streams, limits), design.md D4, README.md.

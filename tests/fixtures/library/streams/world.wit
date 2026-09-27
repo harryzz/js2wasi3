@@ -1,0 +1,28 @@
+package acme:streams;
+
+/// `stream<T>` at the boundary (T20 slice 6b): the provider reads and writes streams, the app
+/// writes and reads them through its imports.
+interface bytes {
+  /// Returns its input.
+  echo: async func(input: stream<u8>) -> stream<u8>;
+  /// Its input upper-cased (ASCII), one chunk out per chunk in.
+  upper: async func(input: stream<u8>) -> stream<u8>;
+  /// Reads `input` until it has seen `n` bytes, then stops reading (drops it); returns `n`
+  /// (or fewer, if the stream ended first).
+  take: async func(input: stream<u8>, n: u32) -> u32;
+  /// `n` strings, one chunk each, after a timer.
+  words: async func(n: u32) -> stream<string>;
+}
+
+/// Implements `bytes` in JS (`provider.js`).
+world provider {
+  import wasi:clocks/monotonic-clock@0.3.1;
+  export bytes;
+}
+
+/// Uses `bytes` (`app.js`).
+world app {
+  import wasi:clocks/monotonic-clock@0.3.1;
+  import bytes;
+  export go: async func(text: string) -> string;
+}

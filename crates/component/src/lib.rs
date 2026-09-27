@@ -291,6 +291,23 @@ pub enum Ty {
     /// `future<T>` (T20 slice 6): `index` is its position in the function's
     /// `find_futures_and_streams`, which names its intrinsics (`[future-new-<index>]f`).
     Future { elem: Option<Box<Ty>>, index: u32 },
+    /// `stream<T>` (T20 slice 6b), numbered like a future (`[stream-new-<index>]f`).
+    Stream { elem: Box<Ty>, index: u32 },
+}
+
+impl Ty {
+    /// Does a value of this type hold a future or a stream?
+    pub fn has_payloads(&self) -> bool {
+        match self {
+            Ty::Scalar(_) | Ty::Enum(_) | Ty::Flags(_) => false,
+            Ty::Option(t) | Ty::List(t) => t.has_payloads(),
+            Ty::Result { ok, err } => [ok, err].into_iter().flatten().any(|t| t.has_payloads()),
+            Ty::Tuple(ts) => ts.iter().any(Ty::has_payloads),
+            Ty::Record(fs) => fs.iter().any(|(_, t)| t.has_payloads()),
+            Ty::Variant(cs) => cs.iter().flat_map(|(_, t)| t).any(Ty::has_payloads),
+            Ty::Future { .. } | Ty::Stream { .. } => true,
+        }
+    }
 }
 
 /// A function a user world exports (T20), or (slice 5) imports.
@@ -334,8 +351,8 @@ pub struct UserWorld {
 
 /// Load `world` (a name, `ns:pkg/world` or `None` for the only one) from the WIT file or
 /// directory `path`. The vendored WASI 0.3.1 packages are available to it. Every function it
-/// exports must have supported parameter and result types (no resources, futures, streams); interface exports aren't
-/// supported yet.
+/// exports must have supported parameter and result types (no resources; futures and streams only in an
+/// `async func`).
 pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld> {
     let mut resolve = Resolve::default();
     for (file, text) in WASI {
@@ -516,7 +533,20 @@ fn boundary_type(resolve: &Resolve, t: &Type, futures: &[TypeId]) -> Result<Ty, 
                 .position(|f| f == id)
                 .expect("wit-parser lists every future") as u32,
         },
-        TypeDefKind::Stream(_) => return later("a stream", "T20 slice 6b"),
+        TypeDefKind::Stream(None) => return later("a stream without an element type", "later"),
+        TypeDefKind::Stream(Some(e)) => {
+            let elem = sub(e)?;
+            if elem.has_payloads() {
+                return later("a stream of futures or streams", "later");
+            }
+            Ty::Stream {
+                elem: Box::new(elem),
+                index: futures
+                    .iter()
+                    .position(|f| f == id)
+                    .expect("wit-parser lists every stream") as u32,
+            }
+        }
         _ => return later("a resource", "later"),
     })
 }

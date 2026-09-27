@@ -14,7 +14,9 @@
 //! - An export that may throw (T12) also goes through an adapter: it catches the JS exception
 //!   and returns `result<T, js-error>` through a return area (see [`adapter`]).
 
-use js2wasi3_ir::{self as ir, AbiSig, AbiType, ErrType, ErrorKind, Payload, Type, WitType};
+use js2wasi3_ir::{
+    self as ir, AbiSig, AbiType, ErrType, ErrorKind, Payload, StreamOp, Type, WitType,
+};
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType};
 
 use crate::host::{self, Import};
@@ -84,6 +86,26 @@ pub enum Helper {
     FutureWrite(u32),
     /// The code of the reject handler: trap.
     FutureAbandon(u32),
+    /// `(v: jsval) -> i32`: a new stream of type `p` (T20 slice 6b) with the (async) iterable `v`
+    /// pumped into it by the prelude's `$$StreamPump`: its readable end. The call waits for the
+    /// pump until it drops the writable end.
+    StreamLower(u32),
+    /// `(h: i32) -> jsval`: start reading the stream `h` of type `p`: a promise of
+    /// `[chunk, ended]` (see `ir::StreamOp::Read`).
+    StreamRead(u32),
+    /// `(h, promise, buf, status)`: that read ended: lift the chunk, free the buffer if nothing
+    /// was allocated after it, settle the promise.
+    StreamReadDone(u32),
+    /// `(chunk: jsval, w: i32) -> jsval`: store `chunk` as a `list<T>` and write it to `w` (see
+    /// `ir::StreamOp::Write`).
+    StreamWrite(u32),
+    /// `(w, promise, ptr, len, start, end, status)`: a write of `len` elements at `ptr` to `w`
+    /// moved on by `status` (the elements written): write the rest, or (all written, or the
+    /// reader dropped its end) free `start..end` if nothing was allocated after it and settle
+    /// the promise.
+    StreamWriteStep(u32),
+    /// `Intrinsic::Stream(op)`: `op` on the stream type given as its last argument.
+    Stream(StreamOp),
 }
 
 impl Helper {
@@ -110,6 +132,12 @@ impl Helper {
             Helper::FutureLower(_) => "future_lower",
             Helper::FutureWrite(_) => "future_write",
             Helper::FutureAbandon(_) => "future_abandon",
+            Helper::StreamLower(_) => "stream_lower",
+            Helper::StreamRead(_) => "stream_read",
+            Helper::StreamReadDone(_) => "stream_read_done",
+            Helper::StreamWrite(_) => "stream_write",
+            Helper::StreamWriteStep(_) => "stream_write_step",
+            Helper::Stream(op) => ir::Intrinsic::Stream(op).name(),
         }
     }
 
@@ -137,6 +165,26 @@ impl Helper {
                 let v = runtime::jsval();
                 (vec![v, v, v], vec![v])
             }
+            Helper::StreamLower(_) => (vec![runtime::jsval()], vec![I32]),
+            Helper::StreamRead(_) => (vec![I32], vec![runtime::jsval()]),
+            Helper::StreamReadDone(_) => (vec![I32, runtime::jsval(), I32, I32], vec![]),
+            Helper::StreamWrite(_) => (vec![runtime::jsval(), I32], vec![runtime::jsval()]),
+            Helper::StreamWriteStep(_) => {
+                let mut ps = vec![I32, runtime::jsval()];
+                ps.extend([I32; 5]);
+                (ps, vec![])
+            }
+            Helper::Stream(op) => {
+                let (params, result) = ir::Intrinsic::Stream(op).signature();
+                let ty = |t: &Type| match t {
+                    Type::JsVal => runtime::jsval(),
+                    _ => I32,
+                };
+                (
+                    params.iter().map(ty).collect(),
+                    result.iter().map(ty).collect(),
+                )
+            }
         }
     }
 
@@ -150,6 +198,12 @@ impl Helper {
             Helper::FutureLower(p) => future_lower(cx, p),
             Helper::FutureWrite(p) => future_write(cx, p),
             Helper::FutureAbandon(_) => future_abandon(),
+            Helper::StreamLower(p) => stream_lower(cx, p),
+            Helper::StreamRead(p) => stream_read(cx, p),
+            Helper::StreamReadDone(p) => stream_read_done(cx, p),
+            Helper::StreamWrite(p) => stream_write(cx, p),
+            Helper::StreamWriteStep(p) => stream_write_step(cx, p),
+            Helper::Stream(op) => stream_dispatch(cx, op),
             Helper::Utf8ToString => utf8_to_string(),
             Helper::StringToUtf8 => {
                 let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
@@ -292,11 +346,19 @@ impl Helper {
                     .iter()
                     .map(|i| (*i, cx.helper(runtime::Helper::Abi(Helper::ImportDone(*i)))))
                     .collect();
-                // Future reads and writes that ended (T20 slice 6a), per future type.
-                let reads: Vec<(u32, u32, u32)> = (0..futures)
+                // Future (T20 slice 6a) and stream (6b) reads and writes that ended, per type:
+                // (type, stream?, read done, write done).
+                let reads: Vec<(u32, bool, u32, u32)> = (0..futures)
                     .map(|p| {
-                        let read = cx.helper(runtime::Helper::Abi(Helper::FutureRead(p)));
-                        (p, read, cx.payload_import(p, PayloadOp::DropWritable))
+                        if cx.payload_is_stream(p) {
+                            let read = cx.helper(runtime::Helper::Abi(Helper::StreamReadDone(p)));
+                            let write =
+                                cx.helper(runtime::Helper::Abi(Helper::StreamWriteStep(p)));
+                            (p, true, read, write)
+                        } else {
+                            let read = cx.helper(runtime::Helper::Abi(Helper::FutureRead(p)));
+                            (p, false, read, cx.payload_import(p, PayloadOp::DropWritable))
+                        }
                     })
                     .collect();
                 let mut s = f.instructions();
@@ -340,8 +402,13 @@ impl Helper {
                         .i32_const(SUBTASK_RETURNED)
                         .i32_eq()
                         .i32_and();
-                    s.local_get(EVENT).i32_const(EVENT_FUTURE_READ).i32_eq().i32_or();
-                    s.local_get(EVENT).i32_const(EVENT_FUTURE_WRITE).i32_eq().i32_or();
+                    // (STREAM_READ 2 … FUTURE_WRITE 5.)
+                    s.local_get(EVENT)
+                        .i32_const(EVENT_STREAM_READ)
+                        .i32_sub()
+                        .i32_const(EVENT_FUTURE_WRITE - EVENT_STREAM_READ)
+                        .i32_le_u()
+                        .i32_or();
                     s.global_get(lib + G_PENDING).ref_is_null().i32_eqz().i32_and();
                     s.if_(BlockType::Empty);
                     key(&mut s);
@@ -366,19 +433,35 @@ impl Helper {
                         }
                         s.end();
                     }
-                    for (p, read, drop_writable) in reads {
+                    for (p, stream, read, write) in reads {
+                        let (ev_read, ev_write) = if stream {
+                            (EVENT_STREAM_READ, EVENT_STREAM_WRITE)
+                        } else {
+                            (EVENT_FUTURE_READ, EVENT_FUTURE_WRITE)
+                        };
                         is(&mut s, p);
                         s.if_(BlockType::Empty);
-                        s.local_get(EVENT).i32_const(EVENT_FUTURE_READ).i32_eq();
+                        s.local_get(EVENT).i32_const(ev_read).i32_eq();
                         s.if_(BlockType::Empty);
                         s.local_get(INDEX);
                         field(&mut s, 0.0);
                         buf(&mut s);
                         s.local_get(PAYLOAD).call(read);
                         s.end();
-                        s.local_get(EVENT).i32_const(EVENT_FUTURE_WRITE).i32_eq();
+                        s.local_get(EVENT).i32_const(ev_write).i32_eq();
                         s.if_(BlockType::Empty);
-                        s.local_get(INDEX).call(drop_writable);
+                        s.local_get(INDEX);
+                        if stream {
+                            // [promise, ptr, id, len, start, end]: write the rest.
+                            field(&mut s, 0.0);
+                            buf(&mut s);
+                            for k in [3.0, 4.0, 5.0] {
+                                field(&mut s, k);
+                                s.call(to_number).i32_trunc_sat_f64_u();
+                            }
+                            s.local_get(PAYLOAD);
+                        }
+                        s.call(write);
                         s.end();
                         s.end();
                     }
@@ -619,15 +702,17 @@ fn import_start(
     s.local_get(p).local_get(ret).call(done);
     s.else_();
     s.local_get(st).i32_const(4).i32_shr_u().local_set(h);
-    add_pending(cx, s, h, Some(p), ret, i, true);
+    add_pending(cx, s, h, Some(p), ret, i, &[], true);
     s.end();
     s.local_get(p);
 }
 
-/// Wait for the waitable `h` (a subtask, or a future's end): join it to the call's waitable set
-/// (made on first use) and record `h` → `[promise, buf, id]` in the pending table (`id`: the
-/// import or future type; `p`: a local, else `undefined`). `count`: one more thing pending
-/// (a future write was counted when it was made).
+/// Wait for the waitable `h` (a subtask, or a future's or stream's end): join it to the call's
+/// waitable set (made on first use) and record `h` → `[promise, buf, id, extra…]` in the
+/// pending table (`id`: the import or future / stream type; `p`: a local, else `undefined`;
+/// `extra`: i32 locals). `count`: one more thing pending (a future write was counted when it
+/// was made).
+#[allow(clippy::too_many_arguments)]
 fn add_pending(
     cx: &mut dyn Cx,
     s: &mut InstructionSink,
@@ -635,6 +720,7 @@ fn add_pending(
     p: Option<u32>,
     buf: u32,
     id: u32,
+    extra: &[u32],
     count: bool,
 ) {
     let lib = cx.host_globals();
@@ -661,7 +747,11 @@ fn add_pending(
     };
     s.local_get(buf).f64_convert_i32_u().call(boxed);
     s.f64_const((id as f64).into()).call(boxed);
-    s.array_new_fixed(runtime::T_VALS, 3).i32_const(3).call(new_array);
+    for x in extra {
+        s.local_get(*x).f64_convert_i32_u().call(boxed);
+    }
+    let n = 3 + extra.len() as u32;
+    s.array_new_fixed(runtime::T_VALS, n).i32_const(n as i32).call(new_array);
     s.call(set);
     if count {
         s.global_get(lib + G_PENDING_N).i32_const(1).i32_add();
@@ -669,10 +759,11 @@ fn add_pending(
     }
 }
 
-/// How many intrinsics a boundary future type imports ([`PayloadOp`]).
+/// How many intrinsics a boundary future or stream type imports ([`PayloadOp`]).
 pub const PAYLOAD_OPS: u32 = 5;
 
-/// The intrinsics of a future type (T20 slice 6a), as wit-component names them.
+/// The intrinsics of a future (T20 slice 6a) or stream (slice 6b) type, as wit-component
+/// names them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PayloadOp {
     New,
@@ -693,26 +784,30 @@ impl PayloadOp {
 
     pub fn name(self, p: &Payload) -> String {
         let (i, f) = (p.index, &p.func);
+        let k = if p.stream { "stream" } else { "future" };
         match self {
-            PayloadOp::New => format!("[future-new-{i}]{f}"),
-            PayloadOp::Read => format!("[async-lower][future-read-{i}]{f}"),
-            PayloadOp::Write => format!("[async-lower][future-write-{i}]{f}"),
-            PayloadOp::DropReadable => format!("[future-drop-readable-{i}]{f}"),
-            PayloadOp::DropWritable => format!("[future-drop-writable-{i}]{f}"),
+            PayloadOp::New => format!("[{k}-new-{i}]{f}"),
+            PayloadOp::Read => format!("[async-lower][{k}-read-{i}]{f}"),
+            PayloadOp::Write => format!("[async-lower][{k}-write-{i}]{f}"),
+            PayloadOp::DropReadable => format!("[{k}-drop-readable-{i}]{f}"),
+            PayloadOp::DropWritable => format!("[{k}-drop-writable-{i}]{f}"),
         }
     }
 
-    pub fn signature(self) -> (Vec<ValType>, Vec<ValType>) {
+    /// A stream's read and write also take a length.
+    pub fn signature(self, stream: bool) -> (Vec<ValType>, Vec<ValType>) {
         use ValType::{I32, I64};
         match self {
             PayloadOp::New => (vec![], vec![I64]),
+            PayloadOp::Read | PayloadOp::Write if stream => (vec![I32; 3], vec![I32]),
             PayloadOp::Read | PayloadOp::Write => (vec![I32, I32], vec![I32]),
             PayloadOp::DropReadable | PayloadOp::DropWritable => (vec![I32], vec![]),
         }
     }
 }
 
-/// The future types at a module's boundary (its exports' and imports' signatures), each once.
+/// The future and stream types at a module's boundary (its exports' and imports' signatures),
+/// each once.
 pub fn payloads(m: &ir::Module) -> Vec<Payload> {
     let mut out: Vec<Payload> = Vec::new();
     let sigs = m.exports.iter().map(|x| &x.sig).chain(m.imports.iter().map(|x| &x.sig));
@@ -738,7 +833,7 @@ fn same_payload(a: &Payload, b: &Payload) -> bool {
 pub fn payload_id(list: &[Payload], p: &Payload) -> u32 {
     list.iter()
         .position(|q| same_payload(q, p))
-        .expect("every boundary future is listed") as u32
+        .expect("every boundary future and stream is listed") as u32
 }
 
 /// Canonical ABI: a future read / write that didn't finish at once, and the status of one that
@@ -781,7 +876,7 @@ fn future_lift(cx: &mut dyn Cx, id: u32) -> Function {
     s.local_get(H).local_get(buf).call(read).local_tee(st);
     s.i32_const(BLOCKED).i32_eq();
     s.if_(BlockType::Empty);
-    add_pending(cx, &mut s, H, Some(p), buf, id, true);
+    add_pending(cx, &mut s, H, Some(p), buf, id, &[], true);
     s.else_();
     s.local_get(H).local_get(p).local_get(buf).local_get(st).call(done);
     s.end();
@@ -903,7 +998,7 @@ fn future_write(cx: &mut dyn Cx, id: u32) -> Function {
     }
     s.local_get(w).local_get(buf).call(write).i32_const(BLOCKED).i32_eq();
     s.if_(BlockType::Empty);
-    add_pending(cx, &mut s, w, None, buf, id, false);
+    add_pending(cx, &mut s, w, None, buf, id, &[], false);
     s.else_();
     s.local_get(w).call(drop);
     s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
@@ -922,6 +1017,247 @@ fn future_write(cx: &mut dyn Cx, id: u32) -> Function {
 fn future_abandon() -> Function {
     let mut f = Function::new([]);
     f.instructions().unreachable().end();
+    f
+}
+
+/// Canonical ABI: the status of a copy whose other end was dropped (the low 4 bits).
+const COPY_DROPPED: i32 = 1;
+
+/// What one stream read asks for: 64 KiB of elements (at least one).
+const READ_BYTES: u64 = 65536;
+
+/// A stream's element type, its size, and how many elements a read asks for.
+fn stream_elem(cx: &mut dyn Cx, id: u32) -> (WitType, u64, u64, u64) {
+    let elem = cx.payload_elem(id).expect("a stream has an element type");
+    let (size, align) = wit::size_align(&elem);
+    let cap = (READ_BYTES / size.max(1)).max(1);
+    (elem, size, align, cap)
+}
+
+/// `$stream_lower(v) -> i32`: see [`Helper::StreamLower`].
+fn stream_lower(cx: &mut dyn Cx, id: u32) -> Function {
+    let lib = cx.host_globals();
+    let new = cx.payload_import(id, PayloadOp::New);
+    let (_, pump) = cx.stream_funcs();
+    let boxed = cx.helper(runtime::Helper::Box);
+    const V: u32 = 0;
+    const PAIR: u32 = 1;
+    let mut f = Function::new([(1, ValType::I64)]);
+    let mut s = f.instructions();
+    s.call(new).local_set(PAIR);
+    s.global_get(lib + G_PENDING_N).i32_const(1).i32_add();
+    s.global_set(lib + G_PENDING_N);
+    s.local_get(V);
+    s.local_get(PAIR)
+        .i64_const(32)
+        .i64_shr_u()
+        .i32_wrap_i64()
+        .f64_convert_i32_u()
+        .call(boxed);
+    s.f64_const((id as f64).into()).call(boxed);
+    s.call(pump).drop();
+    s.local_get(PAIR).i32_wrap_i64();
+    s.end();
+    f
+}
+
+/// `$stream_read(h) -> jsval`: see [`Helper::StreamRead`].
+fn stream_read(cx: &mut dyn Cx, id: u32) -> Function {
+    let (_, size, align, cap) = stream_elem(cx, id);
+    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    let new_promise = cx.helper(runtime::Helper::Prom(promise::Helper::New));
+    let read = cx.payload_import(id, PayloadOp::Read);
+    let done = cx.helper(runtime::Helper::Abi(Helper::StreamReadDone(id)));
+    const H: u32 = 0;
+    const P: u32 = 1;
+    const BUF: u32 = 2;
+    const ST: u32 = 3;
+    let mut f = Function::new([(1, runtime::jsval()), (2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.call(new_promise).local_set(P);
+    s.i32_const(0).i32_const(0).i32_const(align as i32);
+    s.i32_const((cap * size).max(1) as i32);
+    s.call(realloc).local_set(BUF);
+    s.local_get(H).local_get(BUF).i32_const(cap as i32).call(read).local_tee(ST);
+    s.i32_const(BLOCKED).i32_eq();
+    s.if_(BlockType::Empty);
+    add_pending(cx, &mut s, H, Some(P), BUF, id, &[], true);
+    s.else_();
+    s.local_get(H).local_get(P).local_get(BUF).local_get(ST).call(done);
+    s.end();
+    s.local_get(P);
+    s.end();
+    f
+}
+
+/// `$stream_read_done(h, promise, buf, status)`: see [`Helper::StreamReadDone`].
+fn stream_read_done(cx: &mut dyn Cx, id: u32) -> Function {
+    let (elem, size, _, cap) = stream_elem(cx, id);
+    let bump = cx.bump_global();
+    let resolve = cx.helper(runtime::Helper::Prom(promise::Helper::Resolve));
+    let new_array = cx.helper(runtime::Helper::Arr(array::Helper::New));
+    const P: u32 = 1;
+    const BUF: u32 = 2;
+    const ST: u32 = 3;
+    let mut g = wit::Gen::new(4);
+    let (n, chunk) = (g.local(ValType::I32), g.local(runtime::jsval()));
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    s.local_get(ST).i32_const(4).i32_shr_u().local_tee(n);
+    s.if_(BlockType::Empty);
+    let list = WitType::List(Box::new(elem));
+    wit::lift_flat(cx, &mut g, &mut s, &list, &[(BUF, ValType::I32), (n, ValType::I32)]);
+    s.local_set(chunk);
+    s.else_();
+    s.global_get(runtime::G_UNDEFINED).local_set(chunk);
+    s.end();
+    // Free the buffer if it's the last allocation (the host allocates a `string`'s bytes
+    // after it: then it stays).
+    s.global_get(bump)
+        .local_get(BUF)
+        .i32_const((cap * size).max(1) as i32)
+        .i32_add()
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(BUF).global_set(bump);
+    s.end();
+    s.local_get(P).ref_cast_non_null(promise::promise());
+    s.local_get(chunk);
+    s.local_get(ST).i32_const(0xf).i32_and().i32_const(COPY_DROPPED).i32_eq();
+    s.if_(BlockType::Result(runtime::jsval()));
+    s.global_get(runtime::G_TRUE);
+    s.else_();
+    s.global_get(runtime::G_FALSE);
+    s.end();
+    s.array_new_fixed(runtime::T_VALS, 2).i32_const(2).call(new_array);
+    s.call(resolve);
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// `$stream_write(chunk, w) -> jsval`: see [`Helper::StreamWrite`].
+fn stream_write(cx: &mut dyn Cx, id: u32) -> Function {
+    let (elem, ..) = stream_elem(cx, id);
+    let bump = cx.bump_global();
+    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    let new_promise = cx.helper(runtime::Helper::Prom(promise::Helper::New));
+    let step = cx.helper(runtime::Helper::Abi(Helper::StreamWriteStep(id)));
+    const CHUNK: u32 = 0;
+    const W: u32 = 1;
+    let mut g = wit::Gen::new(2);
+    let (p, start) = (g.local(runtime::jsval()), g.local(ValType::I32));
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    s.call(new_promise).local_set(p);
+    // The chunk as a `list<T>`: `(ptr, len)` at `start`, its elements after it.
+    s.i32_const(0).i32_const(0).i32_const(4).i32_const(8);
+    s.call(realloc).local_set(start);
+    let list = WitType::List(Box::new(elem));
+    wit::lower_mem(cx, &mut g, &mut s, &list, CHUNK, start, 0);
+    s.local_get(W).local_get(p);
+    s.local_get(start).i32_load(mem(0, 2));
+    s.local_get(start).i32_load(mem(4, 2));
+    s.local_get(start).global_get(bump);
+    s.i32_const(COPY_COMPLETED);
+    s.call(step);
+    s.local_get(p);
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// `$stream_write_step(w, promise, ptr, len, start, end, status)`: see
+/// [`Helper::StreamWriteStep`].
+fn stream_write_step(cx: &mut dyn Cx, id: u32) -> Function {
+    let (_, size, ..) = stream_elem(cx, id);
+    let bump = cx.bump_global();
+    let write = cx.payload_import(id, PayloadOp::Write);
+    let resolve = cx.helper(runtime::Helper::Prom(promise::Helper::Resolve));
+    const W: u32 = 0;
+    const P: u32 = 1;
+    const PTR: u32 = 2;
+    const LEN: u32 = 3;
+    const START: u32 = 4;
+    const END: u32 = 5;
+    const ST: u32 = 6;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    let finish = |s: &mut InstructionSink, all: bool| {
+        s.global_get(bump).local_get(END).i32_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(START).global_set(bump);
+        s.end();
+        s.local_get(P).ref_cast_non_null(promise::promise());
+        s.global_get(if all { runtime::G_TRUE } else { runtime::G_FALSE });
+        s.call(resolve);
+        s.return_();
+    };
+    s.loop_(BlockType::Empty);
+    // The reader dropped its end: stop.
+    s.local_get(ST).i32_const(0xf).i32_and().i32_const(COPY_DROPPED).i32_eq();
+    s.if_(BlockType::Empty);
+    finish(&mut s, false);
+    s.end();
+    s.local_get(ST).i32_const(4).i32_shr_u().local_set(ST);
+    s.local_get(PTR)
+        .local_get(ST)
+        .i32_const(size as i32)
+        .i32_mul()
+        .i32_add()
+        .local_set(PTR);
+    s.local_get(LEN).local_get(ST).i32_sub().local_tee(LEN);
+    s.i32_eqz();
+    s.if_(BlockType::Empty);
+    finish(&mut s, true);
+    s.end();
+    s.local_get(W).local_get(PTR).local_get(LEN).call(write).local_tee(ST);
+    s.i32_const(BLOCKED).i32_eq();
+    s.if_(BlockType::Empty);
+    add_pending(cx, &mut s, W, Some(P), PTR, id, &[LEN, START, END], true);
+    s.return_();
+    s.end();
+    s.br(0);
+    s.end();
+    s.end();
+    f
+}
+
+/// `$stream_<op>(…, id)`: see [`Helper::Stream`]. `id` is one of the module's stream types.
+fn stream_dispatch(cx: &mut dyn Cx, op: StreamOp) -> Function {
+    let lib = cx.host_globals();
+    let (params, _) = Helper::Stream(op).signature();
+    let id = params.len() as u32 - 1;
+    let streams: Vec<u32> = (0..cx.payload_count())
+        .filter(|p| cx.payload_is_stream(*p))
+        .collect();
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    for p in streams {
+        let callee = match op {
+            StreamOp::Read => cx.helper(runtime::Helper::Abi(Helper::StreamRead(p))),
+            StreamOp::Write => cx.helper(runtime::Helper::Abi(Helper::StreamWrite(p))),
+            StreamOp::DropReadable => cx.payload_import(p, PayloadOp::DropReadable),
+            StreamOp::DropWritable => cx.payload_import(p, PayloadOp::DropWritable),
+        };
+        s.local_get(id).i32_const(p as i32).i32_eq();
+        s.if_(BlockType::Empty);
+        for i in 0..id {
+            s.local_get(i);
+        }
+        s.call(callee);
+        if op == StreamOp::DropWritable {
+            // The pump is over.
+            s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
+            s.global_set(lib + G_PENDING_N);
+        }
+        s.return_();
+        s.end();
+    }
+    s.unreachable();
+    s.end();
     f
 }
 
@@ -976,6 +1312,8 @@ fn import_done(cx: &mut dyn Cx, i: u32) -> Function {
 
 /// Canonical ABI constants (see [`crate::host`]).
 const EVENT_SUBTASK: i32 = 1;
+const EVENT_STREAM_READ: i32 = 2;
+const EVENT_STREAM_WRITE: i32 = 3;
 const EVENT_FUTURE_READ: i32 = 4;
 const EVENT_FUTURE_WRITE: i32 = 5;
 const SUBTASK_RETURNED: i32 = 2;

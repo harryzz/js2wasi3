@@ -116,6 +116,7 @@ The JS shapes are jco's, so a module written for jco / componentize-js works the
 | `list<u8>` (also `s8`, `s16`, `u16`, `s32`, `u32`, `f32`, `f64`) | a `Uint8Array` (`Int8Array`, …, `Float64Array`) | that typed array, or any array-like |
 | `list<T>`, other `T` | an array | an array (or any array-like) |
 | `future<T>` (in an `async func`) | a `Promise` of the value | a promise, or any value (see [Futures](#futures)) |
+| `stream<T>` (in an `async func`) | an async iterable of chunks shaped like `list<T>` (`stream<u8>`: `Uint8Array`s) | any (async) iterable of chunks (see [Streams](#streams)) |
 
 A returned value that doesn't fit its type (an enum string that isn't a case, a `tag` that isn't a case) makes
 the call trap (jco throws a TypeError instead: F128).
@@ -226,13 +227,58 @@ export const later = {
 A `func` (not `async`) with a future in its signature is rejected. `tests/fixtures/library/futures` has a
 provider and an app that use futures both ways, composed with `wac plug`.
 
+## Streams
+
+A `stream<T>` is an async iterable of **chunks** on the JS side, each chunk shaped like a `list<T>`: a
+`Uint8Array` for `stream<u8>`, a typed array for the other numeric types, an array otherwise.
+
+- A stream you **receive** (a parameter, or what an import returns) is an async generator: each `next()` reads
+  once (up to 64 KiB) and gives what that read got. It ends when the writer drops its end. Leaving a
+  `for await` early (`break`, `return`, a throw) drops the readable end, so the writer sees the stream end.
+- A stream you **give** (a result, or an argument to an import) is made from any async or sync iterable of
+  chunks (an async generator, an array of `Uint8Array`s, …), or a stream you received. Each chunk is
+  converted like a `list<T>` and written. The stream ends when the iterable is done, or when the reader drops
+  its end (then the iterable is closed with `return()`). If the iterable throws, the stream ends and the call
+  fails (like an unhandled rejection). The call goes on after it returned until every stream it gave has been
+  written.
+- A stream doesn't keep write boundaries: the chunks the reader gets needn't be the ones written.
+
+```wit
+interface bytes {
+  echo: async func(input: stream<u8>) -> stream<u8>;
+  upper: async func(input: stream<u8>) -> stream<u8>;
+}
+```
+
+```js
+async function* upperChunks(input) {
+  for await (const chunk of input) {
+    yield chunk.map((b) => (b >= 97 && b <= 122 ? b - 32 : b));
+  }
+}
+export const bytes = {
+  async echo(input) {
+    return input; // the received stream, pumped into the result
+  },
+  async upper(input) {
+    return upperChunks(input);
+  },
+};
+```
+
+A `stream` without an element type, and streams of futures or streams, are rejected. `tests/fixtures/library/streams`
+has a provider and an app that use streams both ways, composed with `wac plug`.
+
 ## Limits
 
 - `option<option<T>>`: `some(none)` and `none` are both `undefined` (F127).
 - 64-bit integers are numbers, not BigInts; integer results wrap instead of being range-checked (F124).
-- Resources and `stream`: not yet (T20 slice 6b for `stream`).
-- Composed components that use timers can fail when wasmtime 49.0.1 collects garbage (a wasmtime internal error
-  with the default collector); running with `-O gc-heap-initial-size=64MiB` avoids it for short calls (F134).
+- Resources: not yet.
+- Composed components with async calls between them (timers, async imports, streams) can fail when wasmtime
+  49.0.1 collects garbage (a wasmtime internal error or crash with the default collector); running with
+  `-O gc-heap-initial-size=64MiB` avoids it for short calls (F134).
+- A received stream that is never read to its end or dropped stays open, so its writer waits (F137). Memory
+  used while streaming `string`s isn't reclaimed until the next call (F138).
 - While an async call waits for its future writes after returning, no other call of the component starts (F135).
 - An `async func` import still pending when the export's promise settles finishes during a later async call
   (F133).

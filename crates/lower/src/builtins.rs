@@ -35,6 +35,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/symbol.js"),
     include_str!("../builtins/console.js"),
     include_str!("../builtins/typedarray.js"),
+    include_str!("../builtins/stream.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -65,6 +66,10 @@ const ALIASES: &[(&str, &str)] = &[("keys", "$$Set_prototype_values")];
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
 pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
+
+/// The prelude's stream reader and pump (T20 slice 6b): the backend lifts and lowers a user
+/// world's streams with them.
+pub(crate) const STREAMS: [&str; 2] = ["$$StreamReader", "$$StreamPump"];
 
 /// Parse a user module followed by the built-ins prelude (what [`crate::lower`] expects).
 pub fn parse<'a>(

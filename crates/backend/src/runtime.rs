@@ -200,13 +200,18 @@ pub trait Cx {
     fn user_import(&mut self, i: u32) -> (u32, js2wasi3_ir::AbiSig, Option<u32>);
     /// How many imports the user world has.
     fn user_import_count(&mut self) -> u32;
-    /// The id of a boundary `future` type (T20 slice 6a).
+    /// The id of a boundary `future` or `stream` type (T20 slice 6).
     fn payload(&mut self, p: &js2wasi3_ir::Payload) -> u32;
     /// The function index of one of its intrinsics.
     fn payload_import(&mut self, id: u32, op: crate::abi::PayloadOp) -> u32;
     /// Its value type.
     fn payload_elem(&mut self, id: u32) -> Option<js2wasi3_ir::WitType>;
     fn payload_count(&mut self) -> u32;
+    /// Is it a `stream` (T20 slice 6b)?
+    fn payload_is_stream(&mut self, id: u32) -> bool;
+    /// Function indices of the prelude's `$$StreamReader` and `$$StreamPump` (T20 slice 6b):
+    /// set when a boundary type is a stream.
+    fn stream_funcs(&mut self) -> (u32, u32);
     /// Does the library have top-level code (`init`, T20)?
     fn has_init(&mut self) -> bool;
     /// A library's `init`: its function index, whether it may throw (or leave a rejection), and

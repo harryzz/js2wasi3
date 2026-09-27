@@ -136,6 +136,11 @@ pub struct Module {
     pub string_to_number: Option<FuncId>,
     /// The module can make a `Map`/`Set` (T25): `console.log` links their formatting.
     pub maps: bool,
+    /// The prelude's `$$StreamReader(h, id)` and `$$StreamPump(iterable, w, id)` (T20 slice 6b,
+    /// JS-value params): a lifted stream is a reader (an async generator), a lowered one is
+    /// pumped. Set when the user world has a `stream`.
+    pub stream_reader: Option<FuncId>,
+    pub stream_pump: Option<FuncId>,
     /// The code names a property `bind` (T25): `Function.prototype.bind` is installed.
     pub bind: bool,
     /// The code names a property `toString` (T25): `Function.prototype.toString` is installed and
@@ -237,10 +242,15 @@ pub enum WitType {
     List(Box<WitType>),
     /// `future<T>` (T20 slice 6a) ↔ a Promise (lowered: any value, awaited, then written).
     Future(Box<Payload>),
+    /// `stream<T>` (T20 slice 6b) ↔ an async iterable of chunks shaped like `list<T>`
+    /// (`stream<u8>`: `Uint8Array`s). Lifted: an async generator reading the stream; lowered:
+    /// any (async) iterable, pumped into a new stream.
+    Stream(Box<Payload>),
 }
 
-/// A `future` type of one function (T20 slice 6a): the core module and function name its
-/// intrinsics are imported with (`[future-new-<index>]<func>` from `module`), and the value type.
+/// A `future` or `stream` type of one function (T20 slice 6): the core module and function name
+/// its intrinsics are imported with (`[future-new-<index>]<func>` from `module`), and the value
+/// (a stream's element) type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Payload {
     /// `[export]$root`, `[export]ns:pkg/iface`, or an imported interface's module.
@@ -250,6 +260,8 @@ pub struct Payload {
     /// `find_futures_and_streams`).
     pub index: u32,
     pub elem: Option<WitType>,
+    /// A `stream` (its `elem` is always set), not a `future`.
+    pub stream: bool,
 }
 
 impl WitType {
@@ -285,10 +297,14 @@ impl WitType {
                 .any(|(_, t)| t.as_ref().is_some_and(WitType::has_typed)),
             WitType::List(t) => t.typed_kind().is_some() || t.has_typed(),
             WitType::Future(p) => p.elem.as_ref().is_some_and(WitType::has_typed),
+            WitType::Stream(p) => p
+                .elem
+                .as_ref()
+                .is_some_and(|t| t.typed_kind().is_some() || t.has_typed()),
         }
     }
 
-    /// The futures in this type, in order.
+    /// The futures and streams in this type, in order.
     pub fn payloads<'a>(&'a self, out: &mut Vec<&'a Payload>) {
         match self {
             WitType::Scalar(_) | WitType::Enum(_) | WitType::Flags(_) => {}
@@ -301,7 +317,7 @@ impl WitType {
             WitType::Tuple(ts) => ts.iter().for_each(|t| t.payloads(out)),
             WitType::Record(fs) => fs.iter().for_each(|(_, t)| t.payloads(out)),
             WitType::Variant(cs) => cs.iter().flat_map(|(_, t)| t).for_each(|t| t.payloads(out)),
-            WitType::Future(p) => {
+            WitType::Future(p) | WitType::Stream(p) => {
                 if let Some(t) = &p.elem {
                     t.payloads(out);
                 }
@@ -947,6 +963,8 @@ pub enum Intrinsic {
     Map(MapOp),
     /// Typed arrays and `ArrayBuffer`s (T20), for the prelude.
     Typed(TypedOp),
+    /// A boundary stream's ends (T20 slice 6b), for the prelude's reader and pump.
+    Stream(StreamOp),
     /// `(args: an array of every argument) -> jsval`: a function's `arguments` object (T25,
     /// unmapped: strict mode).
     MakeArguments,
@@ -994,6 +1012,21 @@ pub enum MapOp {
 /// [`Intrinsic::Typed`] operations (T20). `t` is a typed array, `b` an `ArrayBuffer` (the
 /// prelude checks them with `Kind`/`IsBuffer` first: anything else traps); `kind` indexes
 /// [`TYPED_NAMES`]; lengths, offsets and indices are `i32`s in range (the prelude checks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamOp {
+    /// `(h, id) -> jsval`: read from the readable end `h` of stream type `id` (the backend's
+    /// payload id): a promise of `[chunk, ended]` (`chunk`: shaped like `list<T>`, `undefined`
+    /// if nothing was read; `ended`: the writer dropped its end, don't read again).
+    Read,
+    /// `(chunk, w, id) -> jsval`: write `chunk` (converted like a `list<T>`) to the writable end
+    /// `w`: a promise of `true` once it's all written, `false` if the reader dropped its end.
+    Write,
+    /// `(h, id)`: drop the readable end.
+    DropReadable,
+    /// `(w, id)`: drop the writable end (the stream ends); the call stops waiting for it.
+    DropWritable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypedOp {
     /// `(kind, length) -> jsval`: a new zeroed typed array on a new buffer.
@@ -1158,6 +1191,11 @@ impl Intrinsic {
             Intrinsic::MakeArguments => (&[JsVal], Some(JsVal)),
             Intrinsic::SetFunctionName => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::BuiltinCtor(_) | Intrinsic::Namespace(_) => (&[], Some(JsVal)),
+            Intrinsic::Stream(op) => match op {
+                StreamOp::Read => (&[I32, I32], Some(JsVal)),
+                StreamOp::Write => (&[JsVal, I32, I32], Some(JsVal)),
+                StreamOp::DropReadable | StreamOp::DropWritable => (&[I32, I32], None),
+            },
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => (&[], Some(JsVal)),
                 MapOp::Kind | MapOp::Size | MapOp::IterKind | MapOp::Step => (&[JsVal], Some(I32)),
@@ -1322,6 +1360,12 @@ impl Intrinsic {
                 MapOp::Key => "map_key",
                 MapOp::Value => "map_value",
             },
+            Intrinsic::Stream(op) => match op {
+                StreamOp::Read => "stream_read",
+                StreamOp::Write => "stream_write",
+                StreamOp::DropReadable => "stream_drop_readable",
+                StreamOp::DropWritable => "stream_drop_writable",
+            },
             Intrinsic::Typed(op) => match op {
                 TypedOp::New => "typed_new",
                 TypedOp::View => "typed_view",
@@ -1385,6 +1429,7 @@ impl Intrinsic {
                 | Intrinsic::DelegateOpen
                 | Intrinsic::DelegateStep
                 | Intrinsic::CallImport(_)
+                | Intrinsic::Stream(StreamOp::Write)
         )
     }
 }

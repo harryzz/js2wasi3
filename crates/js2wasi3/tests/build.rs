@@ -822,6 +822,49 @@ fn futures_compose_with_wac() {
     );
 }
 
+/// T20 slice 6b: `stream<T>` ↔ async iterables of chunks, both ways through a composition: the
+/// provider echoes, transforms and stops reading a stream, and writes one from a timer; the app
+/// writes (async generators, a sync iterable) and reads them. The acceptance: `echo` returns its
+/// input bytes (also 300 KB, several reads). F134: a large initial GC heap.
+#[test]
+fn streams_compose_with_wac() {
+    let dir = out_dir("streams");
+    let fx = fixture("library/streams");
+    let wit = fx.join("world.wit");
+    let (app, provider, composed) = (
+        dir.join("app.wasm"),
+        dir.join("provider.wasm"),
+        dir.join("composed.wasm"),
+    );
+    for (js, out, world) in [("provider.js", &provider, "provider"), ("app.js", &app, "app")] {
+        let b = build(
+            &fx.join(js),
+            out,
+            &["--wit", wit.to_str().unwrap(), "--world", world],
+        );
+        assert!(b.status.success(), "{js}: {}", String::from_utf8_lossy(&b.stderr));
+    }
+    let plug = Command::new("wac")
+        .arg("plug")
+        .arg(&app)
+        .arg("--plug")
+        .arg(&provider)
+        .arg("-o")
+        .arg(&composed)
+        .output()
+        .expect("wac is installed (TOOLS.md)");
+    assert!(plug.status.success(), "{}", String::from_utf8_lossy(&plug.stderr));
+    assert_eq!(
+        invoke_with(
+            &composed,
+            "go(\"hello streams!\")",
+            &["-O", "gc-heap-initial-size=67108864"]
+        ),
+        "\"echo hello streams!; upper HELLO STREAMS!; take 12; take 5; big 300000 42254; \
+         words w0,w1,w2\""
+    );
+}
+
 #[test]
 fn user_world_import_errors() {
     let dir = out_dir("import-errors");
@@ -924,11 +967,19 @@ fn user_world_mismatches() {
         "{e}"
     );
     let e = err(
-        "package a:b;\nworld w { export f: async func(a: stream<u8>); }\n",
+        "package a:b;\nworld w { export f: async func(a: stream); }\n",
         "export async function f(a) {}\n",
     );
     assert!(
-        e.contains("parameter `a` of `f`: type `stream<…>` (a stream) isn't supported yet (planned: T20 slice 6b)"),
+        e.contains("parameter `a` of `f`: type `stream<…>` (a stream without an element type) isn't supported yet (planned: later)"),
+        "{e}"
+    );
+    let e = err(
+        "package a:b;\nworld w { export f: async func() -> stream<future<u8>>; }\n",
+        "export async function f() {}\n",
+    );
+    assert!(
+        e.contains("the result of `f`: type `stream<…>` (a stream of futures or streams) isn't supported yet (planned: later)"),
         "{e}"
     );
     let e = err(

@@ -231,7 +231,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     for p in &payloads {
         for op in abi::PayloadOp::ALL {
-            let (params, results) = op.signature();
+            let (params, results) = op.signature(p.stream);
             let ty = e.type_id(params, results);
             imports.import(
                 &p.module,
@@ -922,6 +922,15 @@ impl runtime::Cx for Emitter<'_> {
         self.payloads.len() as u32
     }
 
+    fn payload_is_stream(&mut self, id: u32) -> bool {
+        self.payloads[id as usize].stream
+    }
+
+    fn stream_funcs(&mut self) -> (u32, u32) {
+        let f = |x: Option<ir::FuncId>| self.func_base + x.expect("the prelude's streams").0;
+        (f(self.m.stream_reader), f(self.m.stream_pump))
+    }
+
     fn user_import_count(&mut self) -> u32 {
         self.m.imports.len() as u32
     }
@@ -1602,6 +1611,7 @@ impl Emitter<'_> {
                     Intrinsic::Timer(k) => H::Timer(timers::Helper::Fn(*k)),
                     Intrinsic::Map(op) => H::Map(mapset::Helper::Op(*op)),
                     Intrinsic::Typed(op) => H::Typed(typed::Helper::Op(*op)),
+                    Intrinsic::Stream(op) => H::Abi(abi::Helper::Stream(*op)),
                     Intrinsic::MakeArguments => H::Obj(object::Helper::MakeArguments),
                     Intrinsic::SetFunctionName => H::Func(func::Helper::SetName),
                     Intrinsic::BuiltinCtor(b) => H::Func(func::Helper::BuiltinCtor(*b)),

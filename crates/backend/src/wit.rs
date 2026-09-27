@@ -87,7 +87,7 @@ pub fn flatten(t: &WitType) -> Vec<ValType> {
             v
         }
         WitType::List(_) => vec![ValType::I32, ValType::I32],
-        WitType::Future(_) => vec![ValType::I32],
+        WitType::Future(_) | WitType::Stream(_) => vec![ValType::I32],
     }
 }
 
@@ -140,7 +140,7 @@ pub fn size_align(t: &WitType) -> (u64, u64) {
         },
         WitType::Variant(cs) => variant_layout(cs.len(), &payloads(cs)).1,
         WitType::List(_) => (8, 4),
-        WitType::Future(_) => (4, 4),
+        WitType::Future(_) | WitType::Stream(_) => (4, 4),
     }
 }
 
@@ -245,6 +245,16 @@ pub fn lift_flat(
             let id = cx.payload(p);
             let lift = cx.helper(runtime::Helper::Abi(abi::Helper::FutureLift(id)));
             s.call(lift);
+        }
+        WitType::Stream(p) => {
+            // The readable end: the prelude's reader, an async generator (T20 slice 6b).
+            let id = cx.payload(p);
+            let (reader, _) = cx.stream_funcs();
+            let boxed = rh(cx, runtime::Helper::Box);
+            get(s, 0);
+            s.f64_convert_i32_u().call(boxed);
+            s.f64_const((id as f64).into()).call(boxed);
+            s.call(reader);
         }
         WitType::Scalar(a) => {
             get(s, 0);
@@ -531,6 +541,13 @@ pub fn lower_mem(
             // A new future, written when the value settles (T20 slice 6a); its readable end.
             let id = cx.payload(p);
             let lower = cx.helper(runtime::Helper::Abi(abi::Helper::FutureLower(id)));
+            s.local_get(addr).local_get(v).call(lower);
+            s.i32_store(mem(off, 2));
+        }
+        WitType::Stream(p) => {
+            // A new stream, the value pumped into it (T20 slice 6b); its readable end.
+            let id = cx.payload(p);
+            let lower = cx.helper(runtime::Helper::Abi(abi::Helper::StreamLower(id)));
             s.local_get(addr).local_get(v).call(lower);
             s.i32_store(mem(off, 2));
         }
@@ -852,7 +869,7 @@ pub fn flat_load(g: &mut Gen, s: &mut InstructionSink, t: &WitType, addr: u32, o
             s.local_get(addr).i32_load(mem(off, 2));
             s.local_get(addr).i32_load(mem(off + 4, 2));
         }
-        WitType::Future(_) => {
+        WitType::Future(_) | WitType::Stream(_) => {
             s.local_get(addr).i32_load(mem(off, 2));
         }
         WitType::Variant(cs) => variant_load(g, s, &payloads(cs), addr, off),

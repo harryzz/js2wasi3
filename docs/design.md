@@ -150,7 +150,12 @@ function, resolve or reject); the call keeps waiting while imports are pending. 
 signature: each future type imports its intrinsics (`[future-new-N]f` …, N from wit-parser's
 `find_futures_and_streams`); a received future is a promise fed by `future.read`, a given one is `future.new` plus
 a native `then` handler that writes the settled value; reads and writes wait in the pending table, and the call
-goes on after `task.return` until its writes end. User guide:
+goes on after `task.return` until its writes end. Slice 6b: `stream<T>` ↔ an async iterable of chunks shaped like
+`list<T>`, mostly in the prelude (`builtins/stream.js`, kept when the world has a stream): a received stream is
+`$$StreamReader(h, id)`, an async generator reading with `__intrinsic_stream_read` (one 64 KiB `stream.read` per
+chunk, `[chunk, ended]`); a given one is `stream.new` plus `$$StreamPump(iterable, w, id)`, an async function whose
+`for await` writes each chunk with `__intrinsic_stream_write` (stored as a `list<T>`; a partial write goes on from
+the pending table); each drops its end in `finally`. The pump counts as pending until it drops the writable end. User guide:
 [user-worlds.md](user-worlds.md).)
 
 ### D5. Built-ins
