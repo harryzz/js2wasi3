@@ -191,6 +191,11 @@ pub trait Cx {
     fn bump_global(&mut self) -> u32;
     /// Global index of the first host global (commands only, see [`crate::host`]).
     fn host_globals(&mut self) -> u32;
+    /// Does the library have top-level code (`init`, T20)?
+    fn has_init(&mut self) -> bool;
+    /// A library's `init`: its function index, whether it may throw (or leave a rejection), and
+    /// whether it may queue jobs.
+    fn init_func(&mut self) -> (u32, bool, bool);
     /// Function index of the command's `main`, and whether it returns a value (T19: with a
     /// top-level `await` it's an async function returning its promise).
     fn main_func(&mut self) -> (u32, bool);

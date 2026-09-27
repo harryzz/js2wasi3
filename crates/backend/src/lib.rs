@@ -83,9 +83,10 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         }
     }
 
-    // A command (`wasi:cli/run`) always has the JS runtime and memory (for output buffers).
+    // A command (`wasi:cli/run`) always has the JS runtime and memory (for output buffers), a
+    // library with `init` the runtime (its globals come after the runtime's, T20).
     let command = module.main;
-    let js = uses_jsval(module) || command.is_some();
+    let js = uses_jsval(module) || command.is_some() || module.init.is_some();
     // Exports with a string at the boundary go through an ABI adapter (and need memory).
     let adapted: Vec<&ir::Export> = module
         .exports
@@ -94,6 +95,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             x.sig.params.contains(&AbiType::String)
                 || x.sig.result == Some(AbiType::String)
                 || x.sig.throws
+                || module.init.is_some()
         })
         .collect();
     let abi = !adapted.is_empty() || command.is_some();
@@ -133,7 +135,13 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let func_base = import_list.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let host_base = runtime::GLOBALS + abi as u32;
-    let host_globals = if command.is_some() { host::GLOBALS } else { 0 };
+    let host_globals = if command.is_some() {
+        host::GLOBALS
+    } else if module.init.is_some() {
+        abi::LIB_GLOBALS
+    } else {
+        0
+    };
     // Top-level function objects (shared closures): one global each, after the module's globals.
     let mut shared = Vec::new();
     for f in &module.functions {
@@ -240,7 +248,29 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             &ConstExpr::i32_const(abi::HEAP_BASE),
         );
     }
-    for _ in 0..host_globals {
+    if module.init.is_some() {
+        // `abi::LIB_GLOBALS`: the init state and its error.
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
+        );
+        globals.global(
+            GlobalType {
+                val_type: runtime::jsval(),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(wasm_encoder::HeapType::Abstract {
+                shared: false,
+                ty: wasm_encoder::AbstractHeapType::Eq,
+            }),
+        );
+    }
+    for _ in 0..if command.is_some() { host_globals } else { 0 } {
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
@@ -738,6 +768,20 @@ impl runtime::Cx for Emitter<'_> {
             .filter(|m| m.proto == b)
             .map(|m| (m.key.clone(), base + m.code.0, m.length))
             .collect()
+    }
+
+    fn has_init(&mut self) -> bool {
+        self.m.init.is_some()
+    }
+
+    fn init_func(&mut self) -> (u32, bool, bool) {
+        let init = self
+            .m
+            .init
+            .expect("only libraries with top-level code have an init");
+        let jobs = self.m.exports.iter().any(|x| x.sig.jobs);
+        let fails = ir::may_throw(self.m)[init.0 as usize] || jobs;
+        (self.func_base + init.0, fails, jobs)
     }
 
     fn main_func(&mut self) -> (u32, bool) {

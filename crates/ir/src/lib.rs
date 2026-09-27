@@ -66,7 +66,7 @@ pub mod suspend;
 mod throws;
 mod validate;
 
-pub use throws::may_throw;
+pub use throws::{can_queue, may_throw};
 pub use validate::validate;
 
 /// Value types. Wasm types get chosen in the backend: `Bool` is an `i32` 0/1, `JsVal` is `(ref null eq)`.
@@ -105,6 +105,9 @@ pub struct Module {
     /// The command entry point (a `wasi:cli/run` command runs it), for a module without exports.
     /// Takes no params and has no result.
     pub main: Option<FuncId>,
+    /// A library's top-level code (T20, F11): module evaluation, run once before the first
+    /// export call. Takes no params and has no result.
+    pub init: Option<FuncId>,
     /// Built-in prototype methods implemented by the prelude (T21): installed on their prototype
     /// in place of the sentinels.
     pub builtin_methods: Vec<BuiltinMethod>,
@@ -194,6 +197,9 @@ pub struct AbiSig {
     pub result: Option<AbiType>,
     /// The function may throw a JS value: the WIT result is `result<T, js-error>` (T12).
     pub throws: bool,
+    /// The call may queue promise jobs (T20, F65): they run after it, and an unhandled rejection
+    /// fails the call (`throws` is set too).
+    pub jobs: bool,
 }
 
 impl AbiSig {
@@ -203,6 +209,7 @@ impl AbiSig {
             params: vec![AbiType::F64; params as usize],
             result: result.then_some(AbiType::F64),
             throws: false,
+            jobs: false,
         }
     }
 }

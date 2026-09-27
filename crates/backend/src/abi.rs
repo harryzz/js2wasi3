@@ -17,8 +17,8 @@
 use js2wasi3_ir::{AbiSig, AbiType};
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType};
 
-use crate::object;
 use crate::runtime::{self, Cx, T_STRING};
+use crate::{object, promise};
 
 /// First address the allocator hands out (keeps 0 an invalid pointer).
 pub const HEAP_BASE: i32 = 8;
@@ -33,6 +33,12 @@ pub enum Helper {
     StringToUtf8,
     Utf8Len,
     Utf8Encode,
+    /// `()`: a library's `init` (T20, F11), run by the first export call. An `init` that threw
+    /// throws its error again on every later call (like a failed module evaluation).
+    Init,
+    /// `()`: after a library call (T20, F65): run the queued jobs, then throw the reason of the
+    /// first rejection nobody handled.
+    Settle,
 }
 
 impl Helper {
@@ -43,6 +49,8 @@ impl Helper {
             Helper::StringToUtf8 => "string_to_utf8",
             Helper::Utf8Len => "utf8_len",
             Helper::Utf8Encode => "utf8_encode",
+            Helper::Init => "module_init",
+            Helper::Settle => "settle_jobs",
         }
     }
 
@@ -54,6 +62,7 @@ impl Helper {
             Helper::StringToUtf8 => (vec![runtime::string_ref()], vec![I32, I32]),
             Helper::Utf8Len => (vec![runtime::string_ref()], vec![I32]),
             Helper::Utf8Encode => (vec![runtime::string_ref(), I32], vec![]),
+            Helper::Init | Helper::Settle => (vec![], vec![]),
         }
     }
 
@@ -69,8 +78,76 @@ impl Helper {
             }
             Helper::Utf8Len => utf8_len(),
             Helper::Utf8Encode => utf8_encode(),
+            Helper::Init => {
+                let base = cx.host_globals();
+                let (init, fails, jobs) = cx.init_func();
+                let settle = jobs.then(|| cx.helper(runtime::Helper::Abi(Helper::Settle)));
+                module_init(base, init, fails, settle)
+            }
+            Helper::Settle => {
+                let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
+                let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
+                let mut f = Function::new([(1, runtime::jsval())]);
+                let mut s = f.instructions();
+                s.call(drain);
+                s.call(unhandled).local_tee(0).ref_is_null();
+                s.if_(BlockType::Empty);
+                s.return_();
+                s.end();
+                s.local_get(0).throw(runtime::TAG);
+                s.end();
+                f
+            }
         }
     }
+}
+
+/// Library globals (after the bump pointer, where a command has its host globals): the `init`
+/// state (0: not run, 1: done, 2: threw) and the error it threw.
+pub const LIB_GLOBALS: u32 = 2;
+const G_INIT_STATE: u32 = 0;
+const G_INIT_ERROR: u32 = 1;
+
+/// `$module_init()`: see [`Helper::Init`]. `settle`: drain the jobs `init` queued.
+fn module_init(base: u32, init: u32, fails: bool, settle: Option<u32>) -> Function {
+    let mut f = Function::new([(1, runtime::jsval())]);
+    let mut s = f.instructions();
+    s.global_get(base + G_INIT_STATE).i32_const(1).i32_eq();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    if !fails {
+        s.i32_const(1).global_set(base + G_INIT_STATE);
+        s.call(init);
+        s.end();
+        return f;
+    }
+    s.global_get(base + G_INIT_STATE).i32_const(2).i32_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(base + G_INIT_ERROR).throw(runtime::TAG);
+    s.end();
+    s.i32_const(1).global_set(base + G_INIT_STATE);
+    s.block(BlockType::Result(runtime::jsval()));
+    s.try_table(
+        BlockType::Empty,
+        [Catch::One {
+            tag: runtime::TAG,
+            label: 0,
+        }],
+    );
+    s.call(init);
+    if let Some(settle) = settle {
+        s.call(settle);
+    }
+    s.return_();
+    s.end();
+    s.unreachable();
+    s.end();
+    s.local_tee(0).global_set(base + G_INIT_ERROR);
+    s.i32_const(2).global_set(base + G_INIT_STATE);
+    s.local_get(0).throw(runtime::TAG);
+    s.end();
+    f
 }
 
 fn mem(offset: u64, align: u32) -> MemArg {
@@ -115,6 +192,13 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
     let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
     let to_utf8 = (sig.result == Some(AbiType::String) || sig.throws)
         .then(|| cx.helper(runtime::Helper::Abi(Helper::StringToUtf8)));
+    // A library's `init` runs first, its jobs after the call (T20).
+    let init = cx
+        .has_init()
+        .then(|| cx.helper(runtime::Helper::Abi(Helper::Init)));
+    let settle = sig
+        .jobs
+        .then(|| cx.helper(runtime::Helper::Abi(Helper::Settle)));
     let nflat = flat_params(&sig.params).len() as u32;
     // Locals after the params: the (ptr, len) of a string, the return area, an f64 result,
     // the thrown value.
@@ -156,6 +240,9 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
             .i32_store(mem(offset + 4, 2));
     };
     if !sig.throws {
+        if let Some(init) = init {
+            s.call(init);
+        }
         args(&mut s);
         s.call(func);
         if let Some(to_utf8) = to_utf8 {
@@ -189,17 +276,32 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig) -> Function 
         }],
     );
     // Inside the `try_table`, which takes no values from outside.
+    if let Some(init) = init {
+        s.call(init);
+    }
     args(&mut s);
     s.call(func);
+    // The result waits in a local while the jobs run.
+    let settle = |s: &mut InstructionSink| {
+        if let Some(settle) = settle {
+            s.call(settle);
+        }
+    };
     match sig.result {
-        None => alloc(&mut s, payload as i32, size),
+        None => {
+            settle(&mut s);
+            alloc(&mut s, payload as i32, size);
+        }
         Some(AbiType::F64) => {
             s.local_set(num);
+            settle(&mut s);
             alloc(&mut s, payload as i32, size);
             s.local_get(ret).local_get(num).f64_store(mem(payload, 3));
         }
         Some(AbiType::String) => {
-            s.ref_cast_non_null(runtime::string());
+            s.local_set(exc);
+            settle(&mut s);
+            s.local_get(exc).ref_cast_non_null(runtime::string());
             alloc(&mut s, payload as i32, size);
             store_string(&mut s, to_utf8, payload);
         }

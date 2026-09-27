@@ -55,6 +55,19 @@ pub fn validate(m: &Module) -> Result<(), Vec<String>> {
         if !m.exports.is_empty() {
             errs.push("a module with `main` (a command) has no exports".into());
         }
+        if m.init.is_some() {
+            errs.push("a command has no `init`".into());
+        }
+    }
+    if let Some(init) = m.init {
+        match m.functions.get(init.0 as usize) {
+            Some(f) if f.params == 0 && f.result.is_none() => {}
+            Some(f) => errs.push(format!(
+                "init {}: must take no params and return nothing",
+                f.name
+            )),
+            None => errs.push(format!("init: no function #{}", init.0)),
+        }
     }
     for e in &m.exports {
         let Some(f) = m.functions.get(e.func.0 as usize) else {

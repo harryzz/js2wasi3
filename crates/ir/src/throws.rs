@@ -5,7 +5,30 @@
 //! function that may throw, a call through a value, or an intrinsic that may throw ([`Intrinsic::may_throw`]). A catch
 //! body is outside its `Try`'s protection. Recursion is handled by iterating to a fixpoint.
 
-use crate::{Expr, Module, Stmt};
+use crate::{Expr, Intrinsic, Module, Stmt, visit_exprs};
+
+/// Can the module queue a promise job at all (T20, F65)? Then a library drains the queue after
+/// each export call. Module-wide: getters, `valueOf` and other implicit calls can run any function.
+/// Before or after the suspension transform: an async function (generator) queues jobs.
+pub fn can_queue(m: &Module) -> bool {
+    let mut queue = m.functions.iter().any(|f| f.flags.is_async);
+    for f in &m.functions {
+        visit_exprs(&f.body, &mut |x| {
+            queue |= matches!(
+                x,
+                Expr::Intrinsic {
+                    op: Intrinsic::PromiseCtor
+                        | Intrinsic::QueueMicrotask
+                        | Intrinsic::Timer(_)
+                        | Intrinsic::AsyncStart
+                        | Intrinsic::NewAsyncGenerator { .. },
+                    ..
+                }
+            );
+        });
+    }
+    queue
+}
 
 /// For each function (by index): may a JS value be thrown out of it?
 pub fn may_throw(m: &Module) -> Vec<bool> {

@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slice 1 done; next: slice 2) | Depends on: T19
+Status: in progress (slices 1–2 done; next: slice 3) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -49,6 +49,34 @@ every local at each suspension).
 **Next smallest step:** slice 2, library runtime: exports drain the job queue and report unhandled rejections
 (F65), then library top-level code (F11).
 
+### Slice 2: library runtime (done 2026-09-27)
+- **Library init (F11):** a library's top-level code (anything beyond functions, exports and literal globals) is
+  lowered like a command's `main` into `ir::Module::init` (same globals, TDZ flags, classes). The export adapter
+  calls `abi::Helper::Init` (`module_init`) first: it runs `init` once (state and error in two library-only
+  globals after the bump pointer); an `init` that threw throws the same error on every call, like a failed module
+  evaluation. Every export of such a library goes through the adapter. A library with `init` links the JS
+  runtime (its globals come after the runtime's). Top-level `await` in a library is rejected (F120).
+- **Jobs (F65):** `ir::can_queue` (module-wide: an `async` function or generator, `Promise`, `queueMicrotask`,
+  timers) sets `AbiSig::jobs` on every export, and `throws` with it. `abi::Helper::Settle` (`settle_jobs`) runs
+  after `init` and after each call: drain the job queue, then throw the reason of the first unhandled rejection,
+  so the call returns `err` (an error's name and message; a non-error: `name: ""` and its `console.log` text). An
+  exception thrown by a job fails the call the same way.
+- Tests: `tests/fixtures/library/{init,init-throws,jobs}.js` (`.skip`: libraries) checked in
+  `crates/js2wasi3/tests/build.rs` (`library_init_runs_first`, incl. a numbers-only library;
+  `library_calls_run_their_jobs`); `unsupported.rs` (`module_level_rules`, `classes`) updated. `cargo test` ok;
+  `scripts/diff.sh -j 4`: 97 passed, 0 failed, 14 skipped; `hello.js` 55715 (unchanged: commands don't change).
+- Commands run: `cargo build --release`, `cargo test`, `scripts/diff.sh -j 4`, `wasm-tools validate` and
+  `wasmtime run --invoke` on the fixtures.
+
+**Not done (follow-ups):** F118 (state across calls on one instance is untested: `--invoke` makes one call per
+instance), F119 (every export of a library that can queue jobs or whose init may throw returns `result`), F120
+(top-level `await` in a library). F83 (`Math.random`/`wasi:random` in libraries) and `console`/timers in
+libraries stay open: they need imports in library worlds, and timers need async exports.
+
+**Next smallest step:** slice 3, async exports: `export async function f` → `async func` in the generated world,
+lifted with the async callback ABI (reuse `host::Helper::Loop` for timers and jobs), `task.return` of the settled
+value or `js-error`; test with `wasmtime run --invoke`.
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -70,7 +98,7 @@ Notes / Result). The slice numbers below are the pre-slice-1 ones: "Suggested sl
 ```sh
 scripts/check-tools.sh
 cargo build -q --release && cargo test -q --no-fail-fast 2>&1 | grep -E 'FAILED|panicked'   # nothing
-scripts/diff.sh -j 4 | tail -1                              # 97 passed, 0 failed, 11 skipped
+scripts/diff.sh -j 4 | tail -1                              # 97 passed, 0 failed, 14 skipped (after slice 2)
 target/release/js2wasi3 build tests/fixtures/hello.js -o /tmp/h.wasm && stat -c %s /tmp/h.wasm   # 55715
 ```
 
@@ -130,3 +158,7 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-26: 1c done: typed arrays. IR Builtin::{ArrayBuffer, TypedArray, Typed(k)}, TYPED_NAMES/SIZES, Intrinsic::Typed(TypedOp); runtime types $buffer/$typed (T_BUFFER 25, T_TYPED 26); backend typed.rs (element get/set with node's conversions, ops, printing `Uint8Array(n) [ … ]` / `ArrayBuffer { [Uint8Contents]: <…>, [byteLength]: n }`, names); object get/set/has/own_keys and builtin_tag handle typed arrays (gated on `$typed`, set by the lowering); prelude builtins/typedarray.js (constructors, from/of, %TypedArray%.prototype methods and getters, ArrayBuffer); BYTES_PER_ELEMENT; native values/keys/entries/[Symbol.iterator] on %TypedArray%.prototype. builtins/typed-arrays.js, typed-arrays-more.js PASS; cargo test ok; diff.sh 97/0/11; hello.js 55715 (+325: 22 more always-declared global slots and 2 types, F113).
 - 2026-09-26: slice 1 done: Notes / Result, README (F72 ticked, F115–F117, Next up), design.md D3/D5, keywords.md, README.md.
 - 2026-09-26: handoff refreshed for slice 2 (state, baseline 97/0/11, hello.js 55715).
+- 2026-09-26: slice 2 started (F65, F11). Baseline: cargo test ok, diff.sh 97/0/11, hello.js 55715. Design: a library's top-level code becomes `ir::Module::init` (lowered like a command's `main`); the export adapter runs it once before the first call (state + error in 2 library-only globals after the bump pointer: an init that threw rethrows its error on every call, like a failed ES module evaluation), drains the job queue after init and after each call, and fails the call with the first unhandled rejection's reason. `AbiSig::jobs` (drain after the call) = the module can queue jobs && `ir::may_queue(f)`; `throws` also covers jobs and a throwing/queuing init. Top-level `await`, console, timers stay rejected in libraries (async exports: slice 3).
+- 2026-09-27: F11 + F65 implemented. IR: `Module::init`, `AbiSig::jobs`, `ir::can_queue` (module-wide: implicit calls can run any function); lowering: library top-level code goes through the command path into `init` (top-level `await` in a library rejected); backend: `abi::Helper::Init` (`module_init`: state + error globals, only in libraries with init) and `Helper::Settle` (`settle_jobs`: drain, throw the first unhandled rejection's reason), every export of a library with init goes through the adapter. Fixtures `library/{init,init-throws,jobs}.js`: all `--invoke` results as node gives (init's Map/class/JSON, init error on every call, jobs drained before returning, rejection in a job → err).
+- 2026-09-27: libraries with only literal globals keep the old path (no `init`: `static_globals`); a numbers-only library with `init` now links the JS runtime (its globals were misnumbered: emit test). unsupported tests updated. cargo test ok; diff.sh 97/0/14; hello.js 55715.
+- 2026-09-27: slice 2 done: Notes / Result, README (F11, F65 ticked; F118–F120; Next up: slice 3), design.md D4, lower docs.

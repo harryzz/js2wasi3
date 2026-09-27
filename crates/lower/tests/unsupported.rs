@@ -131,13 +131,23 @@ fn module_level_rules() {
         one("import { x } from './x.js';"),
         "1:1 unsupported: import of another module (multi-file modules, F7) (planned: not scheduled)"
     );
+    // T20 (F11): a library's top-level code is its `init`; `await` there needs async exports.
+    lowers("export function f() { return a; }\nlet a = 1;\na = 2;");
+    lowers("export function f() { return a; }\nlet a = 1 + 2;");
     assert_eq!(
-        one("export function f() {}\nlet a = 1;\na = 2;"),
-        "3:1 unsupported: top-level ExpressionStatement in a module with exports (library init code, F11; a file without exports is a command and may have top-level code) (planned: T20)"
+        one("export function f() {}\nawait null;"),
+        "2:1 unsupported: top-level `await` in a module with exports (planned: T20)"
     );
     assert_eq!(
-        one("export function f() {}\nlet a = 1 + 2;"),
-        "2:5 unsupported: top-level variable whose initializer isn't a literal in a module with exports (library init code, F11) (planned: T20)"
+        one("export function f() {}\nfor await (const x of []) {}"),
+        "2:1 unsupported: top-level `await` in a module with exports (planned: T20)"
+    );
+    // Not in a nested function.
+    lowers("export function f() { return 1; }\nconst g = async () => { await null; };\ng();");
+    // Output and timers are still command-only.
+    assert_eq!(
+        one("export function f() {}\nconsole.log(1);"),
+        "2:1 unsupported: `console` in a module with exports (a library can't write to stdout yet) (planned: T20)"
     );
     assert_eq!(
         one("export let a = 1;"),
@@ -435,8 +445,6 @@ fn classes() {
     ] {
         assert_eq!(one(src), err, "{src}");
     }
-    assert!(
-        one("class A {}\nexport function f() { return 1; }")
-            .starts_with("1:1 unsupported: top-level ClassDeclaration in a module with exports")
-    );
+    // T20: a library's top-level class is set by its `init`.
+    lowers("class A {}\nexport function f() { return new A() instanceof A ? 1 : 0; }");
 }

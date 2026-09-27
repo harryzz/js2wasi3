@@ -382,3 +382,67 @@ fn concurrent_timers_overlap() {
         "concurrent {both} ms vs sequential {seq} ms"
     );
 }
+
+/// T20 (F11): a library's top-level code runs before the first export call (each `--invoke` is a
+/// fresh instance, so every call sees it run once).
+#[test]
+fn library_init_runs_first() {
+    let out = out_dir("init").join("init.wasm");
+    let b = build(&fixture("library/init.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    for (call, want) in [
+        ("square(3)", "ok(9)"),
+        ("greet()", "ok(\"hello, world\")"),
+        ("lookup(\"b\")", "ok(2)"),
+        ("lookup(\"z\")", "ok(-1)"),
+        ("norm()", "ok(5)"),
+        ("count()", "ok(1)"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+    // An init that throws fails every call with its error, like a failed module evaluation.
+    let out = out_dir("init-throws").join("init-throws.wasm");
+    let b = build(&fixture("library/init-throws.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let err = "err({name: \"SyntaxError\", message: \"Expected property name or \\'}\\' in JSON at position 1 (line 1 column 2)\"})";
+    for call in ["one()", "limit()"] {
+        assert_eq!(invoke(&out, call), err, "{call}");
+    }
+    // Only numbers: no JS values anywhere but the init state, and no `result`.
+    let dir = out_dir("init-numbers");
+    let src = dir.join("sum.js");
+    std::fs::write(
+        &src,
+        "let total = 0;\nfor (let i = 1; i <= 4; i++) total += i;\nexport function sum(x) { return total + x; }\n",
+    )
+    .unwrap();
+    let out = dir.join("sum.wasm");
+    let b = build(&src, &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert_eq!(invoke(&out, "sum(0.5)"), "10.5");
+}
+
+/// T20 (F65): jobs queued by a library call run before it returns; a rejection nobody handled
+/// (also one from a job) fails the call.
+#[test]
+fn library_calls_run_their_jobs() {
+    let out = out_dir("jobs").join("jobs.wasm");
+    let b = build(&fixture("library/jobs.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    for (call, want) in [
+        ("after-init()", "ok(\"init job;\")"),
+        ("call()", "ok(\"init job;call;\")"),
+        (
+            "rejects()",
+            "err({name: \"RangeError\", message: \"late failure\"})",
+        ),
+        ("handled()", "ok(2)"),
+        (
+            "throws-in-job()",
+            "err({name: \"TypeError\", message: \"job failed\"})",
+        ),
+        ("rejects-in-then()", "err({name: \"\", message: \"plain\"})"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+}

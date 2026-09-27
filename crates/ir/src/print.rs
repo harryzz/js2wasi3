@@ -60,6 +60,10 @@ impl Printer<'_> {
             let s = format!("main = {}", self.func_name(main.0));
             self.line(&s);
         }
+        if let Some(init) = self.m.init {
+            let s = format!("init = {}", self.func_name(init.0));
+            self.line(&s);
+        }
     }
 
     fn func_name(&self, i: u32) -> String {

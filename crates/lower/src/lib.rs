@@ -83,7 +83,9 @@
 //! run before the declaration ([`Lowerer::tdz_flags`], F22).
 //! `console.log`/`info`/`debug` (stdout) and `console.error`/`warn` (stderr) take primitives:
 //! each is shown like node (`-0` as `-0`), joined by spaces, plus a newline. A library (a file
-//! with exports) can't have top-level code or `console` yet (T20).
+//! with exports) can't use `console` yet (T20); its
+//! top-level code (beyond literal globals) is lowered the same way into `ir::Module::init`, which the
+//! first export call runs (T20, F11).
 //!
 //! Anything else produces `unsupported: <construct> (planned: <task>)` at its source
 //! position. The lowering never guesses: a construct it can't lower exactly is rejected.
@@ -749,6 +751,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let mut fns: Vec<(&'a Function<'a>, FuncId)> = Vec::new();
         // A command's top-level code, in order (everything but function declarations).
         let mut top: Vec<&'a Statement<'a>> = Vec::new();
+        // A library needs an `init` only for code beyond literal globals (T20).
+        let init = !self.command
+            && body.iter().any(|stmt| {
+                !self.p.in_prelude(stmt.span().start)
+                    && !matches!(
+                        stmt,
+                        Statement::FunctionDeclaration(_) | Statement::EmptyStatement(_)
+                    )
+                    && stmt.as_module_declaration().is_none()
+                    && !self.static_globals(stmt)
+            });
         for stmt in body.iter() {
             if self.p.in_prelude(stmt.span().start) {
                 // Only the needed built-ins (functions, and state variables as globals).
@@ -757,7 +770,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
                 continue;
             }
-            if self.command
+            if (self.command || init)
                 && !matches!(stmt, Statement::FunctionDeclaration(_))
                 && stmt.as_module_declaration().is_none()
             {
@@ -772,13 +785,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             let _ = self.declare_top(stmt, &mut fns);
         }
-        if self.command {
+        // A library's top-level code is its `init` (T20, F11), lowered like a command's `main`.
+        if self.command || init {
             self.nested_vars();
             self.tdz_flags(&top);
-            let mut f = ir::Function::new("main", &[], None);
+            let name = if self.command { "main" } else { "init" };
+            let mut f = ir::Function::new(name, &[], None);
             f.pos = Some(Pos { line: 1, col: 1 });
             self.main = Some(self.module.add_function(f));
-            self.module.main = self.main;
+            if self.command {
+                self.module.main = self.main;
+            } else {
+                self.module.init = self.main;
+            }
             self.func_params.insert(self.main.unwrap(), Vec::new());
         }
         self.declare_nested();
@@ -853,6 +872,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if let Some(main) = self.main {
             self.lower_main(main, &top);
+            if !self.command && self.module.function(main).flags.is_async {
+                self.library_await(&top);
+            }
         }
         // Pass 3: exports.
         for e in &self.p.exports {
@@ -1279,6 +1301,35 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// Reject a library's top-level `await` (its `init` runs synchronously before the first export
+    /// call; async module evaluation needs async exports, T20).
+    fn library_await(&mut self, top: &[&'a Statement<'a>]) {
+        let nodes = self.p.semantic.nodes();
+        let mut spans = Vec::new();
+        for node in nodes.iter() {
+            let span = match node.kind() {
+                AstKind::AwaitExpression(a) => a.span,
+                AstKind::ForOfStatement(f) if f.r#await => f.span,
+                _ => continue,
+            };
+            let in_top = top
+                .iter()
+                .any(|s| s.span().start <= span.start && span.start < s.span().end);
+            let in_function = nodes.ancestors(node.id()).any(|a| {
+                matches!(
+                    a.kind(),
+                    AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+                )
+            });
+            if in_top && !in_function {
+                spans.push(span);
+            }
+        }
+        for span in spans {
+            self.unsupported(span, "top-level `await` in a module with exports", "T20");
+        }
+    }
+
     /// `main`: a command's top-level code. Top-level variables are globals set in place.
     fn lower_main(&mut self, id: FuncId, top: &[&'a Statement<'a>]) {
         let func = self.module.functions[id.0 as usize].clone();
@@ -1362,6 +1413,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         result
     }
 
+    /// A top-level declaration of plain names with literal (or no) initializers: globals with an
+    /// initial value, no code.
+    fn static_globals(&self, stmt: &'a Statement<'a>) -> bool {
+        let Statement::VariableDeclaration(d) = stmt else {
+            return false;
+        };
+        !matches!(
+            d.kind,
+            VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing
+        ) && d.declarations.iter().all(|decl| {
+            matches!(decl.id, BindingPattern::BindingIdentifier(_))
+                && decl.init.as_ref().is_none_or(|e| self.literal(e).is_some())
+        })
+    }
+
     fn declare_globals(&mut self, d: &'a VariableDeclaration<'a>) -> R<()> {
         let mut result = Ok(());
         for decl in &d.declarations {
@@ -1428,6 +1494,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         use ir::AbiType;
         let mut done: HashMap<FuncId, (FuncId, ir::AbiSig)> = HashMap::new();
         let throws = ir::may_throw(&self.module);
+        // Jobs run after each call; an unhandled rejection, or an `init` that threw, fails it (T20).
+        let jobs = ir::can_queue(&self.module);
+        let init_throws = self.module.init.is_some_and(|f| throws[f.0 as usize]);
         for i in 0..self.module.exports.len() {
             let func = self.module.exports[i].func;
             if let Some((w, sig)) = done.get(&func) {
@@ -1459,7 +1528,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     None if result_kind == Kind::Str => AbiType::String,
                     None => AbiType::F64,
                 }),
-                throws: throws[func.0 as usize],
+                throws: throws[func.0 as usize] || jobs || init_throws,
+                jobs,
             };
             let direct = lead == 0
                 && params

@@ -125,6 +125,10 @@ The entry module's ES exports become the world's exports. WIT types map to JS:
 v0 generates the WIT from the export signatures (all `f64`). Later versions take a user `.wit` world.
 JS names become kebab-case WIT names, and the world is named after the entry file (or `--world`).
 Parameter and result types (`f64` / `string`) come from JSDoc or usage (T09). See [wit-names.md](wit-names.md).
+(T20 slice 2: a library's top-level code is `ir::Module::init`, run once by the first export call through the
+export adapters (`abi::Helper::Init`); an `init` that threw fails every later call with the same error. When the
+module can queue jobs (`ir::can_queue`), each call ends by draining them (`abi::Helper::Settle`), and an unhandled
+rejection (or a job's exception) makes the call return `err`.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
