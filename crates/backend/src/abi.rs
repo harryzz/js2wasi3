@@ -573,15 +573,33 @@ pub(crate) fn size_align(t: AbiType) -> (u64, u64) {
 /// Does an export's adapter use linear memory (strings, a `result`, compound types)?
 pub fn needs_memory(sig: &AbiSig) -> bool {
     let mem = |t: &AbiType| matches!(t, AbiType::String | AbiType::Compound(_));
-    sig.throws || sig.params.iter().any(mem) || sig.result.as_ref().is_some_and(mem)
+    params_in_memory(sig)
+        || sig.throws
+        || sig.params.iter().any(mem)
+        || sig.result.as_ref().is_some_and(mem)
 }
 
-/// Core params of an export.
-pub fn flat_params(sig: &AbiSig) -> Vec<ValType> {
+/// The flat values of an export's params (before the 16-value limit).
+fn flat_param_values(sig: &AbiSig) -> Vec<ValType> {
     sig.params
         .iter()
         .flat_map(|p| wit::flatten(&sig.wit(*p)))
         .collect()
+}
+
+/// Core params of an export: past 16 flat values, a pointer to them in memory (a tuple).
+pub fn flat_params(sig: &AbiSig) -> Vec<ValType> {
+    let flat = flat_param_values(sig);
+    if flat.len() > MAX_FLAT_PARAMS {
+        vec![ValType::I32]
+    } else {
+        flat
+    }
+}
+
+/// Do an export's params come in memory (more than 16 flat values)?
+fn params_in_memory(sig: &AbiSig) -> bool {
+    flat_param_values(sig).len() > MAX_FLAT_PARAMS
 }
 
 /// The `js-error` record of a generated world's throwing export.
@@ -695,21 +713,33 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
     let mut s = InstructionSink::new(&mut body);
     // The arguments as the IR function takes them.
     let args = |cx: &mut dyn Cx, g: &mut wit::Gen, s: &mut InstructionSink| {
+        // The flat values: the core params, or past 16 locals loaded from the tuple they're in.
+        let values = flat_param_values(sig);
+        let slots: Vec<u32> = if params_in_memory(sig) {
+            let tuple = WitType::Tuple(sig.params.iter().map(|p| sig.wit(*p)).collect());
+            let at = g.local(ValType::I32);
+            s.local_get(0).local_set(at);
+            wit::flat_load(g, s, &tuple, at, 0);
+            let slots: Vec<u32> = values.iter().map(|v| g.local(*v)).collect();
+            for l in slots.iter().rev() {
+                s.local_set(*l);
+            }
+            slots
+        } else {
+            (0..values.len() as u32).collect()
+        };
         let mut i = 0;
         for p in &sig.params {
             if let AbiType::Compound(_) = p {
                 let t = sig.wit(*p);
-                let flat = wit::flatten(&t);
-                let slots: Vec<(u32, ValType)> = flat
-                    .iter()
-                    .enumerate()
-                    .map(|(j, v)| (i + j as u32, *v))
-                    .collect();
+                let n = wit::flatten(&t).len();
+                let slots: Vec<(u32, ValType)> =
+                    (i..i + n).map(|j| (slots[j], values[j])).collect();
                 wit::lift_flat(cx, g, s, &t, &slots);
-                i += flat.len() as u32;
+                i += n;
                 continue;
             }
-            s.local_get(i);
+            s.local_get(slots[i]);
             i += 1;
             match p {
                 AbiType::Bool | AbiType::F64 => {}
@@ -732,7 +762,7 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
                     s.call(from_code_point.unwrap());
                 }
                 AbiType::String => {
-                    s.local_get(i).call(utf8_to_string.unwrap());
+                    s.local_get(slots[i]).call(utf8_to_string.unwrap());
                     i += 1;
                 }
                 AbiType::Compound(_) => unreachable!(),

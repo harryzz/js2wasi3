@@ -102,16 +102,6 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         .collect();
     // Linear memory: output buffers, strings and `result`s at the boundary.
     let abi = adapted.iter().any(|x| abi::needs_memory(&x.sig)) || command.is_some();
-    for x in &adapted {
-        // More flat params than this are passed through memory: not implemented (F21).
-        if abi::flat_params(&x.sig).len() > abi::MAX_FLAT_PARAMS {
-            bail!(
-                "unsupported: export `{}` has more than {} parameter values at the boundary (a string counts twice) (planned: F21)",
-                x.name,
-                abi::MAX_FLAT_PARAMS
-            );
-        }
-    }
     let mut types = TypeSection::new();
     if js {
         runtime::types(&mut types);

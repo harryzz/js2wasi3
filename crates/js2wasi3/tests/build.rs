@@ -611,6 +611,65 @@ fn user_world_compound_types() {
 }
 
 #[test]
+fn user_world_lists_and_variants() {
+    let out = out_dir("lists").join("lists.wasm");
+    let dir = fixture("library/lists");
+    let b = build(
+        &dir.join("lists.js"),
+        &out,
+        &["--wit", dir.join("world.wit").to_str().unwrap()],
+    );
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    // jco's shapes: numeric lists as typed arrays (any array-like lowers), other lists as
+    // arrays, variants as `{tag, val}` (no `val` without a payload). Params past 16 flat values
+    // come in memory. Results as node gives with those arguments.
+    for (call, want) in [
+        ("sum([1.5, 2.0, 3.0])", "6.5"),
+        ("sum([])", "0"),
+        ("reverse-bytes([1, 2, 3])", "[3, 2, 1]"),
+        ("bytes-from-array(4)", "[0, 100, 200, 44]"),
+        ("byte-info([9, 8])", "\"true 2 9\""),
+        ("words(\"a bc d\")", "[\"a\", \"bc\", \"d\"]"),
+        ("join-words([\"x\", \"y\"])", "\"x+y\""),
+        (
+            "items([{name: \"a\", tags: [\"t\"]}, {name: \"b\", tags: []}])",
+            "[{name: \"A\", tags: [\"t\", \"seen\"]}, {name: \"B\", tags: [\"seen\"]}]",
+        ),
+        ("matrix(3)", "[[-1, 1, 2], [3, -1, 5], [6, 7, -1]]"),
+        ("floats([1.5, 0.1])", "[3, 0.2]"),
+        ("wide([1, 2])", "[2, 3]"),
+        ("area(circle(2.0))", "13"),
+        ("area(rect((2.0, 4.0)))", "8"),
+        ("area(empty)", "0"),
+        ("area(named(\"abcd\"))", "4"),
+        (
+            "shapes()",
+            "[circle(1.5), rect((2, 3)), empty, named(\"hex\")]",
+        ),
+        ("grow(circle(1.0))", "ok(circle(2))"),
+        ("grow(empty)", "err(\"can\\'t grow empty\")"),
+        (
+            "count-many((1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1), \"abc\", 100)",
+            "119",
+        ),
+        (
+            "many-strings(\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\", \"i\")",
+            "\"abcdefghi\"",
+        ),
+        ("slow-bytes(3)", "[7, 7, 7]"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+    // A `tag` that isn't a case traps.
+    let r = Command::new("wasmtime")
+        .args(["run", "--invoke", "bad-shape()"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(!r.status.success());
+}
+
+#[test]
 fn user_world_mismatches() {
     let dir = out_dir("world-mismatch");
     std::fs::create_dir_all(&dir).unwrap();
@@ -649,10 +708,10 @@ fn user_world_mismatches() {
         "{e}"
     );
     let e = err(
-        "package a:b;\nworld w { export f: func(a: list<u8>); }\n",
+        "package a:b;\nworld w { export f: func(a: future<u8>); }\n",
         "export function f(a) {}\n",
     );
-    assert!(e.contains("parameter `a` of `f`: type `list<…>` (a list) isn't supported yet (planned: T20 slice 4b-2)"), "{e}");
+    assert!(e.contains("parameter `a` of `f`: type `future<…>` (a future or stream) isn't supported yet (planned: T20 slice 6)"), "{e}");
     let e = err(
         "package a:b;\nworld w { export f: async func() -> u32; }\n",
         "export async function f() { await new Promise((r) => setTimeout(r, 1)); return 1; }\n",

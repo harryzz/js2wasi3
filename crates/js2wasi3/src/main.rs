@@ -234,6 +234,12 @@ fn wit_type(t: &component::Ty, scalar: &dyn Fn(component::ValType) -> ir::AbiTyp
         }
         Ty::Enum(cs) => ir::WitType::Enum(cs.clone()),
         Ty::Flags(fs) => ir::WitType::Flags(fs.iter().map(|f| camel_case(f)).collect()),
+        Ty::Variant(cs) => ir::WitType::Variant(
+            cs.iter()
+                .map(|(n, t)| (n.clone(), t.as_ref().map(sub)))
+                .collect(),
+        ),
+        Ty::List(t) => ir::WitType::List(Box::new(sub(t))),
     }
 }
 

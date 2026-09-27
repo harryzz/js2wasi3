@@ -1,0 +1,25 @@
+package acme:lists;
+
+world lists {
+  record item { name: string, tags: list<string> }
+  variant shape { circle(f64), rect(tuple<f64, f64>), empty, named(string) }
+  type big = tuple<u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8>;
+
+  export sum: func(xs: list<f64>) -> f64;
+  export reverse-bytes: func(b: list<u8>) -> list<u8>;
+  export bytes-from-array: func(n: u32) -> list<u8>;
+  export byte-info: func(b: list<u8>) -> string;
+  export words: func(s: string) -> list<string>;
+  export join-words: func(ws: list<string>) -> string;
+  export items: func(xs: list<item>) -> list<item>;
+  export matrix: func(n: u32) -> list<list<s32>>;
+  export floats: func(xs: list<f32>) -> list<f32>;
+  export wide: func(xs: list<u64>) -> list<u64>;
+  export area: func(s: shape) -> f64;
+  export shapes: func() -> list<shape>;
+  export grow: func(s: shape) -> result<shape, string>;
+  export count-many: func(a: big, b: string, c: u32) -> u32;
+  export many-strings: func(a: string, b: string, c: string, d: string, e: string, f: string, g: string, h: string, i: string) -> string;
+  export slow-bytes: async func(n: u32) -> list<u8>;
+  export bad-shape: func() -> shape;
+}

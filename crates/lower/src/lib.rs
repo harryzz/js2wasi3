@@ -867,6 +867,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         // A user world's signatures (T20): its parameter types, checked against the functions.
         if let Some(boundary) = self.boundary {
+            if boundary
+                .values()
+                .any(|w| w.types.iter().any(ir::WitType::has_typed))
+            {
+                // Numeric lists are typed arrays (T20 slice 4b-2).
+                self.module.names.insert("$typed".to_string());
+            }
             for e in &self.p.exports {
                 let Some(Binding::Func(func)) =
                     e.local.as_deref().and_then(|l| self.names.get(l)).copied()

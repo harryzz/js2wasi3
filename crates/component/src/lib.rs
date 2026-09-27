@@ -271,7 +271,7 @@ fn ty(t: ValType) -> &'static str {
 }
 
 /// A WIT type at a user world's boundary (T20: scalars, slice 4b-1: the fixed-size compound
-/// types). Names are WIT names.
+/// types, slice 4b-2: lists and variants). Names are WIT names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Scalar(ValType),
@@ -284,6 +284,8 @@ pub enum Ty {
     Record(Vec<(String, Ty)>),
     Enum(Vec<String>),
     Flags(Vec<String>),
+    Variant(Vec<(String, Option<Ty>)>),
+    List(Box<Ty>),
 }
 
 /// A function a user world exports (T20).
@@ -313,7 +315,7 @@ pub struct UserWorld {
 
 /// Load `world` (a name, `ns:pkg/world` or `None` for the only one) from the WIT file or
 /// directory `path`. The vendored WASI 0.3.1 packages are available to it. Every function it
-/// exports must have scalar parameter and result types (slice 4a); interface exports aren't
+/// exports must have supported parameter and result types (no resources, futures, streams); interface exports aren't
 /// supported yet.
 pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld> {
     let mut resolve = Resolve::default();
@@ -430,10 +432,14 @@ fn boundary_type(resolve: &Resolve, t: &Type) -> Result<Ty, String> {
             return later("flags with more than 32 flags", "later");
         }
         TypeDefKind::Flags(f) => Ty::Flags(f.flags.iter().map(|f| f.name.clone()).collect()),
-        TypeDefKind::List(_) | TypeDefKind::FixedLengthList(..) => {
-            return later("a list", "T20 slice 4b-2");
-        }
-        TypeDefKind::Variant(_) => return later("a variant", "T20 slice 4b-2"),
+        TypeDefKind::List(t) => Ty::List(Box::new(sub(t)?)),
+        TypeDefKind::FixedLengthList(..) => return later("a fixed-length list", "later"),
+        TypeDefKind::Variant(v) => Ty::Variant(
+            v.cases
+                .iter()
+                .map(|c| Ok((c.name.clone(), c.ty.as_ref().map(sub).transpose()?)))
+                .collect::<Result<_, String>>()?,
+        ),
         TypeDefKind::Future(_) | TypeDefKind::Stream(_) => {
             return later("a future or stream", "T20 slice 6");
         }

@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slices 1–3, 4a, 4b-1 done; next: slice 4b-2) | Depends on: T19
+Status: in progress (slices 1–4 done; next: slice 5, imports) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -190,6 +190,39 @@ value that doesn't fit its WIT type traps; jco throws a TypeError, which a `resu
 with the typed-array runtime; results: allocate with `cabi_realloc`, lower each element), then `variant`
 (`{tag, val}`, like the nested `result`), then parameters in memory past 16 flat values (F21).
 
+### Slice 4b-2: lists, variants, params in memory (done 2026-09-27)
+- **Types:** `ir::WitType::{List, Variant}`, `component::Ty::{List, Variant}` (fixed-length lists are rejected).
+  `WitType::typed_kind`: a `list` of `s8`/`u8`/`s16`/`u16`/`s32`/`u32`/`f32`/`f64` is the matching typed array,
+  as in jco (`list<u8>` ↔ `Uint8Array`); 64-bit lists are plain arrays of numbers (F124). Other lists are arrays;
+  a variant is `{ tag, val }` with the case's WIT name, and no `val` for a case without a payload (jco's
+  variant; a nested `result` keeps `val: undefined`).
+- **Backend (`wit.rs`):** lists flatten to `(ptr, len)`, `(8, 4)` in memory; variants like `result` with
+  `n` cases. Lifting: `lift_mem` (= `flat_load` + `lift_flat`) per element; a typed array is made with
+  `TypedOp::New` and its bytes copied. Lowering: `cabi_realloc` for the elements; a typed array of the same kind
+  is copied byte by byte, any other value as an array-like (`length`, then each index). `result` and `variant`
+  share `lift_cases`/`lower_cases` (a `tag` that isn't a case traps). The lowering sets `$typed` when a world
+  has typed lists (element access and printing).
+- **Params past 16 flat values (F21):** the export takes one pointer to the params' tuple (`abi::flat_params`);
+  the adapter loads the flat values from it into locals, then lifts as usual (before resetting the bump
+  allocator). The backend's rejection is gone.
+- Tests: `tests/fixtures/library/lists/{world.wit,lists.js}` (lists of numbers/bytes/strings/records/lists,
+  `f32`/`u64` lists, variants with and without payloads, a `result<variant, string>`, 16 + 3 and 9-string
+  params, an async `list<u8>`, a trap) in `crates/js2wasi3/tests/build.rs` (`user_world_lists_and_variants`;
+  results checked against node calling the module with jco-shaped arguments); `user_world_mismatches` now uses
+  `future<u8>` as its unsupported type. `cargo test` ok; `scripts/diff.sh -j 4`: 97 passed, 0 failed, 16 skipped;
+  sizes unchanged (`hello.js` 55715, `add.js` 289, `library/async.js` 76153, `library/jobs.js` 65430).
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets` (the old warning only),
+  `scripts/diff.sh -j 4`, `wasm-tools validate`, `wasmtime run --invoke`.
+
+**Not done (follow-ups):** F129 (lists are copied one byte / element at a time), F55 (rest params in exports)
+stays open: a WIT signature can't take a variable number of params; a `list` param would be a different JS
+signature. F127, F128 retargeted to later.
+
+**Next smallest step:** slice 5, imports: `import { f } from "ns:pkg/iface"` for a user world's imported
+functions (sync first: the adapters in reverse, lowering JS values into the flat params / memory and lifting the
+result), then `async func` imports via `[async-lower]` + a subtask in the waitable set, surfaced as a Promise.
+Acceptance: a library world with one async export and one async import, composed with a test component via `wac`.
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -286,3 +319,6 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: 4b agreed with the user: a throw becomes `err` by jco's convention (a thrown value's own `payload` property, else a thrown Error traps, else the value itself, lowered as `E`; a mismatch traps). Split: 4b-1 = `result`, `option`, `tuple`, `record`, `enum`, `flags` (≤ 16 flat params, results in a return area, JS shapes as jco: option ↔ value/undefined, tuple ↔ array, record/flags ↔ object with camelCase keys, enum ↔ its WIT name, a nested `result` ↔ `{tag, val}`); 4b-2 = `list<T>` (`list<u8>` ↔ Uint8Array), `variant`, params in memory (F21).
 - 2026-09-27: 4b-1 plan: IR `AbiType::Compound(id)` into `Module::wit_types` (a `WitType` tree), `AbiSig::err` (js-error / none / a type); backend `wit.rs`: `flatten`/`size_align` (joins), `lift_flat` (params → JS values), `lower_mem` (JS value → memory), `flat_load` (memory → flat values, for `task.return`), with locals allocated while generating (body built in a buffer, then `Function::raw`).
 - 2026-09-27: 4b-1 done: `ir::WitType`/`ErrType`, `backend/src/wit.rs`, adapter rebuilt around the return area (+ `Finish(task_return)`), component `Ty`, CLI camelCase keys. Size: first +1.9 KB on library/async.js (the flat load was emitted in both the ok and err paths of every `finish`); one delivery point and merged local declarations brought it to +174. Fixture `library/compound`, test `user_world_compound_types`. cargo test ok; diff.sh 97/0/16; hello.js 55715.
+- 2026-09-27: 4b-2 started: list<T> (list<u8> ↔ Uint8Array), variant, params in memory past 16 flat values (F21).
+- 2026-09-27: 4b-2 implemented: `ir::WitType::{List, Variant}` (`typed_kind`: numeric lists up to 32 bits and `f64` are typed arrays, as in jco; 64-bit lists plain arrays), component `Ty::{List, Variant}`; backend `wit.rs`: flatten/layout, `lift_mem` (flat_load + lift_flat), lists lifted from memory (typed arrays by byte copy, others element by element) and lowered with `cabi_realloc` (a typed array of the same kind: byte copy; any array-like: `length` + indices), variants and nested results share `lift_cases`/`lower_cases` (a variant case without payload has no `val`, like jco); params past 16 flat values come as a pointer to their tuple (F21; the backend's bail removed). Lowering sets `$typed` when a world has typed lists. Fixture `library/lists/{world.wit,lists.js}`: every call as expected on the first build.
+- 2026-09-27: 4b-2 done: user_world_lists_and_variants passes; cargo test ok, clippy (old warning only), diff.sh 97/0/16, sizes unchanged (hello.js 55715, add.js 289, library/async.js 76153). Notes / Result, README (Next up: slice 5; F21 ticked; F127/F128 retargeted; F129), design.md D4, README.md.

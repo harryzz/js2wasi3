@@ -5,17 +5,22 @@
 //! - [`lift_flat`]: a parameter's flat core values → a JS value.
 //! - [`lower_mem`]: a JS value → the type's layout in memory (results go through a return area).
 //! - [`flat_load`]: memory → flat core values (`task.return` of an async export).
+//! - [`lift_mem`]: memory → a JS value (list elements, parameters past 16 flat values).
+//!
+//! A list's elements are in memory from `cabi_realloc` (results: the adapter's bump allocator,
+//! reset by the next call). Numeric lists are typed arrays ([`WitType::typed_kind`]), copied
+//! byte by byte; any other array-like (`length`, indices) lowers too.
 //!
 //! The generated code allocates locals as it goes ([`Gen`]), so functions using it are built
 //! into a buffer first. A JS value that doesn't fit the type traps (an `enum` string that isn't
 //! a case, a `result` object whose `tag` is neither `ok` nor `err`).
 
-use js2wasi3_ir::{AbiType, WitType};
+use js2wasi3_ir::{AbiType, TYPED_SIZES, TypedOp, WitType};
 use wasm_encoder::{BlockType, InstructionSink, MemArg, ValType};
 
 use crate::abi;
-use crate::runtime::{self, Cx, G_FALSE, G_TRUE, G_UNDEFINED, T_VALS};
-use crate::{array, object};
+use crate::runtime::{self, Cx, G_FALSE, G_TRUE, G_UNDEFINED, T_BUFFER, T_BYTES, T_TYPED, T_VALS};
+use crate::{array, object, typed};
 
 /// Locals allocated while generating code: indices from `base`.
 pub struct Gen {
@@ -70,7 +75,24 @@ pub fn flatten(t: &WitType) -> Vec<ValType> {
         WitType::Enum(_) => vec![ValType::I32],
         WitType::Flags(fs) if fs.is_empty() => Vec::new(),
         WitType::Flags(_) => vec![ValType::I32],
+        WitType::Variant(cs) => {
+            let mut joined = Vec::new();
+            for (_, t) in cs {
+                if let Some(t) = t {
+                    joined = join(&joined, &flatten(t));
+                }
+            }
+            let mut v = vec![ValType::I32];
+            v.extend(joined);
+            v
+        }
+        WitType::List(_) => vec![ValType::I32, ValType::I32],
     }
+}
+
+/// The payload types of a variant's cases.
+fn payloads(cs: &[(String, Option<WitType>)]) -> Vec<Option<&WitType>> {
+    cs.iter().map(|(_, t)| t.as_ref()).collect()
 }
 
 fn join(a: &[ValType], b: &[ValType]) -> Vec<ValType> {
@@ -115,6 +137,8 @@ pub fn size_align(t: &WitType) -> (u64, u64) {
             9..=16 => (2, 2),
             _ => (4, 4),
         },
+        WitType::Variant(cs) => variant_layout(cs.len(), &payloads(cs)).1,
+        WitType::List(_) => (8, 4),
     }
 }
 
@@ -336,36 +360,144 @@ pub fn lift_flat(
             s.end();
         }
         WitType::Result { ok, err } => {
-            let define = cx.helper(runtime::Helper::Obj(object::Helper::DefineProp));
-            let new = cx.helper(runtime::Helper::Obj(object::Helper::NewObject));
-            let (tag, val) = (cx.str("tag"), cx.str("val"));
-            let o = g.local(runtime::jsval());
-            s.call(new).local_set(o);
-            let mut case =
-                |s: &mut InstructionSink, g: &mut Gen, name: &str, t: Option<&WitType>| {
-                    let name = cx.str(name);
-                    s.local_get(o).global_get(tag).global_get(name).call(define);
-                    s.local_get(o).global_get(val);
-                    match t {
-                        Some(t) => {
-                            let n = flatten(t).len();
-                            lift_flat(cx, g, s, t, &slots[1..1 + n]);
-                        }
-                        None => {
-                            s.global_get(G_UNDEFINED);
-                        }
-                    }
-                    s.call(define);
-                };
-            get(s, 0);
-            s.if_(BlockType::Empty);
-            case(s, g, "err", err.as_deref());
-            s.else_();
-            case(s, g, "ok", ok.as_deref());
-            s.end();
-            s.local_get(o);
+            // `{ tag: "ok" | "err", val }`, `val: undefined` without a payload.
+            let cases = [("ok", ok.as_deref()), ("err", err.as_deref())];
+            lift_cases(cx, g, s, &cases, true, slots);
+        }
+        WitType::Variant(cs) => {
+            let cases: Vec<(&str, Option<&WitType>)> =
+                cs.iter().map(|(n, t)| (n.as_str(), t.as_ref())).collect();
+            lift_cases(cx, g, s, &cases, false, slots);
+        }
+        WitType::List(elem) => {
+            let (ptr, len) = (slots[0].0, slots[1].0);
+            let (size, _) = size_align(elem);
+            let i = g.local(ValType::I32);
+            if let Some(kind) = elem.typed_kind() {
+                // A typed array: copy the bytes.
+                let new = cx.helper(runtime::Helper::Typed(typed::Helper::Op(TypedOp::New)));
+                let (a, data, n) = (
+                    g.local(runtime::jsval()),
+                    g.local(runtime::rt(false, T_BYTES)),
+                    g.local(ValType::I32),
+                );
+                s.i32_const(kind as i32)
+                    .local_get(len)
+                    .call(new)
+                    .local_tee(a);
+                s.ref_cast_non_null(typed::typed())
+                    .struct_get(T_TYPED, typed::F_BUF)
+                    .struct_get(T_BUFFER, typed::F_DATA)
+                    .local_set(data);
+                s.local_get(len)
+                    .i32_const(TYPED_SIZES[kind as usize] as i32)
+                    .i32_mul()
+                    .local_set(n);
+                for_each(s, i, n, |s| {
+                    s.local_get(data).local_get(i);
+                    s.local_get(ptr)
+                        .local_get(i)
+                        .i32_add()
+                        .i32_load8_u(mem(0, 0));
+                    s.array_set(T_BYTES);
+                });
+                s.local_get(a);
+                return;
+            }
+            let new = cx.helper(runtime::Helper::Arr(array::Helper::New));
+            let (vals, ea) = (g.local(runtime::rt(false, T_VALS)), g.local(ValType::I32));
+            s.local_get(len).array_new_default(T_VALS).local_set(vals);
+            for_each(s, i, len, |s| {
+                s.local_get(ptr)
+                    .local_get(i)
+                    .i32_const(size as i32)
+                    .i32_mul()
+                    .i32_add()
+                    .local_set(ea);
+                s.local_get(vals).local_get(i);
+                lift_mem(cx, g, s, elem, ea, 0);
+                s.array_set(T_VALS);
+            });
+            s.local_get(vals).local_get(len).call(new);
         }
     }
+}
+
+/// `for (i = 0; i < n; i++) body` (`i`, `n`: i32 locals).
+fn for_each(s: &mut InstructionSink, i: u32, n: u32, mut body: impl FnMut(&mut InstructionSink)) {
+    s.i32_const(0).local_set(i);
+    s.block(BlockType::Empty);
+    s.loop_(BlockType::Empty);
+    s.local_get(i).local_get(n).i32_ge_u().br_if(1);
+    body(s);
+    s.local_get(i).i32_const(1).i32_add().local_set(i);
+    s.br(0);
+    s.end();
+    s.end();
+}
+
+/// Push the `{ tag, val }` object of a variant (a nested `result` too) whose discriminant and
+/// joined payload values are in `slots`. A case without a payload has `val: undefined` if
+/// `always_val` (jco's `result`), else no `val` (jco's `variant`).
+fn lift_cases(
+    cx: &mut dyn Cx,
+    g: &mut Gen,
+    s: &mut InstructionSink,
+    cases: &[(&str, Option<&WitType>)],
+    always_val: bool,
+    slots: &[(u32, ValType)],
+) {
+    let define = cx.helper(runtime::Helper::Obj(object::Helper::DefineProp));
+    let new = cx.helper(runtime::Helper::Obj(object::Helper::NewObject));
+    let (tag, val) = (cx.str("tag"), cx.str("val"));
+    let o = g.local(runtime::jsval());
+    s.call(new).local_set(o);
+    // A chain of `if`s on the case index; out of range traps.
+    for (k, (name, t)) in cases.iter().enumerate() {
+        s.local_get(slots[0].0).i32_const(k as i32).i32_eq();
+        s.if_(BlockType::Empty);
+        let name = cx.str(name);
+        s.local_get(o).global_get(tag).global_get(name).call(define);
+        match t {
+            Some(t) => {
+                let n = flatten(t).len();
+                s.local_get(o).global_get(val);
+                lift_flat(cx, g, s, t, &slots[1..1 + n]);
+                s.call(define);
+            }
+            None if always_val => {
+                s.local_get(o)
+                    .global_get(val)
+                    .global_get(G_UNDEFINED)
+                    .call(define);
+            }
+            None => {}
+        }
+        s.else_();
+    }
+    s.unreachable();
+    for _ in cases {
+        s.end();
+    }
+    s.local_get(o);
+}
+
+/// Push the JS value of the `t` stored at `addr + off`.
+pub fn lift_mem(
+    cx: &mut dyn Cx,
+    g: &mut Gen,
+    s: &mut InstructionSink,
+    t: &WitType,
+    addr: u32,
+    off: u64,
+) {
+    let flat = flatten(t);
+    flat_load(g, s, t, addr, off);
+    let slots: Vec<(u32, ValType)> = flat.iter().map(|v| (g.local(*v), *v)).collect();
+    for (l, _) in slots.iter().rev() {
+        s.local_set(*l);
+    }
+    lift_flat(cx, g, s, t, &slots);
 }
 
 /// A new array of the `n` values on the stack.
@@ -510,28 +642,137 @@ pub fn lower_mem(
             s.end();
         }
         WitType::Result { ok, err } => {
-            let eq = rh(cx, runtime::Helper::StrictEq);
-            let (tag, val, ok_s, err_s) =
-                (cx.str("tag"), cx.str("val"), cx.str("ok"), cx.str("err"));
-            let (payload, _) = variant_layout(2, &[ok.as_deref(), err.as_deref()]);
-            let (tg, x) = (g.local(runtime::jsval()), g.local(runtime::jsval()));
-            s.local_get(v).global_get(tag).call(get).local_set(tg);
-            s.local_get(v).global_get(val).call(get).local_set(x);
-            for (k, (name, t)) in [(ok_s, ok), (err_s, err)].into_iter().enumerate() {
-                s.local_get(tg).global_get(name).call(eq);
-                s.if_(BlockType::Empty);
-                s.local_get(addr)
-                    .i32_const(k as i32)
-                    .i32_store8(mem(off, 0));
-                if let Some(t) = t {
-                    lower_mem(cx, g, s, t, x, addr, off + payload);
-                }
-                s.else_();
-            }
-            s.unreachable();
-            s.end();
-            s.end();
+            let cases = [("ok", ok.as_deref()), ("err", err.as_deref())];
+            lower_cases(cx, g, s, &cases, v, addr, off);
         }
+        WitType::Variant(cs) => {
+            let cases: Vec<(&str, Option<&WitType>)> =
+                cs.iter().map(|(n, t)| (n.as_str(), t.as_ref())).collect();
+            lower_cases(cx, g, s, &cases, v, addr, off);
+        }
+        WitType::List(elem) => {
+            let realloc = cx.helper(runtime::Helper::Abi(abi::Helper::Realloc));
+            let (size, align) = size_align(elem);
+            let (p, len, i) = (
+                g.local(ValType::I32),
+                g.local(ValType::I32),
+                g.local(ValType::I32),
+            );
+            let alloc = |s: &mut InstructionSink, bytes: &dyn Fn(&mut InstructionSink)| {
+                s.i32_const(0).i32_const(0).i32_const(align as i32);
+                bytes(s);
+                s.call(realloc).local_set(p);
+            };
+            s.block(BlockType::Empty);
+            if let Some(kind) = elem.typed_kind() {
+                // A typed array of this kind: copy its bytes.
+                let (tv, data, base, n) = (
+                    g.local(runtime::rt(false, T_TYPED)),
+                    g.local(runtime::rt(false, T_BYTES)),
+                    g.local(ValType::I32),
+                    g.local(ValType::I32),
+                );
+                s.local_get(v).ref_test_non_null(typed::typed());
+                s.if_(BlockType::Empty);
+                s.local_get(v)
+                    .ref_cast_non_null(typed::typed())
+                    .local_tee(tv);
+                s.struct_get(T_TYPED, typed::F_KIND)
+                    .i32_const(kind as i32)
+                    .i32_eq();
+                s.if_(BlockType::Empty);
+                s.local_get(tv)
+                    .struct_get(T_TYPED, typed::F_LENGTH)
+                    .local_set(len);
+                s.local_get(tv)
+                    .struct_get(T_TYPED, typed::F_BUF)
+                    .struct_get(T_BUFFER, typed::F_DATA)
+                    .local_set(data);
+                s.local_get(tv)
+                    .struct_get(T_TYPED, typed::F_OFFSET)
+                    .local_set(base);
+                s.local_get(len)
+                    .i32_const(size as i32)
+                    .i32_mul()
+                    .local_set(n);
+                alloc(s, &|s| {
+                    s.local_get(n);
+                });
+                for_each(s, i, n, |s| {
+                    s.local_get(p).local_get(i).i32_add();
+                    s.local_get(data)
+                        .local_get(base)
+                        .local_get(i)
+                        .i32_add()
+                        .array_get_u(T_BYTES);
+                    s.i32_store8(mem(0, 0));
+                });
+                s.br(2);
+                s.end();
+                s.end();
+            }
+            // Any array-like: `length`, then each element.
+            let boxed = rh(cx, runtime::Helper::Box);
+            let to_number = rh(cx, runtime::Helper::ToNumber);
+            let length = cx.str("length");
+            let (x, ea) = (g.local(runtime::jsval()), g.local(ValType::I32));
+            s.local_get(v).global_get(length).call(get).call(to_number);
+            s.i32_trunc_sat_f64_u().local_set(len);
+            alloc(s, &|s| {
+                s.local_get(len).i32_const(size as i32).i32_mul();
+            });
+            for_each(s, i, len, |s| {
+                s.local_get(v).local_get(i).f64_convert_i32_u().call(boxed);
+                s.call(get).local_set(x);
+                s.local_get(p)
+                    .local_get(i)
+                    .i32_const(size as i32)
+                    .i32_mul()
+                    .i32_add()
+                    .local_set(ea);
+                lower_mem(cx, g, s, elem, x, ea, 0);
+            });
+            s.end();
+            s.local_get(addr).local_get(p).i32_store(mem(off, 2));
+            s.local_get(addr).local_get(len).i32_store(mem(off + 4, 2));
+        }
+    }
+}
+
+/// [`lower_mem`] of a variant (a nested `result` too) from its `{ tag, val }` object: a `tag`
+/// that isn't a case name traps.
+fn lower_cases(
+    cx: &mut dyn Cx,
+    g: &mut Gen,
+    s: &mut InstructionSink,
+    cases: &[(&str, Option<&WitType>)],
+    v: u32,
+    addr: u32,
+    off: u64,
+) {
+    let get = cx.helper(runtime::Helper::Obj(object::Helper::Get));
+    let eq = rh(cx, runtime::Helper::StrictEq);
+    let (tag, val) = (cx.str("tag"), cx.str("val"));
+    let ts: Vec<Option<&WitType>> = cases.iter().map(|(_, t)| *t).collect();
+    let (payload, _) = variant_layout(cases.len(), &ts);
+    let size = disc_size(cases.len());
+    let (tg, x) = (g.local(runtime::jsval()), g.local(runtime::jsval()));
+    s.local_get(v).global_get(tag).call(get).local_set(tg);
+    s.local_get(v).global_get(val).call(get).local_set(x);
+    for (k, (name, t)) in cases.iter().enumerate() {
+        let name = cx.str(name);
+        s.local_get(tg).global_get(name).call(eq);
+        s.if_(BlockType::Empty);
+        s.local_get(addr).i32_const(k as i32);
+        store_disc(s, size, off);
+        if let Some(t) = t {
+            lower_mem(cx, g, s, t, x, addr, off + payload);
+        }
+        s.else_();
+    }
+    s.unreachable();
+    for _ in cases {
+        s.end();
     }
 }
 
@@ -591,6 +832,11 @@ pub fn flat_load(g: &mut Gen, s: &mut InstructionSink, t: &WitType, addr: u32, o
                 AbiType::Compound(_) => unreachable!("nested types are trees"),
             }
         }
+        WitType::List(_) => {
+            s.local_get(addr).i32_load(mem(off, 2));
+            s.local_get(addr).i32_load(mem(off + 4, 2));
+        }
+        WitType::Variant(cs) => variant_load(g, s, &payloads(cs), addr, off),
         WitType::Tuple(ts) => {
             let (offs, _) = fields_layout(ts.iter());
             for (t, o) in ts.iter().zip(offs) {

@@ -198,7 +198,9 @@ pub enum AbiType {
 /// A compound WIT type of a user world (T20 slice 4b) and its JS shape (jco's):
 /// `option` ↔ the value or `undefined`, `result` (not at the top) ↔ `{ tag: "ok" | "err", val }`,
 /// `tuple` ↔ an array, `record` / `flags` ↔ an object (keys: the camelCase field / flag names),
-/// `enum` ↔ the case's WIT name.
+/// `enum` ↔ the case's WIT name; slice 4b-2: `variant` ↔ `{ tag, val }` (`tag` the case's WIT
+/// name, no `val` for a case without a payload), `list<T>` ↔ an array, or a typed array for the
+/// numeric `T`s up to 32 bits and `f64` ([`WitType::typed_kind`]: `list<u8>` ↔ `Uint8Array`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WitType {
     Scalar(AbiType),
@@ -214,6 +216,45 @@ pub enum WitType {
     Enum(Vec<String>),
     /// Flag JS keys (at most 32).
     Flags(Vec<String>),
+    /// Cases: (WIT name, payload).
+    Variant(Vec<(String, Option<WitType>)>),
+    List(Box<WitType>),
+}
+
+impl WitType {
+    /// The typed array kind (an index into [`TYPED_NAMES`]) a `list` of this element type is, as
+    /// in jco (64-bit integers would be `BigInt64Array`s: plain arrays here, F124).
+    pub fn typed_kind(&self) -> Option<u8> {
+        Some(match self {
+            WitType::Scalar(AbiType::S8) => 0,
+            WitType::Scalar(AbiType::U8) => 1,
+            WitType::Scalar(AbiType::S16) => 3,
+            WitType::Scalar(AbiType::U16) => 4,
+            WitType::Scalar(AbiType::S32) => 5,
+            WitType::Scalar(AbiType::U32) => 6,
+            WitType::Scalar(AbiType::F32) => 7,
+            WitType::Scalar(AbiType::F64) => 8,
+            _ => return None,
+        })
+    }
+
+    /// Does a value of this type contain a typed array?
+    pub fn has_typed(&self) -> bool {
+        match self {
+            WitType::Scalar(_) | WitType::Enum(_) | WitType::Flags(_) => false,
+            WitType::Option(t) => t.has_typed(),
+            WitType::Result { ok, err } => {
+                ok.as_deref().is_some_and(WitType::has_typed)
+                    || err.as_deref().is_some_and(WitType::has_typed)
+            }
+            WitType::Tuple(ts) => ts.iter().any(WitType::has_typed),
+            WitType::Record(fs) => fs.iter().any(|(_, t)| t.has_typed()),
+            WitType::Variant(cs) => cs
+                .iter()
+                .any(|(_, t)| t.as_ref().is_some_and(WitType::has_typed)),
+            WitType::List(t) => t.typed_kind().is_some() || t.has_typed(),
+        }
+    }
 }
 
 /// The `err` of a throwing export's `result`.
