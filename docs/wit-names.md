@@ -142,7 +142,11 @@ export function check(x) { if (x < 0) throw new RangeError("neg"); return x; }  
 - **The name isn't stored in the component.** Component binaries are structurally typed: they record the exports,
   not the world or package they came from. `wasm-tools component wit out.wasm` always prints
   `package root:component; world root { … }` (hardcoded in `wit-parser-0.259.0/src/decoding.rs`).
-  The name is used when the metadata is embedded, and it will matter for user worlds (T20). Writing the generated WIT
+  The name is used when the metadata is embedded, and it will matter for user worlds (T20).
+- **User worlds (T20): `--wit <file|dir> [--world <name>]`.** The world comes from the user's WIT; `--world` then
+  selects it (a plain name or `ns:pkg/world`; optional if there's one). Each world export is matched with the JS
+  export whose name converts to its WIT name (or a string export name equal to it); a world export without one,
+  or a JS export not in the world, is an error. Writing the generated WIT
   next to the output is follow-up F12.
 
 ## Where the code lives

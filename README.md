@@ -40,6 +40,12 @@ wasmtime run --invoke 'add(1, 2)' add.wasm
 # 3
 wasm-tools component wit add.wasm
 # world root { export add: func(a: f64, b: f64) -> f64; }
+
+# Or implement your own world: its types decide the boundary (scalar types so far).
+printf 'package acme:math;\nworld calc { export add: func(a: u32, b: u32) -> u32; }\n' > calc.wit
+target/release/js2wasi3 build add.js --wit calc.wit -o calc.wasm
+wasmtime run --invoke 'add(4000000000, 1000000000)' calc.wasm
+# 705032704
 ```
 
 Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <file>` (print the IR).
@@ -64,7 +70,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Timers (`setTimeout`, `setInterval`, `setImmediate`, `clear*`, `process.nextTick`) on the WASI 0.3 event loop,
   using `wasi:clocks`.
 - Libraries: `export async function` becomes a WIT `async func` (callback lift); the call runs jobs and timers
-  until its promise settles.
+  until its promise settles. `--wit <file|dir> [--world <name>]` implements a user world with scalar types
+  (`bool`, integers, `f32`/`f64`, `char`, `string`).
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
 Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex, multi-file `import`, and richer WIT types at the boundary (records, lists,

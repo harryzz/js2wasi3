@@ -14,7 +14,7 @@
 //! - An export that may throw (T12) also goes through an adapter: it catches the JS exception
 //!   and returns `result<T, js-error>` through a return area (see [`adapter`]).
 
-use js2wasi3_ir::{AbiSig, AbiType, ErrorKind};
+use js2wasi3_ir::{AbiSig, AbiType, ErrorKind, Type};
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType};
 
 use crate::host::{self, Import};
@@ -58,6 +58,11 @@ pub enum Helper {
     /// `()`: an async call is over: cancel the wait, lower the backpressure. Timers left run in
     /// a later async call.
     End,
+    /// `(cp: i32) -> (ref $string)`: a `char` parameter as a one-character string (T20).
+    FromCodePoint,
+    /// `(s: (ref $string)) -> i32`: a `char` result: the first code point of `s` (a lone
+    /// surrogate gives U+FFFD); traps on the empty string.
+    CodePointAt0,
 }
 
 impl Helper {
@@ -75,6 +80,8 @@ impl Helper {
             Helper::Tick => "async_tick",
             Helper::Event => "async_event",
             Helper::End => "async_end",
+            Helper::FromCodePoint => "from_code_point",
+            Helper::CodePointAt0 => "code_point_at_0",
         }
     }
 
@@ -91,6 +98,8 @@ impl Helper {
             Helper::Step => (vec![], vec![I32]),
             Helper::Tick | Helper::End => (vec![], vec![]),
             Helper::Event => (vec![I32; 3], vec![]),
+            Helper::FromCodePoint => (vec![I32], vec![runtime::string_ref()]),
+            Helper::CodePointAt0 => (vec![runtime::string_ref()], vec![I32]),
         }
     }
 
@@ -181,6 +190,8 @@ impl Helper {
                 f
             }
             Helper::Step => step(cx),
+            Helper::FromCodePoint => from_code_point(),
+            Helper::CodePointAt0 => code_point_at_0(),
             Helper::Tick => {
                 let lib = cx.host_globals();
                 let im = cx.imports();
@@ -259,6 +270,75 @@ impl Helper {
             }
         }
     }
+}
+
+/// `$from_code_point(cp) -> (ref $string)`: see [`Helper::FromCodePoint`].
+fn from_code_point() -> Function {
+    const CP: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(CP).i32_const(0x10000).i32_lt_u();
+    s.if_(BlockType::Result(runtime::string_ref()));
+    s.local_get(CP).array_new_fixed(T_STRING, 1);
+    s.else_();
+    // A surrogate pair.
+    s.local_get(CP)
+        .i32_const(0x10000)
+        .i32_sub()
+        .i32_const(10)
+        .i32_shr_u()
+        .i32_const(0xd800)
+        .i32_add();
+    s.local_get(CP)
+        .i32_const(0x3ff)
+        .i32_and()
+        .i32_const(0xdc00)
+        .i32_add();
+    s.array_new_fixed(T_STRING, 2);
+    s.end();
+    s.end();
+    f
+}
+
+/// `$code_point_at_0(s) -> i32`: see [`Helper::CodePointAt0`].
+fn code_point_at_0() -> Function {
+    const S: u32 = 0;
+    const U: u32 = 1;
+    const V: u32 = 2;
+    let mut f = Function::new([(2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(S)
+        .i32_const(0)
+        .array_get_u(T_STRING)
+        .local_tee(U);
+    // Not a surrogate.
+    s.i32_const(0xf800).i32_and().i32_const(0xd800).i32_ne();
+    s.if_(BlockType::Empty);
+    s.local_get(U).return_();
+    s.end();
+    // A high surrogate followed by a low one.
+    s.local_get(U).i32_const(0xdc00).i32_lt_u();
+    s.local_get(S).array_len().i32_const(1).i32_gt_u();
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(S)
+        .i32_const(1)
+        .array_get_u(T_STRING)
+        .local_tee(V);
+    s.i32_const(0xfc00).i32_and().i32_const(0xdc00).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(U)
+        .i32_const(0xd800)
+        .i32_sub()
+        .i32_const(10)
+        .i32_shl();
+    s.local_get(V).i32_const(0xdc00).i32_sub();
+    s.i32_add().i32_const(0x10000).i32_add().return_();
+    s.end();
+    s.end();
+    s.i32_const(0xfffd);
+    s.end();
+    f
 }
 
 /// Canonical ABI constants (see [`crate::host`]).
@@ -464,15 +544,37 @@ fn mem(offset: u64, align: u32) -> MemArg {
     }
 }
 
+/// Core values of one boundary type (Canonical ABI flattening).
+fn flat(t: AbiType) -> Vec<ValType> {
+    use ValType::{F32, F64, I32, I64};
+    match t {
+        AbiType::S64 | AbiType::U64 => vec![I64],
+        AbiType::F32 => vec![F32],
+        AbiType::F64 => vec![F64],
+        AbiType::String => vec![I32, I32],
+        _ => vec![I32],
+    }
+}
+
+/// Size and alignment of a boundary type in memory.
+fn size_align(t: AbiType) -> (u64, u64) {
+    match t {
+        AbiType::Bool | AbiType::S8 | AbiType::U8 => (1, 1),
+        AbiType::S16 | AbiType::U16 => (2, 2),
+        AbiType::S64 | AbiType::U64 | AbiType::F64 => (8, 8),
+        AbiType::String => (8, 4),
+        _ => (4, 4),
+    }
+}
+
+/// Does an export's adapter use linear memory (strings, a `result`)?
+pub fn needs_memory(sig: &AbiSig) -> bool {
+    sig.throws || sig.params.contains(&AbiType::String) || sig.result == Some(AbiType::String)
+}
+
 /// Core params of an export with boundary types `params`.
 pub fn flat_params(params: &[AbiType]) -> Vec<ValType> {
-    params
-        .iter()
-        .flat_map(|p| match p {
-            AbiType::F64 => vec![ValType::F64],
-            AbiType::String => vec![ValType::I32, ValType::I32],
-        })
-        .collect()
+    params.iter().flat_map(|p| flat(*p)).collect()
 }
 
 /// Core result of an export: a string, or a `result` (if it may throw), comes back through a
@@ -481,22 +583,41 @@ pub fn flat_result(sig: &AbiSig) -> Vec<ValType> {
     match sig.result {
         _ if sig.throws => vec![ValType::I32],
         None => vec![],
-        Some(AbiType::F64) => vec![ValType::F64],
         Some(AbiType::String) => vec![ValType::I32],
+        Some(t) => flat(t),
     }
+}
+
+/// Offset of the payload in a `result<T, js-error>` (its alignment).
+fn payload_offset(sig: &AbiSig) -> u64 {
+    sig.result.map_or(4, |t| size_align(t).1.max(4))
 }
 
 /// The adapter for an export of `func` with signature `sig`.
 ///
+/// Parameters arrive as core values and are passed as [`AbiType::param_type`]s (integers and
+/// `f32` as numbers, a `char` as a one-character string); the result comes back as an
+/// [`AbiType::result_type`] and is narrowed to the WIT type (integers wrap like `ToInt32` and
+/// then to their width, 64-bit ones saturate, a `char` is the first code point of its string).
+///
 /// If the function may throw (`sig.throws`), the WIT result is `result<T, js-error>`, returned
-/// through a return area: discriminant (u8) at 0, payload at the payload's alignment (8 for an
-/// `f64`, else 4). The `js-error` payload is `{ name: string, message: string, stack: option<string> }`
+/// through a return area: discriminant (u8) at 0, payload at the payload's alignment (8 for a
+/// 64-bit `T`, else 4). The `js-error` payload is `{ name: string, message: string, stack: option<string> }`
 /// at offsets 0, 8 and 16 (option discriminant; `stack` is always `none`). An error gives its
 /// `name` and `message`; any other thrown value gives `name: ""` and its `console.log` text.
+/// Without `throws` an exception (or an unhandled rejection) traps.
 pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) -> Function {
     let lib = cx.host_globals();
-    let utf8_to_string = cx.helper(runtime::Helper::Abi(Helper::Utf8ToString));
-    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    let memory = needs_memory(sig);
+    let utf8_to_string = sig
+        .params
+        .contains(&AbiType::String)
+        .then(|| cx.helper(runtime::Helper::Abi(Helper::Utf8ToString)));
+    let from_code_point = sig
+        .params
+        .contains(&AbiType::Char)
+        .then(|| cx.helper(runtime::Helper::Abi(Helper::FromCodePoint)));
+    let realloc = memory.then(|| cx.helper(runtime::Helper::Abi(Helper::Realloc)));
     let to_utf8 = (sig.result == Some(AbiType::String) || sig.throws)
         .then(|| cx.helper(runtime::Helper::Abi(Helper::StringToUtf8)));
     // A library's `init` runs first, its jobs after the call (T20).
@@ -508,44 +629,83 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
     let await_ = sig
         .is_async
         .then(|| cx.helper(runtime::Helper::Abi(Helper::Await)));
-    let to_number = (sig.is_async && sig.result == Some(AbiType::F64))
+    // What converting the settled value (async) and the result needs.
+    let settled = if sig.is_async {
+        sig.result.map(|t| t.result_type())
+    } else {
+        None
+    };
+    let to_number = matches!(settled, Some(Type::F64 | Type::I32))
         .then(|| cx.helper(runtime::Helper::ToNumber));
-    let value_to_string = (sig.is_async && sig.result == Some(AbiType::String))
-        .then(|| cx.helper(runtime::Helper::ToString));
+    let to_int32 = (settled == Some(Type::I32)).then(|| cx.to_int32());
+    let to_boolean = (settled == Some(Type::Bool)).then(|| cx.helper(runtime::Helper::ToBoolean));
+    let value_to_string =
+        (settled == Some(Type::JsVal) || sig.throws).then(|| cx.helper(runtime::Helper::ToString));
+    let code_point = (sig.result == Some(AbiType::Char))
+        .then(|| cx.helper(runtime::Helper::Abi(Helper::CodePointAt0)));
     let nflat = if mode == Mode::Finish {
         0
     } else {
         flat_params(&sig.params).len() as u32
     };
-    // Locals after the params: the (ptr, len) of a string, the return area, an f64 result,
-    // the thrown value.
-    let (ptr, len, ret, num, exc) = (nflat, nflat + 1, nflat + 2, nflat + 3, nflat + 4);
-    let mut f = Function::new([(3, ValType::I32), (1, ValType::F64), (1, runtime::jsval())]);
+    // Locals after the params: the (ptr, len) of a string, the return area, the result as an
+    // i32 / i64 / f32 / f64 / string, the thrown value.
+    let (ptr, len, ret, vi32) = (nflat, nflat + 1, nflat + 2, nflat + 3);
+    let (vi64, vf32, vf64, vstr, exc) = (nflat + 4, nflat + 5, nflat + 6, nflat + 7, nflat + 8);
+    let mut f = Function::new([
+        (4, ValType::I32),
+        (1, ValType::I64),
+        (1, ValType::F32),
+        (1, ValType::F64),
+        (2, runtime::jsval()),
+    ]);
     let mut s = f.instructions();
     // The arguments as the IR function takes them.
     let args = |s: &mut InstructionSink| {
         let mut i = 0;
         for p in &sig.params {
+            s.local_get(i);
+            i += 1;
             match p {
-                AbiType::F64 => {
-                    s.local_get(i);
-                    i += 1;
+                AbiType::Bool | AbiType::F64 | AbiType::S64 | AbiType::U64 => {}
+                AbiType::S8 | AbiType::S16 | AbiType::S32 => {
+                    s.f64_convert_i32_s();
+                }
+                AbiType::U8 | AbiType::U16 | AbiType::U32 => {
+                    s.f64_convert_i32_u();
+                }
+                AbiType::F32 => {
+                    s.f64_promote_f32();
+                }
+                AbiType::Char => {
+                    s.call(from_code_point.unwrap());
                 }
                 AbiType::String => {
-                    s.local_get(i).local_get(i + 1).call(utf8_to_string);
-                    i += 2;
+                    s.local_get(i).call(utf8_to_string.unwrap());
+                    i += 1;
                 }
+            }
+            match p {
+                AbiType::S64 => {
+                    s.f64_convert_i64_s();
+                }
+                AbiType::U64 => {
+                    s.f64_convert_i64_u();
+                }
+                _ => {}
             }
         }
         // The arguments are GC strings now: free the memory they came in.
-        s.i32_const(HEAP_BASE).global_set(bump);
+        if memory {
+            s.i32_const(HEAP_BASE).global_set(bump);
+        }
     };
     let alloc = |s: &mut InstructionSink, align: i32, size: i32| {
         s.i32_const(0)
             .i32_const(0)
             .i32_const(align)
             .i32_const(size)
-            .call(realloc)
+            .call(realloc.expect("strings and results need memory"))
             .local_set(ret);
     };
     // Store the string on the stack as (ptr, len) at `ret + offset`.
@@ -581,33 +741,117 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
         s.end();
         return f;
     }
-    if !sig.throws {
-        if let Some(init) = init {
-            s.call(init);
+    // Run the call; its result (the WIT type's core value) goes to a local.
+    let produce = |s: &mut InstructionSink| {
+        if mode == Mode::Finish {
+            // The call failed to start (`init` threw), or a job or timer threw.
+            s.global_get(lib + G_FAILED);
+            s.if_(BlockType::Empty);
+            s.global_get(lib + G_ERROR).throw(runtime::TAG);
+            s.end();
+            s.global_get(lib + G_PROMISE);
+        } else {
+            if let Some(init) = init {
+                s.call(init);
+            }
+            args(s);
+            s.call(func);
         }
-        args(&mut s);
-        s.call(func);
-        if let Some(to_utf8) = to_utf8 {
-            s.ref_cast_non_null(runtime::string());
-            alloc(&mut s, 4, 8);
-            store_string(&mut s, to_utf8, 0);
-            s.local_get(ret);
+        if let Some(await_) = await_ {
+            // The settled value (a `jsval`) as the result type.
+            s.call(await_);
+            match sig.result.map(|t| (t, t.result_type())) {
+                None => {
+                    s.drop();
+                }
+                Some((_, Type::F64)) => {
+                    s.call(to_number.unwrap());
+                }
+                Some((_, Type::I32)) => {
+                    s.call(to_number.unwrap()).call(to_int32.unwrap());
+                }
+                Some((_, Type::Bool)) => {
+                    s.call(to_boolean.unwrap());
+                }
+                Some(_) => {
+                    s.call(value_to_string.unwrap());
+                }
+            }
+        }
+        let Some(t) = sig.result else { return };
+        match t {
+            AbiType::Bool | AbiType::S32 | AbiType::U32 => {}
+            AbiType::S8 => {
+                s.i32_extend8_s();
+            }
+            AbiType::U8 => {
+                s.i32_const(0xff).i32_and();
+            }
+            AbiType::S16 => {
+                s.i32_extend16_s();
+            }
+            AbiType::U16 => {
+                s.i32_const(0xffff).i32_and();
+            }
+            AbiType::S64 => {
+                s.i64_trunc_sat_f64_s();
+            }
+            AbiType::U64 => {
+                s.i64_trunc_sat_f64_u();
+            }
+            AbiType::F32 => {
+                s.f32_demote_f64();
+            }
+            AbiType::F64 | AbiType::String => {}
+            AbiType::Char => {
+                s.ref_cast_non_null(runtime::string())
+                    .call(code_point.unwrap());
+            }
+        }
+        s.local_set(match flat(t)[0] {
+            _ if t == AbiType::String => vstr,
+            ValType::I64 => vi64,
+            ValType::F32 => vf32,
+            ValType::F64 => vf64,
+            _ => vi32,
+        });
+    };
+    let settle = |s: &mut InstructionSink| {
+        if let Some(settle) = settle {
+            s.call(settle);
+        }
+    };
+    if !sig.throws {
+        produce(&mut s);
+        settle(&mut s);
+        match sig.result {
+            None => {}
+            Some(AbiType::String) => {
+                s.local_get(vstr).ref_cast_non_null(runtime::string());
+                alloc(&mut s, 4, 8);
+                store_string(&mut s, to_utf8.unwrap(), 0);
+                s.local_get(ret);
+            }
+            Some(t) => {
+                s.local_get(match flat(t)[0] {
+                    ValType::I64 => vi64,
+                    ValType::F32 => vf32,
+                    ValType::F64 => vf64,
+                    _ => vi32,
+                });
+            }
         }
         s.end();
         return f;
     }
     let to_utf8 = to_utf8.expect("errors carry strings");
+    let value_to_string = value_to_string.expect("errors carry strings");
     let describe = cx.helper(runtime::Helper::Describe);
     let get = cx.helper(runtime::Helper::Obj(object::Helper::Get));
-    let to_string = cx.helper(runtime::Helper::ToString);
     let empty = cx.str("");
     let (name, message) = (cx.str("name"), cx.str("message"));
     // result<T, js-error>: payload offset (= alignment) and size.
-    let payload: u64 = if sig.result == Some(AbiType::F64) {
-        8
-    } else {
-        4
-    };
+    let payload = payload_offset(sig);
     let size = (payload as i32 + JS_ERROR_SIZE + payload as i32 - 1) & -(payload as i32);
     s.block(BlockType::Result(runtime::jsval()));
     s.try_table(
@@ -618,57 +862,35 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
         }],
     );
     // Inside the `try_table`, which takes no values from outside.
-    if mode == Mode::Finish {
-        // The call failed to start (`init` threw), or a job or timer threw.
-        s.global_get(lib + G_FAILED);
-        s.if_(BlockType::Empty);
-        s.global_get(lib + G_ERROR).throw(runtime::TAG);
-        s.end();
-        s.global_get(lib + G_PROMISE);
-    } else {
-        if let Some(init) = init {
-            s.call(init);
-        }
-        args(&mut s);
-        s.call(func);
-    }
-    if let Some(await_) = await_ {
-        s.call(await_);
-        match sig.result {
-            None => {
-                s.drop();
-            }
-            Some(AbiType::F64) => {
-                s.call(to_number.unwrap());
-            }
-            Some(AbiType::String) => {
-                s.call(value_to_string.unwrap());
-            }
-        }
-    }
-    // The result waits in a local while the jobs run.
-    let settle = |s: &mut InstructionSink| {
-        if let Some(settle) = settle {
-            s.call(settle);
-        }
-    };
-    match sig.result {
-        None => {
-            settle(&mut s);
-            alloc(&mut s, payload as i32, size);
-        }
-        Some(AbiType::F64) => {
-            s.local_set(num);
-            settle(&mut s);
-            alloc(&mut s, payload as i32, size);
-            s.local_get(ret).local_get(num).f64_store(mem(payload, 3));
-        }
-        Some(AbiType::String) => {
-            s.local_set(exc);
-            settle(&mut s);
-            s.local_get(exc).ref_cast_non_null(runtime::string());
-            alloc(&mut s, payload as i32, size);
+    produce(&mut s);
+    settle(&mut s);
+    alloc(&mut s, payload as i32, size);
+    if let Some(t) = sig.result {
+        if t == AbiType::String {
+            s.local_get(vstr).ref_cast_non_null(runtime::string());
             store_string(&mut s, to_utf8, payload);
+        } else {
+            s.local_get(ret);
+            match t {
+                AbiType::Bool | AbiType::S8 | AbiType::U8 => {
+                    s.local_get(vi32).i32_store8(mem(payload, 0));
+                }
+                AbiType::S16 | AbiType::U16 => {
+                    s.local_get(vi32).i32_store16(mem(payload, 1));
+                }
+                AbiType::S64 | AbiType::U64 => {
+                    s.local_get(vi64).i64_store(mem(payload, 3));
+                }
+                AbiType::F32 => {
+                    s.local_get(vf32).f32_store(mem(payload, 2));
+                }
+                AbiType::F64 => {
+                    s.local_get(vf64).f64_store(mem(payload, 3));
+                }
+                _ => {
+                    s.local_get(vi32).i32_store(mem(payload, 2));
+                }
+            }
         }
     }
     s.local_get(ret).i32_const(0).i32_store8(mem(0, 0));
@@ -682,7 +904,10 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
     s.local_get(ret).i32_const(1).i32_store8(mem(0, 0));
     object::is_error(&mut s, exc);
     s.if_(BlockType::Result(runtime::string_ref()));
-    s.local_get(exc).global_get(name).call(get).call(to_string);
+    s.local_get(exc)
+        .global_get(name)
+        .call(get)
+        .call(value_to_string);
     s.else_();
     s.global_get(empty);
     s.end();
@@ -692,7 +917,7 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
     s.local_get(exc)
         .global_get(message)
         .call(get)
-        .call(to_string);
+        .call(value_to_string);
     s.else_();
     s.local_get(exc).call(describe);
     s.end();
@@ -706,15 +931,17 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
     f
 }
 
-/// Core params of an async export's `task.return` (T20): its `result<T, js-error>` flattened.
-/// The cases' values are joined: `f64` with the first `i32` of `js-error` makes an `i64`.
+/// Core params of an async export's `task.return` (T20): its result flattened. The cases of a
+/// `result<T, js-error>` are joined: `T`'s first value with `js-error`'s first `i32` makes an
+/// `i64` if either is 64 bits, else an `i32` (an `f32` goes as its bits).
 pub fn task_return_params(sig: &AbiSig) -> Vec<ValType> {
-    use ValType::{I32, I64};
-    assert!(sig.throws, "async exports return a `result`");
-    let first = if sig.result == Some(AbiType::F64) {
-        I64
-    } else {
-        I32
+    use ValType::{F64, I32, I64};
+    if !sig.throws {
+        return sig.result.map_or(Vec::new(), flat);
+    }
+    let first = match sig.result.map(|t| flat(t)[0]) {
+        Some(I64 | F64) => I64,
+        _ => I32,
     };
     let mut v = vec![I32, first];
     v.extend([I32; 6]);
@@ -757,9 +984,10 @@ pub fn async_callback(cx: &mut dyn Cx, finish: u32, task_return: u32, sig: &AbiS
     f
 }
 
-/// Step the call; while it waits, return the callback code. When it's done: the `result` from
-/// `finish` (a return area) goes to `task.return` as flat values, the call [`Helper::End`]s, and
-/// `EXIT`. Values a case doesn't have are ignored by the lift. Locals `l`, `l + 1`: i32.
+/// Step the call; while it waits, return the callback code. When it's done: the result from
+/// `finish` goes to `task.return` as flat values (a string or `result` from its return area),
+/// the call [`Helper::End`]s, and `EXIT`. Values a case doesn't have are ignored by the lift.
+/// Locals `l`, `l + 1`: i32.
 fn complete(
     s: &mut InstructionSink,
     step: u32,
@@ -774,29 +1002,59 @@ fn complete(
     s.if_(BlockType::Empty);
     s.local_get(code).return_();
     s.end();
-    s.call(finish).local_set(ret);
-    let payload: u64 = if sig.result == Some(AbiType::F64) {
-        8
+    s.call(finish);
+    if !sig.throws {
+        if sig.result == Some(AbiType::String) {
+            s.local_set(ret);
+            s.local_get(ret).i32_load(mem(0, 2));
+            s.local_get(ret).i32_load(mem(4, 2));
+        }
     } else {
-        4
-    };
-    s.local_get(ret).i32_load8_u(mem(0, 0));
-    if sig.result == Some(AbiType::F64) {
-        // `ok`: the f64's bits; `err`: `name`'s pointer.
-        s.local_get(ret).i64_load(mem(payload, 3));
-        s.local_get(ret)
-            .i32_load(mem(payload, 2))
-            .i64_extend_i32_u();
-        s.local_get(ret).i32_load8_u(mem(0, 0)).i32_eqz();
-        s.select();
-    } else {
-        s.local_get(ret).i32_load(mem(payload, 2));
-    }
-    for off in [4, 8, 12, 16, 20, 24] {
-        if off == 16 {
-            s.local_get(ret).i32_load8_u(mem(payload + off, 0));
-        } else {
-            s.local_get(ret).i32_load(mem(payload + off, 2));
+        s.local_set(ret);
+        let payload = payload_offset(sig);
+        let wide = task_return_params(sig)[1] == ValType::I64;
+        s.local_get(ret).i32_load8_u(mem(0, 0));
+        // `ok`: `T`'s first value; `err`: `name`'s pointer.
+        match sig.result {
+            None | Some(AbiType::String) => {
+                s.local_get(ret).i32_load(mem(payload, 2));
+            }
+            Some(t) => {
+                s.local_get(ret);
+                match t {
+                    AbiType::Bool | AbiType::U8 => {
+                        s.i32_load8_u(mem(payload, 0));
+                    }
+                    AbiType::S8 => {
+                        s.i32_load8_s(mem(payload, 0));
+                    }
+                    AbiType::U16 => {
+                        s.i32_load16_u(mem(payload, 1));
+                    }
+                    AbiType::S16 => {
+                        s.i32_load16_s(mem(payload, 1));
+                    }
+                    _ if wide => {
+                        s.i64_load(mem(payload, 3));
+                    }
+                    _ => {
+                        s.i32_load(mem(payload, 2));
+                    }
+                }
+                s.local_get(ret).i32_load(mem(payload, 2));
+                if wide {
+                    s.i64_extend_i32_u();
+                }
+                s.local_get(ret).i32_load8_u(mem(0, 0)).i32_eqz();
+                s.select();
+            }
+        }
+        for off in [4, 8, 12, 16, 20, 24] {
+            if off == 16 {
+                s.local_get(ret).i32_load8_u(mem(payload + off, 0));
+            } else {
+                s.local_get(ret).i32_load(mem(payload + off, 2));
+            }
         }
     }
     s.call(task_return);

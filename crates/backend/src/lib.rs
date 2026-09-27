@@ -92,13 +92,15 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         .exports
         .iter()
         .filter(|x| {
-            x.sig.params.contains(&AbiType::String)
-                || x.sig.result == Some(AbiType::String)
+            x.sig.params.iter().any(|p| *p != AbiType::F64)
+                || x.sig.result.is_some_and(|r| r != AbiType::F64)
                 || x.sig.throws
+                || x.sig.is_async
                 || module.init.is_some()
         })
         .collect();
-    let abi = !adapted.is_empty() || command.is_some();
+    // Linear memory: output buffers, strings and `result`s at the boundary.
+    let abi = adapted.iter().any(|x| abi::needs_memory(&x.sig)) || command.is_some();
     for x in &adapted {
         // More flat params than this are passed through memory: not implemented (F21).
         if abi::flat_params(&x.sig.params).len() > abi::MAX_FLAT_PARAMS {
@@ -254,7 +256,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     for (j, x) in lifted.iter().enumerate() {
         let finish = func_base + n + adapted.len() as u32 + 3 * j as u32;
         let task_return = j as u32;
-        funcs.function(e.type_id(vec![], vec![ValType::I32]));
+        funcs.function(e.type_id(vec![], abi::flat_result(&x.sig)));
         let bump = e.bump;
         code.function(&abi::adapter(&mut e, bump, 0, &x.sig, abi::Mode::Finish));
         let params = abi::flat_params(&x.sig.params);
@@ -760,6 +762,10 @@ impl runtime::Cx for Emitter<'_> {
 
     fn host_globals(&mut self) -> u32 {
         self.host_base
+    }
+
+    fn to_int32(&mut self) -> u32 {
+        self.helper_index(Helper::ToInt32)
     }
 
     fn imports(&mut self) -> host::Imports {

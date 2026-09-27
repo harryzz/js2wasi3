@@ -191,6 +191,8 @@ pub trait Cx {
     fn bump_global(&mut self) -> u32;
     /// Global index of the first host global (commands only, see [`crate::host`]).
     fn host_globals(&mut self) -> u32;
+    /// Function index of `$to_int32` (JS ToInt32 of an `f64`).
+    fn to_int32(&mut self) -> u32;
     /// The host imports (commands; libraries with async exports, T20).
     fn imports(&mut self) -> crate::host::Imports;
     /// Does the library have top-level code (`init`, T20)?

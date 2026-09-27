@@ -120,8 +120,29 @@ use patterns::{Mode, Pat, Src};
 
 pub use builtins::{PRELUDE, parse};
 
+/// An export's signature in a user world (T20): WIT types, whether it returns a `result`
+/// (then a throw is its `err`), and whether it's an `async func`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldSig {
+    pub params: Vec<ir::AbiType>,
+    pub result: Option<ir::AbiType>,
+    pub throws: bool,
+    pub is_async: bool,
+}
+
+/// The exports of a user world, by JS export name.
+pub type Boundary = HashMap<String, WorldSig>;
+
 /// Lower a whole module. Returns every unsupported construct as a diagnostic.
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
+    lower_with(program, None)
+}
+
+/// [`lower`], with the export signatures of a user world (T20).
+pub fn lower_with(
+    program: &Program,
+    boundary: Option<&Boundary>,
+) -> Result<ir::Module, Diagnostics> {
     let mut facts = Facts::default();
     let an = closures::analyze(&program.semantic);
     loop {
@@ -133,6 +154,7 @@ pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
         let prelude = builtins::Prelude::new(program, extra);
         let mut l = Lowerer {
             p: program,
+            boundary,
             prelude: &prelude,
             scoping: program.semantic.scoping(),
             module: ir::Module {
@@ -265,6 +287,8 @@ enum Binding {
 
 struct Lowerer<'p, 'a> {
     p: &'p Program<'a>,
+    /// A user world's export signatures (T20).
+    boundary: Option<&'p Boundary>,
     /// The built-ins prelude (T21).
     prelude: &'p builtins::Prelude,
     scoping: &'p Scoping,
@@ -837,8 +861,62 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 help: None,
             });
         }
+        // A user world's signatures (T20): its parameter types, checked against the functions.
+        if let Some(boundary) = self.boundary {
+            for e in &self.p.exports {
+                let Some(Binding::Func(func)) =
+                    e.local.as_deref().and_then(|l| self.names.get(l)).copied()
+                else {
+                    continue;
+                };
+                let Some(w) = boundary.get(&e.name) else {
+                    continue;
+                };
+                let f = self.module.function(func);
+                let lead = self.hidden.get(&func).map_or(0, |h| h.count()) as usize;
+                let n = f.params as usize - lead;
+                let mut errs = Vec::new();
+                if w.is_async != f.flags.is_async {
+                    errs.push(if w.is_async {
+                        format!("the world's `{}` is an `async func`: export an `async function`", e.name)
+                    } else {
+                        format!("the world's `{}` isn't an `async func`: export a function that isn't `async`", e.name)
+                    });
+                }
+                if n != w.params.len() && !self.rest_param.contains(&func) {
+                    errs.push(format!(
+                        "`{}` takes {n} parameter{}, the world's function {}",
+                        e.name,
+                        if n == 1 { "" } else { "s" },
+                        w.params.len()
+                    ));
+                }
+                let (line, col) = self.p.line_col(e.span.start);
+                for message in errs {
+                    self.diags.push(Diagnostic {
+                        path: self.p.path.clone(),
+                        line,
+                        col,
+                        message,
+                        help: None,
+                    });
+                }
+                for (sym, a) in self.func_params[&func].clone().into_iter().zip(&w.params) {
+                    let Some(sym) = sym else { continue };
+                    let kind = match a {
+                        ir::AbiType::String | ir::AbiType::Char => Kind::Str,
+                        ir::AbiType::Bool => Kind::Bool,
+                        _ => Kind::Num,
+                    };
+                    self.observe(Slot::Var(sym), kind);
+                }
+            }
+        }
         // Boundary facts: string parameters (JSDoc or earlier usage) hold strings.
         for func in self.exported.clone() {
+            if self.boundary.is_some() {
+                break;
+            }
             let params = self.func_params[&func].clone();
             let f = self.module.function(func);
             let pos = f.pos.expect("declared functions have a position");
@@ -1495,22 +1573,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
-    /// Set each export's boundary signature. Where the function's IR signature differs, the
-    /// export goes through a wrapper `<name>$export` that converts.
+    /// Set each export's boundary signature: a user world's (T20), else from JSDoc and usage.
+    /// Where the function's IR signature differs, the export goes through a wrapper
+    /// `<name>$export` that converts.
     fn wrap_exports(&mut self) {
         use ir::AbiType;
-        let mut done: HashMap<FuncId, (FuncId, ir::AbiSig)> = HashMap::new();
+        let mut done: Vec<(FuncId, ir::AbiSig, FuncId)> = Vec::new();
         let throws = ir::may_throw(&self.module);
         // Jobs run after each call; an unhandled rejection, or an `init` that threw, fails it (T20).
         let jobs = ir::can_queue(&self.module);
         let init_throws = self.module.init.is_some_and(|f| throws[f.0 as usize]);
         for i in 0..self.module.exports.len() {
             let func = self.module.exports[i].func;
-            if let Some((w, sig)) = done.get(&func) {
-                self.module.exports[i].func = *w;
-                self.module.exports[i].sig = sig.clone();
-                continue;
-            }
             let f = self.module.function(func).clone();
             // A `this` param (T14) is `undefined` for calls from the boundary.
             let lead = self.hidden.get(&func).map_or(0, |h| h.count()) as usize;
@@ -1523,62 +1597,89 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             } else {
                 Slot::Result(func)
             });
-            let result = if !is_async {
-                f.result.map(|_| match doc.and_then(|d| d.result) {
-                    Some(t) => t,
-                    None if result_kind == Kind::Str => AbiType::String,
-                    None => AbiType::F64,
-                })
-            } else {
-                // What the promise settles to: `@returns {Promise<T>}`, else the `return`s' values.
-                match doc {
-                    Some(d) if d.promise || d.result.is_some() => d.result,
-                    _ => match result_kind {
-                        Kind::Bottom => None,
-                        Kind::Str => Some(AbiType::String),
-                        _ => Some(AbiType::F64),
-                    },
+            let world = self
+                .boundary
+                .and_then(|b| b.get(&self.module.exports[i].name));
+            let sig = if let Some(w) = world {
+                // The world decides; without a `result` a throw traps (T20).
+                ir::AbiSig {
+                    params: w.params.clone(),
+                    result: w.result,
+                    throws: w.throws,
+                    jobs,
+                    is_async,
                 }
-            };
-            let sig = ir::AbiSig {
-                params: params
-                    .iter()
-                    .zip(syms)
-                    .map(|(l, sym)| match doc.and_then(|d| d.params.get(&l.name)) {
-                        Some(t) => *t,
-                        None if sym.is_some_and(|s| self.facts.string_params.contains(&s)) => {
-                            AbiType::String
-                        }
+            } else {
+                let result = if !is_async {
+                    f.result.map(|_| match doc.and_then(|d| d.result) {
+                        Some(t) => t,
+                        None if result_kind == Kind::Str => AbiType::String,
                         None => AbiType::F64,
                     })
-                    .collect(),
-                result,
-                // An async function's promise can reject.
-                throws: throws[func.0 as usize] || jobs || init_throws || is_async,
-                jobs,
-                is_async,
+                } else {
+                    // What the promise settles to: `@returns {Promise<T>}`, else the `return`s'.
+                    match doc {
+                        Some(d) if d.promise || d.result.is_some() => d.result,
+                        _ => match result_kind {
+                            Kind::Bottom => None,
+                            Kind::Str => Some(AbiType::String),
+                            _ => Some(AbiType::F64),
+                        },
+                    }
+                };
+                ir::AbiSig {
+                    params: params
+                        .iter()
+                        .zip(syms)
+                        .map(|(l, sym)| match doc.and_then(|d| d.params.get(&l.name)) {
+                            Some(t) => *t,
+                            None if sym.is_some_and(|s| self.facts.string_params.contains(&s)) => {
+                                AbiType::String
+                            }
+                            None => AbiType::F64,
+                        })
+                        .collect(),
+                    result,
+                    // An async function's promise can reject.
+                    throws: throws[func.0 as usize] || jobs || init_throws || is_async,
+                    jobs,
+                    is_async,
+                }
             };
+            if let Some((_, _, w)) = done.iter().find(|(g, s, _)| *g == func && *s == sig) {
+                self.module.exports[i].func = *w;
+                self.module.exports[i].sig = sig;
+                continue;
+            }
             let direct = lead == 0
+                && params.len() == sig.params.len()
                 && params
                     .iter()
                     .zip(&sig.params)
-                    .all(|(l, a)| l.ty == a.ir_type())
+                    .all(|(l, a)| l.ty == a.param_type())
                 && (is_async
-                    || f.result == sig.result.map(|a| a.ir_type())
+                    || f.result == sig.result.map(|a| a.result_type())
                         && (sig.result != Some(AbiType::String) || result_kind == Kind::Str));
             let target = if direct {
                 func
             } else {
-                let wsig: Vec<(&str, Type)> = params
+                // Parameters the world has and the function doesn't are dropped (T20: `check_world`
+                // reports a count that differs).
+                let wsig: Vec<(String, Type)> = sig
+                    .params
                     .iter()
-                    .zip(&sig.params)
-                    .map(|(l, a)| (l.name.as_str(), a.ir_type()))
+                    .enumerate()
+                    .map(|(j, a)| {
+                        let name = params.get(j).map_or(format!("p{j}"), |l| l.name.clone());
+                        (name, a.param_type())
+                    })
                     .collect();
+                let wsig: Vec<(&str, Type)> = wsig.iter().map(|(n, t)| (n.as_str(), *t)).collect();
                 // An async function's wrapper returns its promise (the backend converts the value).
                 let wresult = if is_async {
                     f.result
                 } else {
-                    sig.result.map(|a| a.ir_type())
+                    sig.result.map(|a| a.result_type())
                 };
                 let mut w = ir::Function::new(format!("{}$export", f.name), &wsig, wresult);
                 w.pos = f.pos;
@@ -1586,40 +1687,36 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 args.extend(
                     params
                         .iter()
-                        .zip(&sig.params)
                         .enumerate()
-                        .map(|(j, (l, a))| {
-                            let p = Expr::local(LocalId(j as u32));
-                            if l.ty == a.ir_type() {
-                                p
-                            } else {
-                                Expr::convert(a.ir_type(), l.ty, p)
+                        .map(|(j, l)| match sig.params.get(j) {
+                            Some(a) => {
+                                convert_any(a.param_type(), l.ty, Expr::local(LocalId(j as u32)))
                             }
+                            None => convert_any(Type::JsVal, l.ty, Expr::undefined()),
                         }),
                 );
                 let call = Expr::Call { func, args };
-                w.body = vec![match (sig.result, f.result) {
-                    _ if is_async => Stmt::Return(Some(call)),
-                    (None, _) | (_, None) => Stmt::Expr(call),
-                    (Some(AbiType::F64), Some(Type::F64)) => Stmt::Return(Some(call)),
-                    (Some(AbiType::F64), Some(_)) => {
-                        Stmt::Return(Some(Expr::convert(Type::JsVal, Type::F64, call)))
+                w.body = match (sig.result, f.result) {
+                    _ if is_async => vec![Stmt::Return(Some(call))],
+                    (None, _) => vec![Stmt::Expr(call)],
+                    (Some(a), None) => vec![
+                        Stmt::Expr(call),
+                        Stmt::Return(Some(to_boundary(
+                            Expr::undefined(),
+                            Type::JsVal,
+                            Kind::Any,
+                            a,
+                        ))),
+                    ],
+                    (Some(a), Some(t)) => {
+                        vec![Stmt::Return(Some(to_boundary(call, t, result_kind, a)))]
                     }
-                    (Some(AbiType::String), Some(Type::F64)) => Stmt::Return(Some(
-                        Expr::intrinsic(ir::Intrinsic::NumberToString, vec![call]),
-                    )),
-                    (Some(AbiType::String), Some(_)) if result_kind == Kind::Str => {
-                        Stmt::Return(Some(call))
-                    }
-                    (Some(AbiType::String), Some(_)) => {
-                        Stmt::Return(Some(Expr::intrinsic(ir::Intrinsic::ToString, vec![call])))
-                    }
-                }];
+                };
                 self.module.add_function(w)
             };
             self.module.exports[i].func = target;
             self.module.exports[i].sig = sig.clone();
-            done.insert(func, (target, sig));
+            done.push((func, sig, target));
         }
     }
 
@@ -6159,6 +6256,39 @@ fn number_constant(name: &str) -> Option<f64> {
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, v)| *v)
+}
+
+/// Convert `e` from `from` to `to` (the IR converts directly only to and from `jsval` and
+/// between `f64` and `i32`).
+fn convert_any(from: Type, to: Type, e: Expr) -> Expr {
+    match (from, to) {
+        _ if from == to => e,
+        (Type::F64, Type::I32)
+        | (Type::I32, Type::F64)
+        | (Type::F64, Type::JsVal)
+        | (Type::JsVal, Type::F64)
+        | (Type::JsVal, Type::Bool)
+        | (Type::Bool, Type::JsVal) => Expr::convert(from, to, e),
+        (Type::I32, _) => convert_any(Type::F64, to, from_i32(e)),
+        (_, Type::I32) => to_i32(convert_any(from, Type::F64, e)),
+        _ => convert_any(Type::JsVal, to, convert_any(from, Type::JsVal, e)),
+    }
+}
+
+/// An export's result `e` (IR type `ty`, kind `kind`) as the boundary type `a` takes it
+/// ([`ir::AbiType::result_type`]): JS ToNumber / ToInt32 / ToBoolean / ToString.
+fn to_boundary(e: Expr, ty: Type, kind: Kind, a: ir::AbiType) -> Expr {
+    match a.result_type() {
+        Type::JsVal => match ty {
+            Type::F64 => Expr::intrinsic(ir::Intrinsic::NumberToString, vec![e]),
+            Type::JsVal if kind == Kind::Str => e,
+            _ => Expr::intrinsic(
+                ir::Intrinsic::ToString,
+                vec![convert_any(ty, Type::JsVal, e)],
+            ),
+        },
+        t => convert_any(ty, t, e),
+    }
 }
 
 fn to_i32(e: Expr) -> Expr {

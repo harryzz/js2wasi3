@@ -75,12 +75,12 @@ pub fn validate(m: &Module) -> Result<(), Vec<String>> {
             continue;
         };
         let params: Vec<Type> = f.locals[..f.params as usize].iter().map(|l| l.ty).collect();
-        let want: Vec<Type> = e.sig.params.iter().map(|a| a.ir_type()).collect();
+        let want: Vec<Type> = e.sig.params.iter().map(|a| a.param_type()).collect();
         // An async export returns its promise (T20).
         let result = if e.sig.is_async {
             Some(Type::JsVal)
         } else {
-            e.sig.result.map(|a| a.ir_type())
+            e.sig.result.map(|a| a.result_type())
         };
         if params != want || f.result != result {
             errs.push(format!(

@@ -169,24 +169,52 @@ pub struct Export {
     /// `name` was written as a string literal in the source (`export { f as "my-f" }`).
     pub string_name: bool,
     pub pos: Option<Pos>,
-    /// Types at the component boundary. `func` takes and returns `f64` for [`AbiType::F64`]
-    /// and a JS string (`JsVal`) for [`AbiType::String`].
+    /// Types at the component boundary. `func` takes [`AbiType::param_type`]s and returns an
+    /// [`AbiType::result_type`] (an async export: its promise).
     pub sig: AbiSig,
 }
 
-/// A value type at the component boundary (a WIT type).
+/// A value type at the component boundary (a WIT type). Generated worlds use `F64` and
+/// `String`; a user world (T20) any scalar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AbiType {
+    Bool,
+    S8,
+    U8,
+    S16,
+    U16,
+    S32,
+    U32,
+    S64,
+    U64,
+    F32,
     F64,
+    Char,
     String,
 }
 
 impl AbiType {
-    /// The IR type the exported function uses for it.
-    pub fn ir_type(self) -> Type {
+    /// The IR type an exported function takes for it: a number (`f64`), a boolean, or a JS
+    /// string (`char` too).
+    pub fn param_type(self) -> Type {
         match self {
-            AbiType::F64 => Type::F64,
-            AbiType::String => Type::JsVal,
+            AbiType::Bool => Type::Bool,
+            AbiType::Char | AbiType::String => Type::JsVal,
+            _ => Type::F64,
+        }
+    }
+
+    /// The IR type an exported function returns for it: the integers up to 32 bits as JS
+    /// ToInt32 (`i32`; the adapter narrows them), other numbers as `f64`.
+    pub fn result_type(self) -> Type {
+        match self {
+            AbiType::S8
+            | AbiType::U8
+            | AbiType::S16
+            | AbiType::U16
+            | AbiType::S32
+            | AbiType::U32 => Type::I32,
+            t => t.param_type(),
         }
     }
 }

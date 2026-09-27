@@ -8,14 +8,25 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
-use wit_parser::Resolve;
+use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 pub mod names;
 
-/// A WIT value type.
+/// A WIT value type (the scalars; T20 slice 4a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValType {
+    Bool,
+    S8,
+    U8,
+    S16,
+    U16,
+    S32,
+    U32,
+    S64,
+    U64,
+    F32,
     F64,
+    Char,
     String,
 }
 
@@ -112,12 +123,14 @@ impl std::fmt::Display for WorldName {
     }
 }
 
-/// A generated world: the WIT text and the WIT name of each export (same order as the input).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A generated world: the WIT text and the WIT name of each export (same order as the input);
+/// or a user world (T20: `user` is set, `wit` is empty).
+#[derive(Debug, Clone)]
 pub struct World {
     pub name: WorldName,
     pub export_names: Vec<String>,
     pub wit: String,
+    pub user: Option<(Resolve, WorldId)>,
 }
 
 /// Map the export names to WIT names and generate the world's WIT text.
@@ -219,6 +232,7 @@ pub fn world(name: WorldName, exports: &[ExportSig]) -> Result<World, Vec<NameEr
         name,
         export_names,
         wit,
+        user: None,
     })
 }
 
@@ -240,8 +254,171 @@ fn params(ps: &[(String, ValType)]) -> Vec<String> {
 
 fn ty(t: ValType) -> &'static str {
     match t {
+        ValType::Bool => "bool",
+        ValType::S8 => "s8",
+        ValType::U8 => "u8",
+        ValType::S16 => "s16",
+        ValType::U16 => "u16",
+        ValType::S32 => "s32",
+        ValType::U32 => "u32",
+        ValType::S64 => "s64",
+        ValType::U64 => "u64",
+        ValType::F32 => "f32",
         ValType::F64 => "f64",
+        ValType::Char => "char",
         ValType::String => "string",
+    }
+}
+
+/// A function a user world exports (T20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldExport {
+    /// Its WIT name.
+    pub name: String,
+    pub params: Vec<(String, ValType)>,
+    pub result: Option<ValType>,
+    /// Its result is a `result<T, E>` (not yet: slice 4b).
+    pub throws: bool,
+    pub is_async: bool,
+    /// Its WIT signature, for messages.
+    pub signature: String,
+}
+
+/// A world from the user's WIT (`--wit`).
+#[derive(Debug, Clone)]
+pub struct UserWorld {
+    pub resolve: Resolve,
+    pub id: WorldId,
+    pub name: String,
+    pub exports: Vec<WorldExport>,
+}
+
+/// Load `world` (a name, `ns:pkg/world` or `None` for the only one) from the WIT file or
+/// directory `path`. The vendored WASI 0.3.1 packages are available to it. Every function it
+/// exports must have scalar parameter and result types (slice 4a); interface exports aren't
+/// supported yet.
+pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld> {
+    let mut resolve = Resolve::default();
+    for (file, text) in WASI {
+        resolve
+            .push_source(file, text)
+            .with_context(|| format!("vendored WIT {file}"))?;
+    }
+    let (pkg, _) = resolve
+        .push_path(path)
+        .with_context(|| format!("reading WIT from {}", path.display()))?;
+    let id = resolve.select_world(&[pkg], world)?;
+    let w = &resolve.worlds[id];
+    let mut exports = Vec::new();
+    let mut errs = Vec::new();
+    for (key, item) in &w.exports {
+        match item {
+            WorldItem::Function(f) => {
+                let mut ok = true;
+                let mut scalar = |t: &Type, what: String| match scalar_type(&resolve, t) {
+                    Some(v) => Some(v),
+                    None => {
+                        errs.push(format!(
+                            "unsupported: {what} of `{}` has type `{}` (only scalar types so far; planned: T20 slice 4b)",
+                            f.name,
+                            type_name(&resolve, t)
+                        ));
+                        ok = false;
+                        None
+                    }
+                };
+                let params: Vec<(String, ValType)> = f
+                    .params
+                    .iter()
+                    .filter_map(|p| {
+                        scalar(&p.ty, format!("parameter `{}`", p.name)).map(|v| (p.name.clone(), v))
+                    })
+                    .collect();
+                let result = f.result.as_ref().and_then(|t| scalar(t, "the result".into()));
+                if !ok {
+                    continue;
+                }
+                let signature = format!(
+                    "{}func({}){}",
+                    if f.kind.is_async() { "async " } else { "" },
+                    params
+                        .iter()
+                        .map(|(n, t)| format!("{n}: {}", ty(*t)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    result.map_or(String::new(), |t| format!(" -> {}", ty(t)))
+                );
+                exports.push(WorldExport {
+                    name: f.name.clone(),
+                    params,
+                    result,
+                    throws: false,
+                    is_async: f.kind.is_async(),
+                    signature,
+                });
+            }
+            _ => errs.push(format!(
+                "unsupported: the world exports interface `{}` (only functions so far; planned: later)",
+                resolve.name_world_key(key)
+            )),
+        }
+    }
+    if !errs.is_empty() {
+        bail!("world `{}`:\n  {}", w.name, errs.join("\n  "));
+    }
+    Ok(UserWorld {
+        name: w.name.clone(),
+        resolve,
+        id,
+        exports,
+    })
+}
+
+/// A scalar WIT type (through type aliases).
+fn scalar_type(resolve: &Resolve, t: &Type) -> Option<ValType> {
+    Some(match t {
+        Type::Bool => ValType::Bool,
+        Type::S8 => ValType::S8,
+        Type::U8 => ValType::U8,
+        Type::S16 => ValType::S16,
+        Type::U16 => ValType::U16,
+        Type::S32 => ValType::S32,
+        Type::U32 => ValType::U32,
+        Type::S64 => ValType::S64,
+        Type::U64 => ValType::U64,
+        Type::F32 => ValType::F32,
+        Type::F64 => ValType::F64,
+        Type::Char => ValType::Char,
+        Type::String => ValType::String,
+        Type::ErrorContext => return None,
+        Type::Id(id) => match &resolve.types[*id].kind {
+            TypeDefKind::Type(t) => return scalar_type(resolve, t),
+            _ => return None,
+        },
+    })
+}
+
+/// How a WIT type is written, for messages.
+fn type_name(resolve: &Resolve, t: &Type) -> String {
+    match t {
+        Type::Id(id) => {
+            let def = &resolve.types[*id];
+            match &def.name {
+                Some(n) => n.clone(),
+                None => match &def.kind {
+                    TypeDefKind::List(_) => "list<…>".into(),
+                    TypeDefKind::Option(_) => "option<…>".into(),
+                    TypeDefKind::Result(_) => "result<…>".into(),
+                    TypeDefKind::Tuple(_) => "tuple<…>".into(),
+                    TypeDefKind::Future(_) => "future<…>".into(),
+                    TypeDefKind::Stream(_) => "stream<…>".into(),
+                    TypeDefKind::Handle(_) => "a resource handle".into(),
+                    _ => "an anonymous type".into(),
+                },
+            }
+        }
+        Type::ErrorContext => "error-context".into(),
+        t => ty(scalar_type(resolve, t).unwrap()).into(),
     }
 }
 
@@ -287,12 +464,16 @@ pub fn command_world(name: WorldName) -> World {
         name,
         export_names: Vec::new(),
         wit,
+        user: None,
     }
 }
 
 /// Embed `world` into the core module and encode a component. The core module must export
 /// each function under its WIT name ([`World::export_names`]).
 pub fn package(core: &[u8], world: &World) -> anyhow::Result<Vec<u8>> {
+    if let Some((resolve, id)) = &world.user {
+        return encode(core, resolve, *id);
+    }
     let mut resolve = Resolve::default();
     // Only a command world uses them; unused packages cost nothing in the component.
     for (path, text) in WASI {
@@ -305,8 +486,12 @@ pub fn package(core: &[u8], world: &World) -> anyhow::Result<Vec<u8>> {
         .with_context(|| format!("generated WIT is invalid:\n{}", world.wit))?;
     // `%` escapes names that are WIT keywords (e.g. an entry file `stream.js`).
     let world_id = resolve.select_world(&[pkg], Some(&format!("%{}", world.name.world)))?;
+    encode(core, &resolve, world_id)
+}
+
+fn encode(core: &[u8], resolve: &Resolve, world_id: WorldId) -> anyhow::Result<Vec<u8>> {
     let mut bytes = core.to_vec();
-    embed_component_metadata(&mut bytes, &resolve, world_id, StringEncoding::UTF8)?;
+    embed_component_metadata(&mut bytes, resolve, world_id, StringEncoding::UTF8)?;
     ComponentEncoder::default()
         .module(&bytes)?
         .validate(true)

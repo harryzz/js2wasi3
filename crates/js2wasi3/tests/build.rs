@@ -494,6 +494,117 @@ fn async_exports_wait_for_timers() {
 }
 
 #[test]
+fn user_world_scalars() {
+    let out = out_dir("scalars").join("scalars.wasm");
+    let dir = fixture("library/scalars");
+    let b = build(
+        &dir.join("scalars.js"),
+        &out,
+        &["--wit", dir.join("world.wit").to_str().unwrap()],
+    );
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    // Numbers wrap like ToInt32 and then to the width; 64-bit ones saturate.
+    for (call, want) in [
+        ("add-u8(200, 100)", "44"),
+        ("neg-s8(-128)", "-128"),
+        ("wrap-s16(40000)", "-25536"),
+        ("mul-u16(300, 300)", "24464"),
+        ("to-s32(3000000000.7)", "-1294967296"),
+        ("to-u32(-1)", "4294967295"),
+        ("big(9007199254740991, 1)", "9007199254740992"),
+        ("half(1.5)", "0.75"),
+        ("not(true)", "false"),
+        ("truthy(\"\")", "false"),
+        ("truthy(\"x\")", "true"),
+        ("next-char('a')", "'b'"),
+        ("next-char('\u{1F600}')", "'\u{1F601}'"),
+        ("first(\"\u{1F600}x\")", "'\u{1F600}'"),
+        (
+            "describe(7, '\u{e9}', true)",
+            "\"7 \u{e9} true number string boolean\"",
+        ),
+        ("slow-add(4000000000, 1000000000)", "705032704"),
+        ("slow-char(\"h\u{e9}llo\")", "'h'"),
+        ("fails(-1)", "-1"),
+    ] {
+        assert_eq!(invoke(&out, call), want, "{call}");
+    }
+    // No `result` in the world: a throw traps.
+    let trap = Command::new("wasmtime")
+        .args(["run", "--invoke", "fails(1)"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(!trap.status.success());
+    // Numbers only: no JS runtime, no memory.
+    let dir = out_dir("scalars-numbers");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wit = dir.join("calc.wit");
+    std::fs::write(
+        &wit,
+        "package acme:math;\nworld calc { export add: func(a: u32, b: u32) -> u32; }\n",
+    )
+    .unwrap();
+    let out = dir.join("calc.wasm");
+    let b = build(&fixture("add.js"), &out, &["--wit", wit.to_str().unwrap()]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert_eq!(invoke(&out, "add(4000000000, 1000000000)"), "705032704");
+}
+
+#[test]
+fn user_world_mismatches() {
+    let dir = out_dir("world-mismatch");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wit = dir.join("w.wit");
+    let js = dir.join("m.js");
+    let out = dir.join("m.wasm");
+    let err = |wit_text: &str, js_text: &str| {
+        std::fs::write(&wit, wit_text).unwrap();
+        std::fs::write(&js, js_text).unwrap();
+        let b = build(&js, &out, &["--wit", wit.to_str().unwrap()]);
+        assert!(!b.status.success());
+        String::from_utf8(b.stderr).unwrap()
+    };
+    let e = err(
+        "package a:b;\nworld w { export f: func(a: u32) -> u32; export g: async func(); export missing: func(); }\n",
+        "export function f(a, b) { return a; }\nexport function g() {}\nexport function extra() {}\n",
+    );
+    assert!(
+        e.contains("3:8: error: export `extra` (WIT name `extra`) isn't in world `w`"),
+        "{e}"
+    );
+    assert!(
+        e.contains("world `w` exports `missing: func()`, and the module has no export for it"),
+        "{e}"
+    );
+    let e = err(
+        "package a:b;\nworld w { export f: func(a: u32) -> u32; export g: async func(); }\n",
+        "export function f(a, b) { return a; }\nexport function g() {}\n",
+    );
+    assert!(
+        e.contains("1:8: error: `f` takes 2 parameters, the world's function 1"),
+        "{e}"
+    );
+    assert!(
+        e.contains("2:8: error: the world's `g` is an `async func`"),
+        "{e}"
+    );
+    let e = err(
+        "package a:b;\nworld w { export f: func(a: list<u8>); }\n",
+        "export function f(a) {}\n",
+    );
+    assert!(e.contains("parameter `a` of `f` has type `list<…>`"), "{e}");
+    let e = err(
+        "package a:b;\nworld w { export f: async func() -> u32; }\n",
+        "export async function f() { await new Promise((r) => setTimeout(r, 1)); return 1; }\n",
+    );
+    assert!(
+        e.contains("its world must `import wasi:clocks/monotonic-clock@0.3.1;`"),
+        "{e}"
+    );
+}
+
+#[test]
 fn library_calls_run_their_jobs() {
     let out = out_dir("jobs").join("jobs.wasm");
     let b = build(&fixture("library/jobs.js"), &out, &[]);

@@ -1,0 +1,23 @@
+package acme:scalars;
+
+world scalars {
+  type count = u32;
+
+  export add-u8: func(a: u8, b: u8) -> u8;
+  export neg-s8: func(a: s8) -> s8;
+  export wrap-s16: func(a: s32) -> s16;
+  export mul-u16: func(a: u16, b: u16) -> u16;
+  export to-s32: func(x: f64) -> s32;
+  export to-u32: func(x: f64) -> count;
+  export big: func(a: u64, b: s64) -> s64;
+  export half: func(x: f32) -> f32;
+  export not: func(b: bool) -> bool;
+  export truthy: func(s: string) -> bool;
+  export next-char: func(c: char) -> char;
+  export first: func(s: string) -> char;
+  export describe: func(n: u32, c: char, ok: bool) -> string;
+  export nothing: func(x: f64);
+  export slow-add: async func(a: u32, b: u32) -> u32;
+  export slow-char: async func(s: string) -> char;
+  export fails: func(x: s32) -> s32;
+}

@@ -33,8 +33,13 @@ enum Cmd {
         core: bool,
         /// WIT world of the component, as <namespace>:<package>/<world>.
         /// Default: js2wasi3:<name>/<name>, from the entry file name.
+        /// With --wit: the world to use from those files (a name or <namespace>:<package>/<world>).
         #[arg(long)]
         world: Option<String>,
+        /// A WIT file or directory with the world the module implements (instead of generating
+        /// one from the exports).
+        #[arg(long)]
+        wit: Option<String>,
     },
 }
 
@@ -47,6 +52,8 @@ fn plan_world(
     let ty = |t: ir::AbiType| match t {
         ir::AbiType::F64 => component::ValType::F64,
         ir::AbiType::String => component::ValType::String,
+        // Generated worlds use only these two.
+        t => unreachable!("{t:?} in a generated world"),
     };
     let mut sigs = Vec::new();
     for e in &ir.exports {
@@ -82,6 +89,114 @@ fn plan_world(
             .collect();
         frontend::Diagnostics(diags).into()
     })
+}
+
+/// Match the module's exports with a user world's (T20): every world export needs a JS export
+/// with its WIT name (converted like a generated world's, or a string export name), and every
+/// JS export must be in the world. Returns the signatures by JS name and the WIT name of each.
+fn match_world(
+    program: &frontend::Program,
+    world: &component::UserWorld,
+) -> anyhow::Result<(
+    js2wasi3_lower::Boundary,
+    std::collections::HashMap<String, String>,
+)> {
+    let ty = |t: component::ValType| {
+        use component::ValType as V;
+        use ir::AbiType as A;
+        match t {
+            V::Bool => A::Bool,
+            V::S8 => A::S8,
+            V::U8 => A::U8,
+            V::S16 => A::S16,
+            V::U16 => A::U16,
+            V::S32 => A::S32,
+            V::U32 => A::U32,
+            V::S64 => A::S64,
+            V::U64 => A::U64,
+            V::F32 => A::F32,
+            V::F64 => A::F64,
+            V::Char => A::Char,
+            V::String => A::String,
+        }
+    };
+    let mut diags = Vec::new();
+    let diag = |e: Option<&frontend::Export>, message: String, help: Option<String>| {
+        let (line, col) = e.map_or((1, 1), |e| program.line_col(e.span.start));
+        frontend::Diagnostic {
+            path: program.path.clone(),
+            line,
+            col,
+            message,
+            help,
+        }
+    };
+    // WIT name → JS export.
+    let mut by_wit: std::collections::HashMap<String, &frontend::Export> = Default::default();
+    for e in &program.exports {
+        if e.from.is_some() || e.local.is_none() {
+            continue; // reported by the lowering
+        }
+        let wit = if e.string_name {
+            e.name.clone()
+        } else {
+            match component::names::to_wit(&e.name) {
+                Ok(w) => w,
+                Err(why) => {
+                    diags.push(diag(
+                        Some(e),
+                        format!("export `{}` has no WIT name: {why}", e.name),
+                        None,
+                    ));
+                    continue;
+                }
+            }
+        };
+        if !world.exports.iter().any(|w| w.name == wit) {
+            diags.push(diag(
+                Some(e),
+                format!(
+                    "export `{}` (WIT name `{wit}`) isn't in world `{}`",
+                    e.name, world.name
+                ),
+                None,
+            ));
+            continue;
+        }
+        by_wit.insert(wit, e);
+    }
+    let mut boundary = js2wasi3_lower::Boundary::new();
+    let mut names = std::collections::HashMap::new();
+    for w in &world.exports {
+        let Some(e) = by_wit.get(&w.name) else {
+            diags.push(diag(
+                None,
+                format!(
+                    "world `{}` exports `{}: {}`, and the module has no export for it",
+                    world.name, w.name, w.signature
+                ),
+                Some(format!(
+                    "export a function whose name converts to `{}`, or `export {{ f as \"{}\" }}`",
+                    w.name, w.name
+                )),
+            ));
+            continue;
+        };
+        boundary.insert(
+            e.name.clone(),
+            js2wasi3_lower::WorldSig {
+                params: w.params.iter().map(|(_, t)| ty(*t)).collect(),
+                result: w.result.map(ty),
+                throws: w.throws,
+                is_async: w.is_async,
+            },
+        );
+        names.insert(e.name.clone(), w.name.clone());
+    }
+    if !diags.is_empty() {
+        return Err(frontend::Diagnostics(diags).into());
+    }
+    Ok((boundary, names))
 }
 
 fn read(path: &str) -> anyhow::Result<String> {
@@ -127,13 +242,50 @@ fn main() -> anyhow::Result<()> {
             out,
             core,
             world,
+            wit,
         } => {
+            let source = read(&entry)?;
+            let program = js2wasi3_lower::parse(&alloc, &entry, &source)?;
+            if let Some(wit) = wit {
+                if program.exports.is_empty() {
+                    anyhow::bail!(
+                        "--wit: {entry} has no exports, so it's a command (its world is wasi:cli/command)"
+                    );
+                }
+                let user = component::load_world(Path::new(&wit), world.as_deref())?;
+                let (boundary, names) = match_world(&program, &user)?;
+                let mut ir = js2wasi3_lower::lower_with(&program, Some(&boundary))?;
+                for e in &mut ir.exports {
+                    e.name = names[&e.name].clone();
+                }
+                let module = js2wasi3_backend::emit(&ir)?;
+                let bytes = if core {
+                    module
+                } else {
+                    let world = component::World {
+                        name: component::WorldName::from_path(Path::new(&entry)),
+                        export_names: Vec::new(),
+                        wit: String::new(),
+                        user: Some((user.resolve, user.id)),
+                    };
+                    let timers = ["$timers", "$immediates", "$ticks"]
+                        .iter()
+                        .any(|n| ir.names.contains(*n));
+                    component::package(&module, &world).with_context(|| {
+                        if timers {
+                            "the module uses timers: its world must `import wasi:clocks/monotonic-clock@0.3.1;`"
+                        } else {
+                            "packaging the component"
+                        }
+                    })?
+                };
+                std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
+                return Ok(());
+            }
             let world = match world {
                 Some(w) => component::WorldName::parse(&w)?,
                 None => component::WorldName::from_path(Path::new(&entry)),
             };
-            let source = read(&entry)?;
-            let program = js2wasi3_lower::parse(&alloc, &entry, &source)?;
             let mut ir = js2wasi3_lower::lower(&program)?;
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?

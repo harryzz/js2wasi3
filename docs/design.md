@@ -133,7 +133,10 @@ export adapters (`abi::Helper::Init`); an `init` that threw fails every later ca
 module can queue jobs (`ir::can_queue`), each call ends by draining them (`abi::Helper::Settle`), and an unhandled
 rejection (or a job's exception) makes the call return `err`. Slice 3: an `async` export is an `async func`
 returning `result<T, js-error>`, `T` being what the promise settles to (JSDoc `@returns {Promise<T>}`, else the
-`return` values); a world with one imports `wasi:clocks/monotonic-clock` for timers.)
+`return` values); a world with one imports `wasi:clocks/monotonic-clock` for timers. Slice 4a: `--wit` takes a user
+world; its scalar types decide the boundary: numbers ToNumber, integers ToInt32 and then narrowed to their width
+(64-bit ones: numbers, saturated), `bool` ToBoolean, `char` ↔ a one-code-point string, and without a `result`
+a throw traps.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

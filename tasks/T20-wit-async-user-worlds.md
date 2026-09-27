@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slices 1–3 done; next: slice 4) | Depends on: T19
+Status: in progress (slices 1–3 and 4a done; next: slice 4b) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -117,6 +117,46 @@ the module's exports against the world (sync vs `async func`, parameter count), 
 (`bool`, integers, `f32`/`f64`, `char`, `string`), then `list`, `option`, `result`, `record`, `variant`, `enum`,
 `flags`, `tuple` (F13, F21, F55); the world decides which exports return `result` (F34/F60/F119).
 
+### Slice 4a: user worlds with scalar types (done 2026-09-27)
+- **CLI:** `js2wasi3 build m.js --wit <file|dir> [--world <name>]` (`--world` selects the world in those files: a
+  plain name or `ns:pkg/world`). `component::load_world` pushes the vendored WASI 0.3.1 packages, then the user's
+  path (`Resolve::push_path`), and lists the world's function exports (type aliases resolved); non-scalar types
+  and interface exports are errors naming the function and type. `match_world` (in `main.rs`) pairs each world
+  export with the JS export whose name converts to it (or a string export name): a world export with no JS
+  export, or a JS export not in the world, is a diagnostic. The component is encoded against the user's
+  `Resolve` (`World::user`); a module with timers whose world lacks `wasi:clocks/monotonic-clock` gets a hint.
+- **Lowering:** `js2wasi3_lower::lower_with(program, Some(&Boundary))` (`WorldSig` by JS export name). Pass 1
+  checks sync vs `async func` and the parameter count, and observes each parameter's kind from its WIT type (so
+  strings/chars are strings, bools booleans, the rest numbers). `wrap_exports` takes the world's signature
+  (`throws` = the world has a `result`; none in 4a, so a throw traps, as in jco) and converts through
+  `convert_any` / `to_boundary` (ToNumber, ToInt32 for the integers, ToBoolean, ToString).
+- **IR:** `ir::AbiType` has every WIT scalar; `param_type` (numbers are `f64`, `bool` is `Bool`, `char`/`string`
+  JS strings) and `result_type` (integers up to 32 bits are `i32` from ToInt32).
+- **Backend adapter** (`abi::adapter`, rewritten): per-type lifting (`f64.convert_i32_s/u`, `i64`, `f32`
+  promote, `char` → a one-code-point string, `abi::Helper::FromCodePoint`) and lowering (narrowing with
+  `extend8_s`/`and 0xff`/…, `i64.trunc_sat_f64_s/u`, `f32.demote`, `char` = first code point with U+FFFD for a
+  lone surrogate, `Helper::CodePointAt0`); `result<T, js-error>` return areas and joined `task.return` params for
+  any scalar `T`; async exports without `result` return their value flat. Helpers and linear memory are only
+  used when needed (`abi::needs_memory`): a numbers-only `u32` library has neither the JS runtime nor memory.
+  Every export whose types aren't all `f64` goes through an adapter.
+- Tests: `tests/fixtures/library/scalars/{world.wit,scalars.js}` (every scalar, a type alias, a string export
+  name, async `u32`/`char`, a trap) and a numbers-only world, in `crates/js2wasi3/tests/build.rs`
+  (`user_world_scalars`, `user_world_mismatches`: missing/extra exports, async and parameter-count mismatches, a
+  `list` type, the missing clock import). `cargo test` ok; `scripts/diff.sh -j 4`: 97 passed, 0 failed, 16
+  skipped; sizes unchanged for commands and generated worlds (`hello.js` 55715, `add.js` 289), `library/async.js`
+  +80 bytes (adapter locals).
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets` (the old warning only),
+  `scripts/diff.sh -j 4`, `wasm-tools validate`, `wasmtime run --invoke` on the fixtures.
+
+**Not done (follow-ups):** F124 (scalar conversions differ from jco: 64-bit numbers not BigInt, wrapping instead
+of range checks, `char` from the first code point), F125 (interface exports; exact parameter count), F126 (a WIT
+dir with its own WASI `deps/`). F13 is done for scalars in user worlds; F34/F60/F119 are resolved by a user world.
+
+**Next smallest step:** slice 4b: `result<T, E>` in user worlds (a throw is `err`: decide how a JS exception
+maps to `E`: `string` = its message, a record like `js-error`, …), then `option<T>` (↔ `undefined`), `tuple`,
+`record` (↔ plain object), `enum` (↔ string), `list<T>` (`list<u8>` ↔ `Uint8Array`), `variant`, `flags`; these
+need the canonical ABI in memory (lists, > 16 flat params, F21).
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -206,3 +246,7 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: 3a done. IR `AbiSig::is_async` (validate: an async export's function returns the promise); lowering: async exports allowed, result from JSDoc `@returns {Promise<T>}` (`Promise<…>` on a non-async function is an error) or `Slot::Settled` (the kinds of `return` values), `$export` wrappers convert params only; component: `async func`; backend: `abi::Helper::Await` (`await_export`), the adapter awaits + converts (ToNumber/ToString), `abi::async_lift` (return area → flat `task.return` params, EXIT), `abi::async_callback` (unreachable), `[task-return]<name>` imports in libraries. Fixture `library/async.js` (all results as node's `await m.f()`), test `async_exports_await_their_promise`; unsupported test updated. cargo test ok; diff.sh 97/0/15; hello.js 55715.
 - 2026-09-27: 3b done: timers in libraries with an async export. Backend: host imports are looked up through `Cx::imports()` (`host::Imports`: a library's `task.return`s come first, then `LIBRARY_TIMER_IMPORTS`: waitable set, clock, wait-until, subtask drop/cancel, backpressure inc/dec); an async export is 3 functions + its adapter: `Mode::Start` (init + call, promise in `LIB_GLOBALS`, now 7), `abi::Helper::Step` (jobs + nextTicks, done when settled/failed/unhandled/nothing to wait for, else arm `wait-until`, backpressure up, `WAIT`), `Event`/`Tick` (run due timers; exception or unhandled rejection fails the call), `Mode::Finish` (the `result` via `Await`), `End` (disarm, backpressure down). Found: `promise::Helper::Unhandled` forgets what it looked at, so Step keeps the reason. World: `import wasi:clocks/monotonic-clock` when an export is async (dropped when unused). Lowering: timers allowed in libraries with an async export. Fixture `library/async-timers.js` (as node; a throwing timer fails the call where node crashes). cargo test ok; diff.sh 97/0/16; hello.js 55715.
 - 2026-09-27: slice 3 done: Notes / Result, README (Next up: slice 4; F120 retargeted; F121–F123), design.md D3/D4, keywords.md, README.md; handoff baseline 97/0/16.
+- 2026-09-27: slice 4 started. Split: 4a = `--wit`/`--world`, exports checked against the world (names, sync vs async, param count), scalar types (bool, s8–u64, f32/f64, char, string), the world decides `result` (without it a throw traps, like jco); 4b = result/option/list/record/variant/enum/flags/tuple.
+- 2026-09-27: 4a implemented: `ir::AbiType` = all WIT scalars (`param_type`/`result_type`), `lower_with(program, Some(&Boundary))` (world sigs by JS export name; pass 1 checks sync/async and param count, observes param kinds; `wrap_exports` converts via `convert_any`/`to_boundary`), backend adapter rewritten (per-type lifting/narrowing, `result` return areas and joined `task.return` params for any scalar, `FromCodePoint`/`CodePointAt0`, conversion helpers gated), component `load_world` (vendored WASI + `push_path`, aliases resolved, non-scalars and interface exports rejected), CLI `--wit` + `match_world` (missing / extra exports). Fixture `library/scalars/{world.wit,scalars.js}`: every result as ToInt32 + narrowing; a throw without `result` traps.
+- 2026-09-27: found while testing: a numbers-only library with a `u32` world had no JS runtime but its adapter requested the string/allocator helpers and the bump global (invalid module): helpers and memory are now requested only when needed (`abi::needs_memory`). Tests added.
+- 2026-09-27: 4a done: Notes / Result, README (Next up: 4b; F124–F126; F13/F34/F60/F119 notes), design.md D4, wit-names.md, README.md.
