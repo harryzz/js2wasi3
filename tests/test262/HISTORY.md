@@ -3,6 +3,25 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T29 `yield*` in async generators (targeted rerun)
+
+- Compiler: T29 (`yield*` in async generators, CreateAsyncFromSyncIterator in the prelude).
+- Run: the 1,128 tests rejected for `yield*` in an async generator (606 s at -j 4): 1,127 → pass, 1 → fail
+  (needs the AsyncGeneratorFunction constructor, F106), 0 regressions.
+
+| directory | pass | fail | unsupported | crash | timeout | skip | pass% |
+|---|---|---|---|---|---|---|---|
+| built-ins/Array | 2194 | 506 | 319 | 0 | 11 | 52 | 72.4% |
+| built-ins/JSON | 96 | 32 | 34 | 0 | 0 | 3 | 59.3% |
+| built-ins/Map | 134 | 10 | 23 | 0 | 2 | 35 | 79.3% |
+| built-ins/Math | 276 | 2 | 39 | 0 | 0 | 10 | 87.1% |
+| built-ins/Promise | 406 | 186 | 39 | 0 | 8 | 93 | 63.5% |
+| built-ins/Set | 311 | 16 | 53 | 0 | 1 | 2 | 81.6% |
+| built-ins/String | 697 | 294 | 226 | 0 | 0 | 6 | 57.3% |
+| language/expressions | 8163 | 587 | 1325 | 0 | 0 | 1089 | 81.0% |
+| language/statements | 7890 | 128 | 813 | 0 | 1 | 518 | 89.3% |
+| **total** | **20167** | **1761** | **2871** | **0** | **23** | **1808** | **81.2%** |
+
 ## 2026-09-27: T28 test262 quick wins (targeted rerun)
 
 - Compiler: T28 (undeclared reads throw a ReferenceError, `await using` reported, WIT names from file names,

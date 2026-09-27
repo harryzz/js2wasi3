@@ -173,13 +173,10 @@ fn declarations_and_functions() {
         one("/** @returns {Promise<number>} */\nexport function f() { return 1; }"),
         "2:8 unsupported: JSDoc return type `Promise<…>` on a function that isn't `async` (planned: T20)"
     );
-    // T20 slice 1b: async generators; `yield*` in them isn't supported yet.
+    // T20 slice 1b: async generators; T29: `yield*` in them.
     lowers("async function* g() { yield 1; } g();");
     lowers("const g = async function* () { await null; return 2; }; g();");
-    assert_eq!(
-        one("async function* g() { yield* [1]; } g();"),
-        "1:23 unsupported: `yield*` in an async generator (planned: later)"
-    );
+    lowers("async function* g() { yield* [1]; } g();");
     assert_eq!(
         one("export function f() { setTimeout(f, 1); return 0; }"),
         "1:23 unsupported: `setTimeout` in a library without async exports (timers run while an async export's call waits) (planned: T20)"

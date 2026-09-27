@@ -9,6 +9,11 @@
 //! `yield* v` is a loop: `DelegateStep` calls the inner iterator's `next`/`throw`/`return` with
 //! the value the generator was resumed with, and each result object that isn't done is passed out
 //! as is (`SuspendKind::YieldDelegate`).
+//!
+//! In an async generator (T29) the loop is [`Lowerer::async_yield_star`]: the prelude
+//! (`builtins/asyncgen.js`) opens the inner iterator (a sync one wrapped by
+//! CreateAsyncFromSyncIterator) and makes the calls; the generator awaits each result and yields
+//! each value with an ordinary async-generator `yield`.
 
 use js2wasi3_ir::{
     self as ir, BinOp, Expr, Intrinsic, RESUME_RETURN, RESUME_THROW, Stmt, SuspendKind, Type,
@@ -156,6 +161,162 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Expr::Seq {
             body,
             value: Box::new(Expr::Local(result)),
+        }
+    }
+
+    /// A direct call of a prelude function with JS-value arguments, as a JS value (T29).
+    fn prelude_call(&mut self, name: &str, args: Vec<Expr>) -> Expr {
+        let sym = self.prelude.names[name];
+        let func = self.funcs[&sym];
+        for p in self.func_params[&func].clone().into_iter().flatten() {
+            self.observe(Slot::Var(p), Kind::Any);
+        }
+        let call = Expr::Call { func, args };
+        match self.module.function(func).result {
+            Some(Type::JsVal) => call,
+            Some(t) => Expr::convert(t, Type::JsVal, call),
+            None => Expr::Seq {
+                body: vec![Stmt::Expr(call)],
+                value: Box::new(Expr::undefined()),
+            },
+        }
+    }
+
+    /// `yield* iterable` in an async generator (T29, ES2025 14.4.14 with generatorKind async):
+    /// the inner iterator's result objects are awaited and must be objects; each value that isn't
+    /// the last is yielded (not awaited again); `throw`/`return` are forwarded, a missing `throw`
+    /// closes the inner iterator and throws a TypeError, a missing `return` returns the
+    /// (twice-awaited) value. A `return` resumption is awaited first
+    /// (AsyncGeneratorUnwrapYieldResumption); if that rejects, the delegation continues with a
+    /// `throw`.
+    pub(crate) fn async_yield_star(&mut self, cx: &mut FnCx, iterable: Expr) -> Expr {
+        let rec = cx.func.add_local("delegate", Type::JsVal);
+        let mode = cx.func.add_local("mode", Type::I32);
+        let received = cx.func.add_local("received", Type::JsVal);
+        let inner = cx.func.add_local("inner", Type::JsVal);
+        let m = cx.func.add_local("method", Type::JsVal);
+        let c = cx.func.add_local("close", Type::JsVal);
+        let result = cx.func.add_local("result", Type::JsVal);
+        let err = cx.func.add_local("error", Type::JsVal);
+        let lp = cx.label();
+        let l = Expr::Local;
+        let is_mode =
+            |k: i32| Expr::binary(BinOp::Eq, Type::I32, Expr::Local(mode), Expr::i32(k));
+        let is_undefined =
+            |local| Expr::binary(BinOp::Eq, Type::JsVal, Expr::Local(local), Expr::undefined());
+        let get = |key: &str| {
+            Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(inner), Expr::str(key)])
+        };
+        let open = self.prelude_call("$$asyncDelegateOpen", vec![iterable]);
+        // mode `next`.
+        let next_call = self.prelude_call("$$asyncDelegateNext", vec![l(rec), l(received)]);
+        let next = vec![Stmt::Set(inner, self.await_value(cx, next_call))];
+        // mode `throw`.
+        let throw_method = self.prelude_call("$$asyncDelegateMethod", vec![l(rec), Expr::str("throw")]);
+        let return_method =
+            self.prelude_call("$$asyncDelegateMethod", vec![l(rec), Expr::str("return")]);
+        let close_call = self.prelude_call("$$asyncDelegateClose", vec![l(rec), l(c)]);
+        let closed = self.await_value(cx, close_call);
+        let check_closed = self.prelude_call("$$asyncDelegateResult", vec![closed]);
+        let no_throw = self.prelude_call("$$asyncDelegateNoThrow", vec![]);
+        let throw_call = self.prelude_call("$$asyncDelegateCall", vec![l(rec), l(m), l(received)]);
+        let throw = vec![
+            Stmt::Set(m, throw_method),
+            Stmt::If {
+                cond: is_undefined(m),
+                then: vec![
+                    Stmt::Set(c, return_method.clone()),
+                    Stmt::If {
+                        cond: Expr::unary(ir::UnOp::Not, Type::Bool, is_undefined(c)),
+                        then: vec![Stmt::Expr(check_closed)],
+                        els: vec![],
+                    },
+                    Stmt::Expr(no_throw),
+                ],
+                els: vec![],
+            },
+            Stmt::Set(inner, self.await_value(cx, throw_call)),
+        ];
+        // mode `return`.
+        let twice = self.await_value(cx, l(received));
+        let ret_received = self.jump(cx, Jump::Return, Some(l(received)));
+        let return_call =
+            self.prelude_call("$$asyncDelegateCall", vec![l(rec), l(m), l(received)]);
+        let mut no_return = vec![Stmt::Set(received, twice)];
+        no_return.extend(ret_received);
+        let ret = vec![
+            Stmt::Set(m, return_method),
+            Stmt::If {
+                cond: is_undefined(m),
+                then: no_return,
+                els: vec![],
+            },
+            Stmt::Set(inner, self.await_value(cx, return_call)),
+        ];
+        // Done: the `yield*` value, or (mode `return`) the generator returns it, awaited.
+        let awaited_result = self.await_value(cx, l(result));
+        let mut ret_done = vec![Stmt::Set(result, awaited_result)];
+        ret_done.extend(self.jump(cx, Jump::Return, Some(l(result))));
+        let check = self.prelude_call("$$asyncDelegateResult", vec![l(inner)]);
+        // A `return` resumption is awaited; a rejection continues as a `throw`.
+        let unwrapped = self.await_value(cx, l(received));
+        let body = vec![
+            Stmt::Set(rec, open),
+            Stmt::Set(mode, Expr::i32(ir::RESUME_NEXT)),
+            Stmt::Set(received, Expr::undefined()),
+            Stmt::Loop {
+                label: lp,
+                body: vec![
+                    Stmt::If {
+                        cond: is_mode(RESUME_THROW),
+                        then: throw,
+                        els: vec![Stmt::If {
+                            cond: is_mode(RESUME_RETURN),
+                            then: ret,
+                            els: next,
+                        }],
+                    },
+                    Stmt::Expr(check),
+                    Stmt::If {
+                        cond: Expr::convert(Type::JsVal, Type::Bool, get("done")),
+                        then: vec![
+                            Stmt::Set(result, get("value")),
+                            Stmt::If {
+                                cond: is_mode(RESUME_RETURN),
+                                then: ret_done,
+                                els: vec![],
+                            },
+                            Stmt::Break(lp),
+                        ],
+                        els: vec![],
+                    },
+                    Stmt::Set(
+                        received,
+                        Expr::Suspend {
+                            kind: SuspendKind::Yield,
+                            arg: Box::new(get("value")),
+                        },
+                    ),
+                    Stmt::Set(mode, Expr::intrinsic(Intrinsic::ResumeMode, vec![])),
+                    Stmt::If {
+                        cond: is_mode(RESUME_RETURN),
+                        then: vec![Stmt::Try {
+                            body: vec![Stmt::Set(received, unwrapped)],
+                            catch_local: Some(err),
+                            catch_body: vec![
+                                Stmt::Set(mode, Expr::i32(RESUME_THROW)),
+                                Stmt::Set(received, l(err)),
+                            ],
+                        }],
+                        els: vec![],
+                    },
+                    Stmt::Continue(lp),
+                ],
+            },
+        ];
+        Expr::Seq {
+            body,
+            value: Box::new(l(result)),
         }
     }
 }

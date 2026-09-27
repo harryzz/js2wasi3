@@ -36,6 +36,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/console.js"),
     include_str!("../builtins/typedarray.js"),
     include_str!("../builtins/stream.js"),
+    include_str!("../builtins/asyncgen.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -63,6 +64,17 @@ const IMPLIED: &[(&str, &[&str])] = &[
 
 /// Prototype methods installed under another name too (T25): `Set.prototype.keys` is `values`.
 const ALIASES: &[(&str, &str)] = &[("keys", "$$Set_prototype_values")];
+
+/// The prelude functions `yield*` in an async generator calls (T29, `builtins/asyncgen.js`).
+pub(crate) const ASYNC_DELEGATE: [&str; 7] = [
+    "$$asyncDelegateOpen",
+    "$$asyncDelegateNext",
+    "$$asyncDelegateMethod",
+    "$$asyncDelegateCall",
+    "$$asyncDelegateClose",
+    "$$asyncDelegateResult",
+    "$$asyncDelegateNoThrow",
+];
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
 pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
@@ -244,6 +256,25 @@ impl Prelude {
             }
         };
         for node in p.semantic.nodes().iter() {
+            // `yield*` in an async generator (T29): the lowering calls the delegation helpers.
+            if let AstKind::YieldExpression(y) = node.kind()
+                && y.delegate
+                && p.semantic
+                    .nodes()
+                    .ancestors(node.id())
+                    .find_map(|a| match a.kind() {
+                        AstKind::Function(f) => Some(f.r#async && f.generator),
+                        AstKind::ArrowFunctionExpression(_) => Some(false),
+                        _ => None,
+                    })
+                    .unwrap_or(false)
+            {
+                for name in ASYNC_DELEGATE {
+                    if let Some(sym) = out.names.get(name) {
+                        add(item_of[sym], y.span, &mut roots);
+                    }
+                }
+            }
             // A string in the user's code may name a static read with a computed key
             // (`Math[k]`, T25)…
             if let AstKind::StringLiteral(s) = node.kind()

@@ -4035,13 +4035,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let async_gen = cx.func.flags.is_async && cx.func.flags.is_generator;
                 let e = if y.delegate {
                     if async_gen {
-                        return Err(self.unsupported(
-                            y.span,
-                            "`yield*` in an async generator",
-                            "later",
-                        ));
+                        self.async_yield_star(cx, arg)
+                    } else {
+                        self.yield_star(cx, arg)
                     }
-                    self.yield_star(cx, arg)
                 } else if async_gen {
                     // `yield v` awaits `v` first (T20).
                     let arg = self.await_value(cx, arg);
