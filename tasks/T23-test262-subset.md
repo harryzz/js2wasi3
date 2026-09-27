@@ -67,7 +67,7 @@ then two reruns of the tests the runner had misclassified (below). Baseline: `te
 | language/statements | 5840 | 139 | 2861 | 9 | 1 | 500 | 66.0% |
 | **total** | **16122** | **1745** | **7425** | **9** | **22** | **1307** | **63.7%** |
 
-(pass% = pass / run, skips excluded.)
+(pass% = pass / run, skips excluded.) Run history with commits: `tests/test262/HISTORY.md` (add an entry per full run).
 
 **Runner fixes found by the run**
 - 110 "build errors" were tests valid only as scripts (`function f(await)`, `var x; function x() {}`, reserved

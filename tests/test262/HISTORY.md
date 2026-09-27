@@ -1,0 +1,28 @@
+# test262 run history
+
+One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
+pass% = pass / tests run (skips excluded).
+
+## 2026-09-27: first subset run (T23 slice 2)
+
+- Compiler: `b933c92` "T23 slice 1: test262 runner" (compiler crates unchanged since `bae9723`).
+- Results committed in: `b1b729d` "T23 slice 2: first test262 subset run and baseline" (2026-09-27 17:21 +0300).
+- test262: `7ab7fafa0003f73fc85c1b95d88094d33f7eb8bd`; wasmtime 49.0.1; node 24.21.0.
+- Run: `node scripts/test262.mjs --update --causes 25 subset`, 26,630 files, 6,500 s at -j 4 (i7-8565U, WSL2);
+  then 130 tests rerun after two runner fixes (script-only tests → skip; plain temp file names, F143).
+
+| directory | pass | fail | unsupported | crash | timeout | skip | pass% |
+|---|---|---|---|---|---|---|---|
+| built-ins/Array | 2047 | 494 | 478 | 0 | 11 | 52 | 67.6% |
+| built-ins/JSON | 87 | 22 | 53 | 0 | 0 | 3 | 53.7% |
+| built-ins/Map | 101 | 25 | 74 | 0 | 2 | 2 | 50.0% |
+| built-ins/Math | 162 | 0 | 165 | 0 | 0 | 0 | 49.5% |
+| built-ins/Promise | 367 | 181 | 173 | 0 | 7 | 4 | 50.4% |
+| built-ins/Set | 260 | 13 | 107 | 0 | 1 | 2 | 68.2% |
+| built-ins/String | 616 | 278 | 323 | 0 | 0 | 6 | 50.6% |
+| language/expressions | 6642 | 593 | 3191 | 0 | 0 | 738 | 63.7% |
+| language/statements | 5840 | 139 | 2861 | 9 | 1 | 500 | 66.0% |
+| **total** | **16122** | **1745** | **7425** | **9** | **22** | **1307** | **63.7%** |
+
+Top causes: unsupported global `Array` (2,302, mostly propertyHelper), `yield*` in async generators (1,050), undeclared
+globals (~1,200, F139), wrapper-object traps (722, F106), dynamic `import()` (469), `eval` (400). Details: T23's Notes / Result.
