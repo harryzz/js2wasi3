@@ -1104,6 +1104,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let Some((b, key)) = name[2..].split_once("_prototype_") else {
                 // A constructor used as a value (`$$Array`) and its statics (`$$Array_from`, T25).
                 let (b, key) = name[2..].split_once('_').unwrap_or((&name[2..], ""));
+                // `$$Array_isArray$value` is the static `isArray` (T28).
+                let key = key.strip_suffix(builtins::VALUE).unwrap_or(key);
                 if !self.prelude.ctor_values.contains(b) {
                     continue;
                 }
@@ -1850,6 +1852,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         d: &'a VariableDeclaration<'a>,
         out: &mut Vec<Stmt>,
     ) -> R<()> {
+        if matches!(
+            d.kind,
+            VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing
+        ) {
+            // Reported by `declare_command_globals`; it declared no globals (F140).
+            return Err(Unsupported);
+        }
         let mut result = Ok(());
         for decl in &d.declarations {
             let BindingPattern::BindingIdentifier(b) = &decl.id else {
@@ -2743,7 +2752,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let f = self.module.function(func);
         // A built-in (`$$Math_floor`) is named after its property (`floor`).
         let name = match f.name.strip_prefix("$$") {
-            Some(n) => n.rsplit('_').next().unwrap_or(n).to_string(),
+            Some(n) => {
+                let n = n.strip_suffix(builtins::VALUE).unwrap_or(n);
+                n.rsplit('_').next().unwrap_or(n).to_string()
+            }
             None => f.name.clone(),
         };
         let length = builtins::length(&f.name).unwrap_or(self.fn_length[&func]);
@@ -3679,6 +3691,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     }
                     return Ok(Val::js(Expr::intrinsic(op, vec![]), Kind::Any));
                 }
+                if self.undeclared(id) {
+                    return Ok(Val::js(not_defined(&id.name), Kind::Any));
+                }
                 let var = self.resolve(cx, id)?;
                 Ok(self.read_var(&var))
             }
@@ -3696,6 +3711,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Ok(val(Expr::Seq { body, value }, Type::JsVal))
                 }
                 UnaryOperator::Typeof => {
+                    if let Expression::Identifier(id) = u.argument.without_parentheses()
+                        && self.undeclared(id)
+                    {
+                        // `typeof x` of an unresolvable name doesn't throw (F139).
+                        return Ok(Val::js(Expr::str("undefined"), Kind::Str));
+                    }
                     let v = self.expr(cx, &u.argument)?;
                     let known = match v.kind {
                         Kind::Num | Kind::Bottom => Some("number"),
@@ -3914,8 +3935,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Expression::ClassExpression(c) => {
                 Ok(Val::js(self.class_value(cx, c, None, None)?, Kind::Any))
             }
-            Expression::StaticMemberExpression(_) if self.builtin_static(e).is_some() => {
-                let func = self.builtin_static(e).expect("checked");
+            Expression::StaticMemberExpression(_) if self.builtin_static_value(e).is_some() => {
+                let func = self.builtin_static_value(e).expect("checked");
                 self.check_builtin(span, func)?;
                 Ok(Val::js(self.func_value(func), Kind::Any))
             }
@@ -4206,6 +4227,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             _ => return Ok(None),
         };
+        if let Expression::Identifier(id) = u.argument.without_parentheses()
+            && self.undeclared(id)
+        {
+            // `typeof x` is `"undefined"` without reading `x` (F139): the general comparison.
+            return Ok(None);
+        }
         let v = self.expr(cx, &u.argument)?;
         let tag = TypeofTag::parse(s.value.as_str());
         let known = match v.kind {
@@ -5005,6 +5032,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         self.funcs.get(self.prelude.names.get(&name)?).copied()
     }
 
+    /// `A.b` read as a value: `$$A_b$value` when calls of `A.b` are intrinsics (T28), else
+    /// [`Self::builtin_static`].
+    fn builtin_static_value(&self, e: &Expression<'a>) -> Option<FuncId> {
+        if let Expression::StaticMemberExpression(m) = e.without_parentheses()
+            && !m.optional
+            && let Some(name) = builtins::static_name(self.p, &m.object, &m.property.name)
+            && let Some(sym) = self.prelude.names.get(&format!("{name}{}", builtins::VALUE))
+        {
+            return self.funcs.get(sym).copied();
+        }
+        self.builtin_static(e)
+    }
+
     /// A global function implemented by the prelude (`parseInt` → `$$parseInt`, T21).
     fn builtin_global(&self, e: &Expression<'a>) -> Option<FuncId> {
         let Expression::Identifier(id) = e.without_parentheses() else {
@@ -5289,6 +5329,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             (Builtin::Object, "keys") => Some(Intrinsic::ObjectKeys),
             (Builtin::Object, "values") => Some(Intrinsic::ObjectValues),
             (Builtin::Object, "entries") => Some(Intrinsic::ObjectEntries),
+            (Builtin::Object, "getOwnPropertyNames") => Some(Intrinsic::GetOwnPropertyNames),
             (Builtin::Object, "defineProperty") => Some(Intrinsic::DefineProperty),
             (Builtin::Object, "getOwnPropertyDescriptor") => {
                 Some(Intrinsic::GetOwnPropertyDescriptor)
@@ -6180,6 +6221,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         ))
     }
 
+    /// Is `id` a name declared nowhere that isn't a global in node either (F139)? Reading it throws
+    /// `ReferenceError: x is not defined` at run time. node's globals that aren't implemented stay
+    /// "unsupported" (`global \`Reflect\``).
+    fn undeclared(&self, id: &IdentifierReference<'a>) -> bool {
+        self.scoping.get_reference(id.reference_id()).symbol_id().is_none()
+            && id.name != "arguments"
+            && !id.name.starts_with("__intrinsic_")
+            && NODE_GLOBALS.binary_search(&id.name.as_str()).is_err()
+    }
+
     /// The TDZ check of a guarded variable access: throws a ReferenceError like node's.
     fn tdz_check(&self, guard: Guard, sym: SymbolId) -> Stmt {
         let name = self.scoping.symbol_name(sym);
@@ -6397,6 +6448,48 @@ enum Member {
 }
 
 /// Read a member.
+/// The global names of node 24 in an ES module (sorted, for `binary_search`): a name declared
+/// nowhere that is one of these is a built-in js2wasi3 may lack ("unsupported"); any other name
+/// throws a ReferenceError when read (F139).
+const NODE_GLOBALS: &[&str] = &[
+    "AbortController", "AbortSignal", "AggregateError", "Array", "ArrayBuffer",
+    "AsyncDisposableStack", "Atomics", "BigInt", "BigInt64Array", "BigUint64Array", "Blob",
+    "Boolean", "BroadcastChannel", "Buffer", "ByteLengthQueuingStrategy", "CloseEvent",
+    "CompressionStream", "CountQueuingStrategy", "Crypto", "CryptoKey", "CustomEvent",
+    "DOMException", "DataView", "Date", "DecompressionStream", "DisposableStack", "Error",
+    "EvalError", "Event", "EventTarget", "File", "FinalizationRegistry", "Float16Array",
+    "Float32Array", "Float64Array", "FormData", "Function", "Headers", "Infinity", "Int16Array",
+    "Int32Array", "Int8Array", "Intl", "Iterator", "JSON", "Map", "Math", "MessageChannel",
+    "MessageEvent", "MessagePort", "NaN", "Navigator", "Number", "Object", "Performance",
+    "PerformanceEntry", "PerformanceMark", "PerformanceMeasure", "PerformanceObserver",
+    "PerformanceObserverEntryList", "PerformanceResourceTiming", "Promise", "Proxy", "RangeError",
+    "ReadableByteStreamController", "ReadableStream", "ReadableStreamBYOBReader",
+    "ReadableStreamBYOBRequest", "ReadableStreamDefaultController", "ReadableStreamDefaultReader",
+    "ReferenceError", "Reflect", "RegExp", "Request", "Response", "Set", "SharedArrayBuffer",
+    "String", "SubtleCrypto", "SuppressedError", "Symbol", "SyntaxError", "TextDecoder",
+    "TextDecoderStream", "TextEncoder", "TextEncoderStream", "TransformStream",
+    "TransformStreamDefaultController", "TypeError", "URIError", "URL", "URLPattern",
+    "URLSearchParams", "Uint16Array", "Uint32Array", "Uint8Array", "Uint8ClampedArray", "WeakMap",
+    "WeakRef", "WeakSet", "WebAssembly", "WebSocket", "WritableStream",
+    "WritableStreamDefaultController", "WritableStreamDefaultWriter", "atob", "btoa",
+    "clearImmediate", "clearInterval", "clearTimeout", "console", "crypto", "decodeURI",
+    "decodeURIComponent", "encodeURI", "encodeURIComponent", "escape", "eval", "fetch", "global",
+    "globalThis", "isFinite", "isNaN", "navigator", "parseFloat", "parseInt", "performance",
+    "process", "queueMicrotask", "setImmediate", "setInterval", "setTimeout", "structuredClone",
+    "undefined", "unescape",
+];
+
+/// Reading an unresolvable name: `throw new ReferenceError("x is not defined")` (node's message).
+fn not_defined(name: &str) -> Expr {
+    Expr::Seq {
+        body: vec![Stmt::Throw(Expr::intrinsic(
+            Intrinsic::NewError(ErrorKind::ReferenceError),
+            vec![Expr::str(&format!("{name} is not defined")), Expr::undefined()],
+        ))],
+        value: Box::new(Expr::undefined()),
+    }
+}
+
 fn member_get(m: &Member, obj: Expr, key: Expr) -> Expr {
     match m {
         Member::Private(read, _) => {
@@ -6889,5 +6982,13 @@ fn anonymous_function(e: &Expression) -> bool {
         Expression::ArrowFunctionExpression(_) => true,
         Expression::ClassExpression(c) => c.id.is_none(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn node_globals_are_sorted() {
+        assert!(super::NODE_GLOBALS.is_sorted(), "binary_search needs a sorted list");
     }
 }

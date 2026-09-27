@@ -336,9 +336,16 @@ impl Prelude {
                     (item, r.span)
                 }
                 AstKind::StaticMemberExpression(m) => {
-                    let Some(name) = static_name(p, &m.object, &m.property.name) else {
+                    let Some(mut name) = static_name(p, &m.object, &m.property.name) else {
                         continue;
                     };
+                    // Read as a value, not called: `$$A_b$value` if there is one (T28).
+                    let called = matches!(p.semantic.nodes().parent_kind(node.id()),
+                        AstKind::CallExpression(c) if c.callee.span() == m.span);
+                    let value = format!("{name}{VALUE}");
+                    if !called && out.names.contains_key(&value) {
+                        name = value;
+                    }
                     let Some(sym) = out.names.get(&name) else {
                         continue;
                     };
@@ -354,6 +361,7 @@ impl Prelude {
                 continue;
             };
             let (b, key) = rest.split_once('_').unwrap_or((rest, ""));
+            let key = key.strip_suffix(VALUE).unwrap_or(key);
             if out.ctor_values.contains(b)
                 && !key.starts_with("prototype")
                 && (key.is_empty() || user_props.contains(key))
@@ -408,6 +416,8 @@ impl Prelude {
 pub(crate) fn length(name: &str) -> Option<u32> {
     match name {
         "$$Math_max" | "$$Math_min" | "$$Math_hypot" => Some(2),
+        "$$Object_defineProperty$value" => Some(3),
+        "$$Object_getOwnPropertyDescriptor$value" | "$$Object_hasOwn$value" => Some(2),
         "$$String"
         | "$$Number"
         | "$$String_fromCharCode"
@@ -452,6 +462,10 @@ pub(crate) fn length(name: &str) -> Option<u32> {
 }
 
 /// `A.b` with `A` an undeclared global: the prelude name `$$A_b` that would implement it.
+/// The suffix of a prelude function that is a static read as a value when calls of it are
+/// intrinsics (`$$Object_defineProperty$value`, T28).
+pub(crate) const VALUE: &str = "$value";
+
 pub(crate) fn static_name(p: &Program, object: &Expression, prop: &str) -> Option<String> {
     let Expression::Identifier(id) = object.without_parentheses() else {
         return None;

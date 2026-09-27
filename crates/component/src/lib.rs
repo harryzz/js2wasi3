@@ -86,7 +86,12 @@ impl WorldName {
                     .unwrap_or(s)
             })
             .unwrap_or("");
-        let name = names::to_wit(&stem.replace('.', "_")).unwrap_or_else(|_| "app".into());
+        // Any other character separates words, like `_` (`a.test.js`, `x-__proto__.js`: F143).
+        let stem: String = stem
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let name = names::to_wit(&stem).unwrap_or_else(|_| "app".into());
         WorldName {
             namespace: "js2wasi3".into(),
             package: name.clone(),
@@ -705,6 +710,8 @@ mod tests {
         assert_eq!(n("my_lib.test.js"), "js2wasi3:my-lib-test/my-lib-test");
         assert_eq!(n("_.js"), "js2wasi3:app/app");
         assert_eq!(n("1.mjs"), "js2wasi3:app/app");
+        assert_eq!(n("obj-prop-__proto__dup.js"), "js2wasi3:obj-prop-proto-dup/obj-prop-proto-dup");
+        assert_eq!(n("a b+c.js"), "js2wasi3:a-b-c/a-b-c");
         assert_eq!(
             WorldName::parse("acme:math/calc").unwrap().to_string(),
             "acme:math/calc"

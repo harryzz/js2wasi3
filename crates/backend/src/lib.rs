@@ -1557,6 +1557,7 @@ impl Emitter<'_> {
                     Intrinsic::ObjectKeys => H::Obj(object::Helper::Keys(0)),
                     Intrinsic::ObjectValues => H::Obj(object::Helper::Keys(1)),
                     Intrinsic::ObjectEntries => H::Obj(object::Helper::Keys(2)),
+                    Intrinsic::GetOwnPropertyNames => H::Obj(object::Helper::Keys(3)),
                     Intrinsic::TypeofString => H::TypeofString,
                     Intrinsic::Inspect => H::Inspect,
                     Intrinsic::NoFormat => H::NoFormat,

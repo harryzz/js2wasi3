@@ -248,3 +248,56 @@ function $$Object_prototype_valueOf() {
   }
   return o;
 }
+
+// ---- Statics lowered to intrinsics, as values (T28) ---------------------------------------
+// `const f = Object.defineProperty`: `$$A_b$value` is `A.b` read as a value (calls stay
+// intrinsics). Named and sized like node's (`builtins::length`).
+
+function $$Object_defineProperty$value(o, key, desc) {
+  return Object.defineProperty(o, key, desc);
+}
+function $$Object_getOwnPropertyDescriptor$value(o, key) {
+  return Object.getOwnPropertyDescriptor(o, key);
+}
+function $$Object_getOwnPropertyNames$value(o) {
+  return Object.getOwnPropertyNames(o);
+}
+function $$Object_getOwnPropertySymbols$value(o) {
+  return Object.getOwnPropertySymbols(o);
+}
+function $$Object_getPrototypeOf$value(o) {
+  return Object.getPrototypeOf(o);
+}
+function $$Object_hasOwn$value(o, key) {
+  return Object.hasOwn(o, key);
+}
+function $$Object_keys$value(o) {
+  return Object.keys(o);
+}
+function $$Object_values$value(o) {
+  return Object.values(o);
+}
+function $$Object_entries$value(o) {
+  return Object.entries(o);
+}
+function $$Object_preventExtensions$value(o) {
+  return Object.preventExtensions(o);
+}
+function $$Object_seal$value(o) {
+  return Object.seal(o);
+}
+function $$Object_freeze$value(o) {
+  return Object.freeze(o);
+}
+function $$Object_isExtensible$value(o) {
+  return Object.isExtensible(o);
+}
+function $$Object_isSealed$value(o) {
+  return Object.isSealed(o);
+}
+function $$Object_isFrozen$value(o) {
+  return Object.isFrozen(o);
+}
+function $$Array_isArray$value(v) {
+  return Array.isArray(v);
+}

@@ -274,6 +274,9 @@ pub enum Helper {
     CopyProps,
     /// `(o: (ref $object)) -> (ref $keys)`: own enumerable keys in enumeration order.
     OwnKeys,
+    /// `$own_names(o)`: like `OwnKeys`, non-enumerable keys too, and an array's `length`
+    /// (`Object.getOwnPropertyNames`, T28).
+    OwnNames,
     /// `(v) -> jsval`: the keys of `for (k in v)`.
     ForInKeys,
     /// `(p) -> jsval`: `Object.create(p)`.
@@ -380,6 +383,7 @@ impl Helper {
             Helper::SetProto => "set_proto",
             Helper::CopyProps => "copy_props",
             Helper::OwnKeys => "own_keys",
+            Helper::OwnNames => "own_names",
             Helper::ForInKeys => "for_in_keys",
             Helper::Create => "object_create",
             Helper::GetPrototypeOf => "get_prototype_of",
@@ -396,6 +400,7 @@ impl Helper {
             Helper::CheckDestructure => "check_destructure",
             Helper::Keys(0) => "Object.keys",
             Helper::Keys(1) => "Object.values",
+            Helper::Keys(3) => "Object.getOwnPropertyNames",
             Helper::Keys(_) => "Object.entries",
             Helper::SymbolKeys => "symbol_keys",
             Helper::OwnSymbols => "own_symbols",
@@ -432,7 +437,7 @@ impl Helper {
             Helper::Delete | Helper::Has | Helper::HasOwn => (vec![v, v], vec![I32]),
             Helper::NewObject => (vec![], vec![v]),
             Helper::SetProto | Helper::CopyProps => (vec![v, v], vec![]),
-            Helper::OwnKeys => (vec![o], vec![rt(false, T_KEYS)]),
+            Helper::OwnKeys | Helper::OwnNames => (vec![o], vec![rt(false, T_KEYS)]),
             Helper::ForInKeys | Helper::Create | Helper::GetPrototypeOf => (vec![v], vec![v]),
             Helper::InstanceOf(_) => (vec![v], vec![I32]),
             Helper::NewError(ErrorKind::AggregateError) => (vec![v, v, v], vec![v]),
@@ -493,7 +498,8 @@ impl Helper {
             Helper::NewObject => new_object(cx),
             Helper::SetProto => set_proto(),
             Helper::CopyProps => copy_props(cx),
-            Helper::OwnKeys => own_keys(cx),
+            Helper::OwnKeys => own_keys(cx, false),
+            Helper::OwnNames => own_keys(cx, true),
             Helper::ForInKeys => for_in_keys(cx),
             Helper::Create => create(cx),
             Helper::GetPrototypeOf => get_prototype_of(cx),
@@ -2272,8 +2278,9 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
 }
 
 /// `$own_keys(o)`: live enumerable string keys: array indices ascending (an array's elements
-/// first), then the others in insertion order. (Symbol keys are skipped.)
-fn own_keys(cx: &mut dyn Cx) -> Function {
+/// first), then the others in insertion order. (Symbol keys are skipped.) With `all`
+/// (`$own_names`): the non-enumerable ones too, and an array's `length` after its indices.
+fn own_keys(cx: &mut dyn Cx, all: bool) -> Function {
     let index = h(cx, Helper::ArrayIndex);
     let index_keys = cx.helper(runtime::Helper::Arr(array::Helper::IndexKeys));
     const O: u32 = 0;
@@ -2298,8 +2305,9 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_I32S)),
         (2, rt(true, T_KEYS)),
     ]);
+    let length = all.then(|| cx.str("length"));
     let mut s = f.instructions();
-    // Push "entry E is live and enumerable", setting KK.
+    // Push "entry E is live and enumerable (or any, with `all`)", setting KK.
     let live = |s: &mut InstructionSink| {
         s.local_get(O)
             .struct_get(T_OBJECT, F_KEYS)
@@ -2308,14 +2316,16 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
             .local_tee(KK)
             .ref_is_null()
             .i32_eqz();
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_ATTRS)
-            .local_get(E)
-            .array_get_u(T_BYTES)
-            .i32_const(HIDDEN)
-            .i32_and()
-            .i32_eqz();
-        s.i32_and();
+        if !all {
+            s.local_get(O)
+                .struct_get(T_OBJECT, F_ATTRS)
+                .local_get(E)
+                .array_get_u(T_BYTES)
+                .i32_const(HIDDEN)
+                .i32_and()
+                .i32_eqz();
+            s.i32_and();
+        }
         s.local_get(KK)
             .ref_test_non_null(runtime::symbol())
             .i32_eqz();
@@ -2432,7 +2442,8 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
         s.local_get(ALL).ref_as_non_null().return_();
         s.end();
     }
-    // An array: its elements' indices come first.
+    // An array: its elements' indices come first (then `length`, with `all`).
+    let extra = all as i32;
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
     s.local_get(O)
@@ -2443,16 +2454,24 @@ fn own_keys(cx: &mut dyn Cx) -> Function {
         .local_get(OUT)
         .array_len()
         .i32_add()
+        .i32_const(extra)
+        .i32_add()
         .array_new_default(T_KEYS)
         .local_set(ALL);
     s.local_get(ALL).ref_as_non_null().i32_const(0);
     s.local_get(ELEMS).ref_as_non_null().i32_const(0);
     s.local_get(ELEMS).array_len();
     s.array_copy(T_KEYS, T_KEYS);
+    if let Some(length) = length {
+        s.local_get(ALL).ref_as_non_null().local_get(ELEMS).array_len();
+        s.global_get(length).array_set(T_KEYS);
+    }
     s.local_get(ALL)
         .ref_as_non_null()
         .local_get(ELEMS)
-        .array_len();
+        .array_len()
+        .i32_const(extra)
+        .i32_add();
     s.local_get(OUT).ref_as_non_null().i32_const(0);
     s.local_get(OUT).array_len();
     s.array_copy(T_KEYS, T_KEYS);
@@ -3079,7 +3098,8 @@ fn check_destructure(cx: &mut dyn Cx) -> Function {
 fn keys(cx: &mut dyn Cx, which: u8) -> Function {
     let is_nullish = rh(cx, runtime::Helper::IsNullish);
     let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
-    let own_keys = h(cx, Helper::OwnKeys);
+    // 3: `Object.getOwnPropertyNames` (T28).
+    let own_keys = h(cx, if which == 3 { Helper::OwnNames } else { Helper::OwnKeys });
     let for_in_keys = h(cx, Helper::ForInKeys);
     let get = h(cx, Helper::Get);
     let new = cx.helper(runtime::Helper::Arr(array::Helper::New));
@@ -3112,12 +3132,17 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
         .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_KEYS));
     s.end();
     s.local_tee(KS).array_len().local_tee(N);
+    // `Object.getOwnPropertyNames` of a string: its indices, then `length`.
+    let length = (which == 3).then(|| cx.str("length"));
+    if length.is_some() {
+        s.local_get(V).ref_test_non_null(string()).i32_add();
+    }
     s.array_new_default(T_VALS).local_set(OUT);
     count_loop(&mut s, I, N, |s| {
         s.local_get(KS).local_get(I).array_get(T_KEYS).local_set(K);
         s.local_get(OUT).local_get(I);
         match which {
-            0 => {
+            0 | 3 => {
                 s.local_get(K);
             }
             1 => {
@@ -3131,6 +3156,13 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
         }
         s.array_set(T_VALS);
     });
+    if let Some(length) = length {
+        s.local_get(V).ref_test_non_null(string());
+        s.if_(BlockType::Empty);
+        s.local_get(OUT).local_get(N).global_get(length).array_set(T_VALS);
+        s.local_get(N).i32_const(1).i32_add().local_set(N);
+        s.end();
+    }
     s.local_get(OUT).ref_as_non_null().local_get(N).call(new);
     s.end();
     f

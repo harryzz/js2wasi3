@@ -3,6 +3,26 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T28 test262 quick wins (targeted rerun)
+
+- Compiler: T28 (undeclared reads throw a ReferenceError, `await using` reported, WIT names from file names,
+  `Object.getOwnPropertyNames`, built-in statics as values for `propertyHelper.js`).
+- Run: the 4,816 non-passing tests whose reason was a fixed cause (1,795 s at -j 4), then 16 more after a fix.
+  3,136 → pass, 9 crash → unsupported, 0 regressions.
+
+| directory | pass | fail | unsupported | crash | timeout | skip | pass% |
+|---|---|---|---|---|---|---|---|
+| built-ins/Array | 2194 | 506 | 319 | 0 | 11 | 52 | 72.4% |
+| built-ins/JSON | 96 | 32 | 34 | 0 | 0 | 3 | 59.3% |
+| built-ins/Map | 134 | 10 | 23 | 0 | 2 | 35 | 79.3% |
+| built-ins/Math | 276 | 2 | 39 | 0 | 0 | 10 | 87.1% |
+| built-ins/Promise | 406 | 186 | 39 | 0 | 8 | 93 | 63.5% |
+| built-ins/Set | 311 | 16 | 53 | 0 | 1 | 2 | 81.6% |
+| built-ins/String | 697 | 294 | 226 | 0 | 0 | 6 | 57.3% |
+| language/expressions | 7720 | 587 | 1768 | 0 | 0 | 1089 | 76.6% |
+| language/statements | 7206 | 127 | 1498 | 0 | 1 | 518 | 81.6% |
+| **total** | **19040** | **1760** | **3999** | **0** | **23** | **1808** | **76.7%** |
+
 ## 2026-09-27: reclassification, no new run (T23 slice 3)
 
 - Runner: tests using features node 24 lacks are skipped (proper tail calls, `upsert`, `Math.sumPrecise`, …): 554

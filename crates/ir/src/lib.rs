@@ -812,6 +812,8 @@ pub enum Intrinsic {
     IsArray,
     /// `Object.keys(v)`.
     ObjectKeys,
+    /// `Object.getOwnPropertyNames(v)` (T28).
+    GetOwnPropertyNames,
     /// `Object.values(v)`.
     ObjectValues,
     /// `Object.entries(v)`.
@@ -1131,7 +1133,8 @@ impl Intrinsic {
             | Intrinsic::NewSymbol
             | Intrinsic::ObjectKeys
             | Intrinsic::ObjectValues
-            | Intrinsic::ObjectEntries => (&[JsVal], Some(JsVal)),
+            | Intrinsic::ObjectEntries
+            | Intrinsic::GetOwnPropertyNames => (&[JsVal], Some(JsVal)),
             Intrinsic::IterOpen | Intrinsic::ObjectRest => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::IterStep | Intrinsic::IsArray => (&[JsVal], Some(Bool)),
             Intrinsic::IterClose => (&[JsVal, Bool], None),
@@ -1285,6 +1288,7 @@ impl Intrinsic {
             Intrinsic::ObjectKeys => "object_keys",
             Intrinsic::ObjectValues => "object_values",
             Intrinsic::ObjectEntries => "object_entries",
+            Intrinsic::GetOwnPropertyNames => "get_own_property_names",
             Intrinsic::ConstructList => "construct_list",
             Intrinsic::CreateThis => "create_this",
             Intrinsic::ClassHeritage => "class_heritage",
@@ -1411,6 +1415,7 @@ impl Intrinsic {
                 | Intrinsic::ObjectKeys
                 | Intrinsic::ObjectValues
                 | Intrinsic::ObjectEntries
+                | Intrinsic::GetOwnPropertyNames
                 | Intrinsic::ConstructList
                 | Intrinsic::CreateThis
                 | Intrinsic::ClassHeritage

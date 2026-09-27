@@ -203,9 +203,11 @@ fn declarations_and_functions() {
         "1:8 unsupported: rest parameter in an exported function (planned: T20)"
     );
     assert_eq!(
-        one("export function f() { return x; }"),
-        "1:30 unsupported: global `x` (planned: T21)"
+        one("export function f() { return Reflect; }"),
+        "1:30 unsupported: global `Reflect` (planned: T21)"
     );
+    // A name that isn't a global in node either throws a ReferenceError when read (F139).
+    lowers("export function f() { return x; }");
     assert_eq!(
         one("export function* f() { yield 1; }"),
         "1:8 unsupported: exported generator function (the boundary needs an iterator type) (planned: T20)"
@@ -287,6 +289,11 @@ fn command_rules() {
     assert_eq!(
         one("console.table(1);"),
         "1:1 unsupported: global `console` (planned: T21)"
+    );
+    // A top-level `await using` is reported, not a panic (F140).
+    assert_eq!(
+        one("await using x = null;"),
+        "1:1 unsupported: `using` declaration (planned: not scheduled)"
     );
 }
 
