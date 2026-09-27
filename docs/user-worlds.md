@@ -115,6 +115,7 @@ The JS shapes are jco's, so a module written for jco / componentize-js works the
 | `result<T, E>` inside another type | `{ tag: "ok" \| "err", val }` | the same shape |
 | `list<u8>` (also `s8`, `s16`, `u16`, `s32`, `u32`, `f32`, `f64`) | a `Uint8Array` (`Int8Array`, …, `Float64Array`) | that typed array, or any array-like |
 | `list<T>`, other `T` | an array | an array (or any array-like) |
+| `future<T>` (in an `async func`) | a `Promise` of the value | a promise, or any value (see [Futures](#futures)) |
 
 A returned value that doesn't fit its type (an enum string that isn't a case, a `tag` that isn't a case) makes
 the call trap (jco throws a TypeError instead: F128).
@@ -187,11 +188,52 @@ An `async func` is implemented by an `async function` (or one returning a promis
 jobs and timers until it settles; a fulfilled value is the result, a rejection follows the `result` rules above.
 A module with timers needs `import wasi:clocks/monotonic-clock@0.3.1;` in its world.
 
+## Futures
+
+A `future<T>` is a `Promise` on the JS side, in both directions, anywhere in an `async func`'s signature (a
+parameter, the result, inside a record, …):
+
+- A future you **receive** (a parameter, or in what an import returns) is a promise of its value, read as soon as
+  it arrives. If the writer drops the future without a value, the promise rejects.
+- A future you **give** (a result, or an argument to an import) is made from any value: a promise is awaited and
+  its value written when it settles; any other value is written at once. A rejection drops the future (the reader
+  sees it dropped) and fails the call. The call goes on after it returned (or the import it was passed to
+  started) until every future it gave has been written and read.
+
+An async function's own promise adopts a promise it returns, so an `async func` returning `future<T>` directly
+can only write a value it already has; to hand out a value later, put the future in a record or tuple:
+
+```wit
+interface later {
+  record pair { now: u32, later: future<u32> }
+  double-later: async func(n: u32) -> pair;
+  shout: async func(s: future<string>) -> string;
+}
+```
+
+```js
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export const later = {
+  async doubleLater(n) {
+    return { now: n, later: sleep(20).then(() => 2 * n) }; // written after 20 ms
+  },
+  async shout(s) {
+    return (await s).toUpperCase(); // s: a Promise<string>
+  },
+};
+```
+
+A `func` (not `async`) with a future in its signature is rejected. `tests/fixtures/library/futures` has a
+provider and an app that use futures both ways, composed with `wac plug`.
+
 ## Limits
 
 - `option<option<T>>`: `some(none)` and `none` are both `undefined` (F127).
 - 64-bit integers are numbers, not BigInts; integer results wrap instead of being range-checked (F124).
-- Resources, `future`, `stream`: not yet (T20 slice 6 for `future`/`stream`).
+- Resources and `stream`: not yet (T20 slice 6b for `stream`).
+- Composed components that use timers can fail when wasmtime 49.0.1 collects garbage (a wasmtime internal error
+  with the default collector); running with `-O gc-heap-initial-size=64MiB` avoids it for short calls (F134).
+- While an async call waits for its future writes after returning, no other call of the component starts (F135).
 - An `async func` import still pending when the export's promise settles finishes during a later async call
   (F133).
 - Rest parameters in exported functions are rejected (F55).

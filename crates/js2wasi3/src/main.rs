@@ -193,10 +193,11 @@ fn match_world(
         };
         // Compound types go to the signature's table.
         let mut types = Vec::new();
+        let site = ("[export]$root".to_string(), w.name.clone());
         let mut abi = |t: &component::Ty| match t {
             component::Ty::Scalar(v) => ty(*v),
             t => {
-                types.push(wit_type(t, &ty));
+                types.push(wit_type(t, &ty, &site));
                 ir::AbiType::Compound(types.len() as u32 - 1)
             }
         };
@@ -242,10 +243,11 @@ fn match_world(
                 }
             };
             let mut types = Vec::new();
+            let site = (format!("[export]{}", iface.module), name.clone());
             let mut abi = |t: &component::Ty| match t {
                 component::Ty::Scalar(v) => ty(*v),
                 t => {
-                    types.push(wit_type(t, &ty));
+                    types.push(wit_type(t, &ty, &site));
                     ir::AbiType::Compound(types.len() as u32 - 1)
                 }
             };
@@ -275,10 +277,11 @@ fn match_world(
         let mut funcs = Vec::new();
         for (name, sig) in &iface.functions {
             let mut types = Vec::new();
+            let site = (iface.module.clone(), name.clone());
             let mut abi = |t: &component::Ty| match t {
                 component::Ty::Scalar(v) => ty(*v),
                 t => {
-                    types.push(wit_type(t, &ty));
+                    types.push(wit_type(t, &ty, &site));
                     ir::AbiType::Compound(types.len() as u32 - 1)
                 }
             };
@@ -338,9 +341,14 @@ fn match_world(
 
 /// A compound WIT type as the IR describes it: record fields and flags get jco's camelCase JS
 /// keys (`max-size` → `maxSize`).
-fn wit_type(t: &component::Ty, scalar: &dyn Fn(component::ValType) -> ir::AbiType) -> ir::WitType {
+/// `site`: the core module and function name a `future`'s intrinsics are imported with.
+fn wit_type(
+    t: &component::Ty,
+    scalar: &dyn Fn(component::ValType) -> ir::AbiType,
+    site: &(String, String),
+) -> ir::WitType {
     use component::Ty;
-    let sub = |t: &Ty| wit_type(t, scalar);
+    let sub = |t: &Ty| wit_type(t, scalar, site);
     match t {
         Ty::Scalar(v) => ir::WitType::Scalar(scalar(*v)),
         Ty::Option(t) => ir::WitType::Option(Box::new(sub(t))),
@@ -360,6 +368,12 @@ fn wit_type(t: &component::Ty, scalar: &dyn Fn(component::ValType) -> ir::AbiTyp
                 .collect(),
         ),
         Ty::List(t) => ir::WitType::List(Box::new(sub(t))),
+        Ty::Future { elem, index } => ir::WitType::Future(Box::new(ir::Payload {
+            module: site.0.clone(),
+            func: site.1.clone(),
+            index: *index,
+            elem: elem.as_deref().map(sub),
+        })),
     }
 }
 

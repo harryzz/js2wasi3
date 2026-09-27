@@ -235,6 +235,21 @@ pub enum WitType {
     /// Cases: (WIT name, payload).
     Variant(Vec<(String, Option<WitType>)>),
     List(Box<WitType>),
+    /// `future<T>` (T20 slice 6a) ↔ a Promise (lowered: any value, awaited, then written).
+    Future(Box<Payload>),
+}
+
+/// A `future` type of one function (T20 slice 6a): the core module and function name its
+/// intrinsics are imported with (`[future-new-<index>]<func>` from `module`), and the value type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Payload {
+    /// `[export]$root`, `[export]ns:pkg/iface`, or an imported interface's module.
+    pub module: String,
+    pub func: String,
+    /// Its position in the function's futures and streams (wit-parser's
+    /// `find_futures_and_streams`).
+    pub index: u32,
+    pub elem: Option<WitType>,
 }
 
 impl WitType {
@@ -269,6 +284,29 @@ impl WitType {
                 .iter()
                 .any(|(_, t)| t.as_ref().is_some_and(WitType::has_typed)),
             WitType::List(t) => t.typed_kind().is_some() || t.has_typed(),
+            WitType::Future(p) => p.elem.as_ref().is_some_and(WitType::has_typed),
+        }
+    }
+
+    /// The futures in this type, in order.
+    pub fn payloads<'a>(&'a self, out: &mut Vec<&'a Payload>) {
+        match self {
+            WitType::Scalar(_) | WitType::Enum(_) | WitType::Flags(_) => {}
+            WitType::Option(t) | WitType::List(t) => t.payloads(out),
+            WitType::Result { ok, err } => {
+                for t in [ok, err].into_iter().flatten() {
+                    t.payloads(out);
+                }
+            }
+            WitType::Tuple(ts) => ts.iter().for_each(|t| t.payloads(out)),
+            WitType::Record(fs) => fs.iter().for_each(|(_, t)| t.payloads(out)),
+            WitType::Variant(cs) => cs.iter().flat_map(|(_, t)| t).for_each(|t| t.payloads(out)),
+            WitType::Future(p) => {
+                if let Some(t) = &p.elem {
+                    t.payloads(out);
+                }
+                out.push(p);
+            }
         }
     }
 }

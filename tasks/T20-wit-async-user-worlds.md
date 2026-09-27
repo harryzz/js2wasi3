@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slices 1–5 done; next: slice 6, `future`/`stream`) | Depends on: T19
+Status: in progress (slices 1–5 and 6a done; next: slice 6b, `stream<u8>`) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -291,6 +291,55 @@ imports: `future.new`/`future.read`/`future.write` built-ins with the waitable s
 `stream.read`; write: `for await` over the JS iterable into `stream.write`); acceptance: a stream export echoes
 its input bytes.
 
+### Slice 6a: `future<T>` ↔ Promise (done 2026-09-27)
+- **Types:** `component::Ty::Future { elem, index }` (`index`: the position in wit-parser's
+  `Function::find_futures_and_streams`, which names the intrinsics); a `func` (not `async`) with a future or
+  stream is rejected, streams are rejected (slice 6b). `ir::WitType::Future(Payload { module, func, index, elem })`:
+  the CLI gives each future the core module and function its intrinsics are imported from (`[export]$root`,
+  `[export]ns:pkg/iface`, or an imported interface).
+- **Backend:** `abi::payloads` lists each future type of the exports and imports once; each imports
+  `abi::PayloadOp` × 5 (`[future-new-N]f`, `[async-lower][future-read-N]f`, `…-write-N`, `[future-drop-readable-N]f`,
+  `…-writable-N`) after the user world's imports. `wit.rs`: a future is one i32 (4 bytes). Lifting
+  (`Helper::FutureLift`): a new promise and a `future.read` into a buffer; done at once → `Helper::FutureRead`
+  (drop the readable end, lift, resolve; dropped by the writer → reject), else the pending table (shared with
+  async imports: `add_pending`, entries `[promise, buf, id]`). Lowering (`Helper::FutureLower`): `future.new`
+  (i64: readable low, writable high), `PerformThen(PromiseResolve(v), write, abandon)` with native handlers
+  (`env`: the writable end), counted as pending; `FutureWrite` stores the value (`lower_mem`) and writes it (done
+  at once → drop; else pending until FUTURE_WRITE); `FutureAbandon` traps (wasmtime traps on dropping an
+  unwritten future: "cannot drop future write end without first writing a value"). `Helper::Event` handles
+  FUTURE_READ / FUTURE_WRITE. With futures, the call goes on after `task.return` until nothing is pending
+  (`G_RETURNED`, `LIB_GLOBALS` 9 → 10; `complete` loops, `Step` checks). Memory: the export adapter doesn't reset
+  the bump pointer after lifting params that hold futures, and an import adapter doesn't restore it when its
+  result holds one (their buffers are read into later).
+- **Tests:** `tests/fixtures/library/futures/{world.wit,provider.js,app.js}`: futures in an import's / export's
+  result (in a record, written after a timer; directly, written at once; `future` without a value) and as a
+  parameter (written after an app timer); `futures_compose_with_wac` (build both, `wac plug`, run:
+  `now 3 true; later 6; HEY; awaited 6; point 1,-2; done undefined`), updated rejection tests
+  (`user_world_mismatches`, `user_world_import_errors`). Checked by hand: a rejected promise for a future traps.
+- **Found (F134):** with wasmtime 49.0.1's default copying collector the composed test traps with wasmtime's own
+  "BUG: there should always be enough room in the active semi-space …" (copying.rs:534) at a GC; under
+  `-C collector=drc` it passes. Pre-existing: the slice 5b `slow` composition built from HEAD fails under
+  `-C collector=drc`, and small apps (a timer, then two imports) lose their export's promise resolution
+  depending on when GC runs. Single components and compositions without timers pass under forced GC
+  (`-O gc-zeal-alloc-counter=1`, both collectors). The test runs with `-O gc-heap-initial-size=67108864` (no GC).
+- Sizes: `hello.js` 55715, `add.js` 289 (unchanged); `library/async.js` 76170 (+5), `library/async-timers.js`
+  77503 (+5), `library/jobs.js` 65445 (+5): one more library global; `slow-app` 74665 (+34: the event dispatch).
+  `cargo test` ok; clippy: the old warning only; `scripts/diff.sh -j 4`: 97 passed, 0 failed, 16 skipped.
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets`, `scripts/diff.sh -j 4`,
+  `wasm-tools validate`, `wac plug`, `wasmtime run -Sp3 --invoke` (with `-C collector=…`, `-O gc-zeal-alloc-counter=…`,
+  `-O gc-heap-initial-size=…`).
+
+**Not done (follow-ups):** F134 (wasmtime GC failures in compositions with timers), F135 (backpressure while a
+returned call waits for its future writes; a promise that never settles), F136 (rejections: `future<result<…>>`
+could carry them as `err`; futures in sync funcs; cancelling pending reads/writes when a call fails).
+
+**Next smallest step:** slice 6b: `stream<u8>` ↔ async iterable of `Uint8Array`, reusing the payload intrinsics
+(`[stream-new-N]f`, `[async-lower][stream-read-N]f`, `…-write-N`, drops; `PayloadOp` gets a kind): lifting a
+stream gives an async iterable whose `next()` starts a `stream.read` into a buffer (STREAM_READ events carry the
+count; DROPPED ends the iteration); lowering an async iterable makes a stream and pumps it (`for await`-like:
+`next()`, write the chunk, wait for STREAM_WRITE, repeat; drop the writable end at the end). Acceptance: an
+`echo: async func(input: stream<u8>) -> stream<u8>` export returns its input, composed with a JS caller via `wac`.
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -400,3 +449,8 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: 5a done: Notes / Result, README (F130–F132; F125 partly), docs/user-worlds.md (interface exports, imports), design.md D4, keywords.md.
 - 2026-09-27: 5b implemented: `ir::Import::unwrap` (the lowering's `<f>$unwrap` function, shared by sync stubs and async completion); async stubs return `CallImport`'s promise; an async import needs an `async func` export in the world (else rejected). Backend: `[async-lower]<f>` (≤ 4 flat params, else a pointer; a return-area pointer; i32 status), `import_start` (promise; RETURNED at once → `Helper::ImportDone`; else join the subtask to the call's waitable set and record `handle → [promise, ret, i]` in `G_PENDING` (LIB_GLOBALS 7 → 9)), `Event` settles pending imports on SUBTASK_RETURNED (drop the subtask, lift, unwrap in a try_table → resolve / reject), `Step` waits while imports are pending (timers or not), `host::LIBRARY_WAIT_IMPORTS` when there are no timers. Fixture `library/imports/{slow-provider,slow-app}.js` + worlds: concurrent imports (provider backpressure → STARTING), one returning at once, an `err` rejection, an app timer meanwhile: `first,timer,fetch,tick` as expected, stable.
 - 2026-09-27: slice 5 done (acceptance 1 met: async export + async import composed with wac on wasmtime): Notes / Result 5b, README (Next up: slice 6; F133), docs/user-worlds.md (async imports), design.md D4.
+- 2026-09-27: slice 6 started. Split agreed with the user: 6a = `future<T>` ↔ Promise (params and results of async exports and async imports; test: a wac composition, provider and app both reading and writing futures), 6b = `stream<u8>` ↔ async iterable of `Uint8Array` + the echo acceptance. Found: wit-component names a function's payload intrinsics `[future-new-N]f`, `[async-lower][future-read-N]f`, … with N the position in wit-parser's `Function::find_futures_and_streams` (params then result, depth-first, element before its future; one TypeId can repeat); `future.new` returns an i64 (readable low, writable high).
+- 2026-09-27: 6a implemented (uncommitted): component `Ty::Future { elem, index }` (index from `find_futures_and_streams`; futures in a sync func rejected), `ir::WitType::Future(Payload { module, func, index, elem })`, CLI passes the intrinsics' module/function; backend: `abi::payloads` (each future type once) → 5 core imports per type after the user imports (`PayloadOp`: new, read, write, drop-readable, drop-writable), `abi::Helper::{FutureLift, FutureRead, FutureLower, FutureWrite, FutureAbandon}` (lift: promise + `future.read`, blocked → pending table; lower: `future.new`, `PerformThen(PromiseResolve(v), write, abandon)` with native handlers, counted as pending), `Event` handles FUTURE_READ/FUTURE_WRITE, `add_pending` shared with imports, the call loops after `task.return` until its writes end (`G_RETURNED`, LIB_GLOBALS 10), bump resets skipped when a future's value is read into memory. Fixture `library/futures/{world.wit,provider.js,app.js}`: composed with wac, output as expected (`now 3 true; later 6; HEY; awaited 6; point 1,-2; done undefined`) with `-C collector=drc` or `-O gc-heap-initial-size=64MiB`.
+- 2026-09-27: found (blocker): with wasmtime's default (copying) collector the composed futures test traps with wasmtime's internal "BUG: there should always be enough room in the active semi-space" (copying.rs:534) at the first GC after some cross-component calls. Related, pre-existing: the committed slice 5b `slow` composition (HEAD build) fails under `-C collector=drc` (go$finish rethrows), and small apps (timer, then 2 imports) lose their export's promise resolution depending on when GC runs. Single components (library/async-timers.js, commands with timers) pass under forced GC (`-O gc-zeal-alloc-counter=1`, both collectors); compositions without timers pass too. Points to wasmtime GC with composed components (not proven). Debug instrumentation removed.
+- 2026-09-27: user chose the workaround for the GC failures (tests with a larger initial GC heap, F134) over minimizing the wasmtime bug now. Rejected promise for a future: wasmtime traps on dropping an unwritten future, so `FutureAbandon` traps. Tests added/updated; cargo test ok; clippy old warning only; diff.sh 97/0/16; sizes: hello.js 55715, async.js 76170 (+5).
+- 2026-09-27: slice 6a done: Notes / Result 6a, README (F134–F136, Next up: 6b), docs/user-worlds.md (Futures, limits), design.md D4.

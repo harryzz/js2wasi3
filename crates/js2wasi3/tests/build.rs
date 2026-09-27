@@ -28,8 +28,15 @@ fn build(entry: &Path, out: &Path, extra: &[&str]) -> Output {
 }
 
 fn invoke(component: &Path, call: &str) -> String {
+    invoke_with(component, call, &[])
+}
+
+/// [`invoke`] with more `wasmtime run` options.
+fn invoke_with(component: &Path, call: &str, options: &[&str]) -> String {
     let out = Command::new("wasmtime")
-        .args(["run", "--invoke", call])
+        .arg("run")
+        .args(options)
+        .args(["--invoke", call])
         .arg(component)
         .output()
         .expect("wasmtime is installed (TOOLS.md)");
@@ -774,6 +781,47 @@ fn async_imports_compose_with_wac() {
     );
 }
 
+/// `future<T>` both ways (T20 slice 6a): the provider returns futures (written when their
+/// promise settles, the call going on after `task.return`) and reads one it takes; the app
+/// reads the futures its imports return and writes the one it passes.
+///
+/// Runs with a larger initial GC heap: with wasmtime 49.0.1's default copying collector a GC
+/// in these composed components hits a wasmtime internal error (see the follow-up in
+/// `tasks/README.md`).
+#[test]
+fn futures_compose_with_wac() {
+    let dir = out_dir("futures");
+    let fx = fixture("library/futures");
+    let wit = fx.join("world.wit");
+    let (app, provider, composed) = (
+        dir.join("app.wasm"),
+        dir.join("provider.wasm"),
+        dir.join("composed.wasm"),
+    );
+    for (js, out, world) in [("provider.js", &provider, "provider"), ("app.js", &app, "app")] {
+        let b = build(
+            &fx.join(js),
+            out,
+            &["--wit", wit.to_str().unwrap(), "--world", world],
+        );
+        assert!(b.status.success(), "{js}: {}", String::from_utf8_lossy(&b.stderr));
+    }
+    let plug = Command::new("wac")
+        .arg("plug")
+        .arg(&app)
+        .arg("--plug")
+        .arg(&provider)
+        .arg("-o")
+        .arg(&composed)
+        .output()
+        .expect("wac is installed (TOOLS.md)");
+    assert!(plug.status.success(), "{}", String::from_utf8_lossy(&plug.stderr));
+    assert_eq!(
+        invoke_with(&composed, "go(3)", &["-O", "gc-heap-initial-size=67108864"]),
+        "\"now 3 true; later 6; HEY; awaited 6; point 1,-2; done undefined\""
+    );
+}
+
 #[test]
 fn user_world_import_errors() {
     let dir = out_dir("import-errors");
@@ -803,7 +851,7 @@ fn user_world_import_errors() {
     for want in [
         "1:13: error: `a:b/h` has no function `nope`",
         "2:10: error: unsupported: importing the `async func` `g` in a world without an `async func` export",
-        "3:10: error: import of `r` from `a:b/h`: unsupported: parameter `x` of `r`",
+        "3:10: error: import of `r` from `a:b/h`: unsupported: `r` takes or returns a future or stream and isn't an `async func`",
         "4:1: error: unsupported: import from `a:b/other`: the world doesn't import an interface of that name",
         "5:40: error: the world's interface `h2` has no function `extra`",
     ] {
@@ -871,7 +919,18 @@ fn user_world_mismatches() {
         "package a:b;\nworld w { export f: func(a: future<u8>); }\n",
         "export function f(a) {}\n",
     );
-    assert!(e.contains("parameter `a` of `f`: type `future<…>` (a future or stream) isn't supported yet (planned: T20 slice 6)"), "{e}");
+    assert!(
+        e.contains("unsupported: `f` takes or returns a future or stream and isn't an `async func`"),
+        "{e}"
+    );
+    let e = err(
+        "package a:b;\nworld w { export f: async func(a: stream<u8>); }\n",
+        "export async function f(a) {}\n",
+    );
+    assert!(
+        e.contains("parameter `a` of `f`: type `stream<…>` (a stream) isn't supported yet (planned: T20 slice 6b)"),
+        "{e}"
+    );
     let e = err(
         "package a:b;\nworld w { export f: async func() -> u32; }\n",
         "export async function f() { await new Promise((r) => setTimeout(r, 1)); return 1; }\n",

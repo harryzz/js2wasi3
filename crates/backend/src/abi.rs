@@ -14,7 +14,7 @@
 //! - An export that may throw (T12) also goes through an adapter: it catches the JS exception
 //!   and returns `result<T, js-error>` through a return area (see [`adapter`]).
 
-use js2wasi3_ir::{AbiSig, AbiType, ErrType, ErrorKind, Type, WitType};
+use js2wasi3_ir::{self as ir, AbiSig, AbiType, ErrType, ErrorKind, Payload, Type, WitType};
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType};
 
 use crate::host::{self, Import};
@@ -69,6 +69,21 @@ pub enum Helper {
     /// `(promise: jsval, ret: i32)`: the user world's `async func` import `i` returned (T20
     /// slice 5b): lift its result from the return area `ret` and settle the call's promise.
     ImportDone(u32),
+    /// `(h: i32) -> jsval`: the readable end of future type `p` (T20 slice 6a) as a promise:
+    /// start reading it; the value (lifted) fulfills the promise.
+    FutureLift(u32),
+    /// `(h: i32, promise, buf: i32, status: i32)`: a read of future type `p` ended: drop the
+    /// readable end, then fulfill the promise with the value in `buf` (or, if the writer
+    /// dropped the future, reject it).
+    FutureRead(u32),
+    /// `(v: jsval) -> i32`: a new future of type `p` for the value `v` (a promise or any value):
+    /// its readable end. When `v` is fulfilled, [`Helper::FutureWrite`] writes the value; until
+    /// the write ends the call keeps waiting. A rejection traps ([`Helper::FutureAbandon`]).
+    FutureLower(u32),
+    /// The code (a `$code`, `env`: `[writable end]`) of the fulfill handler.
+    FutureWrite(u32),
+    /// The code of the reject handler: trap.
+    FutureAbandon(u32),
 }
 
 impl Helper {
@@ -90,6 +105,11 @@ impl Helper {
             Helper::CodePointAt0 => "code_point_at_0",
             Helper::Import(_) => "call_import",
             Helper::ImportDone(_) => "import_done",
+            Helper::FutureLift(_) => "future_lift",
+            Helper::FutureRead(_) => "future_read",
+            Helper::FutureLower(_) => "future_lower",
+            Helper::FutureWrite(_) => "future_write",
+            Helper::FutureAbandon(_) => "future_abandon",
         }
     }
 
@@ -110,6 +130,13 @@ impl Helper {
             Helper::CodePointAt0 => (vec![runtime::string_ref()], vec![I32]),
             Helper::Import(_) => (vec![runtime::jsval()], vec![runtime::jsval()]),
             Helper::ImportDone(_) => (vec![runtime::jsval(), I32], vec![]),
+            Helper::FutureLift(_) => (vec![I32], vec![runtime::jsval()]),
+            Helper::FutureRead(_) => (vec![I32, runtime::jsval(), I32, I32], vec![]),
+            Helper::FutureLower(_) => (vec![runtime::jsval()], vec![I32]),
+            Helper::FutureWrite(_) | Helper::FutureAbandon(_) => {
+                let v = runtime::jsval();
+                (vec![v, v, v], vec![v])
+            }
         }
     }
 
@@ -118,6 +145,11 @@ impl Helper {
             Helper::Realloc => realloc(bump),
             Helper::Import(i) => import_adapter(cx, bump, i),
             Helper::ImportDone(i) => import_done(cx, i),
+            Helper::FutureLift(p) => future_lift(cx, p),
+            Helper::FutureRead(p) => future_read(cx, p),
+            Helper::FutureLower(p) => future_lower(cx, p),
+            Helper::FutureWrite(p) => future_write(cx, p),
+            Helper::FutureAbandon(_) => future_abandon(),
             Helper::Utf8ToString => utf8_to_string(),
             Helper::StringToUtf8 => {
                 let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
@@ -244,8 +276,9 @@ impl Helper {
                 let asyncs: Vec<u32> = (0..cx.user_import_count())
                     .filter(|i| cx.user_import(*i).1.is_async)
                     .collect();
+                let futures = cx.payload_count();
                 let mut f = Function::new([(1, runtime::jsval())]);
-                if !timers && asyncs.is_empty() {
+                if !timers && asyncs.is_empty() && futures == 0 {
                     // Nothing to wait for.
                     f.instructions().end();
                     return f;
@@ -258,6 +291,13 @@ impl Helper {
                 let dones: Vec<(u32, u32)> = asyncs
                     .iter()
                     .map(|i| (*i, cx.helper(runtime::Helper::Abi(Helper::ImportDone(*i)))))
+                    .collect();
+                // Future reads and writes that ended (T20 slice 6a), per future type.
+                let reads: Vec<(u32, u32, u32)> = (0..futures)
+                    .map(|p| {
+                        let read = cx.helper(runtime::Helper::Abi(Helper::FutureRead(p)));
+                        (p, read, cx.payload_import(p, PayloadOp::DropWritable))
+                    })
                     .collect();
                 let mut s = f.instructions();
                 if let Some(tick) = tick {
@@ -276,8 +316,9 @@ impl Helper {
                     s.return_();
                     s.end();
                 }
-                if !dones.is_empty() {
-                    // An `async func` import returned (T20 slice 5b): settle its promise.
+                if !dones.is_empty() || !reads.is_empty() {
+                    // An `async func` import returned (T20 slice 5b): settle its promise; a
+                    // future's read or write ended (slice 6a).
                     let key = |s: &mut InstructionSink| {
                         s.global_get(lib + G_PENDING);
                         s.local_get(INDEX).f64_convert_i32_u().call(boxed);
@@ -285,11 +326,22 @@ impl Helper {
                     let field = |s: &mut InstructionSink, k: f64| {
                         s.local_get(ENTRY).f64_const(k.into()).call(boxed).call(get);
                     };
+                    let is = |s: &mut InstructionSink, id: u32| {
+                        field(s, 2.0);
+                        s.call(to_number).f64_const((id as f64).into()).f64_eq();
+                    };
+                    let buf = |s: &mut InstructionSink| {
+                        field(s, 1.0);
+                        s.call(to_number).i32_trunc_sat_f64_u();
+                    };
+                    // A subtask returned, or a future copy ended.
                     s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
                     s.local_get(PAYLOAD)
                         .i32_const(SUBTASK_RETURNED)
                         .i32_eq()
                         .i32_and();
+                    s.local_get(EVENT).i32_const(EVENT_FUTURE_READ).i32_eq().i32_or();
+                    s.local_get(EVENT).i32_const(EVENT_FUTURE_WRITE).i32_eq().i32_or();
                     s.global_get(lib + G_PENDING).ref_is_null().i32_eqz().i32_and();
                     s.if_(BlockType::Empty);
                     key(&mut s);
@@ -300,15 +352,34 @@ impl Helper {
                     s.global_get(runtime::G_UNDEFINED).call(set);
                     s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
                     s.global_set(lib + G_PENDING_N);
-                    s.local_get(INDEX).call(im.get(Import::SubtaskDrop));
-                    for (i, done) in dones {
-                        field(&mut s, 2.0);
-                        s.call(to_number).f64_const((i as f64).into()).f64_eq();
+                    if !dones.is_empty() {
+                        s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
                         s.if_(BlockType::Empty);
+                        s.local_get(INDEX).call(im.get(Import::SubtaskDrop));
+                        for (i, done) in dones {
+                            is(&mut s, i);
+                            s.if_(BlockType::Empty);
+                            field(&mut s, 0.0);
+                            buf(&mut s);
+                            s.call(done);
+                            s.end();
+                        }
+                        s.end();
+                    }
+                    for (p, read, drop_writable) in reads {
+                        is(&mut s, p);
+                        s.if_(BlockType::Empty);
+                        s.local_get(EVENT).i32_const(EVENT_FUTURE_READ).i32_eq();
+                        s.if_(BlockType::Empty);
+                        s.local_get(INDEX);
                         field(&mut s, 0.0);
-                        field(&mut s, 1.0);
-                        s.call(to_number).i32_trunc_sat_f64_u();
-                        s.call(done);
+                        buf(&mut s);
+                        s.local_get(PAYLOAD).call(read);
+                        s.end();
+                        s.local_get(EVENT).i32_const(EVENT_FUTURE_WRITE).i32_eq();
+                        s.if_(BlockType::Empty);
+                        s.local_get(INDEX).call(drop_writable);
+                        s.end();
                         s.end();
                     }
                     s.end();
@@ -504,7 +575,10 @@ fn import_adapter(cx: &mut dyn Cx, bump: u32, i: u32) -> Function {
             s.call(func).global_get(runtime::G_UNDEFINED);
         }
     }
-    s.local_get(saved).global_set(bump);
+    // (A future's value is read into memory later: keep it, T20 slice 6a.)
+    if !has_payloads(result.into_iter()) {
+        s.local_get(saved).global_set(bump);
+    }
     s.end();
     let mut f = Function::new(g.decls());
     f.raw(body);
@@ -525,15 +599,14 @@ fn import_start(
     result: Option<&WitType>,
     ret: u32,
 ) {
-    let lib = cx.host_globals();
-    let im = cx.imports();
     let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
     let new_promise = cx.helper(runtime::Helper::Prom(promise::Helper::New));
     let done = cx.helper(runtime::Helper::Abi(Helper::ImportDone(i)));
-    let set = cx.helper(runtime::Helper::Obj(object::Helper::Set));
-    let boxed = cx.helper(runtime::Helper::Box);
-    let new_array = cx.helper(runtime::Helper::Arr(array::Helper::New));
-    let (st, p) = (g.local(ValType::I32), g.local(runtime::jsval()));
+    let (st, p, h) = (
+        g.local(ValType::I32),
+        g.local(runtime::jsval()),
+        g.local(ValType::I32),
+    );
     if let Some(t) = result {
         let (size, align) = wit::size_align(t);
         s.i32_const(0).i32_const(0).i32_const(align as i32).i32_const(size as i32);
@@ -545,30 +618,311 @@ fn import_start(
     s.if_(BlockType::Empty);
     s.local_get(p).local_get(ret).call(done);
     s.else_();
-    {
-        s.global_get(lib + G_WS).i32_eqz();
-        s.if_(BlockType::Empty);
-        s.call(im.get(Import::WaitableSetNew)).global_set(lib + G_WS);
-        s.end();
-        s.local_get(st).i32_const(4).i32_shr_u();
-        s.global_get(lib + G_WS).call(im.get(Import::WaitableJoin));
-        s.global_get(lib + G_PENDING).ref_is_null();
-        s.if_(BlockType::Empty);
-        s.array_new_fixed(runtime::T_VALS, 0).i32_const(0).call(new_array);
-        s.global_set(lib + G_PENDING);
-        s.end();
-        s.global_get(lib + G_PENDING);
-        s.local_get(st).i32_const(4).i32_shr_u().f64_convert_i32_u().call(boxed);
-        s.local_get(p);
-        s.local_get(ret).f64_convert_i32_u().call(boxed);
-        s.f64_const((i as f64).into()).call(boxed);
-        s.array_new_fixed(runtime::T_VALS, 3).i32_const(3).call(new_array);
-        s.call(set);
+    s.local_get(st).i32_const(4).i32_shr_u().local_set(h);
+    add_pending(cx, s, h, Some(p), ret, i, true);
+    s.end();
+    s.local_get(p);
+}
+
+/// Wait for the waitable `h` (a subtask, or a future's end): join it to the call's waitable set
+/// (made on first use) and record `h` → `[promise, buf, id]` in the pending table (`id`: the
+/// import or future type; `p`: a local, else `undefined`). `count`: one more thing pending
+/// (a future write was counted when it was made).
+fn add_pending(
+    cx: &mut dyn Cx,
+    s: &mut InstructionSink,
+    h: u32,
+    p: Option<u32>,
+    buf: u32,
+    id: u32,
+    count: bool,
+) {
+    let lib = cx.host_globals();
+    let im = cx.imports();
+    let set = cx.helper(runtime::Helper::Obj(object::Helper::Set));
+    let boxed = cx.helper(runtime::Helper::Box);
+    let new_array = cx.helper(runtime::Helper::Arr(array::Helper::New));
+    s.global_get(lib + G_WS).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.call(im.get(Import::WaitableSetNew)).global_set(lib + G_WS);
+    s.end();
+    s.local_get(h);
+    s.global_get(lib + G_WS).call(im.get(Import::WaitableJoin));
+    s.global_get(lib + G_PENDING).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.array_new_fixed(runtime::T_VALS, 0).i32_const(0).call(new_array);
+    s.global_set(lib + G_PENDING);
+    s.end();
+    s.global_get(lib + G_PENDING);
+    s.local_get(h).f64_convert_i32_u().call(boxed);
+    match p {
+        Some(p) => s.local_get(p),
+        None => s.global_get(runtime::G_UNDEFINED),
+    };
+    s.local_get(buf).f64_convert_i32_u().call(boxed);
+    s.f64_const((id as f64).into()).call(boxed);
+    s.array_new_fixed(runtime::T_VALS, 3).i32_const(3).call(new_array);
+    s.call(set);
+    if count {
         s.global_get(lib + G_PENDING_N).i32_const(1).i32_add();
         s.global_set(lib + G_PENDING_N);
     }
+}
+
+/// How many intrinsics a boundary future type imports ([`PayloadOp`]).
+pub const PAYLOAD_OPS: u32 = 5;
+
+/// The intrinsics of a future type (T20 slice 6a), as wit-component names them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PayloadOp {
+    New,
+    Read,
+    Write,
+    DropReadable,
+    DropWritable,
+}
+
+impl PayloadOp {
+    pub const ALL: [PayloadOp; PAYLOAD_OPS as usize] = [
+        PayloadOp::New,
+        PayloadOp::Read,
+        PayloadOp::Write,
+        PayloadOp::DropReadable,
+        PayloadOp::DropWritable,
+    ];
+
+    pub fn name(self, p: &Payload) -> String {
+        let (i, f) = (p.index, &p.func);
+        match self {
+            PayloadOp::New => format!("[future-new-{i}]{f}"),
+            PayloadOp::Read => format!("[async-lower][future-read-{i}]{f}"),
+            PayloadOp::Write => format!("[async-lower][future-write-{i}]{f}"),
+            PayloadOp::DropReadable => format!("[future-drop-readable-{i}]{f}"),
+            PayloadOp::DropWritable => format!("[future-drop-writable-{i}]{f}"),
+        }
+    }
+
+    pub fn signature(self) -> (Vec<ValType>, Vec<ValType>) {
+        use ValType::{I32, I64};
+        match self {
+            PayloadOp::New => (vec![], vec![I64]),
+            PayloadOp::Read | PayloadOp::Write => (vec![I32, I32], vec![I32]),
+            PayloadOp::DropReadable | PayloadOp::DropWritable => (vec![I32], vec![]),
+        }
+    }
+}
+
+/// The future types at a module's boundary (its exports' and imports' signatures), each once.
+pub fn payloads(m: &ir::Module) -> Vec<Payload> {
+    let mut out: Vec<Payload> = Vec::new();
+    let sigs = m.exports.iter().map(|x| &x.sig).chain(m.imports.iter().map(|x| &x.sig));
+    for sig in sigs {
+        let mut found = Vec::new();
+        for t in &sig.types {
+            t.payloads(&mut found);
+        }
+        for p in found {
+            if !out.iter().any(|q| same_payload(q, p)) {
+                out.push(p.clone());
+            }
+        }
+    }
+    out
+}
+
+fn same_payload(a: &Payload, b: &Payload) -> bool {
+    a.module == b.module && a.func == b.func && a.index == b.index
+}
+
+/// The id of `p` in [`payloads`].
+pub fn payload_id(list: &[Payload], p: &Payload) -> u32 {
+    list.iter()
+        .position(|q| same_payload(q, p))
+        .expect("every boundary future is listed") as u32
+}
+
+/// Canonical ABI: a future read / write that didn't finish at once, and the status of one that
+/// did (the low 4 bits).
+const BLOCKED: i32 = -1;
+const COPY_COMPLETED: i32 = 0;
+
+/// Allocate `elem`'s memory (for a future's value) into local `buf` (0 without a value type).
+fn alloc_elem(cx: &mut dyn Cx, s: &mut InstructionSink, elem: Option<&WitType>, buf: u32) {
+    match elem {
+        Some(t) => {
+            let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+            let (size, align) = wit::size_align(t);
+            s.i32_const(0).i32_const(0).i32_const(align as i32).i32_const(size.max(1) as i32);
+            s.call(realloc).local_set(buf);
+        }
+        None => {
+            s.i32_const(0).local_set(buf);
+        }
+    }
+}
+
+/// `$future_lift(h) -> jsval`: see [`Helper::FutureLift`].
+fn future_lift(cx: &mut dyn Cx, id: u32) -> Function {
+    let elem = cx.payload_elem(id);
+    let new_promise = cx.helper(runtime::Helper::Prom(promise::Helper::New));
+    let read = cx.payload_import(id, PayloadOp::Read);
+    let done = cx.helper(runtime::Helper::Abi(Helper::FutureRead(id)));
+    const H: u32 = 0;
+    let mut g = wit::Gen::new(1);
+    let (p, buf, st) = (
+        g.local(runtime::jsval()),
+        g.local(ValType::I32),
+        g.local(ValType::I32),
+    );
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    s.call(new_promise).local_set(p);
+    alloc_elem(cx, &mut s, elem.as_ref(), buf);
+    s.local_get(H).local_get(buf).call(read).local_tee(st);
+    s.i32_const(BLOCKED).i32_eq();
+    s.if_(BlockType::Empty);
+    add_pending(cx, &mut s, H, Some(p), buf, id, true);
+    s.else_();
+    s.local_get(H).local_get(p).local_get(buf).local_get(st).call(done);
     s.end();
     s.local_get(p);
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// `$future_read(h, promise, buf, status)`: see [`Helper::FutureRead`].
+fn future_read(cx: &mut dyn Cx, id: u32) -> Function {
+    let elem = cx.payload_elem(id);
+    let drop = cx.payload_import(id, PayloadOp::DropReadable);
+    let resolve = cx.helper(runtime::Helper::Prom(promise::Helper::Resolve));
+    let reject = cx.helper(runtime::Helper::Prom(promise::Helper::Settle { rejected: true }));
+    let new_error = cx.helper(runtime::Helper::Obj(object::Helper::NewError(ErrorKind::Error)));
+    let dropped = cx.str("the future was dropped without a value");
+    const H: u32 = 0;
+    const P: u32 = 1;
+    const BUF: u32 = 2;
+    const ST: u32 = 3;
+    let mut g = wit::Gen::new(4);
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    s.local_get(H).call(drop);
+    s.local_get(ST).i32_const(0xf).i32_and().i32_const(COPY_COMPLETED).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(P).ref_cast_non_null(promise::promise());
+    match &elem {
+        Some(t) => wit::lift_mem(cx, &mut g, &mut s, t, BUF, 0),
+        None => {
+            s.global_get(runtime::G_UNDEFINED);
+        }
+    }
+    s.call(resolve);
+    s.else_();
+    s.local_get(P).ref_cast_non_null(promise::promise());
+    s.global_get(dropped)
+        .global_get(runtime::G_UNDEFINED)
+        .call(new_error)
+        .call(reject);
+    s.end();
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// `$future_lower(v) -> i32`: see [`Helper::FutureLower`].
+fn future_lower(cx: &mut dyn Cx, id: u32) -> Function {
+    let lib = cx.host_globals();
+    let new = cx.payload_import(id, PayloadOp::New);
+    let func_new = cx.helper(runtime::Helper::Func(crate::func::Helper::New));
+    let resolve = cx.helper(runtime::Helper::Prom(promise::Helper::PromiseResolve));
+    let then = cx.helper(runtime::Helper::Prom(promise::Helper::PerformThen));
+    let boxed = cx.helper(runtime::Helper::Box);
+    let write = cx.helper(runtime::Helper::Abi(Helper::FutureWrite(id)));
+    let abandon = cx.helper(runtime::Helper::Abi(Helper::FutureAbandon(id)));
+    cx.declare_func(write);
+    cx.declare_func(abandon);
+    let empty = cx.str("");
+    const V: u32 = 0;
+    const PAIR: u32 = 1;
+    const ENV: u32 = 2;
+    let mut f = Function::new([(1, ValType::I64), (1, runtime::rt(true, runtime::T_VALS))]);
+    let mut s = f.instructions();
+    s.call(new).local_set(PAIR);
+    s.local_get(PAIR)
+        .i64_const(32)
+        .i64_shr_u()
+        .i32_wrap_i64()
+        .f64_convert_i32_u()
+        .call(boxed);
+    s.array_new_fixed(runtime::T_VALS, 1).local_set(ENV);
+    s.local_get(V).call(resolve).ref_cast_non_null(promise::promise());
+    promise::native(&mut s, func_new, write, Some(ENV), empty, 1);
+    promise::native(&mut s, func_new, abandon, Some(ENV), empty, 1);
+    s.ref_null(promise::promise());
+    s.call(then);
+    s.global_get(lib + G_PENDING_N).i32_const(1).i32_add();
+    s.global_set(lib + G_PENDING_N);
+    s.local_get(PAIR).i32_wrap_i64();
+    s.end();
+    f
+}
+
+/// Push the writable end in a future handler's environment (an i32).
+fn writable_end(cx: &mut dyn Cx, s: &mut InstructionSink) {
+    let to_number = cx.helper(runtime::Helper::ToNumber);
+    promise::env(s);
+    s.i32_const(0).array_get(runtime::T_VALS);
+    s.call(to_number).i32_trunc_sat_f64_u();
+}
+
+/// `$future_write(self, this, args) -> jsval`: see [`Helper::FutureWrite`]. The value is
+/// stored (it converts like a result; one that doesn't fit traps), then written; a write that
+/// doesn't finish at once waits in the pending table.
+fn future_write(cx: &mut dyn Cx, id: u32) -> Function {
+    let lib = cx.host_globals();
+    let elem = cx.payload_elem(id);
+    let write = cx.payload_import(id, PayloadOp::Write);
+    let drop = cx.payload_import(id, PayloadOp::DropWritable);
+    let mut g = wit::Gen::new(3);
+    let (w, v, buf) = (
+        g.local(ValType::I32),
+        g.local(runtime::jsval()),
+        g.local(ValType::I32),
+    );
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    writable_end(cx, &mut s);
+    s.local_set(w);
+    promise::arg(cx, &mut s, 0);
+    s.local_set(v);
+    alloc_elem(cx, &mut s, elem.as_ref(), buf);
+    if let Some(t) = &elem {
+        wit::lower_mem(cx, &mut g, &mut s, t, v, buf, 0);
+    }
+    s.local_get(w).local_get(buf).call(write).i32_const(BLOCKED).i32_eq();
+    s.if_(BlockType::Empty);
+    add_pending(cx, &mut s, w, None, buf, id, false);
+    s.else_();
+    s.local_get(w).call(drop);
+    s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
+    s.global_set(lib + G_PENDING_N);
+    s.end();
+    s.global_get(runtime::G_UNDEFINED);
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// `$future_abandon(self, this, args) -> jsval`: see [`Helper::FutureAbandon`]. A future
+/// can't be dropped before its value is written (wasmtime traps), and a reader waiting forever
+/// is worse: trap.
+fn future_abandon() -> Function {
+    let mut f = Function::new([]);
+    f.instructions().unreachable().end();
+    f
 }
 
 /// `$import_done(promise, ret)`: see [`Helper::ImportDone`]. The result is lifted from the
@@ -622,6 +976,8 @@ fn import_done(cx: &mut dyn Cx, i: u32) -> Function {
 
 /// Canonical ABI constants (see [`crate::host`]).
 const EVENT_SUBTASK: i32 = 1;
+const EVENT_FUTURE_READ: i32 = 4;
+const EVENT_FUTURE_WRITE: i32 = 5;
 const SUBTASK_RETURNED: i32 = 2;
 const CALLBACK_EXIT: i32 = 0;
 const CALLBACK_WAIT: i32 = 2;
@@ -638,6 +994,7 @@ fn step(cx: &mut dyn Cx) -> Function {
         .names("$ticks")
         .then(|| cx.helper(runtime::Helper::Timer(timers::Helper::RunTicks)));
     let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
+    let futures = cx.payload_count() > 0;
     const D: u32 = 0;
     const ST: u32 = 1;
     const R: u32 = 2;
@@ -672,11 +1029,23 @@ fn step(cx: &mut dyn Cx) -> Function {
         s.if_(BlockType::Empty);
         s.i32_const(0).return_();
         s.end();
+        if futures {
+            // After `task.return` (T20 slice 6a): done once the future writes ended.
+            s.global_get(lib + G_RETURNED);
+            s.global_get(lib + G_PENDING_N).i32_eqz().i32_and();
+            s.if_(BlockType::Empty);
+            s.i32_const(0).return_();
+            s.end();
+            s.global_get(lib + G_RETURNED).i32_eqz();
+        }
         s.global_get(lib + G_PROMISE)
             .ref_cast_non_null(promise::promise())
             .struct_get(runtime::T_PROMISE, promise::P_STATE)
             .i32_const(promise::PENDING)
             .i32_ne();
+        if futures {
+            s.i32_and();
+        }
         s.if_(BlockType::Empty);
         s.i32_const(0).return_();
         s.end();
@@ -761,7 +1130,7 @@ fn step(cx: &mut dyn Cx) -> Function {
 /// state (0: not run, 1: done, 2: threw) and the error it threw; for an async call (T20) its
 /// promise, whether it failed and the error, the waitable set (0: none yet) and whether
 /// backpressure is raised; the pending `async func` imports (slice 5b).
-pub const LIB_GLOBALS: u32 = 9;
+pub const LIB_GLOBALS: u32 = 10;
 const G_INIT_STATE: u32 = 0;
 const G_INIT_ERROR: u32 = 1;
 const G_PROMISE: u32 = 2;
@@ -773,12 +1142,14 @@ const G_BP: u32 = 6;
 /// (a JS array, made on first use), and how many there are.
 const G_PENDING: u32 = 7;
 const G_PENDING_N: u32 = 8;
+/// The async call `task.return`ed and waits for its future writes (T20 slice 6a).
+const G_RETURNED: u32 = 9;
 
 /// The types of the [`LIB_GLOBALS`] (all start as 0 / null).
 pub fn lib_global_types() -> [ValType; LIB_GLOBALS as usize] {
     use ValType::I32;
     let v = runtime::jsval();
-    [I32, v, v, I32, v, I32, I32, v, I32]
+    [I32, v, v, I32, v, I32, I32, v, I32, I32]
 }
 
 /// What an [`adapter`] does.
@@ -841,6 +1212,15 @@ fn mem(offset: u64, align: u32) -> MemArg {
         align,
         memory_index: 0,
     }
+}
+
+/// Do these types contain futures?
+fn has_payloads(ts: impl Iterator<Item = WitType>) -> bool {
+    ts.into_iter().any(|t| {
+        let mut found = Vec::new();
+        t.payloads(&mut found);
+        !found.is_empty()
+    })
 }
 
 /// Core values of one scalar boundary type (Canonical ABI flattening).
@@ -1066,8 +1446,9 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) 
                 AbiType::Compound(_) => unreachable!(),
             }
         }
-        // The arguments are GC strings now: free the memory they came in.
-        if memory {
+        // The arguments are GC strings now: free the memory they came in (unless a future's
+        // value is being read into it, T20 slice 6a).
+        if memory && !has_payloads(sig.params.iter().map(|p| sig.wit(*p))) {
             s.i32_const(HEAP_BASE).global_set(bump);
         }
     };
@@ -1421,14 +1802,33 @@ pub fn async_callback(cx: &mut dyn Cx, finish: u32) -> Function {
 /// [`Helper::Step`] the call; while it waits, return the callback code. When it's done, the
 /// [`Mode::Finish`] adapter (`finish`) `task.return`s its result, the call [`Helper::End`]s,
 /// and `EXIT`. Local `code`: an i32.
+///
+/// With futures at the boundary (T20 slice 6a), the call goes on after `task.return` until its
+/// future writes ended (the callback steps it again).
 fn complete(cx: &mut dyn Cx, s: &mut InstructionSink, finish: u32, code: u32) {
+    let lib = cx.host_globals();
     let step = cx.helper(runtime::Helper::Abi(Helper::Step));
     let end = cx.helper(runtime::Helper::Abi(Helper::End));
+    let futures = cx.payload_count() > 0;
+    if futures {
+        s.loop_(BlockType::Empty);
+    }
     s.call(step).local_tee(code);
     s.if_(BlockType::Empty);
     s.local_get(code).return_();
     s.end();
-    s.call(finish);
+    if futures {
+        s.global_get(lib + G_RETURNED).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.call(finish);
+        s.i32_const(1).global_set(lib + G_RETURNED);
+        s.br(1);
+        s.end();
+        s.end();
+        s.i32_const(0).global_set(lib + G_RETURNED);
+    } else {
+        s.call(finish);
+    }
     s.call(end);
     s.i32_const(CALLBACK_EXIT);
 }

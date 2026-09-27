@@ -78,7 +78,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   [docs/user-worlds.md](docs/user-worlds.md).
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
-Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex, multi-file `import`, and richer WIT types at the boundary (resources, `future`/`stream`). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex, multi-file `import`, and richer WIT types at the boundary (resources, `stream`; `future<T>` works in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

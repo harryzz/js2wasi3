@@ -8,7 +8,9 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
-use wit_parser::{FunctionKind, InterfaceId, Resolve, Type, TypeDefKind, WorldId, WorldItem};
+use wit_parser::{
+    FunctionKind, InterfaceId, Resolve, Type, TypeDefKind, TypeId, WorldId, WorldItem,
+};
 
 pub mod names;
 
@@ -286,6 +288,9 @@ pub enum Ty {
     Flags(Vec<String>),
     Variant(Vec<(String, Option<Ty>)>),
     List(Box<Ty>),
+    /// `future<T>` (T20 slice 6): `index` is its position in the function's
+    /// `find_futures_and_streams`, which names its intrinsics (`[future-new-<index>]f`).
+    Future { elem: Option<Box<Ty>>, index: u32 },
 }
 
 /// A function a user world exports (T20), or (slice 5) imports.
@@ -411,7 +416,14 @@ fn interface(resolve: &Resolve, key: &wit_parser::WorldKey, id: InterfaceId) -> 
 /// A world function's signature: its WIT types, a `result<T, E>` result split into `T` and `E`.
 fn function(resolve: &Resolve, f: &wit_parser::Function) -> Result<WorldExport, Vec<String>> {
     let mut errs = Vec::new();
-    let mut ty = |t: &Type, what: String| match boundary_type(resolve, t) {
+    let futures = f.find_futures_and_streams(resolve);
+    if !futures.is_empty() && !f.kind.is_async() {
+        errs.push(format!(
+            "unsupported: `{}` takes or returns a future or stream and isn't an `async func` (planned: later)",
+            f.name
+        ));
+    }
+    let mut ty = |t: &Type, what: String| match boundary_type(resolve, t, &futures) {
         Ok(v) => Some(v),
         Err(why) => {
             errs.push(format!("unsupported: {what} of `{}`: {why}", f.name));
@@ -456,7 +468,7 @@ fn function(resolve: &Resolve, f: &wit_parser::Function) -> Result<WorldExport, 
 }
 
 /// A type at the boundary, or why it isn't supported.
-fn boundary_type(resolve: &Resolve, t: &Type) -> Result<Ty, String> {
+fn boundary_type(resolve: &Resolve, t: &Type, futures: &[TypeId]) -> Result<Ty, String> {
     if let Some(v) = scalar_type(resolve, t) {
         return Ok(Ty::Scalar(v));
     }
@@ -469,7 +481,7 @@ fn boundary_type(resolve: &Resolve, t: &Type) -> Result<Ty, String> {
             type_name(resolve, t)
         ))
     };
-    let sub = |t: &Type| boundary_type(resolve, t);
+    let sub = |t: &Type| boundary_type(resolve, t, futures);
     Ok(match &resolve.types[*id].kind {
         TypeDefKind::Type(t) => return sub(t),
         TypeDefKind::Option(t) => Ty::Option(Box::new(sub(t)?)),
@@ -497,9 +509,14 @@ fn boundary_type(resolve: &Resolve, t: &Type) -> Result<Ty, String> {
                 .map(|c| Ok((c.name.clone(), c.ty.as_ref().map(sub).transpose()?)))
                 .collect::<Result<_, String>>()?,
         ),
-        TypeDefKind::Future(_) | TypeDefKind::Stream(_) => {
-            return later("a future or stream", "T20 slice 6");
-        }
+        TypeDefKind::Future(e) => Ty::Future {
+            elem: e.as_ref().map(sub).transpose()?.map(Box::new),
+            index: futures
+                .iter()
+                .position(|f| f == id)
+                .expect("wit-parser lists every future") as u32,
+        },
+        TypeDefKind::Stream(_) => return later("a stream", "T20 slice 6b"),
         _ => return later("a resource", "later"),
     })
 }

@@ -527,7 +527,7 @@ pub(crate) fn arg(cx: &mut dyn Cx, s: &mut InstructionSink, i: i32) {
 }
 
 /// Push the environment of a `$code`'s function (a `(ref $vals)`).
-fn env(s: &mut InstructionSink) {
+pub(crate) fn env(s: &mut InstructionSink) {
     s.local_get(SELF)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_ENV)

@@ -1,0 +1,30 @@
+package acme:futures;
+
+/// `future<T>` at the boundary (T20 slice 6a): the provider writes and reads futures, the app
+/// reads and writes them through its imports.
+interface later {
+  record coords { x: s32, y: s32 }
+  record pair { now: u32, later: future<u32> }
+
+  /// `n` now, `2n` later (after a timer).
+  double-later: async func(n: u32) -> pair;
+  /// Awaits `s` and returns it upper-cased.
+  shout: async func(s: future<string>) -> string;
+  /// A future written at once.
+  origin: async func() -> future<coords>;
+  /// A future without a value.
+  done: async func() -> future;
+}
+
+/// Implements `later` in JS (`provider.js`).
+world provider {
+  import wasi:clocks/monotonic-clock@0.3.1;
+  export later;
+}
+
+/// Uses `later` (`app.js`).
+world app {
+  import wasi:clocks/monotonic-clock@0.3.1;
+  import later;
+  export go: async func(n: u32) -> string;
+}

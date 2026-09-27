@@ -146,7 +146,11 @@ frees what it allocated (the bump pointer goes back); an interface export is `ex
 functions exported as `ns:pkg/iface#f`. Slice 5b: an `async func` import is `[async-lower]`: its adapter
 gives a promise; a subtask that doesn't return at once joins the export call's waitable set and a pending table
 (`handle → [promise, return area, import]`), and the callback's `Event` settles it (lift, the import's unwrap
-function, resolve or reject); the call keeps waiting while imports are pending. User guide:
+function, resolve or reject); the call keeps waiting while imports are pending. Slice 6a: `future<T>` ↔ Promise in an `async func`'s
+signature: each future type imports its intrinsics (`[future-new-N]f` …, N from wit-parser's
+`find_futures_and_streams`); a received future is a promise fed by `future.read`, a given one is `future.new` plus
+a native `then` handler that writes the settled value; reads and writes wait in the pending table, and the call
+goes on after `task.return` until its writes end. User guide:
 [user-worlds.md](user-worlds.md).)
 
 ### D5. Built-ins

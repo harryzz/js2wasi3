@@ -135,16 +135,20 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let lib_timers = !lifted.is_empty() && uses_timers(module);
     // `async func` imports (T20 slice 5b) wait in the async export's waitable set.
     let async_imports = module.imports.iter().any(|x| x.sig.is_async);
+    // The `future`s at the boundary (T20 slice 6a): their intrinsics come after the user
+    // world's imports, [`abi::PAYLOAD_OPS`] per future type.
+    let payloads = abi::payloads(module);
     let import_list = if lib_timers {
         host::LIBRARY_TIMER_IMPORTS.to_vec()
-    } else if async_imports && !lifted.is_empty() {
+    } else if (async_imports || !payloads.is_empty()) && !lifted.is_empty() {
         host::LIBRARY_WAIT_IMPORTS.to_vec()
     } else {
         import_list
     };
     // A user world's imports come after the host's (T20 slice 5).
     let user_imports = import_list.len() as u32 + lifted.len() as u32;
-    let func_base = user_imports + module.imports.len() as u32;
+    let payload_base = user_imports + module.imports.len() as u32;
+    let func_base = payload_base + abi::PAYLOAD_OPS * payloads.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let host_base = runtime::GLOBALS + abi as u32;
     let host_globals = if command.is_some() {
@@ -178,6 +182,8 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         global_base: if js { host_base + host_globals } else { 0 },
         bump: runtime::GLOBALS,
         user_imports,
+        payload_base,
+        payloads: payloads.clone(),
         host_base,
         func_base,
         type_ids: HashMap::new(),
@@ -222,6 +228,17 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             x.name.clone()
         };
         imports.import(&x.module, &name, wasm_encoder::EntityType::Function(ty));
+    }
+    for p in &payloads {
+        for op in abi::PayloadOp::ALL {
+            let (params, results) = op.signature();
+            let ty = e.type_id(params, results);
+            imports.import(
+                &p.module,
+                &op.name(p),
+                wasm_encoder::EntityType::Function(ty),
+            );
+        }
     }
     // The exception tag (`runtime::TAG`) comes with the JS runtime.
     let mut tags = TagSection::new();
@@ -439,6 +456,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     for (i, x) in module.imports.iter().enumerate() {
         fnames.append(user_imports + i as u32, &format!("{}#{}", x.module, x.name));
+    }
+    for (i, p) in payloads.iter().enumerate() {
+        for (k, op) in abi::PayloadOp::ALL.iter().enumerate() {
+            let at = payload_base + (i as u32) * abi::PAYLOAD_OPS + k as u32;
+            fnames.append(at, &format!("{}#{}", p.module, op.name(p)));
+        }
     }
     for (i, f) in module.functions.iter().enumerate() {
         fnames.append(func_base + i as u32, &f.name);
@@ -731,6 +754,9 @@ struct Emitter<'m> {
     bump: u32,
     /// Function index of the user world's first import (T20 slice 5).
     user_imports: u32,
+    /// The intrinsics of the boundary's futures (T20 slice 6a).
+    payload_base: u32,
+    payloads: Vec<ir::Payload>,
     /// Global index of the first host global (commands).
     host_base: u32,
     /// Number of imported functions: the IR function `i` has index `func_base + i`.
@@ -878,6 +904,22 @@ impl runtime::Cx for Emitter<'_> {
         let x = &self.m.imports[i as usize];
         let unwrap = x.unwrap.map(|f| self.func_base + f.0);
         (self.user_imports + i, x.sig.clone(), unwrap)
+    }
+
+    fn payload(&mut self, p: &ir::Payload) -> u32 {
+        abi::payload_id(&self.payloads, p)
+    }
+
+    fn payload_import(&mut self, id: u32, op: abi::PayloadOp) -> u32 {
+        self.payload_base + id * abi::PAYLOAD_OPS + op as u32
+    }
+
+    fn payload_elem(&mut self, id: u32) -> Option<ir::WitType> {
+        self.payloads[id as usize].elem.clone()
+    }
+
+    fn payload_count(&mut self) -> u32 {
+        self.payloads.len() as u32
     }
 
     fn user_import_count(&mut self) -> u32 {
