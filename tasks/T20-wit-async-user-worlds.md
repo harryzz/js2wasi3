@@ -351,6 +351,60 @@ count; DROPPED ends the iteration); lowering an async iterable makes a stream an
       other element types if cheap; `ArrayBuffer` as far as `Uint8Array` needs it.
 2. Library runtime (the handoff's slice 1). 3. Async exports. 4. User worlds. 5. Imports. 6. `future`/`stream`.
 
+## Handoff for slice 6b (written 2026-09-27, end of the slice 6a session)
+
+**State:** slices 1–5 and 6a done and pushed (`9b59194`). Next: slice 6b, `stream<u8>` ↔ async iterable of
+`Uint8Array`; its plan is slice 6a's *Next smallest step* above. Commit/push/post only when the user asks; no
+attribution lines. Agree the 6b plan (or a split) with the user first, like the earlier slices.
+
+**Run first (baseline):**
+```sh
+scripts/check-tools.sh
+cargo build -q --release && cargo test -q --release --no-fail-fast 2>&1 | grep -E 'FAILED|panicked'   # nothing
+scripts/diff.sh -j 4 | tail -1                              # 97 passed, 0 failed, 16 skipped
+target/release/js2wasi3 build tests/fixtures/hello.js -o /tmp/h.wasm && stat -c %s /tmp/h.wasm   # 55715
+# sizes: add.js 289, library/async.js 76170, library/async-timers.js 77503, library/jobs.js 65445
+```
+
+**Read first:** design.md D3/D4 (slice 6a paragraph), `docs/user-worlds.md` ("Futures"), slice 6a's Notes / Result,
+then the code:
+- `crates/component/src/lib.rs`: `Ty::Future`, `boundary_type` (streams are rejected there with "T20 slice 6b").
+- `crates/ir/src/lib.rs`: `WitType::Future(Payload)`, `WitType::payloads`.
+- `crates/js2wasi3/src/main.rs`: `wit_type(…, site)`: the intrinsics' module/function per signature.
+- `crates/backend/src/abi.rs`: `PayloadOp`, `payloads`/`payload_id`, `add_pending`, `future_lift`/`future_read`/
+  `future_lower`/`future_write`/`future_abandon`, `Helper::Event` (FUTURE_READ/WRITE dispatch), `step`/`complete`
+  (`G_RETURNED`), `import_adapter`/`adapter` (bump resets skipped when futures hold buffers).
+- `crates/backend/src/lib.rs`: payload imports after the user imports (`payload_base`, `func_base`).
+- `crates/backend/src/wit.rs`: the `Future` arms of `flatten`/`size_align`/`lift_flat`/`lower_mem`/`flat_load`.
+- Test: `crates/js2wasi3/tests/build.rs` `futures_compose_with_wac`, fixture `tests/fixtures/library/futures/`.
+
+**Facts found in 6a (keep):**
+- Intrinsic names: `[stream-new-N]f` (→ i64: readable low, writable high), `[async-lower][stream-read-N]f` and
+  `…-write-N` `(handle, ptr, len) -> i32`, `[stream-drop-readable-N]f`, `[stream-drop-writable-N]f` (also
+  `cancel-read/write`). Module: `[export]$root`, `[export]ns:pkg/iface`, or the imported interface. N: the
+  position in wit-parser's `Function::find_futures_and_streams` (futures and streams share the numbering).
+  Print them with `wasm-tools component embed w.wit --dummy-names legacy --async-callback -t`.
+- Copy status: `-1` BLOCKED; else low 4 bits COMPLETED 0 / DROPPED 1 / CANCELLED 2, a stream's count in the high
+  28 bits. Events: SUBTASK 1, STREAM_READ 2, STREAM_WRITE 3, FUTURE_READ 4, FUTURE_WRITE 5 (payload = status).
+- wasmtime traps on dropping an unwritten future's writable end ("cannot drop future write end without first
+  writing a value"); streams may be dropped at any time (that's how they end).
+- An async function adopts a promise it returns, so a directly returned future can't be pending (put it in a
+  record); a directly returned async iterable is fine for streams.
+
+**Pitfalls:**
+- **F134 ([issue #1](https://github.com/harryzz/js2wasi3/issues/1)):** composed components with timers fail at GC
+  on wasmtime 49.0.1 (default collector: internal "BUG … semi-space"; `drc`: lost resolutions). Run composed
+  tests with `-O gc-heap-initial-size=67108864` (`invoke_with` in build.rs). A GC-dependent failure looks like
+  a heisenbug: adding code moves it. Before debugging our code, rerun with `-C collector=drc` and with a big
+  initial heap; if the result changes, it's F134.
+- Debugging a library without console: return a JS array of numbers from a hacked `Await` (pending path) and push
+  values into it from helpers (a lib global); remove all instrumentation after (keep a copy of abi.rs first).
+- Blocks can't see values pushed before them (`if` branches): push the promise inside each branch.
+- New helpers used as `$code` (native functions) need `cx.declare_func` before `ref.func`.
+- Size gates and F113 as before; new lib globals cost 5 bytes per library with an async export: say so in Notes.
+- Streams: the call must keep looping after `task.return` while it pumps (the 6a `G_RETURNED` loop) — and F135
+  applies (backpressure stays raised meanwhile).
+
 ## Handoff (written 2026-09-26, end of the T25 session)
 
 **State:** written after T25; updated 2026-09-26 after slice 1 (`for await`, async generators, typed arrays: see
@@ -454,3 +508,4 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: found (blocker): with wasmtime's default (copying) collector the composed futures test traps with wasmtime's internal "BUG: there should always be enough room in the active semi-space" (copying.rs:534) at the first GC after some cross-component calls. Related, pre-existing: the committed slice 5b `slow` composition (HEAD build) fails under `-C collector=drc` (go$finish rethrows), and small apps (timer, then 2 imports) lose their export's promise resolution depending on when GC runs. Single components (library/async-timers.js, commands with timers) pass under forced GC (`-O gc-zeal-alloc-counter=1`, both collectors); compositions without timers pass too. Points to wasmtime GC with composed components (not proven). Debug instrumentation removed.
 - 2026-09-27: user chose the workaround for the GC failures (tests with a larger initial GC heap, F134) over minimizing the wasmtime bug now. Rejected promise for a future: wasmtime traps on dropping an unwritten future, so `FutureAbandon` traps. Tests added/updated; cargo test ok; clippy old warning only; diff.sh 97/0/16; sizes: hello.js 55715, async.js 76170 (+5).
 - 2026-09-27: slice 6a done: Notes / Result 6a, README (F134–F136, Next up: 6b), docs/user-worlds.md (Futures, limits), design.md D4.
+- 2026-09-27: handoff for slice 6b written (state 9b59194, baseline, read-first list, 6a facts, pitfalls incl. F134 / issue #1).
