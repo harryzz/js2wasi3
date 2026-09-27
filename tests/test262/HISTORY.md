@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T33 holes through the prototype chain (targeted rerun)
+
+- Compiler: T33 (native `join`/`pop` and array iteration read holes with `Get`).
+- Run: `built-ins/Array/prototype/{pop,join,toString,shift,unshift}`, `built-ins/Array/from`,
+  `language/statements/{for-of,for}`, `language/expressions/array`, `language/expressions/assignment/dstr`,
+  `language/statements/const/dstr` (1,795 tests): 3 fail → pass, 0 regressions. Subset: 21,719 of 24,820 run pass
+  (87.5%); `built-ins/Array` 2532 of 3030 (83.6%).
+
 ## 2026-09-27: T32 `defineProperty` on arrays (targeted rerun)
 
 - Compiler: T32 (element attributes and accessor elements on `$array`, ArraySetLength, non-writable `length`).

@@ -721,6 +721,7 @@ fn push(cx: &mut dyn Cx) -> Function {
 fn join(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(runtime::Helper::ToString);
     let value = cx.helper(runtime::Helper::Prop(crate::props::Helper::Value));
+    let get = oh(cx, object::Helper::Get);
     let is_nullish = cx.helper(runtime::Helper::IsNullish);
     let empty = cx.str("");
     const A: u32 = 0;
@@ -760,10 +761,16 @@ fn join(cx: &mut dyn Cx) -> Function {
         .local_get(I)
         .array_get(T_VALS)
         .local_tee(E);
-    s.ref_is_null().i32_eqz();
-    s.if_(BlockType::Empty);
+    s.ref_is_null();
+    s.if_(BlockType::Result(jsval()));
+    // A hole reads through the prototype chain (T33).
+    s.local_get(A).local_get(I).ref_i31().call(get);
+    s.else_();
     // An accessor element (T32): its getter's value.
-    s.local_get(E).local_get(A).call(value).local_set(E);
+    s.local_get(E).local_get(A).call(value);
+    s.end();
+    s.local_set(E);
+    s.block(BlockType::Empty);
     s.local_get(E).call(is_nullish).i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(E).call(to_string).local_set(P);
@@ -974,6 +981,7 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
         cx.str("' of [object Array]"),
     );
     let value = cx.helper(runtime::Helper::Prop(crate::props::Helper::Value));
+    let get = oh(cx, object::Helper::Get);
     let attrs = ah(cx, Helper::Attrs);
     let set_attrs = ah(cx, Helper::SetAttrs);
     let length_read_only =
@@ -1009,8 +1017,11 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
         .local_get(L)
         .array_get(T_VALS)
         .local_tee(V);
-    s.ref_is_null().i32_eqz();
+    s.ref_is_null();
     s.if_(BlockType::Empty);
+    // A hole reads through the prototype chain (T33).
+    s.local_get(1).local_get(L).ref_i31().call(get).local_set(V);
+    s.else_();
     s.local_get(V).local_get(1).call(value).local_set(V);
     s.local_get(1).ref_cast_non_null(array()).local_get(L).call(attrs);
     s.i32_const(object::FIXED).i32_and();
