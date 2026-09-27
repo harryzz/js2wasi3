@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: reclassification, no new run (T23 slice 3)
+
+- Runner: tests using features node 24 lacks are skipped (proper tail calls, `upsert`, `Math.sumPrecise`, …): 554
+  tests rerun, now skips. Compiler unchanged.
+- Baseline totals: 15,904 pass, 1,682 fail, 7,205 unsupported, 9 crash, 22 timeout, 1,808 skip: **64.1%** of 24,822 run.
+- Causes → follow-ups: T23's Notes / Result, slice 3.
+
 ## 2026-09-27: first subset run (T23 slice 2)
 
 - Compiler: `b933c92` "T23 slice 1: test262 runner" (compiler crates unchanged since `bae9723`).

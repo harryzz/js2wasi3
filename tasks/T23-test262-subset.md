@@ -1,6 +1,6 @@
 # T23: test262 subset runner
 
-Status: in progress (slices 1–2 done; slice 3 next), run only with approval | Depends on: T12+
+Status: done (slices 1–3), run only with approval | Depends on: T12+
 
 ## Goal
 Run a chosen subset of test262 (by directory or feature list) through js2wasi3 + wasmtime and report the pass rate per directory.
@@ -12,7 +12,7 @@ Never run it after every edit. Only at the end of a task or on request. Ask befo
 ## Checklist
 - [x] Slice 1: runner (`scripts/test262.mjs`, `scripts/fetch-test262.sh`, pin in `TOOLS.md`)
 - [x] Slice 2: first subset run, baseline committed
-- [ ] Slice 3: top failure causes recorded as follow-ups
+- [x] Slice 3: top failure causes recorded as follow-ups
 
 ## Notes / Result
 
@@ -83,9 +83,47 @@ propertyHelper), `yield*` in an async generator (1,050), dynamic `import()` (469
 fail: wrapper objects (722 traps, F106), `Test262Error` assertions (448), `Object.defineProperty` traps (202), a
 recursion in `strict_eq < float` (27 "call stack exhausted"); crash: `await using` (9, F140); timeouts: 22.
 
-**Next smallest step (slice 3)**: group the top reasons in `out/test262/subset-2026-09-27.log` (and `results.tsv`)
-into follow-ups with counts; check a sample of each large `fail` group (Test262Error, `defineProperty` traps,
-`strict_eq` recursion, timeouts) for its cause.
+### Slice 3: failure causes → follow-ups (2026-09-27)
+Grouped the reasons in `out/test262/results.tsv` (merged full run + reruns) and read samples of every large group.
+**Runner change**: tests using features node 24.21.0 lacks are skipped (`NODE_MISSING`: `tail-call-optimization`,
+`upsert`, `Math.sumPrecise`, `await-dictionary`, `iterator-sequencing`, `source-phase-imports*`, `import-defer`;
+554 tests rerun → skip); a pass that becomes a skip isn't counted as a regression. The 27 "call stack exhausted in
+`strict_eq`" failures were the tail-call tests. Baseline now: 15,904 pass, 1,682 fail, 7,205 unsupported, 9 crash,
+22 timeout, 1,808 skip: **64.1%** of 24,822 run.
+
+Each non-passing test counts once, under its first reason (a build lists only the first rejection per test, so
+fixing one cause can reveal the next):
+
+| tests | cause | follow-up |
+|---|---|---|
+| 2,299 | propertyHelper: built-ins as values (`Array.isArray`, `Object.defineProperty`, `Function.prototype.call.bind`, …) | F144 |
+| 1,301 | read of an undeclared global rejected at build time (should be a runtime ReferenceError) | F139 |
+| 1,050 | `yield*` in async generators | F115 |
+| 810 | wrapper objects / primitive `this` (`new Boolean(true)`, `new Object("")`, `this.valueOf()` on `false`) | F106 |
+| 520 | assertion failures, spread thin: assignment evaluation order (F146), species / `constructor` (F147), subclassing built-ins (F106), IteratorClose in destructuring (F148), class/generator details | F146–F148 |
+| 398 / 200 / 154 | `eval` / `globalThis` / `Function` | F151 |
+| 377 | classes: private accessors, computed instance keys, `static {}`, `accessor`, `o?.#x` | F58 |
+| 353 | dynamic `import()`, `import.meta` | F79 |
+| 218 | `Object.defineProperty` on arrays (accessor elements, `length`) | F145 |
+| 200 | BigInt | F153 |
+| 190 / 70 | `Reflect` / `Proxy` | F152 |
+| 169 | regex literals, `RegExp` | T27 |
+| 88 | `new.target`/`super()`/`arguments` in arrows or functions | F57, F103 |
+| 76 | `WeakMap`/`WeakSet`/`WeakRef` (F98), `Date` (T26), `DataView`, `SharedArrayBuffer`, `Float16Array`, BigInt arrays (F116) | various |
+| 71 | TDZ detected at build time (used before declaration) | F63 |
+| 61 | tagged templates, `String.raw` | F78 |
+| 53 | `Object.setPrototypeOf`/`getOwnPropertyNames`/`is`/`defineProperties` | F144 (same work) |
+| 45 | `using` (F80), `await using` crash (F140) | F80, F140 |
+| 22 | timeouts: replaced methods not called (F147), dense holey arrays and huge lengths (F149), code size of deep closure nesting (F150) | F147, F149, F150 |
+| 193 | other: array-only `push`/`pop`/`join` (F91), unhandled rejections (host noise), case mapping and `normalize` traps, `console` in a library, … | — |
+
+**Result (T23)**: a runner, a baseline and a map from failure causes to follow-ups. Commands:
+`scripts/fetch-test262.sh`; `node scripts/test262.mjs [--list] [--causes N] [--update] <dir | subset>`; a full
+`subset` run takes ~1 h 50 min at -j 4 here. Record each full run in `tests/test262/HISTORY.md`.
+
+**Next smallest step**: a "test262 quick wins" task (needs approval): F139 (undeclared globals throw a
+ReferenceError at run time; 1,301 tests), F140, F143, then F144 (propertyHelper, 2,299 tests); rerun only the
+affected directories with the runner and check `Changed since the baseline`.
 
 ## Handoff (written 2026-09-28, end of the T20 session)
 
@@ -130,3 +168,5 @@ cheap. Each test is a full build + wasmtime compile (~0.3–1 s), so whole-suite
 - 2026-09-27: slice 2 started. `built-ins/JSON` + `built-ins/Map` (369 files): 188 pass, 48 fail, 127 unsupported, 2 timeout, 4 skip; 104 s at -j 4 (~3.5 tests/s, so the whole subset ≈ 2 h). The 2 timeouts are real: `new Map(iterable)` ignores a user-replaced `Map.prototype.set`, so it never throws and loops over an infinite iterator. Also seen: `getOrInsert`/`getOrInsertComputed` missing, `WeakMap`, `JSON.rawJSON`.
 - 2026-09-27: user approved the full `subset` run (~2 h, -j 4); started in the background with --update --causes 25.
 - 2026-09-27: full subset run done (6,500 s). Reclassified 110 script-only build errors as skips (runner checks `node --check` as a module) and fixed 10 WIT-name failures from temp file names (F143); baseline 16,122 pass / 1,745 fail / 7,425 unsupported / 9 crash / 22 timeout / 1,307 skip (63.7%). Slice 2 done.
+- 2026-09-27: slice 3 started (group the top reasons into follow-ups; sample the big fail groups).
+- 2026-09-27: slice 3: counted causes (table above), added F144–F153, updated F139/F140/F143 counts and pick-up; runner skips NODE_MISSING features (554 tests → skip), a new skip isn't a regression. Baseline 64.1% of 24,822. T23 done.

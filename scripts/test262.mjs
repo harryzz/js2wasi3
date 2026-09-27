@@ -28,10 +28,11 @@
 //   crash        the compiler panicked
 //   timeout      build + run took longer than --timeout
 //   skip         not runnable here: `noStrict`/`raw` (sloppy mode), `_FIXTURE` files, module resolution
-//                (multi-file modules, F7), `$262` (host-defined test hooks), script only (the build
+//                (multi-file modules, F7), `$262` (host-defined test hooks), features node 24 lacks
+//                (NODE_MISSING), script only (the build
 //                failed and node doesn't parse the test as a module either)
 // The run prints counts per directory, then every test whose status differs from the baseline
-// (or that isn't in it). Exit 1 if a test that passed in the baseline doesn't pass now.
+// (or that isn't in it). Exit 1 if a test that passed in the baseline now fails (a new skip doesn't count).
 // Per-test details of the last run: out/test262/results.tsv (path, status, ms, reason).
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, existsSync } from "node:fs";
@@ -56,6 +57,18 @@ const SUBSET = [
   "built-ins/Promise",
   "built-ins/Map",
   "built-ins/Set",
+];
+// Features node 24.21.0 (the oracle, TOOLS.md) doesn't implement: proper tail calls and proposals it
+// doesn't ship yet. Tests using them are skipped.
+const NODE_MISSING = [
+  "tail-call-optimization",
+  "upsert",
+  "Math.sumPrecise",
+  "await-dictionary",
+  "iterator-sequencing",
+  "source-phase-imports",
+  "source-phase-imports-module-source",
+  "import-defer",
 ];
 const PRINT_SHIM = "function print(x) { console.log(x); }\n";
 
@@ -132,6 +145,8 @@ function skipReason(rel, src, meta) {
   if (meta.flags.includes("raw")) return "raw (sloppy mode, no harness)";
   if (meta.negative?.phase === "resolution") return "module resolution (F7)";
   if (/\$262\b/.test(src)) return "$262 (host-defined hooks)";
+  const missing = meta.features.find((f) => NODE_MISSING.includes(f));
+  if (missing) return `feature ${missing} (not in node 24)`;
   return null;
 }
 
@@ -290,7 +305,7 @@ let regressions = 0;
 for (const [rel, r] of [...results].sort()) {
   const old = baseline[rel];
   if (old === r.status) continue;
-  if (old === "pass") regressions++;
+  if (old === "pass" && r.status !== "skip") regressions++; // a new skip is the runner's choice, not a regression
   changes.push(`${(old ?? "new").padEnd(11)} -> ${r.status.padEnd(11)} ${rel}${r.reason ? `: ${r.reason}` : ""}`);
 }
 if (Object.keys(baseline).length === 0) {
