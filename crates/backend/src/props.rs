@@ -16,7 +16,7 @@
 //! Arrays: attributes of indices and `length` other than the defaults (or those of a sealed /
 //! frozen array) aren't representable: `defineProperty` traps on them.
 
-use js2wasi3_ir::ErrorKind;
+use js2wasi3_ir::{ErrorKind, PrivateKind};
 use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
 
 use crate::array;
@@ -76,8 +76,10 @@ pub enum Helper {
     PrivateSet,
     /// `(sym, o) -> i32`: `#x in o`.
     PrivateHas,
-    /// `(o, sym, v, message: (ref $string))`: add a private field (method: read-only).
-    PrivateAdd { method: bool },
+    /// `(o, sym, v, message: (ref $string))`: add a private field, method (read-only) or accessor.
+    PrivateAdd(PrivateKind),
+    /// `(get, set: jsval) -> jsval`: a new `$accessor`.
+    NewAccessor,
 }
 
 impl Helper {
@@ -104,8 +106,10 @@ impl Helper {
             Helper::PrivateGet => "private_get",
             Helper::PrivateSet => "private_set",
             Helper::PrivateHas => "private_has",
-            Helper::PrivateAdd { method: false } => "private_add_field",
-            Helper::PrivateAdd { method: true } => "private_add_method",
+            Helper::PrivateAdd(PrivateKind::Field) => "private_add_field",
+            Helper::PrivateAdd(PrivateKind::Method) => "private_add_method",
+            Helper::PrivateAdd(PrivateKind::Accessor) => "private_add_accessor",
+            Helper::NewAccessor => "new_accessor",
         }
     }
 
@@ -129,7 +133,8 @@ impl Helper {
             Helper::DefineData(_) => (vec![v, v, v], vec![]),
             Helper::SuperSet => (vec![v, v, v, v], vec![]),
             Helper::PrivateGet => (vec![v, v, s], vec![v]),
-            Helper::PrivateSet | Helper::PrivateAdd { .. } => (vec![v, v, v, s], vec![]),
+            Helper::PrivateSet | Helper::PrivateAdd(_) => (vec![v, v, v, s], vec![]),
+            Helper::NewAccessor => (vec![v, v], vec![v]),
             Helper::PrivateHas => (vec![v, v], vec![I32]),
         }
     }
@@ -152,7 +157,14 @@ impl Helper {
                 private_access(cx, self == Helper::PrivateSet)
             }
             Helper::PrivateHas => private_has(cx),
-            Helper::PrivateAdd { method } => private_add(cx, method),
+            Helper::PrivateAdd(kind) => private_add(cx, kind),
+            Helper::NewAccessor => {
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(0).local_get(1).struct_new(T_ACCESSOR);
+                s.end();
+                f
+            }
             Helper::DefineData(a) => {
                 let to_key = oh(cx, object::Helper::ToKey);
                 let put = ph(cx, Helper::Put);
@@ -1369,13 +1381,20 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
     let throw_read = cx.helper(runtime::Helper::ThrowRead);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
     let concat = cx.helper(runtime::Helper::Concat);
+    let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
     let (method, not_writable) = (cx.str("Private method '"), cx.str("' is not writable"));
+    let (quote, what, without) = if write {
+        (cx.str("'"), cx.str("setter"), cx.str("' was defined without a setter"))
+    } else {
+        (cx.str("'"), cx.str("getter"), cx.str("' was defined without a getter"))
+    };
     const O: u32 = 0;
     const SYM: u32 = 1;
     let v: u32 = 2;
     let msg: u32 = if write { 3 } else { 2 };
     let e: u32 = msg + 1;
-    let mut f = Function::new([(1, ValType::I32)]);
+    let g: u32 = e + 1;
+    let mut f = Function::new([(1, ValType::I32), (1, jsval())]);
     let mut s = f.instructions();
     if !write {
         s.local_get(O).call(is_nullish);
@@ -1396,6 +1415,40 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
     s.local_tee(e).i32_const(0).i32_lt_s();
     s.if_(BlockType::Empty);
     s.local_get(msg).call(throw);
+    s.end();
+    // An accessor (T31): call its getter / setter, or throw node's TypeError without one.
+    as_obj(&mut s, O);
+    s.struct_get(T_OBJECT, F_ATTRS)
+        .local_get(e)
+        .array_get_u(T_BYTES)
+        .i32_const(ACCESSOR)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, O);
+    s.struct_get(T_OBJECT, F_VALS)
+        .local_get(e)
+        .array_get(T_VALS)
+        .ref_cast_non_null(accessor())
+        .struct_get(T_ACCESSOR, if write { 1 } else { 0 })
+        .local_tee(g);
+    s.global_get(G_UNDEFINED).ref_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(quote);
+    s.local_get(SYM).ref_cast_non_null(string()).call(concat);
+    s.global_get(without).call(concat);
+    s.call(throw);
+    s.end();
+    s.local_get(g).local_get(O);
+    if write {
+        s.local_get(v).array_new_fixed(T_VALS, 1);
+    } else {
+        s.i32_const(0).array_new_default(T_VALS);
+    }
+    s.global_get(what).call(call_value);
+    if write {
+        s.drop();
+    }
+    s.return_();
     s.end();
     as_obj(&mut s, O);
     if write {
@@ -1452,7 +1505,7 @@ fn private_has(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn private_add(cx: &mut dyn Cx, method: bool) -> Function {
+fn private_add(cx: &mut dyn Cx, kind: PrivateKind) -> Function {
     let find = oh(cx, object::Helper::FindOwn);
     let define = oh(cx, object::Helper::Define);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
@@ -1471,7 +1524,15 @@ fn private_add(cx: &mut dyn Cx, method: bool) -> Function {
     as_obj(&mut s, O);
     s.local_get(SYM).ref_cast_non_null(string());
     s.local_get(V);
-    s.i32_const(HIDDEN | PRIVATE | if method { READONLY } else { 0 });
+    s.i32_const(
+        HIDDEN
+            | PRIVATE
+            | match kind {
+                PrivateKind::Field => 0,
+                PrivateKind::Method => READONLY,
+                PrivateKind::Accessor => ACCESSOR,
+            },
+    );
     s.call(define);
     s.end();
     f

@@ -69,6 +69,7 @@ const NODE_MISSING = [
   "source-phase-imports",
   "source-phase-imports-module-source",
   "import-defer",
+  "nonextensible-applies-to-private",
 ];
 const PRINT_SHIM = "function print(x) { console.log(x); }\n";
 

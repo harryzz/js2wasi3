@@ -1584,8 +1584,18 @@ fn array_index() -> Function {
 /// ToPropertyKey: a symbol stays itself, anything else is ToString.
 fn to_key(cx: &mut dyn Cx) -> Function {
     let to_string = rh(cx, runtime::Helper::ToString);
+    let to_primitive = h(cx, Helper::ToPrimitive);
     let mut f = Function::new([]);
     let mut s = f.instructions();
+    // An object: its ToPrimitive (hint string), which may be a symbol.
+    s.local_get(0).ref_test_non_null(runtime::object());
+    s.if_(BlockType::Empty);
+    s.local_get(0)
+        .ref_cast_non_null(runtime::object())
+        .i32_const(2)
+        .call(to_primitive)
+        .local_set(0);
+    s.end();
     s.local_get(0).ref_test_non_null(runtime::symbol());
     s.if_(BlockType::Result(string_ref()));
     s.local_get(0).ref_cast_non_null(string());

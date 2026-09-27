@@ -1623,9 +1623,9 @@ impl Emitter<'_> {
                     Intrinsic::PrivateGet => H::Prop(props::Helper::PrivateGet),
                     Intrinsic::PrivateSet => H::Prop(props::Helper::PrivateSet),
                     Intrinsic::PrivateHas => H::Prop(props::Helper::PrivateHas),
-                    Intrinsic::PrivateAdd { method } => {
-                        H::Prop(props::Helper::PrivateAdd { method: *method })
-                    }
+                    Intrinsic::PrivateAdd { kind } => H::Prop(props::Helper::PrivateAdd(*kind)),
+                    Intrinsic::NewAccessor => H::Prop(props::Helper::NewAccessor),
+                    Intrinsic::ToPropertyKey => H::Obj(object::Helper::ToKey),
                     Intrinsic::Hole | Intrinsic::IsHole => unreachable!("inline"),
                     Intrinsic::ResumeMode
                     | Intrinsic::NewGenerator { .. }

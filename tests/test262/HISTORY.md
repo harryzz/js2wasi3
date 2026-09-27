@@ -3,6 +3,28 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T31 class features (targeted rerun)
+
+- Compiler: T31 (private getters/setters, computed class field keys, `static {}` blocks, `o?.#x`; ToPropertyKey of
+  objects through ToPrimitive). Runner: `nonextensible-applies-to-private` skipped (not in node 24).
+- Run: the 977 non-passing tests under `language/{statements,expressions}/class`, plus
+  `language/expressions/{optional-chaining,assignment/dstr,object}` and `language/statements/class/subclass` for
+  regressions (2,618 tests, 855 s at -j 4): 563 → pass, 2 → skip, 2 → fail (`arguments` in a parameter default,
+  F158), 0 regressions.
+
+| directory | pass | fail | unsupported | crash | timeout | skip | pass% |
+|---|---|---|---|---|---|---|---|
+| built-ins/Array | 2290 | 410 | 319 | 0 | 11 | 52 | 75.6% |
+| built-ins/JSON | 108 | 20 | 34 | 0 | 0 | 3 | 66.7% |
+| built-ins/Map | 134 | 10 | 23 | 0 | 2 | 35 | 79.3% |
+| built-ins/Math | 276 | 2 | 39 | 0 | 0 | 10 | 87.1% |
+| built-ins/Promise | 406 | 186 | 39 | 0 | 8 | 93 | 63.5% |
+| built-ins/Set | 311 | 16 | 53 | 0 | 1 | 2 | 81.6% |
+| built-ins/String | 890 | 101 | 226 | 0 | 0 | 6 | 73.1% |
+| language/expressions | 8843 | 165 | 1067 | 0 | 0 | 1089 | 87.8% |
+| language/statements | 8217 | 108 | 504 | 0 | 1 | 520 | 93.1% |
+| **total** | **21475** | **1018** | **2304** | **0** | **23** | **1810** | **86.5%** |
+
 ## 2026-09-27: T30 wrapper objects (targeted rerun)
 
 - Compiler: T30 (`new String/Number/Boolean`, `Object(prim)`, ToObject for `Array.prototype` methods, unwrapping in

@@ -39,6 +39,9 @@ pub enum Cap {
     /// The cell holding an instance private method (filled when the class is evaluated), for its
     /// constructor to install.
     PrivMethod(u32),
+    /// The cell of a computed instance field key (by the field's start), filled when the class is
+    /// evaluated (T31).
+    FieldKey(u32),
     /// A variable's cell.
     Cell(SymbolId),
     /// A value that never changes (a named function expression's own name).
@@ -93,14 +96,17 @@ pub struct PrivateName {
     /// With the `#`.
     pub name: String,
     pub is_static: bool,
+    /// A method or an accessor (brand-checked, not writable as a field).
     pub method: bool,
+    /// A getter and/or setter (T31).
+    pub accessor: bool,
 }
 
 #[derive(Default, Debug)]
 pub struct ClassInfo {
     /// The instance fields' initializers: `[start, end)` source ranges.
     pub fields: Vec<(u32, u32)>,
-    /// The static fields' initializers.
+    /// The static fields' initializers and `static {}` blocks.
     pub statics: Vec<(u32, u32)>,
     /// Has an `extends` clause.
     pub derived: bool,
@@ -153,16 +159,21 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
         for el in &c.body.body {
             let private = match el {
                 ClassElement::PropertyDefinition(p) => match &p.key {
-                    PropertyKey::PrivateIdentifier(id) => Some((id, p.r#static, false)),
+                    PropertyKey::PrivateIdentifier(id) => Some((id, p.r#static, false, false)),
                     _ => None,
                 },
                 ClassElement::MethodDefinition(m) => match &m.key {
-                    PropertyKey::PrivateIdentifier(id) => Some((id, m.r#static, true)),
+                    PropertyKey::PrivateIdentifier(id) => Some((
+                        id,
+                        m.r#static,
+                        true,
+                        m.kind != MethodDefinitionKind::Method,
+                    )),
                     _ => None,
                 },
                 _ => None,
             };
-            if let Some((id, is_static, method)) = private {
+            if let Some((id, is_static, method, accessor)) = private {
                 let name = format!("#{}", id.name);
                 // A getter and a setter share their name.
                 if !an.privates.iter().any(|p| p.class == s && p.name == name) {
@@ -171,6 +182,7 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
                         name,
                         is_static,
                         method,
+                        accessor,
                     });
                 }
             }
@@ -192,6 +204,8 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
                         an.ctor_class.insert(fs, s);
                     }
                 }
+                // A `static {}` block runs like a static field initializer (T31).
+                ClassElement::StaticBlock(b) => info.statics.push((b.span.start, b.span.end)),
                 _ => {}
             }
         }
@@ -359,6 +373,24 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
     // Private names: each reference captures its class's symbol from where the class is
     // evaluated; a class's constructor captures the symbols of its instance private members and
     // the cells of its instance private methods.
+    // Computed instance field keys: evaluated with the class, captured by its constructor.
+    for node in nodes.iter() {
+        let AstKind::Class(c) = node.kind() else {
+            continue;
+        };
+        let Some(s) = c.scope_id.get() else { continue };
+        for el in &c.body.body {
+            if let ClassElement::PropertyDefinition(p) = el
+                && p.computed
+                && !p.r#static
+            {
+                captures
+                    .entry(s)
+                    .or_default()
+                    .insert(Cap::FieldKey(p.span.start));
+            }
+        }
+    }
     for (i, p) in an.privates.iter().enumerate() {
         if !p.is_static {
             let e = captures.entry(p.class).or_default();

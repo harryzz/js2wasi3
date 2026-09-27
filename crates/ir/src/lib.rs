@@ -676,6 +676,17 @@ impl Builtin {
     }
 }
 
+/// What a private name denotes (T16, T31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrivateKind {
+    /// A field: writable.
+    Field,
+    /// A method: read-only.
+    Method,
+    /// A getter and/or setter.
+    Accessor,
+}
+
 /// A runtime operation on JS values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
@@ -881,11 +892,17 @@ pub enum Intrinsic {
     PrivateSet,
     /// `#x in o` (`bool`): args: private symbol, object.
     PrivateHas,
-    /// Add a private field (or method: read-only) to a new object (no result): args: object, private
-    /// symbol, value, the TypeError message if it's already there.
+    /// Add a private member to a new object (no result): args: object, private symbol, value (an
+    /// accessor: a [`Intrinsic::NewAccessor`]), the TypeError message if it's already there.
     PrivateAdd {
-        method: bool,
+        kind: PrivateKind,
     },
+    /// ToPropertyKey (a string or a symbol): a computed class field key, converted once when the
+    /// class is evaluated (T31).
+    ToPropertyKey,
+    /// A getter/setter pair (args: getter, setter, each a function or `undefined`) as a value for
+    /// [`Intrinsic::PrivateAdd`] with [`PrivateKind::Accessor`].
+    NewAccessor,
     /// How a generator was resumed after the `Suspend` just before (`i32`): [`RESUME_NEXT`],
     /// [`RESUME_THROW`] or [`RESUME_RETURN`]. Only in generators, before the suspension transform.
     ResumeMode,
@@ -1172,6 +1189,8 @@ impl Intrinsic {
                 (&[JsVal, JsVal, JsVal, JsVal], None)
             }
             Intrinsic::PrivateHas => (&[JsVal, JsVal], Some(Bool)),
+            Intrinsic::NewAccessor => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::ToPropertyKey => (&[JsVal], Some(JsVal)),
             Intrinsic::IsHole | Intrinsic::TestIntegrity(_) => (&[JsVal], Some(Bool)),
             Intrinsic::CtorReturn { .. } | Intrinsic::GetOwnPropertyDescriptor => {
                 (&[JsVal, JsVal], Some(JsVal))
@@ -1327,8 +1346,13 @@ impl Intrinsic {
             Intrinsic::PrivateGet => "private_get",
             Intrinsic::PrivateSet => "private_set",
             Intrinsic::PrivateHas => "private_has",
-            Intrinsic::PrivateAdd { method: false } => "private_add_field",
-            Intrinsic::PrivateAdd { method: true } => "private_add_method",
+            Intrinsic::PrivateAdd { kind } => match kind {
+                PrivateKind::Field => "private_add_field",
+                PrivateKind::Method => "private_add_method",
+                PrivateKind::Accessor => "private_add_accessor",
+            },
+            Intrinsic::NewAccessor => "new_accessor",
+            Intrinsic::ToPropertyKey => "to_property_key",
             Intrinsic::ResumeMode => "resume_mode",
             Intrinsic::NewGenerator { .. } => "new_generator",
             Intrinsic::NewAsync { .. } => "new_async",
@@ -1438,6 +1462,7 @@ impl Intrinsic {
                 | Intrinsic::PrivateGet
                 | Intrinsic::PrivateSet
                 | Intrinsic::PrivateHas
+                | Intrinsic::ToPropertyKey
                 | Intrinsic::PrivateAdd { .. }
                 | Intrinsic::DelegateOpen
                 | Intrinsic::DelegateStep

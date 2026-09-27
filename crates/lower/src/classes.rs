@@ -14,8 +14,11 @@
 //! (base) or after each `super(…)` (derived). `super.x` reads the home object's prototype
 //! (`SuperGet`) with the current `this` as the receiver.
 
+use std::collections::HashMap;
+
 use js2wasi3_ir::{
-    self as ir, Builtin, ErrorKind, Expr, FnKind, FuncId, Intrinsic, LocalId, Stmt, Type, UnOp,
+    self as ir, Builtin, ErrorKind, Expr, FnKind, FuncId, Intrinsic, LocalId, PrivateKind, Stmt,
+    Type, UnOp,
 };
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
@@ -64,8 +67,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 .map(|i| i.name.to_string())
                 .or(name.map(str::to_string))
                 .unwrap_or_default();
-        // A new symbol per private name, and a cell per instance private method (filled below,
-        // read by the constructor).
+        // A new symbol per private name, a cell per instance private method or accessor (filled
+        // below, read by the constructor), and a getter and a setter local per private accessor.
+        let mut accessors = HashMap::new();
         for (i, p) in self.an.privates.iter().enumerate() {
             if p.class != scope {
                 continue;
@@ -83,6 +87,27 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Expr::intrinsic(Intrinsic::NewCell(Type::JsVal), vec![Expr::undefined()]),
                 ));
                 cx.priv_cells.insert(i as u32, cell);
+            }
+            if p.accessor {
+                let get = cx.func.add_local(format!("{}.get", p.name), Type::JsVal);
+                let set = cx.func.add_local(format!("{}.set", p.name), Type::JsVal);
+                body.push(Stmt::Set(get, Expr::undefined()));
+                body.push(Stmt::Set(set, Expr::undefined()));
+                accessors.insert(i as u32, (get, set));
+            }
+        }
+        // A cell per computed field key: the class object (made before its elements run) captures
+        // the instance ones.
+        for el in &c.body.body {
+            if let ClassElement::PropertyDefinition(p) = el
+                && p.computed
+            {
+                let cell = cx.func.add_local("key.cell", Type::JsVal);
+                body.push(Stmt::Set(
+                    cell,
+                    Expr::intrinsic(Intrinsic::NewCell(Type::JsVal), vec![Expr::undefined()]),
+                ));
+                cx.field_keys.insert(p.span.start, cell);
             }
         }
         // The constructor is only called through its construct entry: its parameters can be anything.
@@ -145,18 +170,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Ok(())
                 }
                 ClassElement::MethodDefinition(m) => {
-                    self.class_method(cx, scope, m, k, proto, &mut body)
+                    self.class_method(cx, scope, m, k, proto, &accessors, &mut body)
                 }
-                ClassElement::PropertyDefinition(p) if p.r#static => {
-                    statics.push(&**p);
-                    Ok(())
+                ClassElement::PropertyDefinition(p) => {
+                    if p.r#static {
+                        statics.push(Static::Field(p));
+                    }
+                    if p.computed {
+                        // The key is evaluated now, in order with the other keys (T31).
+                        self.field_key(cx, p, &mut body)
+                    } else {
+                        Ok(())
+                    }
                 }
-                ClassElement::PropertyDefinition(p) if p.computed => {
-                    Err(self.unsupported(p.span, "computed instance field key", "later"))
-                }
-                ClassElement::PropertyDefinition(_) => Ok(()),
                 ClassElement::StaticBlock(b) => {
-                    Err(self.unsupported(b.span, "class `static` block", "later"))
+                    statics.push(Static::Block(b));
+                    Ok(())
                 }
                 ClassElement::AccessorProperty(a) => {
                     Err(self.unsupported(a.span, "`accessor` class field", "not scheduled"))
@@ -171,6 +200,34 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         cx.home = saved_home;
         std::mem::replace(&mut result, Ok(()))?;
+        // Private accessors: a getter/setter pair, on the class (static) or in the cell the
+        // constructor installs from.
+        let mut accessors: Vec<_> = accessors.into_iter().collect();
+        accessors.sort_by_key(|(i, _)| *i);
+        for (i, (get, set)) in accessors {
+            let pair = Expr::intrinsic(
+                Intrinsic::NewAccessor,
+                vec![Expr::Local(get), Expr::Local(set)],
+            );
+            body.push(Stmt::Expr(if self.an.privates[i as usize].is_static {
+                Expr::intrinsic(
+                    Intrinsic::PrivateAdd {
+                        kind: PrivateKind::Accessor,
+                    },
+                    vec![
+                        Expr::Local(k),
+                        Expr::Local(cx.privates[&i]),
+                        pair,
+                        Expr::str(""),
+                    ],
+                )
+            } else {
+                Expr::intrinsic(
+                    Intrinsic::CellSet(Type::JsVal),
+                    vec![Expr::Local(cx.priv_cells[&i]), pair],
+                )
+            }));
+        }
         if let Some(sym) = binding {
             let slot = Slot::Var(sym);
             self.observe(slot, Kind::Any);
@@ -181,13 +238,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 body.push(Stmt::SetGlobal(*flag, Expr::bool(true)));
             }
         }
-        // Static fields: `this` and the home object are the class.
+        // Static fields and blocks, in order: `this` and the home object are the class.
         let saved = (cx.this, cx.this_checked, cx.home);
         cx.this = Some(k);
         cx.this_checked = false;
         cx.home = Some(k);
-        for p in statics {
-            if let Err(e) = self.field(cx, scope, p, Expr::Local(k), &mut body) {
+        for st in statics {
+            let r = match st {
+                Static::Field(p) => self.field(cx, scope, p, Expr::Local(k), &mut body),
+                // Its `var`s are its own: the symbols are the block's, lowered as locals here.
+                Static::Block(b) => {
+                    let scope = b.scope_id.get().expect("static blocks have scopes");
+                    self.var_cells(cx, scope, |_| false, &mut body);
+                    body.extend(self.stmts(cx, &b.body));
+                    Ok(())
+                }
+            };
+            if let Err(e) = r {
                 result = Err(e);
             }
         }
@@ -200,6 +267,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// A method, getter or setter: defined on the prototype (or the class, `static`).
+    #[allow(clippy::too_many_arguments)]
     fn class_method(
         &mut self,
         cx: &mut FnCx,
@@ -207,24 +275,40 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         m: &'a MethodDefinition<'a>,
         class: LocalId,
         proto: LocalId,
+        accessors: &HashMap<u32, (LocalId, LocalId)>,
         body: &mut Vec<Stmt>,
     ) -> R<()> {
         let target = if m.r#static { class } else { proto };
         if let PropertyKey::PrivateIdentifier(id) = &m.key {
             // A private method: installed on the class now (static), or on each instance by the
-            // constructor (from its cell).
-            if m.kind != MethodDefinitionKind::Method {
-                return Err(self.unsupported(m.span, "private getter or setter", "later"));
-            }
+            // constructor (from its cell). A getter or setter goes into its local, paired after
+            // the class body.
             let name = format!("#{}", id.name);
             let i = self.private_id(scope, &name);
             let fscope = m.value.scope_id.get().expect("functions have scopes");
             cx.home = Some(target);
-            let f = self.closure(cx, fscope, Some(&name), m.span)?;
+            let prefix = match m.kind {
+                MethodDefinitionKind::Get => "get ",
+                MethodDefinitionKind::Set => "set ",
+                _ => "",
+            };
+            let f = self.closure(cx, fscope, Some(&format!("{prefix}{name}")), m.span)?;
+            if !prefix.is_empty() {
+                let (get, set) = accessors[&i];
+                let l = if m.kind == MethodDefinitionKind::Get {
+                    get
+                } else {
+                    set
+                };
+                body.push(Stmt::Set(l, f));
+                return Ok(());
+            }
             let sym = Expr::Local(cx.privates[&i]);
             body.push(Stmt::Expr(if m.r#static {
                 Expr::intrinsic(
-                    Intrinsic::PrivateAdd { method: true },
+                    Intrinsic::PrivateAdd {
+                        kind: PrivateKind::Method,
+                    },
                     vec![Expr::Local(class), sym, f, Expr::str("")],
                 )
             } else {
@@ -311,6 +395,25 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// A computed field key: evaluated and converted (ToPropertyKey) when the class is, into its
+    /// cell for [`Lowerer::field`] (an instance field's cell is captured by the constructor).
+    fn field_key(
+        &mut self,
+        cx: &mut FnCx,
+        p: &'a PropertyDefinition<'a>,
+        body: &mut Vec<Stmt>,
+    ) -> R<()> {
+        let (key, _) = self.member_key(cx, &p.key, true, body)?;
+        body.push(Stmt::Expr(Expr::intrinsic(
+            Intrinsic::CellSet(Type::JsVal),
+            vec![
+                Expr::Local(cx.field_keys[&p.span.start]),
+                Expr::intrinsic(Intrinsic::ToPropertyKey, vec![key]),
+            ],
+        )));
+        Ok(())
+    }
+
     /// A field of class `scope`: define it on `target` (the class, or `this` in a constructor).
     fn field(
         &mut self,
@@ -328,7 +431,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 None => Expr::undefined(),
             };
             body.push(Stmt::Expr(Expr::intrinsic(
-                Intrinsic::PrivateAdd { method: false },
+                Intrinsic::PrivateAdd {
+                    kind: PrivateKind::Field,
+                },
                 vec![
                     target,
                     Expr::Local(cx.privates[&i]),
@@ -340,7 +445,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             )));
             return Ok(());
         }
-        let (key, name) = self.member_key(cx, &p.key, p.computed, body)?;
+        let (key, name) = match cx.field_keys.get(&p.span.start) {
+            Some(cell) if p.computed => {
+                let l = cx.func.add_local("key", Type::JsVal);
+                body.push(Stmt::Set(
+                    l,
+                    Expr::intrinsic(Intrinsic::CellGet(Type::JsVal), vec![Expr::Local(*cell)]),
+                ));
+                (Expr::Local(l), None)
+            }
+            _ => self.member_key(cx, &p.key, p.computed, body)?,
+        };
         let value = match &p.value {
             Some(v) => {
                 let f = jsval_of(self.named(cx, v, name.as_deref())?);
@@ -373,8 +488,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         for (i, p) in self.an.privates.iter().enumerate() {
             let i = i as u32;
             if p.class == scope && p.method && !p.is_static {
+                let kind = if p.accessor {
+                    PrivateKind::Accessor
+                } else {
+                    PrivateKind::Method
+                };
                 out.push(Stmt::Expr(Expr::intrinsic(
-                    Intrinsic::PrivateAdd { method: true },
+                    Intrinsic::PrivateAdd { kind },
                     vec![
                         Expr::Local(this),
                         Expr::Local(cx.privates[&i]),
@@ -393,7 +513,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         for el in &c.body.body {
             if let ClassElement::PropertyDefinition(p) = el
                 && !p.r#static
-                && !p.computed
                 && let Err(e) = self.field(cx, scope, p, Expr::Local(this), &mut out)
             {
                 result = Err(e);
@@ -593,13 +712,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .expect("declared private names are collected by the analysis") as u32
     }
 
-    /// The symbol of a private name reference, and how node reports reading it from an object
-    /// without it.
+    /// The symbol of a private name reference, and how node reports reading it from / writing it
+    /// to an object without it.
     pub(crate) fn private_sym(
         &mut self,
         cx: &FnCx,
         id: &PrivateIdentifier<'a>,
-    ) -> R<(Expr, String)> {
+    ) -> R<(Expr, String, String)> {
         let found = self
             .an
             .private_refs
@@ -613,19 +732,26 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ));
         };
         let p = &self.an.privates[i as usize];
-        let read = if p.method {
+        if p.method {
+            // Methods and accessors: a brand check.
             let c = self.classes[&p.class].class;
-            format!(
-                "Receiver must be an instance of class {}",
-                c.id.as_ref().map_or("anonymous", |i| i.name.as_str())
-            )
-        } else {
-            format!(
-                "Cannot read private member {} from an object whose class did not declare it",
-                p.name
-            )
-        };
-        Ok((Expr::Local(l), read))
+            let class = c.id.as_ref().map_or("anonymous", |i| i.name.as_str());
+            let msg = if p.is_static {
+                format!("Receiver must be class {class}")
+            } else {
+                format!("Receiver must be an instance of class {class}")
+            };
+            return Ok((Expr::Local(l), msg.clone(), msg));
+        }
+        let read = format!(
+            "Cannot read private member {} from an object whose class did not declare it",
+            p.name
+        );
+        let write = format!(
+            "Cannot write private member {} to an object whose class did not declare it",
+            p.name
+        );
+        Ok((Expr::Local(l), read, write))
     }
 
     /// `o.#x`.
@@ -638,7 +764,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Err(self.unsupported(pf.span, "optional chain with a private field", "later"));
         }
         let obj = jsval_of(self.expr(cx, &pf.object)?);
-        let (sym, msg) = self.private_sym(cx, &pf.field)?;
+        let (sym, msg, _) = self.private_sym(cx, &pf.field)?;
         Ok(Val::js(
             Expr::intrinsic(Intrinsic::PrivateGet, vec![obj, sym, Expr::str(&msg)]),
             Kind::Any,
@@ -805,3 +931,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 }
 
 use super::Unsupported;
+
+/// A static element run after the class is defined, in source order.
+enum Static<'a> {
+    Field(&'a PropertyDefinition<'a>),
+    Block(&'a StaticBlock<'a>),
+}

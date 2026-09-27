@@ -1,6 +1,6 @@
 # T31: class features (private accessors, computed instance keys, `static {}`, `o?.#x`)
 
-Status: todo (proposed) | Depends on: T16 (classes), T28
+Status: done | Depends on: T16 (classes), T28
 
 ## Goal
 The class syntax still rejected by the lowering works like node (F58, except `accessor` fields, which node 24 doesn't
@@ -65,12 +65,51 @@ One fixture per slice in `tests/fixtures/classes/` (`scripts/diff.sh`), `cargo t
 for these constructs change: they now lower), `wasm-tools validate` + one wasmtime run. test262 as in slice 4.
 
 ## Checklist
-- [ ] Slice 1: private getters/setters
-- [ ] Slice 2: computed instance field keys
-- [ ] Slice 3: `static {}` blocks, `o?.#x`
-- [ ] Slice 4: test262 rerun, follow-ups, baseline
+- [x] Slice 1: private getters/setters
+- [x] Slice 2: computed instance field keys
+- [x] Slice 3: `static {}` blocks, `o?.#x`
+- [x] Slice 4: test262 rerun, follow-ups, baseline
 
 ## Notes / Result
+**What changed**
+- IR: `PrivateAdd { kind: PrivateKind }` (field / method / accessor), `NewAccessor` (a getter/setter pair as a
+  value), `ToPropertyKey`. Backend: `private_get`/`private_set` call an accessor's getter/setter (node's
+  "'#x' was defined without a getter/setter"); `private_add_accessor` installs it with `ACCESSOR`; ToPropertyKey of
+  an object now goes through ToPrimitive (hint string), so a `Symbol.toPrimitive` returning a symbol gives that
+  symbol (all computed keys, not only class fields).
+- Lowering (`classes.rs`): private getters/setters go into `#x.get`/`#x.set` locals and are paired after the class
+  body (static: added to the class; instance: into the private cell the constructor installs from, before the
+  fields). Computed field keys (instance and static) are evaluated in element order into a cell per key (the class
+  object exists before its elements run, so the constructor captures the cell: `Cap::FieldKey`). `static {}`
+  blocks are lowered inline like static field initializers (their range is in `ClassInfo::statics`, so `this`,
+  `super` are the class); their captured `var`s get cells through `var_cells` (split out of `prologue`).
+  `o?.#x`, `o?.a.#x`, `o?.#m()` in the optional-chain lowering. Brand messages: a static method/accessor says
+  "Receiver must be class A", and writes to a method/accessor use the brand message (like node).
+- Destructuring assignment targets take private members and `super.x` (`member_ref` + `member_set`).
+- `scripts/test262.mjs` skips the `nonextensible-applies-to-private` feature (node 24 lacks it).
+
+**Tests**: fixtures `tests/fixtures/classes/{private-accessors,computed-fields,static-blocks}.js` (pass with
+`scripts/diff.sh`), `crates/lower/tests/unsupported.rs` (the three constructs now lower), `cargo test`, the
+fixtures validate, wasmtime smoke run. Whole `scripts/diff.sh`: 106 pass, 1 fail (`async/for-await-order.js`,
+fails on the T30 commit too: F157).
+
+**test262**: the 977 non-passing tests under `language/{statements,expressions}/class` plus
+`language/expressions/{optional-chaining,assignment/dstr,object}` and `language/statements/class/subclass` (2,618
+tests, 855 s at -j 4, `--update`): 563 unsupported → pass, 2 → skip (node-missing feature), 2 → fail
+(`static-init-arguments-*`: `arguments` in a parameter default, F158), no regressions. Subset: 21,475 of 24,820
+run pass (86.5%, was 84.2%). The class tests left are `eval` (179, F151), a class or parameter used before its
+declaration (25, F63), `Proxy`/`Function`/`Reflect` (F151, F152), `new.target`/`super()`/`arguments`/`this` in
+arrows (F57, F103).
+
+**Unsupported**: `accessor` fields (node 24 rejects them too).
+
+**Next smallest step**: T32 (`defineProperty` on arrays) is proposed; F157 (the `for await` fixture) is a small
+separate fix.
 
 ## Progress
 - 2026-09-27: task written as a proposal after T30 (largest remaining test262 cause, ~570 tests). Not started.
+- 2026-09-27: approved; started slice 1 (read classes.rs, props.rs).
+- 2026-09-27: slice 1 implemented: `PrivateKind` on `PrivateAdd`, `NewAccessor`, `private_get`/`private_set` call accessors (node's 'defined without a getter/setter'); static brand message 'Receiver must be class A'; method writes use the brand message; destructuring targets take private members and `super.x` (`member_ref`). Fixture `classes/private-accessors.js` passes; class fixtures pass.
+- 2026-09-27: slice 2 implemented: computed field keys (instance and static) evaluated in element order into a cell per key (the class object is made before its elements, so the constructor captures the cell: `Cap::FieldKey`), `Intrinsic::ToPropertyKey` once at class evaluation. Fixture `classes/computed-fields.js` passes; static computed keys now also run in order (they ran after the methods before).
+- 2026-09-27: slice 3 implemented: `static {}` blocks lowered inline like static field initializers (their range is in `ClassInfo::statics`, so `this`/`super` are the class; captured `var`s get cells via the new `var_cells`, split out of `prologue`); `o?.#x`, `o?.a.#x`, `o?.#m()` in `chain_link`/`chain_call_link`. Fixture `classes/static-blocks.js` passes; all 11 class fixtures pass, `cargo test -p js2wasi3-lower` ok, the 3 new fixtures validate, wasmtime smoke run ok. Next: slice 4 (test262 rerun of class dirs).
+- 2026-09-27: slice 4: test262 rerun (2,618 tests): 563 → pass, no regressions; ToPropertyKey of objects via ToPrimitive (2 computed-name tests); runner skips `nonextensible-applies-to-private`. Full diff.sh: only `async/for-await-order.js` fails, also on the T30 commit (F157). Task done.

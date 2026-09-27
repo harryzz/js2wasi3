@@ -228,11 +228,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             _ => match t.as_member_expression() {
                 Some(m) => {
-                    let (obj, key) = self.member(cx, m)?;
-                    out.push(Stmt::Expr(Expr::intrinsic(
-                        Intrinsic::SetProp,
-                        vec![obj, key, v],
-                    )));
+                    // Private fields and accessors (T31) and `super.x` too.
+                    let (obj, key, member) = self.member_ref(cx, m)?;
+                    out.push(Stmt::Expr(super::member_set(&member, obj, key, v)));
                     Ok(())
                 }
                 None => Err(self.unsupported(t.span(), "assignment target", "later")),

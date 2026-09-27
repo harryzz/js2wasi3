@@ -422,22 +422,13 @@ fn classes() {
         "export function f(o) { return Object.isFrozen(Object.freeze(Object.defineProperty(o, 'k', { value: 1 }))); }",
         "export function f(F) { return new F(1, ...[2]); }",
         "class P { #x = 1; static #n = 0; #m() { return this.#x; } static has(o) { return #x in o; } static get(o) { return o.#m() + P.#n++; } }\nconsole.log(P.get(new P()));",
+        "class A { get #x() { return 1; } set #x(v) {} static get #s() { return 2; } m() { [this.#x] = [this.#x + A.#s]; } }\nnew A().m();",
+        "const k = 'a';\nclass A { [k] = 1; static [k + 1] = 2; }\nconsole.log(new A().a);",
+        "class A { static #p = 1; static { var v = this.#p; this.f = () => v; } static g(o) { return o?.#p; } }\nconsole.log(A.g(A));",
     ] {
         lowers(src);
     }
     for (src, err) in [
-        (
-            "class A { get #x() { return 1; } }",
-            "1:11 unsupported: private getter or setter (planned: later)",
-        ),
-        (
-            "class A { static { } }",
-            "1:11 unsupported: class `static` block (planned: later)",
-        ),
-        (
-            "const k = 'a';\nclass A { [k] = 1; }",
-            "2:11 unsupported: computed instance field key (planned: later)",
-        ),
         (
             "function f() { return new.target; }",
             "1:23 unsupported: `new.target` outside a class constructor (planned: later)",
