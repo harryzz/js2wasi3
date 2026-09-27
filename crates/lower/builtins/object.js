@@ -117,7 +117,7 @@ function $$Object_groupBy(items, callbackfn) {
       group = [];
       __intrinsic_define(o, key, group);
     }
-    group.push(v);
+    $$append(group, v);
     k++;
   }
   return o;

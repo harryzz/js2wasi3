@@ -58,12 +58,13 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   spread.
 - Control flow: `if`, loops (`for`, `for-in`, `for-of`, `while`, `do`), labels, `switch`, `break`/`continue`,
   `try`/`catch`/`finally`, `throw`.
-- Objects and prototypes, getters/setters, `Object.defineProperty`, `freeze`/`seal`; arrays and the iterator
-  protocol.
+- Objects and prototypes, getters/setters, `Object.defineProperty` (also on array elements and `length`),
+  `freeze`/`seal`; arrays and the iterator protocol.
 - Built-ins written in JS and compiled with the program (only what's used): `Math`, `String`/`Number` methods and
   parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …), `Array.from`/`of`, `JSON.stringify`/`parse`, `Map`/`Set`, typed arrays and `ArrayBuffer`, `Object.assign`/`fromEntries`,
   `hasOwnProperty` and the other `Object.prototype` methods.
-- Classes: fields, static members, private `#x` fields and methods, `extends` (also built-in errors), `super`.
+- Classes: fields (also computed keys), static members and `static {}` blocks, private `#x` fields, methods and
+  getters/setters, `extends` (also built-in errors), `super`.
 - Generators (`function*`, `yield`, `yield*`); `Promise` (`then`/`catch`/`finally`, `all`/`allSettled`/`race`/`any`,
   `withResolvers`), `AggregateError`, `queueMicrotask`; `async`/`await`, including top-level `await`; `for await`
   and async generators.

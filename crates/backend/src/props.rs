@@ -304,7 +304,7 @@ fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u3
 fn set(cx: &mut dyn Cx) -> Function {
     let find = oh(cx, object::Helper::FindOwn);
     let define = oh(cx, object::Helper::Define);
-    let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define));
+    let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define { set: true }));
     let array_own = cx.helper(runtime::Helper::Arr(array::Helper::OwnGet));
     let concat = cx.helper(runtime::Helper::Concat);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
@@ -661,7 +661,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     let concat = cx.helper(runtime::Helper::Concat);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
     let desc = ph(cx, Helper::Desc);
-    let set_index = cx.helper(runtime::Helper::Arr(array::Helper::SetIndex));
+    let set_index = cx.helper(runtime::Helper::Arr(array::Helper::DefineIndex));
     let elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::Attrs));
     let set_elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::SetAttrs));
     let resize = cx.helper(runtime::Helper::Arr(array::Helper::Resize));

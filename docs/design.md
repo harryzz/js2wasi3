@@ -47,6 +47,17 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   an `$accessor { get, set }`; attributes: hidden, read-only, fixed, accessor, private; object flags for
   non-extensible / sealed / frozen. Private names are a fresh `$symbol` per class evaluation, captured like
   values. See `crates/backend/src/props.rs`, `crates/lower/src/classes.rs`.)
+  (T31: a private getter/setter pair is one `$accessor` entry with `PRIVATE | ACCESSOR`, installed like private
+  methods; computed class field keys are evaluated with the class into a cell per key, which the constructor
+  captures; `static {}` blocks are lowered inline like static field initializers. See `crates/lower/src/classes.rs`.)
+  (T32: `$array` has `eattrs: (ref null $bytes)`, each element's attribute bits (null: all default); an accessor
+  element's slot holds its `$accessor`, so element readers resolve it with `props::Helper::Value`; `class` flag
+  `LENGTH_READONLY` for a non-writable `length`. `Object.defineProperty` shares ValidateAndApplyPropertyDescriptor
+  between dictionary entries and elements. T34: element writes are either [[Set]] (`array::Helper::SetIndex`: for an
+  absent element, once `runtime::G_INDEX_PROTO` says an index key reached the prototype chain, setters and read-only
+  properties there apply) or CreateDataProperty (`DefineIndex`: literals, spread, `__intrinsic_define`); the prelude
+  builds its own arrays with definitions (`$$append`). T33: holes read through the prototype chain. See
+  `crates/backend/src/array.rs`.)
   (T30: primitive wrapper objects are `$wrapper`, a final subtype of `$object` with the primitive in `prim`; a String
   wrapper's indices and `length` are real read-only own properties. ToPrimitive unwraps through the built-in
   `valueOf`/`toString`; the prelude reads `prim` with `__intrinsic_unwrap` and wraps with `__intrinsic_to_object`.

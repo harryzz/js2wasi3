@@ -8,6 +8,12 @@
 // ---- helpers -----------------------------------------------------------------------------
 
 // ToObject(this) (T30: primitives are wrapped), with node's message for `undefined`/`null`.
+// Appends `v` to a prelude-made array (CreateDataProperty at `length`, T34): unlike `push`,
+// never meets setters or read-only indices on the prototype chain.
+function $$append(a, v) {
+  __intrinsic_define(a, +a.length, v);
+}
+
 function $$thisObject(v, name) {
   if (v === undefined || v === null) {
     throw new TypeError("Array.prototype." + name + " called on null or undefined");
@@ -142,7 +148,7 @@ function $$Array(...args) {
   }
   const a = [];
   for (let i = 0; i < +args.length; i++) {
-    a[i] = args[i];
+    __intrinsic_define(a, i, args[i]);
   }
   return a;
 }
@@ -150,7 +156,7 @@ function $$Array(...args) {
 function $$Array_of(...items) {
   const a = [];
   for (let i = 0; i < +items.length; i++) {
-    a[i] = items[i];
+    __intrinsic_define(a, i, items[i]);
   }
   return a;
 }
@@ -169,9 +175,9 @@ function $$Array_from(items, mapfn, thisArg) {
     let k = 0;
     for (const v of items) {
       if (mapfn === undefined) {
-        a[k] = v;
+        __intrinsic_define(a, k, v);
       } else {
-        a[k] = $$call3(mapfn, thisArg, v, k, undefined);
+        __intrinsic_define(a, k, $$call3(mapfn, thisArg, v, k, undefined));
       }
       k++;
     }
@@ -181,9 +187,9 @@ function $$Array_from(items, mapfn, thisArg) {
   for (let k = 0; k < len; k++) {
     const v = items[k];
     if (mapfn === undefined) {
-      a[k] = v;
+      __intrinsic_define(a, k, v);
     } else {
-      a[k] = $$call3(mapfn, thisArg, v, k, undefined);
+      __intrinsic_define(a, k, $$call3(mapfn, thisArg, v, k, undefined));
     }
   }
   return a;
@@ -227,7 +233,7 @@ function $$Array_prototype_map(callbackfn, thisArg) {
   const a = $$newArray(len);
   for (let k = 0; k < len; k++) {
     if ($$has(o, k)) {
-      a[k] = $$call3(callbackfn, thisArg, o[k], k, o);
+      __intrinsic_define(a, k, $$call3(callbackfn, thisArg, o[k], k, o));
     }
   }
   return a;
@@ -243,7 +249,7 @@ function $$Array_prototype_filter(callbackfn, thisArg) {
     if ($$has(o, k)) {
       const v = o[k];
       if ($$call3(callbackfn, thisArg, v, k, o)) {
-        a[n] = v;
+        __intrinsic_define(a, n, v);
         n++;
       }
     }
@@ -416,7 +422,7 @@ function $$Array_prototype_slice(start, end) {
   let n = 0;
   for (let k = from; k < to; k++) {
     if ($$has(o, k)) {
-      a[n] = o[k];
+      __intrinsic_define(a, n, o[k]);
     }
     n++;
   }
@@ -434,12 +440,12 @@ function $$Array_prototype_concat(...items) {
       const len = +e.length;
       for (let k = 0; k < len; k++) {
         if (k in e) {
-          a[n] = e[k];
+          __intrinsic_define(a, n, e[k]);
         }
         n++;
       }
     } else {
-      a[n] = e;
+      __intrinsic_define(a, n, e);
       n++;
     }
   }
@@ -460,7 +466,7 @@ function $$flatten(target, source, start, depth, mapper, thisArg) {
       if (depth > 0 && Array.isArray(e)) {
         n = $$flatten(target, e, n, depth - 1, undefined, undefined);
       } else {
-        target[n] = e;
+        __intrinsic_define(target, n, e);
         n++;
       }
     }
@@ -614,7 +620,7 @@ function $$Array_prototype_splice(...args) {
   const removed = $$newArray(deleteCount);
   for (let k = 0; k < deleteCount; k++) {
     if ($$has(o, start + k)) {
-      removed[k] = o[start + k];
+      __intrinsic_define(removed, k, o[start + k]);
     }
   }
   if (itemCount < deleteCount) {
@@ -673,15 +679,15 @@ function $$mergeSort(v, keys, comparefn) {
           }
         }
         if (left) {
-          dst[k] = src[i];
+          __intrinsic_define(dst, k, src[i]);
           if (keys !== undefined) {
-            kdst[k] = ksrc[i];
+            __intrinsic_define(kdst, k, ksrc[i]);
           }
           i++;
         } else {
-          dst[k] = src[j];
+          __intrinsic_define(dst, k, src[j]);
           if (keys !== undefined) {
-            kdst[k] = ksrc[j];
+            __intrinsic_define(kdst, k, ksrc[j]);
           }
           j++;
         }
@@ -713,7 +719,7 @@ function $$sortValues(o, len, comparefn, skipHoles) {
         if (primitive && (typeof x === "object" || typeof x === "function" || typeof x === "symbol")) {
           primitive = false;
         }
-        v[n] = x;
+        __intrinsic_define(v, n, x);
         n++;
       }
     }
@@ -722,12 +728,12 @@ function $$sortValues(o, len, comparefn, skipHoles) {
   if (primitive) {
     keys = $$newArray(n);
     for (let k = 0; k < n; k++) {
-      keys[k] = __intrinsic_to_string(v[k]);
+      __intrinsic_define(keys, k, __intrinsic_to_string(v[k]));
     }
   }
   const r = $$mergeSort(v, keys, comparefn);
   for (let k = 0; k < undefs; k++) {
-    r[n + k] = undefined;
+    __intrinsic_define(r, n + k, undefined);
   }
   return r;
 }
@@ -770,7 +776,7 @@ function $$Array_prototype_toReversed() {
   const len = $$lengthOf(o);
   const a = [];
   for (let k = 0; k < len; k++) {
-    a[k] = o[len - 1 - k];
+    __intrinsic_define(a, k, o[len - 1 - k]);
   }
   return a;
 }
@@ -787,7 +793,7 @@ function $$Array_prototype_with(index, value) {
   }
   const a = [];
   for (let i = 0; i < len; i++) {
-    a[i] = i === k ? value : o[i];
+    __intrinsic_define(a, i, i === k ? value : o[i]);
   }
   return a;
 }
@@ -805,15 +811,15 @@ function $$Array_prototype_toSpliced(...args) {
   const a = [];
   let n = 0;
   for (let k = 0; k < start; k++) {
-    a[n] = o[k];
+    __intrinsic_define(a, n, o[k]);
     n++;
   }
   for (let i = 2; i < +args.length; i++) {
-    a[n] = args[i];
+    __intrinsic_define(a, n, args[i]);
     n++;
   }
   for (let k = start + skip; k < len; k++) {
-    a[n] = o[k];
+    __intrinsic_define(a, n, o[k]);
     n++;
   }
   return a;

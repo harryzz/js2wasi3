@@ -43,7 +43,7 @@ function $$JSON_stringify(value, replacer, space) {
         item = $$String(v);
       }
       if (item !== undefined && !propertyList.includes(item)) {
-        propertyList.push(item);
+        $$append(propertyList, item);
       }
     }
   }
@@ -122,20 +122,20 @@ function $$jsonWritable(v) {
 function $$jsonWrite(state, value, key, index) {
   const out = state.out;
   if (value === null) {
-    out.push("null");
+    $$append(out, "null");
     return;
   }
   const t = typeof value;
   if (t === "boolean") {
-    out.push(value ? "true" : "false");
+    $$append(out, value ? "true" : "false");
     return;
   }
   if (t === "string") {
-    out.push($$jsonQuote(value));
+    $$append(out, $$jsonQuote(value));
     return;
   }
   if (t === "number") {
-    out.push(value - value === 0 ? $$String(value) : "null");
+    $$append(out, value - value === 0 ? $$String(value) : "null");
     return;
   }
   if (t === "bigint") {
@@ -144,8 +144,8 @@ function $$jsonWrite(state, value, key, index) {
   if (state.stack.includes(value)) {
     throw new TypeError($$jsonCircular(state, value, key, index));
   }
-  state.stack.push(value);
-  state.keys.push(key);
+  $$append(state.stack, value);
+  $$append(state.keys, key);
   const stepback = state.indent;
   state.indent = stepback + state.gap;
   if (Array.isArray(value)) {
@@ -165,7 +165,7 @@ function $$jsonObject(state, value) {
   const n = +keys.length;
   const gap = state.gap;
   let empty = true;
-  out.push("{");
+  $$append(out, "{");
   for (let i = 0; i < n; i++) {
     const k = keys[i];
     const v = $$jsonValue(state, value, k, value[k]);
@@ -173,20 +173,20 @@ function $$jsonObject(state, value) {
       continue;
     }
     if (!empty) {
-      out.push(",");
+      $$append(out, ",");
     }
     empty = false;
     if (gap !== "") {
-      out.push("\n" + state.indent);
+      $$append(out, "\n" + state.indent);
     }
-    out.push($$jsonQuote(k));
-    out.push(gap === "" ? ":" : ": ");
+    $$append(out, $$jsonQuote(k));
+    $$append(out, gap === "" ? ":" : ": ");
     $$jsonWrite(state, v, k, false);
   }
   if (!empty && gap !== "") {
-    out.push("\n" + state.indent.slice(0, +state.indent.length - +gap.length));
+    $$append(out, "\n" + state.indent.slice(0, +state.indent.length - +gap.length));
   }
-  out.push("}");
+  $$append(out, "}");
 }
 
 // SerializeJSONArray.
@@ -194,26 +194,26 @@ function $$jsonArray(state, value) {
   const out = state.out;
   const len = +value.length;
   const gap = state.gap;
-  out.push("[");
+  $$append(out, "[");
   for (let i = 0; i < len; i++) {
     if (i > 0) {
-      out.push(",");
+      $$append(out, ",");
     }
     if (gap !== "") {
-      out.push("\n" + state.indent);
+      $$append(out, "\n" + state.indent);
     }
     const k = $$String(i);
     const v = $$jsonValue(state, value, k, value[i]);
     if ($$jsonWritable(v)) {
       $$jsonWrite(state, v, k, true);
     } else {
-      out.push("null");
+      $$append(out, "null");
     }
   }
   if (len > 0 && gap !== "") {
-    out.push("\n" + state.indent.slice(0, +state.indent.length - +gap.length));
+    $$append(out, "\n" + state.indent.slice(0, +state.indent.length - +gap.length));
   }
-  out.push("]");
+  $$append(out, "]");
 }
 
 // QuoteJSONString.
@@ -689,7 +689,7 @@ function $$jsonParseArray() {
     return arr;
   }
   for (;;) {
-    arr.push($$jsonParseValue());
+    $$append(arr, $$jsonParseValue());
     $$jsonSkipSpace();
     const c = $$jsonAt($$jsonPos);
     if (c === 93) {

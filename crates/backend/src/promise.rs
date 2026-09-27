@@ -1286,7 +1286,7 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
 }
 
 fn element(cx: &mut dyn Cx, e: Element) -> Function {
-    let set_index = cx.helper(runtime::Helper::Arr(array::Helper::SetIndex));
+    let set_index = cx.helper(runtime::Helper::Arr(array::Helper::DefineIndex));
     let new_object = oh(cx, object::Helper::NewObject);
     let define = oh(cx, object::Helper::DefineProp);
     let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));

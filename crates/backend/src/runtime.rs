@@ -168,8 +168,11 @@ pub const G_IMMEDIATES_N: u32 = G_IMMEDIATES + 1;
 pub const G_TICKS: u32 = G_IMMEDIATES_N + 1;
 pub const G_TICKS_N: u32 = G_TICKS + 1;
 pub const G_TIMER_ID: u32 = G_TICKS_N + 1;
+/// `(mut i32)` (T34): an index key was added to `Array.prototype` or `Object.prototype`, or an
+/// array's prototype was replaced: array writes to absent elements then look at the prototype chain.
+pub const G_INDEX_PROTO: u32 = G_TIMER_ID + 1;
 /// Number of runtime globals before the user globals.
-pub const GLOBALS: u32 = G_TIMER_ID + 1;
+pub const GLOBALS: u32 = G_INDEX_PROTO + 1;
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -704,6 +707,8 @@ pub fn globals(globals: &mut GlobalSection) {
         globals.global(vals, &null_vals);
         globals.global(int, &ConstExpr::i32_const(0));
     }
+    globals.global(int, &ConstExpr::i32_const(0));
+    // T34: index keys on the arrays' prototype chain.
     globals.global(int, &ConstExpr::i32_const(0));
 }
 

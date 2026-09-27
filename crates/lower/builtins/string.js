@@ -595,34 +595,34 @@ function $$String_prototype_split(separator, limit) {
     return out;
   }
   if (separator === undefined) {
-    out.push(s);
+    $$append(out, s);
     return out;
   }
   const len = s.length;
   const m = sep.length;
   if (len === 0) {
     if (m !== 0) {
-      out.push(s);
+      $$append(out, s);
     }
     return out;
   }
   if (m === 0) {
     for (let i = 0; i < len && out.length < lim; i++) {
-      out.push(__intrinsic_sub(s, i, i + 1));
+      $$append(out, __intrinsic_sub(s, i, i + 1));
     }
     return out;
   }
   let p = 0;
   let q = $$indexOf(s, sep, 0);
   while (q >= 0) {
-    out.push(__intrinsic_sub(s, p, q));
+    $$append(out, __intrinsic_sub(s, p, q));
     if (out.length >= lim) {
       return out;
     }
     p = q + m;
     q = $$indexOf(s, sep, p);
   }
-  out.push(__intrinsic_sub(s, p, len));
+  $$append(out, __intrinsic_sub(s, p, len));
   return out;
 }
 
@@ -693,7 +693,7 @@ function $$String_prototype_replaceAll(searchValue, replaceValue) {
   const positions = [];
   let p = $$indexOf(s, t, 0);
   while (p >= 0) {
-    positions.push(p);
+    $$append(positions, p);
     p = p + advance <= s.length ? $$indexOf(s, t, p + advance) : -1;
   }
   let end = 0;
@@ -1007,7 +1007,7 @@ function $$decimalToDouble(s, a0, a1, b0, b1, exp) {
     }
     const d = __intrinsic_unit(s, i) - 48;
     if (nd > 0 || d !== 0) {
-      ds.push(d);
+      $$append(ds, d);
       nd++;
     }
   }
@@ -1063,7 +1063,7 @@ function $$bigFrom(x) {
   const a = [];
   while (x > 0) {
     const q = __intrinsic_floor(x / 16777216);
-    a.push(x - q * 16777216);
+    $$append(a, x - q * 16777216);
     x = q;
   }
   return a;
@@ -1075,11 +1075,11 @@ function $$bigMulAdd(a, m, c) {
   for (let i = 0; i < n; i++) {
     const t = a[i] * m + c;
     c = __intrinsic_floor(t / 16777216);
-    a[i] = t - c * 16777216;
+    __intrinsic_define(a, i, t - c * 16777216);
   }
   while (c > 0) {
     const q = __intrinsic_floor(c / 16777216);
-    a.push(c - q * 16777216);
+    $$append(a, c - q * 16777216);
     c = q;
   }
 }
@@ -1110,7 +1110,7 @@ function $$bigDivSmall(a, d) {
   for (let i = a.length - 1; i >= 0; i--) {
     const t = r * 16777216 + +a[i];
     const q = __intrinsic_floor(t / d);
-    a[i] = q;
+    __intrinsic_define(a, i, q);
     r = t - q * d;
   }
   let n = a.length;
@@ -1124,7 +1124,7 @@ function $$bigDivSmall(a, d) {
 function $$bigCopy(a) {
   const b = [];
   for (let i = 0; i < a.length; i++) {
-    b.push(a[i]);
+    $$append(b, a[i]);
   }
   return b;
 }

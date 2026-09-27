@@ -41,7 +41,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `case` | ✅ | T24: lazy strict-equality tests, fall-through, TDZ across cases. |
 | `catch` | ✅ | With or without a binding, destructuring binding; native Wasm EH (T12). |
 | `char` | ➖ | Removed in ES5. |
-| `class` | 🟡 | T16: fields, statics, private `#x` fields and methods, `extends` (also native errors), `super`, accessors. Missing: private getters/setters, `static {}` blocks, `accessor` fields, computed instance field keys (F58, F80); `Symbol.hasInstance` (T21); a class used before its declaration throws at build time, not at run time (F63). |
+| `class` | 🟡 | T16: fields, statics, private `#x` fields and methods, `extends` (also native errors), `super`, accessors. T31: private getters/setters, computed field keys (evaluated once, in order), `static {}` blocks, `o?.#x`. Missing: `accessor` fields (node 24 lacks them too); a class used before its declaration throws at build time, not at run time (F63). |
 | `const` | ✅ | TDZ checks; writes throw `TypeError: Assignment to constant variable.` (fixed in T24). |
 | `continue` | ✅ | Plain and labeled, through `finally`. |
 | `debugger` | ✅ | A no-op (T24). |
@@ -79,7 +79,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `public` | ➖ | Reserved in strict mode. |
 | `return` | ✅ | Also through `finally`, in generators and async functions. |
 | `short` | ➖ | Removed in ES5. |
-| `static` | 🟡 | Static fields and methods (T16). Missing: `static {}` blocks (F80). |
+| `static` | ✅ | Static fields and methods (T16), `static {}` blocks (T31). |
 | `super` | ✅ | `super(...)`, `super.m()`, `super.x = v` in classes and object-literal methods. |
 | `switch` | ✅ | T24. |
 | `synchronized` | ➖ | Removed in ES5. |
@@ -105,7 +105,7 @@ literals (not scheduled), spread arguments into `console.log(...xs)`, `console.l
 
 | Word | Status | Notes / what's missing |
 |---|---|---|
-| `Array` | 🟡 | Literals, indexing, `length`, holes, spread, destructuring, iteration, `Array.isArray`, `Array(…)`/`new Array(…)`, `Array.from`/`of`, and every prototype method (T21: `map`, `forEach`, `filter`, `reduce`/`reduceRight`, `some`/`every`, `find*`, `indexOf`/`lastIndexOf`/`includes`, `at`, `slice`, `splice`, `concat`, `flat`/`flatMap`, `fill`, `copyWithin`, `reverse`, `shift`/`unshift`, `sort` (stable), `toSorted`/`toReversed`/`toSpliced`/`with`, `push`/`pop`/`join`/`toString`/`values`) and (T25) `keys`/`entries`/`toLocaleString`, `Array` as a value, spread into `Array(…)`. Missing: species/subclass results, `Symbol.isConcatSpreadable` (F108); sparse arrays past 2^26 (F50); callbacks are slow (F92). |
+| `Array` | 🟡 | Literals, indexing, `length`, holes, spread, destructuring, iteration, `Array.isArray`, `Array(…)`/`new Array(…)`, `Array.from`/`of`, and every prototype method (T21: `map`, `forEach`, `filter`, `reduce`/`reduceRight`, `some`/`every`, `find*`, `indexOf`/`lastIndexOf`/`includes`, `at`, `slice`, `splice`, `concat`, `flat`/`flatMap`, `fill`, `copyWithin`, `reverse`, `shift`/`unshift`, `sort` (stable), `toSorted`/`toReversed`/`toSpliced`/`with`, `push`/`pop`/`join`/`toString`/`values`) and (T25) `keys`/`entries`/`toLocaleString`, `Array` as a value, spread into `Array(…)`. T32: `Object.defineProperty` on elements (accessor elements, non-writable/non-enumerable/non-configurable elements) and on `length` (non-writable `length`, shrinking stops at a non-configurable element), printed like node (`[Getter]`). T33/T34: holes read and writes to absent elements go through the prototype chain (`Array.prototype[i]` getters/setters). Missing: `push`/`pop`/`join`/`toString` on non-arrays, species/subclass results, `Symbol.isConcatSpreadable` (F108); sparse arrays past 2^26 (F50, F160); callbacks are slow (F92). |
 | `Date` | ❌ | Rejected (T26). |
 | `eval` | ❌ | See keywords. |
 | `function` | 🟡 | See keywords. |

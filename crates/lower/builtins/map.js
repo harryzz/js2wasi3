@@ -71,7 +71,7 @@ function $$Map_groupBy(items, callbackfn) {
       group = [];
       __intrinsic_map_set(m, key, group);
     }
-    group.push(v);
+    $$append(group, v);
     k++;
   }
   return m;

@@ -123,7 +123,7 @@ function $$Math_hypot(...values) {
   let nan = false;
   for (let i = 0; i < n; i++) {
     const v = __intrinsic_abs(+values[i]);
-    abs.push(v);
+    $$append(abs, v);
     if (v !== v) {
       nan = true;
     } else if (v > max) {
@@ -317,10 +317,10 @@ function $$kernel_rem_pio2(x, y, e0, nx) {
   const fq = [];
   const q = [];
   for (let i = 0; i < 20; i++) {
-    iq.push(0);
-    f.push(0);
-    fq.push(0);
-    q.push(0);
+    $$append(iq, 0);
+    $$append(f, 0);
+    $$append(fq, 0);
+    $$append(q, 0);
   }
   const jx = nx - 1;
   let jv = __intrinsic_trunc((e0 - 3) / 24);
@@ -331,14 +331,14 @@ function $$kernel_rem_pio2(x, y, e0, nx) {
   let j = jv - jx;
   const m = jx + jk;
   for (let i = 0; i <= m; i++, j++) {
-    f[i] = j < 0 ? 0 : ipio2[j];
+    __intrinsic_define(f, i, j < 0 ? 0 : ipio2[j]);
   }
   for (let i = 0; i <= jk; i++) {
     let fw = 0;
     for (j = 0; j <= jx; j++) {
       fw += x[j] * f[jx + i - j];
     }
-    q[i] = fw;
+    __intrinsic_define(q, i, fw);
   }
   let jz = jk;
   let z = 0;
@@ -350,7 +350,7 @@ function $$kernel_rem_pio2(x, y, e0, nx) {
     z = q[jz];
     for (j = jz; j > 0; i++, j--) {
       const fw = __intrinsic_trunc(twon24 * z);
-      iq[i] = __intrinsic_trunc(z - two24 * fw);
+      __intrinsic_define(iq, i, __intrinsic_trunc(z - two24 * fw));
       z = q[j - 1] + fw;
     }
     z = $$scalbn(z, q0);
@@ -376,10 +376,10 @@ function $$kernel_rem_pio2(x, y, e0, nx) {
         if (carry === 0) {
           if (j !== 0) {
             carry = 1;
-            iq[i] = 0x1000000 - j;
+            __intrinsic_define(iq, i, 0x1000000 - j);
           }
         } else {
-          iq[i] = 0xffffff - j;
+          __intrinsic_define(iq, i, 0xffffff - j);
         }
       }
       if (q0 === 1) {
@@ -406,12 +406,12 @@ function $$kernel_rem_pio2(x, y, e0, nx) {
           k++;
         }
         for (i = jz + 1; i <= jz + k; i++) {
-          f[jx + i] = ipio2[jv + i];
+          __intrinsic_define(f, jx + i, ipio2[jv + i]);
           let fw = 0;
           for (j = 0; j <= jx; j++) {
             fw += x[j] * f[jx + i - j];
           }
-          q[i] = fw;
+          __intrinsic_define(q, i, fw);
         }
         jz += k;
         continue;
@@ -430,17 +430,17 @@ function $$kernel_rem_pio2(x, y, e0, nx) {
     z = $$scalbn(z, -q0);
     if (z >= two24) {
       const fw = __intrinsic_trunc(twon24 * z);
-      iq[jz] = __intrinsic_trunc(z - two24 * fw);
+      __intrinsic_define(iq, jz, __intrinsic_trunc(z - two24 * fw));
       jz += 1;
       q0 += 24;
-      iq[jz] = fw;
+      __intrinsic_define(iq, jz, fw);
     } else {
-      iq[jz] = __intrinsic_trunc(z);
+      __intrinsic_define(iq, jz, __intrinsic_trunc(z));
     }
   }
   let fw = $$scalbn(1, q0);
   for (let i = jz; i >= 0; i--) {
-    q[i] = fw * iq[i];
+    __intrinsic_define(q, i, fw * iq[i]);
     fw *= twon24;
   }
   for (let i = jz; i >= 0; i--) {
@@ -448,18 +448,18 @@ function $$kernel_rem_pio2(x, y, e0, nx) {
     for (let k = 0; k <= jp && k <= jz - i; k++) {
       fw += PIo2[k] * q[i + k];
     }
-    fq[jz - i] = fw;
+    __intrinsic_define(fq, jz - i, fw);
   }
   fw = 0;
   for (let i = jz; i >= 0; i--) {
     fw += fq[i];
   }
-  y[0] = ih === 0 ? fw : -fw;
+  __intrinsic_define(y, 0, ih === 0 ? fw : -fw);
   fw = fq[0] - fw;
   for (let i = 1; i <= jz; i++) {
     fw += fq[i];
   }
-  y[1] = ih === 0 ? fw : -fw;
+  __intrinsic_define(y, 1, ih === 0 ? fw : -fw);
   return n & 7;
 }
 
@@ -474,8 +474,8 @@ function $$rem_pio2(x, y) {
   const hx = __intrinsic_hi(x);
   const ix = hx & 0x7fffffff;
   if (ix <= 0x3fe921fb) {
-    y[0] = x;
-    y[1] = 0;
+    __intrinsic_define(y, 0, x);
+    __intrinsic_define(y, 1, 0);
     return 0;
   }
   if (ix < 0x4002d97c) {
@@ -483,23 +483,23 @@ function $$rem_pio2(x, y) {
     if (hx > 0) {
       let z = x - pio2_1;
       if (ix !== 0x3ff921fb) {
-        y[0] = z - pio2_1t;
-        y[1] = (z - y[0]) - pio2_1t;
+        __intrinsic_define(y, 0, z - pio2_1t);
+        __intrinsic_define(y, 1, (z - y[0]) - pio2_1t);
       } else {
         z -= pio2_2;
-        y[0] = z - pio2_2t;
-        y[1] = (z - y[0]) - pio2_2t;
+        __intrinsic_define(y, 0, z - pio2_2t);
+        __intrinsic_define(y, 1, (z - y[0]) - pio2_2t);
       }
       return 1;
     }
     let z = x + pio2_1;
     if (ix !== 0x3ff921fb) {
-      y[0] = z + pio2_1t;
-      y[1] = (z - y[0]) + pio2_1t;
+      __intrinsic_define(y, 0, z + pio2_1t);
+      __intrinsic_define(y, 1, (z - y[0]) + pio2_1t);
     } else {
       z += pio2_2;
-      y[0] = z + pio2_2t;
-      y[1] = (z - y[0]) + pio2_2t;
+      __intrinsic_define(y, 0, z + pio2_2t);
+      __intrinsic_define(y, 1, (z - y[0]) + pio2_2t);
     }
     return -1;
   }
@@ -519,10 +519,10 @@ function $$rem_pio2(x, y) {
       0x404858EB, 0x404921FB,
     ];
     if (n < 32 && ix !== npio2_hw[n - 1]) {
-      y[0] = r - w;
+      __intrinsic_define(y, 0, r - w);
     } else {
       const j = ix >> 20;
-      y[0] = r - w;
+      __intrinsic_define(y, 0, r - w);
       let i = j - ((__intrinsic_hi(y[0]) >> 20) & 0x7ff);
       if (i > 16) {
         // 2nd iteration: good to 118 bits.
@@ -530,7 +530,7 @@ function $$rem_pio2(x, y) {
         w = fn * pio2_2;
         r = t - w;
         w = fn * pio2_2t - ((t - r) - w);
-        y[0] = r - w;
+        __intrinsic_define(y, 0, r - w);
         i = j - ((__intrinsic_hi(y[0]) >> 20) & 0x7ff);
         if (i > 49) {
           // 3rd iteration: 151 bits.
@@ -538,21 +538,21 @@ function $$rem_pio2(x, y) {
           w = fn * pio2_3;
           r = t - w;
           w = fn * pio2_3t - ((t - r) - w);
-          y[0] = r - w;
+          __intrinsic_define(y, 0, r - w);
         }
       }
     }
-    y[1] = (r - y[0]) - w;
+    __intrinsic_define(y, 1, (r - y[0]) - w);
     if (hx < 0) {
-      y[0] = -y[0];
-      y[1] = -y[1];
+      __intrinsic_define(y, 0, -y[0]);
+      __intrinsic_define(y, 1, -y[1]);
       return -n;
     }
     return n;
   }
   if (ix >= 0x7ff00000) {
-    y[0] = x - x;
-    y[1] = x - x;
+    __intrinsic_define(y, 0, x - x);
+    __intrinsic_define(y, 1, x - x);
     return 0;
   }
   // Huge: z = scalbn(|x|, ilogb(x) - 23), split into three 24-bit chunks.
@@ -560,18 +560,18 @@ function $$rem_pio2(x, y) {
   let z = __intrinsic_from_words(ix - (e0 << 20), __intrinsic_lo(x));
   const tx = [0, 0, 0];
   for (let i = 0; i < 2; i++) {
-    tx[i] = __intrinsic_trunc(z);
+    __intrinsic_define(tx, i, __intrinsic_trunc(z));
     z = (z - tx[i]) * 1.67772160000000000000e+07;
   }
-  tx[2] = z;
+  __intrinsic_define(tx, 2, z);
   let nx = 3;
   while (tx[nx - 1] === 0) {
     nx--;
   }
   const n = $$kernel_rem_pio2(tx, y, e0, nx);
   if (hx < 0) {
-    y[0] = -y[0];
-    y[1] = -y[1];
+    __intrinsic_define(y, 0, -y[0]);
+    __intrinsic_define(y, 1, -y[1]);
     return -n;
   }
   return n;

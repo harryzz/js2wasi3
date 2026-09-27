@@ -486,8 +486,27 @@ impl Helper {
             Helper::DefineProp => {
                 let to_key = h(cx, Helper::ToKey);
                 let define = h(cx, Helper::Define);
+                let define_index = cx.helper(runtime::Helper::Arr(array::Helper::DefineIndex));
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
+                // An array and a small non-negative integer key: the element directly (T34).
+                s.local_get(0).ref_test_non_null(array::array());
+                s.local_get(1).ref_test_non_null(wasm_encoder::HeapType::I31);
+                s.i32_and();
+                s.if_(BlockType::Empty);
+                s.local_get(1)
+                    .ref_cast_non_null(wasm_encoder::HeapType::I31)
+                    .i31_get_s()
+                    .i32_const(0)
+                    .i32_ge_s();
+                s.if_(BlockType::Empty);
+                s.local_get(0).ref_cast_non_null(array::array());
+                s.local_get(1)
+                    .ref_cast_non_null(wasm_encoder::HeapType::I31)
+                    .i31_get_s();
+                s.local_get(2).call(define_index).return_();
+                s.end();
+                s.end();
                 as_obj(&mut s, 0);
                 s.local_get(1)
                     .call(to_key)
@@ -819,6 +838,7 @@ fn lookup(cx: &mut dyn Cx, holder: bool) -> Function {
 
 fn define(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwn);
+    let index = h(cx, Helper::ArrayIndex);
     let grow = h(cx, Helper::Grow);
     let reindex = h(cx, Helper::Reindex);
     let hash = h(cx, Helper::Hash);
@@ -830,7 +850,7 @@ fn define(cx: &mut dyn Cx) -> Function {
     const MASK: u32 = 5;
     const I: u32 = 6;
     const IDX: u32 = 7;
-    let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define));
+    let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define { set: false }));
     let mut f = Function::new([(3, ValType::I32), (1, rt(true, T_I32S))]);
     let mut s = f.instructions();
     // An array's index or `length`.
@@ -863,6 +883,17 @@ fn define(cx: &mut dyn Cx) -> Function {
         .i32_and();
     s.array_set(T_BYTES);
     s.return_();
+    s.end();
+    // An index key on `Array.prototype` or `Object.prototype`: array writes must look at the
+    // prototype chain from now on (T34).
+    s.local_get(O).global_get(G_PROTOS + Builtin::Array.index()).ref_eq();
+    s.local_get(O).global_get(G_PROTOS + Builtin::Object.index()).ref_eq();
+    s.i32_or();
+    s.if_(BlockType::Empty);
+    s.local_get(K).call(index).i64_const(0).i64_ge_s();
+    s.if_(BlockType::Empty);
+    s.i32_const(1).global_set(runtime::G_INDEX_PROTO);
+    s.end();
     s.end();
     // A new entry at `count`.
     s.local_get(O).struct_get(T_OBJECT, F_COUNT);
@@ -2200,6 +2231,11 @@ fn set_proto() -> Function {
     const P: u32 = 1;
     let mut f = Function::new([]);
     let mut s = f.instructions();
+    // An array with another prototype: its writes look at the chain (T34).
+    s.local_get(O).ref_test_non_null(array::array());
+    s.if_(BlockType::Empty);
+    s.i32_const(1).global_set(runtime::G_INDEX_PROTO);
+    s.end();
     s.local_get(P).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     as_obj(&mut s, O);

@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T34 array writes through the prototype chain (targeted rerun)
+
+- Compiler: T34 ([[Set]] on absent elements walks the prototype chain behind a flag; CreateDataProperty for elements;
+  the prelude defines its own arrays).
+- Run: `built-ins/{Array,JSON,String,Math,Map,Set}`, `language/statements/for-of`,
+  `language/expressions/{array,assignment/dstr}` (6,555 tests): 6 fail → pass, 1 pass → fail (fixed; `sort`/`toSorted`
+  rerun: 2 → pass). Subset: 21,726 of 24,820 run pass (87.5%); `built-ins/Array` 2537 of 3030 (83.7%).
+
 ## 2026-09-27: T33 holes through the prototype chain (targeted rerun)
 
 - Compiler: T33 (native `join`/`pop` and array iteration read holes with `Get`).
