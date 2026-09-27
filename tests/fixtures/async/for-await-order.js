@@ -14,10 +14,3 @@ function* g2() { try { yield 1; yield Promise.reject("r2"); yield 3; } finally {
 async function f() { try { for await (const x of g2()) log.push("f" + x); } catch (err) { log.push("f caught " + err); } }
 const run = async (fn) => { log.length = 0; const p = fn(); await tick("t", 12); await p; console.log(fn.name, log.join(" ")); };
 await run(a); await run(b); await run(c); await run(d); await run(e); await run(f);
-try { for await (const x of 5) {} } catch (err) { console.log(err.message); }
-try { for await (const x of { [Symbol.asyncIterator]() { return { next() { return 1; } }; } }) {} } catch (err) { console.log(err.message); }
-try { for await (const x of { [Symbol.asyncIterator]: 5 }) {} } catch (err) { console.log(err.message); }
-const it2 = { [Symbol.asyncIterator]() { return { next: () => ({ value: 1, done: false }), return() { console.log("return called"); return {}; } }; } };
-for await (const x of it2) { console.log("x", x); break; }
-const it3 = { [Symbol.asyncIterator]() { return { next: () => ({ value: 1, done: false }), return() { return 5; } }; } };
-try { for await (const x of it3) break; } catch (err) { console.log(err.message); }

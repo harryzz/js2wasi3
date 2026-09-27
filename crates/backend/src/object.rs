@@ -61,6 +61,9 @@ pub const NO_EXTEND: i32 = 0x100;
 pub const SEALED: i32 = 0x200;
 /// `class` flag of an array: its elements and `length` are read-only too (`freeze`).
 pub const FROZEN: i32 = 0x400;
+/// `class` flag of an array: `length` is read-only (`defineProperty(a, "length", { writable: false })`,
+/// T32).
+pub const LENGTH_READONLY: i32 = 0x800;
 
 /// Attribute bit: not enumerable.
 pub const HIDDEN: i32 = 1;
@@ -1698,6 +1701,12 @@ fn get(cx: &mut dyn Cx) -> Function {
         .local_tee(R);
     s.ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
+    // An accessor element (T32): its getter.
+    s.local_get(R)
+        .ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
+    s.if_(BlockType::Empty);
+    s.local_get(R).local_get(V).call(value).return_();
+    s.end();
     s.local_get(R).return_();
     s.end();
     s.end();
@@ -1956,6 +1965,8 @@ fn delete(cx: &mut dyn Cx) -> Function {
     let of = cx.str("' of [object String]");
     let of_array = cx.str("' of [object Array]");
     let array_own = cx.helper(runtime::Helper::Arr(array::Helper::OwnGet));
+    let elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::Attrs));
+    let set_elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::SetAttrs));
     let index = h(cx, Helper::ArrayIndex);
     let str_eq = rh(cx, runtime::Helper::StrEq);
     let length = cx.str("length");
@@ -1991,12 +2002,11 @@ fn delete(cx: &mut dyn Cx) -> Function {
         .ref_is_null()
         .i32_eqz();
     s.if_(BlockType::Empty);
-    // A sealed or frozen array's elements can't be deleted.
-    s.local_get(V)
-        .ref_cast_non_null(object())
-        .struct_get(T_OBJECT, F_CLASS)
-        .i32_const(SEALED)
-        .i32_and();
+    // A non-configurable element (sealed, frozen, or by its attributes, T32) can't be deleted.
+    s.local_get(K).ref_as_non_null().call(index).i32_wrap_i64().local_set(E);
+    s.local_get(V).ref_cast_non_null(array::array());
+    s.local_get(E).call(elem_attrs);
+    s.i32_const(FIXED).i32_and();
     s.if_(BlockType::Empty);
     s.global_get(cannot);
     s.local_get(K).ref_as_non_null().call(concat);
@@ -2006,9 +2016,11 @@ fn delete(cx: &mut dyn Cx) -> Function {
     s.local_get(V)
         .ref_cast_non_null(array::array())
         .struct_get(T_ARRAY, array::F_ELEMS);
-    s.local_get(K).ref_as_non_null().call(index).i32_wrap_i64();
+    s.local_get(E);
     s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
     s.array_set(T_VALS);
+    s.local_get(V).ref_cast_non_null(array::array());
+    s.local_get(E).i32_const(0).call(set_elem_attrs);
     s.i32_const(1).return_();
     s.end();
     s.end();
@@ -2460,6 +2472,7 @@ fn own_keys(cx: &mut dyn Cx, all: bool) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(O)
         .ref_cast_non_null(array::array())
+        .i32_const(all as i32)
         .call(index_keys)
         .local_tee(ELEMS)
         .array_len()

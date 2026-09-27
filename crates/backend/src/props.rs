@@ -661,7 +661,14 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     let concat = cx.helper(runtime::Helper::Concat);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
     let desc = ph(cx, Helper::Desc);
-    let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define));
+    let set_index = cx.helper(runtime::Helper::Arr(array::Helper::SetIndex));
+    let elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::Attrs));
+    let set_elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::SetAttrs));
+    let resize = cx.helper(runtime::Helper::Arr(array::Helper::Resize));
+    let to_number = cx.helper(runtime::Helper::ToNumber);
+    let to_int32 = cx.to_int32();
+    let range_error = oh(cx, object::Helper::Throw(ErrorKind::RangeError));
+    let invalid_length = cx.str("Invalid array length");
     let index = oh(cx, object::Helper::ArrayIndex);
     let str_eq = cx.helper(runtime::Helper::StrEq);
     let keys = [
@@ -702,6 +709,9 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     const X: u32 = 12;
     const CUR: u32 = 13;
     const T: u32 = 14;
+    const J: u32 = 15;
+    const NL: u32 = 16;
+    const NL2: u32 = 17;
     let mut f = Function::new([
         (1, rt(true, T_OBJECT)),
         (1, rt(true, T_STRING)),
@@ -711,6 +721,8 @@ fn define_property(cx: &mut dyn Cx) -> Function {
         (1, jsval()),
         (1, rt(true, T_ACCESSOR)),
         (1, jsval()),
+        (1, ValType::I64),
+        (2, ValType::F64),
     ]);
     let mut s = f.instructions();
     let fail = |s: &mut InstructionSink, msg: u32| {
@@ -789,43 +801,331 @@ fn define_property(cx: &mut dyn Cx) -> Function {
         .call(concat);
     s.call(throw);
     s.end();
-    // Arrays: indices and `length` only with the default attributes (or none given).
+    let arr = |s: &mut InstructionSink| {
+        s.local_get(O).ref_cast_non_null(array::array());
+    };
+    // Where the property lives: an entry of the dictionary part (`E`: its index) or an array
+    // element (`elem`, `E`: the index, T32).
+    let load_attrs = |s: &mut InstructionSink, elem: bool| {
+        if elem {
+            arr(s);
+            s.local_get(E).call(elem_attrs);
+        } else {
+            s.local_get(O)
+                .ref_as_non_null()
+                .struct_get(T_OBJECT, F_ATTRS)
+                .local_get(E)
+                .array_get_u(T_BYTES);
+        }
+    };
+    let slots = |s: &mut InstructionSink, elem: bool| {
+        if elem {
+            arr(s);
+            s.struct_get(T_ARRAY, array::F_ELEMS);
+        } else {
+            s.local_get(O).ref_as_non_null().struct_get(T_OBJECT, F_VALS);
+        }
+    };
+    let load_slot = |s: &mut InstructionSink, elem: bool| {
+        slots(s, elem);
+        s.local_get(E).array_get(T_VALS);
+    };
+    let store_attrs = |s: &mut InstructionSink, elem: bool| {
+        if elem {
+            arr(s);
+            s.local_get(E).local_get(A).call(set_elem_attrs);
+        } else {
+            s.local_get(O)
+                .ref_as_non_null()
+                .struct_get(T_OBJECT, F_ATTRS);
+            s.local_get(E).local_get(A).array_set(T_BYTES);
+        }
+    };
+    // An existing non-configurable property: only compatible changes.
+    let validate = |s: &mut InstructionSink, elem: bool| {
+        load_attrs(s, elem);
+        s.local_tee(A);
+        s.i32_const(FIXED).i32_and();
+        s.if_(BlockType::Empty);
+        s.block(BlockType::Empty);
+        {
+            s.block(BlockType::Empty);
+            // configurable: true
+            s.local_get(BITS).i32_const(D_CONF).i32_and().br_if(0);
+            // enumerable changes
+            s.local_get(HAS).i32_const(D_ENUM).i32_and();
+            s.local_get(BITS).i32_const(D_ENUM).i32_and().i32_eqz();
+            s.local_get(A)
+                .i32_const(HIDDEN)
+                .i32_and()
+                .i32_eqz()
+                .i32_eqz();
+            s.i32_ne();
+            s.i32_and().br_if(0);
+            s.local_get(A).i32_const(ACCESSOR).i32_and();
+            s.if_(BlockType::Empty);
+            // accessor: no data fields, same get/set
+            s.local_get(HAS)
+                .i32_const(D_VALUE | D_WRIT)
+                .i32_and()
+                .br_if(1);
+            load_slot(s, elem);
+            s.ref_cast_non_null(accessor()).local_set(CUR);
+            for (bit, field, local) in [(D_GET, 0, GT), (D_SET, 1, ST)] {
+                s.local_get(HAS)
+                    .i32_const(bit)
+                    .i32_and()
+                    .i32_const(0)
+                    .i32_ne();
+                s.local_get(CUR)
+                    .ref_as_non_null()
+                    .struct_get(T_ACCESSOR, field)
+                    .local_get(local)
+                    .ref_eq()
+                    .i32_eqz();
+                s.i32_and().br_if(1);
+            }
+            s.else_();
+            // data: no accessor fields; read-only: not made writable, same value
+            s.local_get(HAS).i32_const(D_GET | D_SET).i32_and().br_if(1);
+            s.local_get(A).i32_const(READONLY).i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(BITS).i32_const(D_WRIT).i32_and().br_if(2);
+            s.local_get(HAS)
+                .i32_const(D_VALUE)
+                .i32_and()
+                .i32_const(0)
+                .i32_ne();
+            load_slot(s, elem);
+            s.local_get(VAL).call(strict_eq).i32_eqz();
+            s.i32_and().br_if(2);
+            s.end();
+            s.end();
+            s.br(1);
+            s.end();
+            fail(s, redefine);
+        }
+        s.end();
+        s.end();
+    };
+    // Apply the fields given.
+    let apply = |s: &mut InstructionSink, elem: bool| {
+        load_attrs(s, elem);
+        s.local_set(A);
+        for (bit, attr) in [(D_ENUM, HIDDEN), (D_CONF, FIXED)] {
+            s.local_get(HAS).i32_const(bit).i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(A).i32_const(!attr).i32_and();
+            // The attribute bit is set when the field is false.
+            s.i32_const(0).i32_const(attr);
+            s.local_get(BITS).i32_const(bit).i32_and();
+            s.select();
+            s.i32_or().local_set(A);
+            s.end();
+        }
+        s.local_get(HAS).i32_const(D_GET | D_SET).i32_and();
+        s.if_(BlockType::Empty);
+        {
+            // An accessor (a data property becomes one with both functions undefined).
+            s.local_get(A).i32_const(ACCESSOR).i32_and().i32_eqz();
+            s.if_(BlockType::Empty);
+            slots(s, elem);
+            s.local_get(E);
+            s.global_get(G_UNDEFINED)
+                .global_get(G_UNDEFINED)
+                .struct_new(T_ACCESSOR);
+            s.array_set(T_VALS);
+            s.local_get(A)
+                .i32_const(!READONLY)
+                .i32_and()
+                .i32_const(ACCESSOR)
+                .i32_or()
+                .local_set(A);
+            s.end();
+            load_slot(s, elem);
+            s.ref_cast_non_null(accessor()).local_set(CUR);
+            for (bit, field, local) in [(D_GET, 0, GT), (D_SET, 1, ST)] {
+                s.local_get(HAS).i32_const(bit).i32_and();
+                s.if_(BlockType::Empty);
+                s.local_get(CUR)
+                    .ref_as_non_null()
+                    .local_get(local)
+                    .struct_set(T_ACCESSOR, field);
+                s.end();
+            }
+        }
+        s.else_();
+        {
+            s.local_get(HAS)
+                .i32_const(D_VALUE | D_WRIT)
+                .i32_and()
+                .i32_const(0)
+                .i32_ne();
+            s.local_get(A)
+                .i32_const(ACCESSOR)
+                .i32_and()
+                .i32_const(0)
+                .i32_ne();
+            s.i32_and();
+            s.if_(BlockType::Empty);
+            // An accessor becomes a data property: `undefined`, read-only unless said otherwise.
+            slots(s, elem);
+            s.local_get(E).global_get(G_UNDEFINED).array_set(T_VALS);
+            s.local_get(A)
+                .i32_const(!ACCESSOR)
+                .i32_and()
+                .i32_const(READONLY)
+                .i32_or()
+                .local_set(A);
+            s.end();
+            s.local_get(HAS).i32_const(D_WRIT).i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(A).i32_const(!READONLY).i32_and();
+            s.i32_const(0).i32_const(READONLY);
+            s.local_get(BITS).i32_const(D_WRIT).i32_and();
+            s.select();
+            s.i32_or().local_set(A);
+            s.end();
+            s.local_get(HAS).i32_const(D_VALUE).i32_and();
+            s.if_(BlockType::Empty);
+            slots(s, elem);
+            s.local_get(E).local_get(VAL).array_set(T_VALS);
+            s.end();
+        }
+        s.end();
+        store_attrs(s, elem);
+    };
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
-    s.local_get(K)
-        .ref_as_non_null()
-        .call(index)
-        .i64_const(0)
-        .i64_ge_s();
-    s.local_get(K)
-        .ref_as_non_null()
-        .global_get(length)
-        .call(str_eq);
-    s.i32_or();
-    s.if_(BlockType::Empty);
-    // Every attribute given must be true, and no accessor.
-    s.local_get(HAS).i32_const(D_GET | D_SET).i32_and();
-    s.local_get(HAS)
-        .i32_const(D_ENUM | D_CONF | D_WRIT)
-        .i32_and()
-        .local_get(BITS)
-        .i32_ne();
-    s.i32_or();
-    s.if_(BlockType::Empty);
-    s.unreachable(); // array element attributes aren't implemented
-    s.end();
-    s.local_get(HAS).i32_const(D_VALUE).i32_and();
-    s.if_(BlockType::Empty);
-    s.local_get(O)
-        .ref_cast_non_null(array::array())
-        .local_get(K)
-        .ref_as_non_null()
-        .local_get(VAL)
-        .call(array_define)
-        .drop();
-    s.end();
-    s.local_get(O).ref_as_non_null().return_();
-    s.end();
+    {
+        // An array's `length` (ArraySetLength, T32): the value is converted first (twice, as
+        // the spec does); it is never configurable, enumerable or an accessor.
+        s.local_get(K)
+            .ref_as_non_null()
+            .global_get(length)
+            .call(str_eq);
+        s.if_(BlockType::Empty);
+        {
+            s.local_get(HAS).i32_const(D_VALUE).i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(VAL).call(to_number).local_set(NL);
+            s.local_get(VAL).call(to_number).local_set(NL2);
+            s.local_get(NL).call(to_int32).f64_convert_i32_u();
+            s.local_get(NL2).f64_ne();
+            s.if_(BlockType::Empty);
+            s.global_get(invalid_length).call(range_error);
+            s.end();
+            s.end();
+            s.local_get(HAS).i32_const(D_GET | D_SET).i32_and();
+            s.local_get(BITS).i32_const(D_CONF | D_ENUM).i32_and();
+            s.i32_or();
+            s.if_(BlockType::Empty);
+            fail(&mut s, redefine);
+            s.end();
+            arr(&mut s);
+            s.struct_get(T_ARRAY, object::F_CLASS)
+                .i32_const(FROZEN | object::LENGTH_READONLY)
+                .i32_and();
+            s.if_(BlockType::Empty);
+            // Read-only: not made writable, same value.
+            s.local_get(BITS).i32_const(D_WRIT).i32_and();
+            s.local_get(HAS).i32_const(D_VALUE).i32_and();
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(NL2);
+            arr(&mut s);
+            s.struct_get(T_ARRAY, array::F_LENGTH).f64_convert_i32_u();
+            s.f64_ne();
+            s.else_();
+            s.i32_const(0);
+            s.end();
+            s.i32_or();
+            s.if_(BlockType::Empty);
+            fail(&mut s, redefine);
+            s.end();
+            s.local_get(O).ref_as_non_null().return_();
+            s.end();
+            // `writable: false` applies even when a deletion fails below.
+            s.local_get(HAS)
+                .i32_const(D_WRIT)
+                .i32_and()
+                .i32_const(0)
+                .i32_ne();
+            s.local_get(BITS).i32_const(D_WRIT).i32_and().i32_eqz();
+            s.i32_and();
+            s.if_(BlockType::Empty);
+            arr(&mut s);
+            arr(&mut s);
+            s.struct_get(T_ARRAY, object::F_CLASS)
+                .i32_const(object::LENGTH_READONLY)
+                .i32_or()
+                .struct_set(T_ARRAY, object::F_CLASS);
+            s.end();
+            s.local_get(HAS).i32_const(D_VALUE).i32_and();
+            s.if_(BlockType::Empty);
+            arr(&mut s);
+            s.local_get(NL2).i32_trunc_f64_u().call(resize);
+            s.end();
+            s.local_get(O).ref_as_non_null().return_();
+        }
+        s.end();
+        // An index.
+        s.local_get(K).ref_as_non_null().call(index).local_tee(J);
+        s.i64_const(0).i64_ge_s();
+        s.if_(BlockType::Empty);
+        {
+            s.local_get(J).i64_const(array::MAX_DENSE as i64).i64_ge_u();
+            s.if_(BlockType::Empty);
+            s.unreachable(); // sparse arrays aren't implemented
+            s.end();
+            s.local_get(J).i32_wrap_i64().local_set(E);
+            // Absent (a hole or past the end): a new element, absent attributes false.
+            s.local_get(E);
+            arr(&mut s);
+            s.struct_get(T_ARRAY, array::F_LENGTH).i32_lt_u();
+            s.if_(BlockType::Result(ValType::I32));
+            load_slot(&mut s, true);
+            s.ref_is_null();
+            s.else_();
+            s.i32_const(1);
+            s.end();
+            s.if_(BlockType::Empty);
+            {
+                arr(&mut s);
+                s.struct_get(T_ARRAY, object::F_CLASS)
+                    .i32_const(NO_EXTEND)
+                    .i32_and();
+                s.local_get(E);
+                arr(&mut s);
+                s.struct_get(T_ARRAY, array::F_LENGTH).i32_ge_u();
+                arr(&mut s);
+                s.struct_get(T_ARRAY, object::F_CLASS)
+                    .i32_const(object::LENGTH_READONLY)
+                    .i32_and()
+                    .i32_const(0)
+                    .i32_ne();
+                s.i32_and();
+                s.i32_or();
+                s.if_(BlockType::Empty);
+                s.global_get(define_prop);
+                s.local_get(K).ref_as_non_null().call(concat);
+                s.global_get(not_ext).call(concat);
+                s.call(throw);
+                s.end();
+                arr(&mut s);
+                s.local_get(E).global_get(G_UNDEFINED).call(set_index);
+                arr(&mut s);
+                s.local_get(E)
+                    .i32_const(HIDDEN | READONLY | FIXED)
+                    .call(set_elem_attrs);
+            }
+            s.else_();
+            validate(&mut s, true);
+            s.end();
+            apply(&mut s, true);
+            s.local_get(O).ref_as_non_null().return_();
+        }
+        s.end();
+    }
     s.end();
     s.local_get(O)
         .ref_as_non_null()
@@ -863,192 +1163,9 @@ fn define_property(cx: &mut dyn Cx) -> Function {
             .local_set(E);
     }
     s.else_();
-    {
-        // An existing non-configurable property: only compatible changes.
-        s.local_get(O)
-            .ref_as_non_null()
-            .struct_get(T_OBJECT, F_ATTRS)
-            .local_get(E)
-            .array_get_u(T_BYTES)
-            .local_tee(A);
-        s.i32_const(FIXED).i32_and();
-        s.if_(BlockType::Empty);
-        s.block(BlockType::Empty);
-        {
-            s.block(BlockType::Empty);
-            // configurable: true
-            s.local_get(BITS).i32_const(D_CONF).i32_and().br_if(0);
-            // enumerable changes
-            s.local_get(HAS).i32_const(D_ENUM).i32_and();
-            s.local_get(BITS).i32_const(D_ENUM).i32_and().i32_eqz();
-            s.local_get(A)
-                .i32_const(HIDDEN)
-                .i32_and()
-                .i32_eqz()
-                .i32_eqz();
-            s.i32_ne();
-            s.i32_and().br_if(0);
-            s.local_get(A).i32_const(ACCESSOR).i32_and();
-            s.if_(BlockType::Empty);
-            // accessor: no data fields, same get/set
-            s.local_get(HAS)
-                .i32_const(D_VALUE | D_WRIT)
-                .i32_and()
-                .br_if(1);
-            s.local_get(O)
-                .ref_as_non_null()
-                .struct_get(T_OBJECT, F_VALS)
-                .local_get(E)
-                .array_get(T_VALS)
-                .ref_cast_non_null(accessor())
-                .local_set(CUR);
-            for (bit, field, local) in [(D_GET, 0, GT), (D_SET, 1, ST)] {
-                s.local_get(HAS)
-                    .i32_const(bit)
-                    .i32_and()
-                    .i32_const(0)
-                    .i32_ne();
-                s.local_get(CUR)
-                    .ref_as_non_null()
-                    .struct_get(T_ACCESSOR, field)
-                    .local_get(local)
-                    .ref_eq()
-                    .i32_eqz();
-                s.i32_and().br_if(1);
-            }
-            s.else_();
-            // data: no accessor fields; read-only: not made writable, same value
-            s.local_get(HAS).i32_const(D_GET | D_SET).i32_and().br_if(1);
-            s.local_get(A).i32_const(READONLY).i32_and();
-            s.if_(BlockType::Empty);
-            s.local_get(BITS).i32_const(D_WRIT).i32_and().br_if(2);
-            s.local_get(HAS)
-                .i32_const(D_VALUE)
-                .i32_and()
-                .i32_const(0)
-                .i32_ne();
-            s.local_get(O)
-                .ref_as_non_null()
-                .struct_get(T_OBJECT, F_VALS)
-                .local_get(E)
-                .array_get(T_VALS)
-                .local_get(VAL)
-                .call(strict_eq)
-                .i32_eqz();
-            s.i32_and().br_if(2);
-            s.end();
-            s.end();
-            s.br(1);
-            s.end();
-            fail(&mut s, redefine);
-        }
-        s.end();
-        s.end();
-    }
+    validate(&mut s, false);
     s.end();
-    // Apply the fields given.
-    s.local_get(O)
-        .ref_as_non_null()
-        .struct_get(T_OBJECT, F_ATTRS)
-        .local_get(E)
-        .array_get_u(T_BYTES)
-        .local_set(A);
-    for (bit, attr) in [(D_ENUM, HIDDEN), (D_CONF, FIXED)] {
-        s.local_get(HAS).i32_const(bit).i32_and();
-        s.if_(BlockType::Empty);
-        s.local_get(A).i32_const(!attr).i32_and();
-        // The attribute bit is set when the field is false.
-        s.i32_const(0).i32_const(attr);
-        s.local_get(BITS).i32_const(bit).i32_and();
-        s.select();
-        s.i32_or().local_set(A);
-        s.end();
-    }
-    s.local_get(HAS).i32_const(D_GET | D_SET).i32_and();
-    s.if_(BlockType::Empty);
-    {
-        // An accessor (a data property becomes one with both functions undefined).
-        s.local_get(A).i32_const(ACCESSOR).i32_and().i32_eqz();
-        s.if_(BlockType::Empty);
-        s.local_get(O)
-            .ref_as_non_null()
-            .struct_get(T_OBJECT, F_VALS);
-        s.local_get(E);
-        s.global_get(G_UNDEFINED)
-            .global_get(G_UNDEFINED)
-            .struct_new(T_ACCESSOR);
-        s.array_set(T_VALS);
-        s.local_get(A)
-            .i32_const(!READONLY)
-            .i32_and()
-            .i32_const(ACCESSOR)
-            .i32_or()
-            .local_set(A);
-        s.end();
-        s.local_get(O)
-            .ref_as_non_null()
-            .struct_get(T_OBJECT, F_VALS)
-            .local_get(E)
-            .array_get(T_VALS)
-            .ref_cast_non_null(accessor())
-            .local_set(CUR);
-        for (bit, field, local) in [(D_GET, 0, GT), (D_SET, 1, ST)] {
-            s.local_get(HAS).i32_const(bit).i32_and();
-            s.if_(BlockType::Empty);
-            s.local_get(CUR)
-                .ref_as_non_null()
-                .local_get(local)
-                .struct_set(T_ACCESSOR, field);
-            s.end();
-        }
-    }
-    s.else_();
-    {
-        s.local_get(HAS)
-            .i32_const(D_VALUE | D_WRIT)
-            .i32_and()
-            .i32_const(0)
-            .i32_ne();
-        s.local_get(A)
-            .i32_const(ACCESSOR)
-            .i32_and()
-            .i32_const(0)
-            .i32_ne();
-        s.i32_and();
-        s.if_(BlockType::Empty);
-        // An accessor becomes a data property: `undefined`, read-only unless said otherwise.
-        s.local_get(O)
-            .ref_as_non_null()
-            .struct_get(T_OBJECT, F_VALS);
-        s.local_get(E).global_get(G_UNDEFINED).array_set(T_VALS);
-        s.local_get(A)
-            .i32_const(!ACCESSOR)
-            .i32_and()
-            .i32_const(READONLY)
-            .i32_or()
-            .local_set(A);
-        s.end();
-        s.local_get(HAS).i32_const(D_WRIT).i32_and();
-        s.if_(BlockType::Empty);
-        s.local_get(A).i32_const(!READONLY).i32_and();
-        s.i32_const(0).i32_const(READONLY);
-        s.local_get(BITS).i32_const(D_WRIT).i32_and();
-        s.select();
-        s.i32_or().local_set(A);
-        s.end();
-        s.local_get(HAS).i32_const(D_VALUE).i32_and();
-        s.if_(BlockType::Empty);
-        s.local_get(O)
-            .ref_as_non_null()
-            .struct_get(T_OBJECT, F_VALS);
-        s.local_get(E).local_get(VAL).array_set(T_VALS);
-        s.end();
-    }
-    s.end();
-    s.local_get(O)
-        .ref_as_non_null()
-        .struct_get(T_OBJECT, F_ATTRS);
-    s.local_get(E).local_get(A).array_set(T_BYTES);
+    apply(&mut s, false);
     let _ = X;
     s.local_get(O).ref_as_non_null();
     s.end();
@@ -1063,6 +1180,8 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(runtime::Helper::IsNullish);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
     let array_own = cx.helper(runtime::Helper::Arr(array::Helper::OwnGet));
+    let elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::Attrs));
+    let index = oh(cx, object::Helper::ArrayIndex);
     let str_eq = cx.helper(runtime::Helper::StrEq);
     let convert = cx.str("Cannot convert undefined or null to object");
     let (value, writable, enumerable, configurable, get, set, length) = (
@@ -1113,7 +1232,9 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(object()).local_set(O);
     s.local_get(KEY).call(to_key).local_set(K);
     s.call(new_object).local_set(R);
-    // An array's index or `length`.
+    // The property's attributes (`A`) and slot (`X`): an array's index or `length` (T32), or an
+    // entry of the dictionary part.
+    s.block(BlockType::Empty);
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
     s.local_get(O)
@@ -1124,33 +1245,25 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
         .local_tee(X);
     s.ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
-    s.local_get(O)
-        .ref_as_non_null()
-        .struct_get(T_OBJECT, F_CLASS)
-        .local_set(A);
     s.local_get(K)
         .ref_as_non_null()
         .global_get(length)
-        .call(str_eq)
-        .local_set(E);
-    field(&mut s, value, &|s| {
-        s.local_get(X);
-    });
-    field(&mut s, writable, &|s| {
-        s.local_get(A).i32_const(FROZEN).i32_and().i32_eqz();
-        bool_of(s);
-    });
-    field(&mut s, enumerable, &|s| {
-        s.local_get(E).i32_eqz();
-        bool_of(s);
-    });
-    field(&mut s, configurable, &|s| {
-        s.local_get(E).i32_eqz();
-        s.local_get(A).i32_const(SEALED).i32_and().i32_eqz();
-        s.i32_and();
-        bool_of(s);
-    });
-    s.local_get(R).return_();
+        .call(str_eq);
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(HIDDEN | FIXED | READONLY).i32_const(HIDDEN | FIXED);
+    s.local_get(O)
+        .ref_as_non_null()
+        .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(FROZEN | object::LENGTH_READONLY)
+        .i32_and();
+    s.select();
+    s.else_();
+    s.local_get(O).ref_cast_non_null(array::array());
+    s.local_get(K).ref_as_non_null().call(index).i32_wrap_i64();
+    s.call(elem_attrs);
+    s.end();
+    s.local_set(A);
+    s.br(2);
     s.end();
     s.end();
     s.local_get(O)
@@ -1175,6 +1288,7 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
         .local_get(E)
         .array_get(T_VALS)
         .local_set(X);
+    s.end();
     s.local_get(A).i32_const(ACCESSOR).i32_and();
     s.if_(BlockType::Empty);
     for (key, i) in [(get, 0), (set, 1)] {

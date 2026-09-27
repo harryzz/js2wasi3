@@ -412,6 +412,7 @@ fn open(cx: &mut dyn Cx) -> Function {
 
 fn step(cx: &mut dyn Cx) -> Function {
     let get = oh(cx, object::Helper::Get);
+    let prop_value = cx.helper(runtime::Helper::Prop(crate::props::Helper::Value));
     let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
     let to_boolean = cx.helper(runtime::Helper::ToBoolean);
     let inspect = cx.helper(runtime::Helper::Inspect);
@@ -459,14 +460,10 @@ fn step(cx: &mut dyn Cx) -> Function {
             .ref_cast_non_null(array::array())
             .struct_get(T_ARRAY, F_ELEMS)
             .local_get(I)
-            .array_get(T_VALS)
-            .local_tee(R);
-        s.ref_is_null();
-        s.if_(BlockType::Result(jsval()));
-        s.global_get(G_UNDEFINED);
-        s.else_();
-        s.local_get(R);
-        s.end();
+            .array_get(T_VALS);
+        // A hole is `undefined`; an accessor element (T32) calls its getter.
+        it(&mut s, IT);
+        s.struct_get(T_ITER, F_OBJ).call(prop_value);
         set_value(&mut s);
         it(&mut s, IT);
         s.local_get(I)

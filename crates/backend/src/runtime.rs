@@ -352,6 +352,8 @@ pub fn types(types: &mut TypeSection) {
     let mut array_fields = object_fields.clone();
     array_fields.push(field(StorageType::Val(rt(false, T_VALS)), true));
     array_fields.push(field(StorageType::Val(ValType::I32), true));
+    // Element attributes (T32): null while every element has the default ones.
+    array_fields.push(field(StorageType::Val(rt(true, T_BYTES)), true));
     let mut function_fields = object_fields.clone();
     function_fields.push(field(StorageType::Val(rt(false, T_CODE)), false));
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));

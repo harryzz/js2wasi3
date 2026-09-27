@@ -1,6 +1,6 @@
 # T32: `Object.defineProperty` on arrays (accessor elements, element attributes, `length`)
 
-Status: todo (proposed) | Depends on: T16 (attributes, accessors), T21 (array methods in the prelude)
+Status: done | Depends on: T16 (attributes, accessors), T21 (array methods in the prelude)
 
 ## Goal
 Arrays take any property descriptor on their indices and on `length`, like node (F145). Today an `$array` has no
@@ -53,12 +53,55 @@ One fixture per slice in `tests/fixtures/builtins/` (`scripts/diff.sh`), plus th
 paths change), `cargo test`, `wasm-tools validate` + one wasmtime run. test262 as in slice 4.
 
 ## Checklist
-- [ ] Slice 1: element attributes and accessors, `defineProperty`/descriptors on indices
-- [ ] Slice 2: native methods, iteration, printing, keys, delete on such arrays
-- [ ] Slice 3: `length` (ArraySetLength, non-writable)
-- [ ] Slice 4: test262 rerun, follow-ups, baseline
+- [x] Slice 1: element attributes and accessors, `defineProperty`/descriptors on indices
+- [x] Slice 2: native methods, iteration, printing, keys, delete on such arrays
+- [x] Slice 3: `length` (ArraySetLength, non-writable)
+- [x] Slice 4: test262 rerun, follow-ups, baseline
 
 ## Notes / Result
+**What changed**
+- `$array` has `eattrs: mut (ref null $bytes)` (`array::F_EATTRS`): each element's `HIDDEN`/`READONLY`/`FIXED`/
+  `ACCESSOR` bits, null while all are default; an accessor element's slot holds its `$accessor` (like the
+  dictionary part). New `class` flag `object::LENGTH_READONLY` (0x800). Array helpers: `Attrs` (with `SEALED`/`FROZEN`
+  folded in), `SetAttrs` (makes/grows `eattrs` only for non-default bits), `Resize` (shrinking stops at a
+  non-configurable element: keeps up to it, then node's "Cannot delete property 'k' of [object Array]").
+- `Object.defineProperty` (`props.rs`): the ValidateAndApplyPropertyDescriptor code is generated for both storages
+  (`validate`/`apply` over a dictionary entry or an array element), so indices follow the object rules; a new
+  element gets absent attributes false (holes before it). `length` is ArraySetLength: ToUint32 and ToNumber
+  (two conversions) and the RangeError before the other checks; never configurable/enumerable/accessor;
+  `writable: false` is applied even when a shrink fails. `getOwnPropertyDescriptor` reports real element and
+  `length` attributes.
+- Writes: `set_index` (every `a[i] = v`, `push`) calls an accessor element's setter (node's "only a getter"
+  TypeError), rejects read-only elements and growth past a read-only `length`; `a.length = v` converts twice too;
+  `push()`/`pop()` throw on a read-only/frozen `length` even when nothing changes.
+- Reads resolve accessor elements with `props::Value`: the `get` fast path, native `join`/`pop`, the iterator's
+  array fast path (so spread, `for-of`, destructuring); `console.log` prints `[Getter]`/`[Setter]`/
+  `[Getter/Setter]` and, like node's `formatSpecialArray`, shows non-enumerable elements after the first hole as
+  holes. `delete`/`pop` honour non-configurable elements; `Object.keys`/`for-in` skip non-enumerable elements
+  (`IndexKeys` takes `all`).
+- F157: `tests/fixtures/async/for-await-order.js` split (the error cases are `for-await-errors.js`): it fails only
+  under wasmtime's copying collector at certain heap states (see F157).
+
+**Tests**: fixtures `tests/fixtures/builtins/array-define.js`, `array-length.js` (= node); `diff.sh` arrays,
+builtins, objects, classes (53 pass); whole `diff.sh`: 109 pass, 1 fail under load (`async/timers-more.js`, a
+timer fixture; passes 3/3 alone); `cargo test`; the fixtures validate; wasmtime smoke run.
+
+**test262**: all of `built-ins/Array`, `built-ins/JSON`, `language/statements/for-of`, `language/expressions/array`
+(4,050 tests, 1,299 s at -j 4, `--update`): 237 fail → pass, no regressions; then 4 more (`push`/`pop` setting a
+read-only length). Subset: 21,716 of 24,820 run pass (87.5%, was 86.5%); `built-ins/Array` 83.5% (was 75.6%).
+Left in `built-ins/Array`: `push`/`pop`/`join` on non-arrays and species (F108), holes not looking up the
+prototype in the native paths (F159), indices ≥ 2^26 (no sparse arrays, F160), `Proxy`/`Reflect`/`Function`/
+`globalThis` (F151, F152).
+
+**Unsupported**: CreateDataProperty on an existing accessor or read-only element (`object::Helper::Define` shares
+`set_index`, so it calls the setter / throws instead of redefining; F161).
+
+**Next smallest step**: no task is proposed; candidates: F159 (holes → prototype chain in the native paths),
+F108 (generic `push`/`pop`/`join`).
 
 ## Progress
 - 2026-09-27: task written as a proposal after T30 (213 test262 failures). Not started.
+- 2026-09-27: approved; started slice 1 (reading array.rs, props.rs).
+- 2026-09-27: slice 1 in progress: `$array` got `eattrs` (F_EATTRS=9, nullable $bytes), `LENGTH_READONLY` class flag 0x800; array helpers Attrs/SetAttrs/Resize; set_index calls accessor setters, rejects read-only elements and growth past a read-only length; set_length converts twice (ArraySetLength) and Resize stops at non-configurable elements.
+- 2026-09-27: slices 1–3 implemented: defineProperty on indices shares ValidateAndApply with objects (storage-parametrized `validate`/`apply` in props.rs), `length` via ArraySetLength (2 conversions, RangeError first, LENGTH_READONLY, Resize), getOwnPropertyDescriptor from real element attrs; readers resolve accessor elements (get fast path, join, pop, iterator, inspect [Getter]); delete/pop honour FIXED; IndexKeys(all) hides non-enumerable; inspect treats hidden elements as holes after the first hole (node's formatSpecialArray). Fixtures builtins/array-define.js, array-length.js pass.
+- 2026-09-27: slice 4: test262 (4,050 tests) 237 fail → pass, 0 regressions; push()/pop() on read-only length +4. diff.sh whole: only a timer fixture under load. Task done.

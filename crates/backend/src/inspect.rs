@@ -515,6 +515,8 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     let concat = cx.helper(runtime::Helper::Concat);
     let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
     let is_number = cx.helper(runtime::Helper::IsNumber);
+    let labels = accessor_labels(cx);
+    let elem_attrs = cx.helper(runtime::Helper::Arr(array::Helper::Attrs));
     let (open, close, deep) = (cx.str("["), cx.str("]"), cx.str("[Array]"));
     let (lt, item, items) = (cx.str("<"), cx.str(" empty item>"), cx.str(" empty items>"));
     const A: u32 = 0;
@@ -528,11 +530,13 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     const OUT: u32 = 8;
     const E: u32 = 9;
     const EXTRA: u32 = 10;
+    const SPECIAL: u32 = 11;
     let mut f = Function::new([
         (5, ValType::I32),
         (1, rt(true, T_KEYS)),
         (1, jsval()),
         (1, rt(true, T_KEYS)),
+        (1, ValType::I32),
     ]);
     let mut s = f.instructions();
     // Too deep (node: only when there is something to show).
@@ -567,19 +571,44 @@ fn format_array(cx: &mut dyn Cx) -> Function {
             .local_get(idx)
             .array_get(T_VALS);
     };
+    // Is element `idx` shown as a hole? After the first hole node lists the elements by
+    // `Object.keys` (`formatSpecialArray`), so from there a non-enumerable one is a hole too (T32).
+    let hole = |s: &mut InstructionSink, idx: u32| {
+        elem(s, idx);
+        s.ref_is_null();
+        s.local_get(SPECIAL);
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(A)
+            .local_get(idx)
+            .call(elem_attrs)
+            .i32_const(object::HIDDEN)
+            .i32_and()
+            .i32_const(0)
+            .i32_ne();
+        s.else_();
+        s.i32_const(0);
+        s.end();
+        s.i32_or();
+    };
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
     s.local_get(N).i32_const(100).i32_ge_u().br_if(1);
     elem(&mut s, I);
-    s.local_tee(E).ref_is_null();
+    s.local_set(E);
+    hole(&mut s, I);
     s.if_(BlockType::Empty);
     {
         // A run of holes: `<k empty item(s)>`.
+        s.local_get(A)
+            .struct_get(T_ARRAY, array::F_EATTRS)
+            .ref_is_null()
+            .i32_eqz()
+            .local_set(SPECIAL);
         s.local_get(I).local_set(J);
         s.block(BlockType::Empty).loop_(BlockType::Empty);
         s.local_get(J).local_get(LEN).i32_ge_u().br_if(1);
-        elem(&mut s, J);
-        s.ref_is_null().i32_eqz().br_if(1);
+        hole(&mut s, J);
+        s.i32_eqz().br_if(1);
         s.local_get(J).i32_const(1).i32_add().local_set(J);
         s.br(0).end().end();
         s.i32_const(0).local_set(NUMBERS);
@@ -608,10 +637,16 @@ fn format_array(cx: &mut dyn Cx) -> Function {
         s.i32_const(0).local_set(NUMBERS);
         s.end();
         s.local_get(OUT).local_get(N);
+        // An accessor element (T32): `[Getter]` etc.
+        s.local_get(E).ref_test_non_null(props::accessor());
+        s.if_(BlockType::Result(string_ref()));
+        accessor_label(&mut s, labels, E);
+        s.else_();
         s.local_get(E);
         s.local_get(DEPTH).i32_const(1).i32_add();
         s.local_get(INDENT).i32_const(2).i32_add();
         s.i32_const(1).call(format);
+        s.end();
         s.array_set(T_KEYS);
         s.local_get(I).i32_const(1).i32_add().local_set(I);
     }
@@ -2001,6 +2036,35 @@ fn join(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// The globals of `[Getter]`, `[Setter]` and `[Getter/Setter]`.
+fn accessor_labels(cx: &mut dyn Cx) -> [u32; 3] {
+    [
+        cx.str("[Getter]"),
+        cx.str("[Setter]"),
+        cx.str("[Getter/Setter]"),
+    ]
+}
+
+/// Push how node shows the accessor in local `r` (a `$accessor`).
+fn accessor_label(s: &mut InstructionSink, [getter, setter, both]: [u32; 3], r: u32) {
+    let get = |s: &mut InstructionSink, field: u32| {
+        s.local_get(r)
+            .ref_cast_non_null(props::accessor())
+            .struct_get(runtime::T_ACCESSOR, field)
+            .global_get(runtime::G_UNDEFINED)
+            .ref_eq();
+    };
+    s.global_get(getter).global_get(setter);
+    get(s, 0);
+    s.i32_eqz();
+    s.typed_select(string_ref());
+    s.global_get(both);
+    get(s, 0);
+    get(s, 1);
+    s.i32_or();
+    s.typed_select(string_ref());
+}
+
 /// `$inspect_props(o, depth, indent, skip_indices)` (T25), see [`Helper::Props`].
 fn format_props(cx: &mut dyn Cx) -> Function {
     let format = ih(cx, Helper::Format);
@@ -2011,11 +2075,7 @@ fn format_props(cx: &mut dyn Cx) -> Function {
     let own = oh(cx, object::Helper::OwnGet);
     let index = oh(cx, object::Helper::ArrayIndex);
     let colon = cx.str(": ");
-    let (getter, setter, both) = (
-        cx.str("[Getter]"),
-        cx.str("[Setter]"),
-        cx.str("[Getter/Setter]"),
-    );
+    let labels = accessor_labels(cx);
     const O: u32 = 0;
     const DEPTH: u32 = 1;
     const INDENT: u32 = 2;
@@ -2046,29 +2106,7 @@ fn format_props(cx: &mut dyn Cx) -> Function {
             .local_tee(R);
         s.ref_test_non_null(props::accessor());
         s.if_(BlockType::Result(string_ref()));
-        {
-            s.global_get(getter).global_get(setter);
-            s.local_get(R)
-                .ref_cast_non_null(props::accessor())
-                .struct_get(runtime::T_ACCESSOR, 0)
-                .global_get(runtime::G_UNDEFINED)
-                .ref_eq()
-                .i32_eqz();
-            s.typed_select(string_ref());
-            s.global_get(both);
-            s.local_get(R)
-                .ref_cast_non_null(props::accessor())
-                .struct_get(runtime::T_ACCESSOR, 0)
-                .global_get(runtime::G_UNDEFINED)
-                .ref_eq()
-                .local_get(R)
-                .ref_cast_non_null(props::accessor())
-                .struct_get(runtime::T_ACCESSOR, 1)
-                .global_get(runtime::G_UNDEFINED)
-                .ref_eq()
-                .i32_or();
-            s.typed_select(string_ref());
-        }
+        accessor_label(s, labels, R);
         s.else_();
         s.local_get(R);
         s.local_get(DEPTH).i32_const(1).i32_add();

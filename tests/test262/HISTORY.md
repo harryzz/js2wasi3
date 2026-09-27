@@ -3,6 +3,25 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T32 `defineProperty` on arrays (targeted rerun)
+
+- Compiler: T32 (element attributes and accessor elements on `$array`, ArraySetLength, non-writable `length`).
+- Run: all of `built-ins/Array`, `built-ins/JSON`, `language/statements/for-of`, `language/expressions/array` (4,050
+  tests, 1,299 s at -j 4): 237 fail → pass, 0 regressions; then `built-ins/Array/prototype/{push,pop}` again: 4 more.
+
+| directory | pass | fail | unsupported | crash | timeout | skip | pass% |
+|---|---|---|---|---|---|---|---|
+| built-ins/Array | 2529 | 171 | 319 | 0 | 11 | 52 | 83.5% |
+| built-ins/JSON | 109 | 19 | 34 | 0 | 0 | 3 | 67.3% |
+| built-ins/Map | 134 | 10 | 23 | 0 | 2 | 35 | 79.3% |
+| built-ins/Math | 276 | 2 | 39 | 0 | 0 | 10 | 87.1% |
+| built-ins/Promise | 406 | 186 | 39 | 0 | 8 | 93 | 63.5% |
+| built-ins/Set | 311 | 16 | 53 | 0 | 1 | 2 | 81.6% |
+| built-ins/String | 890 | 101 | 226 | 0 | 0 | 6 | 73.1% |
+| language/expressions | 8843 | 165 | 1067 | 0 | 0 | 1089 | 87.8% |
+| language/statements | 8218 | 107 | 504 | 0 | 1 | 520 | 93.1% |
+| **total** | **21716** | **777** | **2304** | **0** | **23** | **1810** | **87.5%** |
+
 ## 2026-09-27: T31 class features (targeted rerun)
 
 - Compiler: T31 (private getters/setters, computed class field keys, `static {}` blocks, `o?.#x`; ToPropertyKey of

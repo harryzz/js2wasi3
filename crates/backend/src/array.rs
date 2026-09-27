@@ -7,6 +7,12 @@
 //! object helpers ask [`Helper::OwnGet`] / [`Helper::Define`] here first. Indices at or past
 //! [`MAX_DENSE`] trap (there is no sparse storage yet).
 //!
+//! `eattrs: mut (ref null $bytes)` (T32) holds each element's attribute bits (`crate::object`'s
+//! `HIDDEN`, `READONLY`, `FIXED`, `ACCESSOR`); null (the usual case) or past its end means the default
+//! ones. An accessor element's slot holds its `$accessor`, as in the dictionary part, so a reader
+//! of `elems` that may meet one resolves it with `props::Helper::Value`. The `class` flags
+//! `SEALED`/`FROZEN` apply to every element on top of these, and `LENGTH_READONLY` to `length`.
+//!
 //! # Array.prototype
 //! Built like the other prototypes (`crate::object`), with real `push`, `pop`, `join` and
 //! `toString`; the other methods are sentinels (T21).
@@ -23,6 +29,7 @@ use crate::runtime::{
 /// `$array` field indices after the object's.
 pub const F_ELEMS: u32 = 7;
 pub const F_LENGTH: u32 = 8;
+pub const F_EATTRS: u32 = 9;
 
 /// Indices from here on trap.
 pub const MAX_DENSE: i32 = 1 << 26;
@@ -52,7 +59,8 @@ pub enum Helper {
     Push,
     /// `(a: (ref $array), sep: (ref $string)) -> (ref $string)`: `a.join(sep)`.
     Join,
-    /// `(a: (ref $array)) -> (ref $keys)`: the keys of the elements that aren't holes, ascending.
+    /// `(a: (ref $array), all: i32) -> (ref $keys)`: the keys of the elements that aren't holes,
+    /// ascending (without `all`, only the enumerable ones).
     IndexKeys,
     /// The code (a `$code`) of `Array.prototype.push`.
     ProtoPush,
@@ -64,6 +72,13 @@ pub enum Helper {
     ProtoToString,
     /// `(args: jsval (a `$vals`), k: i32) -> jsval`: a new array of `args[k..]` (rest parameters).
     FromArgs,
+    /// `(a: (ref $array), i: i32) -> i32`: element `i`'s attribute bits, `SEALED`/`FROZEN` included.
+    Attrs,
+    /// `(a: (ref $array), i: i32, attrs: i32)`: set element `i`'s attribute bits.
+    SetAttrs,
+    /// `(a: (ref $array), len: i32)`: set a valid length (shrinking stops at an element that isn't
+    /// configurable, with a TypeError).
+    Resize,
 }
 
 impl Helper {
@@ -82,6 +97,9 @@ impl Helper {
             Helper::ProtoJoin => "Array.prototype.join",
             Helper::ProtoToString => "Array.prototype.toString",
             Helper::FromArgs => "array_from_args",
+            Helper::Attrs => "array_attrs",
+            Helper::SetAttrs => "array_set_attrs",
+            Helper::Resize => "array_resize",
         }
     }
 
@@ -96,11 +114,14 @@ impl Helper {
             Helper::SetIndex => (vec![a, ValType::I32, v], vec![]),
             Helper::SetLength | Helper::Push => (vec![a, v], vec![]),
             Helper::Join => (vec![a, s], vec![s]),
-            Helper::IndexKeys => (vec![a], vec![rt(false, T_KEYS)]),
+            Helper::IndexKeys => (vec![a, ValType::I32], vec![rt(false, T_KEYS)]),
             Helper::ProtoPush | Helper::ProtoPop | Helper::ProtoJoin | Helper::ProtoToString => {
                 (vec![v, v, v], vec![v])
             }
             Helper::FromArgs => (vec![v, ValType::I32], vec![v]),
+            Helper::Attrs => (vec![a, ValType::I32], vec![ValType::I32]),
+            Helper::SetAttrs => (vec![a, ValType::I32, ValType::I32], vec![]),
+            Helper::Resize => (vec![a, ValType::I32], vec![]),
         }
     }
 
@@ -119,6 +140,9 @@ impl Helper {
             Helper::ProtoJoin => proto_join(cx),
             Helper::ProtoToString => proto_to_string(cx),
             Helper::FromArgs => from_args(cx),
+            Helper::Attrs => attrs(),
+            Helper::SetAttrs => set_attrs(),
+            Helper::Resize => resize(cx),
         }
     }
 }
@@ -152,7 +176,106 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.i32_const(0);
     s.ref_null(HeapType::Concrete(T_I32S));
     s.local_get(0).local_get(1);
+    s.ref_null(HeapType::Concrete(T_BYTES));
     s.struct_new(T_ARRAY);
+    s.end();
+    f
+}
+
+fn attrs() -> Function {
+    const A: u32 = 0;
+    const I: u32 = 1;
+    const B: u32 = 2;
+    const R: u32 = 3;
+    let mut f = Function::new([(1, rt(true, T_BYTES)), (1, ValType::I32)]);
+    let mut s = f.instructions();
+    // The class flags: sealed → FIXED, frozen → READONLY | FIXED.
+    s.i32_const(object::FIXED).i32_const(0);
+    s.local_get(A)
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::SEALED | object::FROZEN)
+        .i32_and();
+    s.select();
+    s.i32_const(object::READONLY).i32_const(0);
+    s.local_get(A)
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::FROZEN)
+        .i32_and();
+    s.select();
+    s.i32_or().local_set(R);
+    s.local_get(A).struct_get(T_ARRAY, F_EATTRS).local_tee(B);
+    s.ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(I)
+        .local_get(B)
+        .ref_as_non_null()
+        .array_len()
+        .i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(B)
+        .ref_as_non_null()
+        .local_get(I)
+        .array_get_u(T_BYTES)
+        .local_get(R)
+        .i32_or()
+        .local_set(R);
+    s.end();
+    s.end();
+    s.local_get(R);
+    s.end();
+    f
+}
+
+/// Store element attributes, making or growing `eattrs` (to the store's capacity) when needed.
+fn set_attrs() -> Function {
+    const A: u32 = 0;
+    const I: u32 = 1;
+    const V: u32 = 2;
+    const B: u32 = 3;
+    const NEW: u32 = 4;
+    let mut f = Function::new([(2, rt(true, T_BYTES))]);
+    let mut s = f.instructions();
+    s.local_get(A).struct_get(T_ARRAY, F_EATTRS).local_set(B);
+    s.local_get(B).ref_is_null();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(1);
+    s.else_();
+    s.local_get(I)
+        .local_get(B)
+        .ref_as_non_null()
+        .array_len()
+        .i32_ge_u();
+    s.end();
+    s.if_(BlockType::Empty);
+    // Default attributes need no store.
+    s.local_get(V).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.local_get(A).struct_get(T_ARRAY, F_ELEMS).array_len();
+    s.local_get(I).i32_const(1).i32_add();
+    s.local_get(A).struct_get(T_ARRAY, F_ELEMS).array_len();
+    s.local_get(I).i32_const(1).i32_add();
+    s.i32_gt_u();
+    s.select();
+    s.array_new_default(T_BYTES).local_set(NEW);
+    s.local_get(B).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(NEW).ref_as_non_null().i32_const(0);
+    s.local_get(B).ref_as_non_null().i32_const(0);
+    s.local_get(B).ref_as_non_null().array_len();
+    s.array_copy(T_BYTES, T_BYTES);
+    s.end();
+    s.local_get(A).local_get(NEW).struct_set(T_ARRAY, F_EATTRS);
+    s.local_get(NEW).local_set(B);
+    s.end();
+    s.local_get(B)
+        .ref_as_non_null()
+        .local_get(I)
+        .local_get(V)
+        .i32_const(object::HIDDEN | object::READONLY | object::FIXED | object::ACCESSOR)
+        .i32_and()
+        .array_set(T_BYTES);
     s.end();
     f
 }
@@ -283,16 +406,87 @@ fn set_index(cx: &mut dyn Cx) -> Function {
         cx.str("Cannot add property "),
         cx.str(", object is not extensible"),
     );
+    let attrs = ah(cx, Helper::Attrs);
+    let call_value = cx.helper(runtime::Helper::Func(crate::func::Helper::CallValue));
+    let setter = cx.str("setter");
+    let (set_prop, only_getter) = (
+        cx.str("Cannot set property "),
+        cx.str(" of [object Array] which has only a getter"),
+    );
+    let length_read_only =
+        cx.str("Cannot assign to read only property 'length' of object '[object Array]'");
     const A: u32 = 0;
     const I: u32 = 1;
     const V: u32 = 2;
     const CAP: u32 = 3;
     const NEW: u32 = 4;
-    let mut f = Function::new([(1, ValType::I32), (1, rt(true, T_VALS))]);
+    const T: u32 = 5;
+    const X: u32 = 6;
+    let mut f = Function::new([
+        (1, ValType::I32),
+        (1, rt(true, T_VALS)),
+        (1, ValType::I32),
+        (1, jsval()),
+    ]);
     let mut s = f.instructions();
     s.local_get(I).i32_const(MAX_DENSE).i32_ge_u();
     s.if_(BlockType::Empty);
     s.unreachable();
+    s.end();
+    // Element attributes (T32): an accessor's setter, a read-only element; past the end, a
+    // read-only `length`.
+    s.local_get(I)
+        .local_get(A)
+        .struct_get(T_ARRAY, F_LENGTH)
+        .i32_lt_u();
+    s.if_(BlockType::Empty);
+    {
+        s.local_get(A)
+            .struct_get(T_ARRAY, F_EATTRS)
+            .ref_is_null()
+            .i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(A).local_get(I).call(attrs).local_tee(T);
+        s.i32_const(object::ACCESSOR).i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(A)
+            .struct_get(T_ARRAY, F_ELEMS)
+            .local_get(I)
+            .array_get(T_VALS)
+            .ref_cast_non_null(HeapType::Concrete(runtime::T_ACCESSOR))
+            .struct_get(runtime::T_ACCESSOR, 1)
+            .local_tee(X);
+        s.global_get(G_UNDEFINED).ref_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(set_prop);
+        s.local_get(I).f64_convert_i32_u().call(number_to_string);
+        s.call(concat);
+        s.global_get(only_getter).call(concat);
+        s.call(throw);
+        s.end();
+        s.local_get(X).local_get(A);
+        s.local_get(V).array_new_fixed(T_VALS, 1);
+        s.global_get(setter).call(call_value).drop();
+        s.return_();
+        s.end();
+        s.local_get(T).i32_const(object::READONLY).i32_and();
+        s.if_(BlockType::Empty);
+        s.global_get(read_only);
+        s.local_get(I).f64_convert_i32_u().call(number_to_string);
+        s.call(concat);
+        s.global_get(of_array).call(concat);
+        s.call(throw);
+        s.end();
+        s.end();
+    }
+    s.else_();
+    s.local_get(A)
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::LENGTH_READONLY)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(length_read_only).call(throw);
+    s.end();
     s.end();
     // Frozen: elements are read-only; not extensible: no new elements (T16).
     s.local_get(A)
@@ -357,58 +551,139 @@ fn set_index(cx: &mut dyn Cx) -> Function {
 
 fn set_length(cx: &mut dyn Cx) -> Function {
     let to_number = cx.helper(runtime::Helper::ToNumber);
+    let to_int32 = cx.to_int32();
+    let resize = ah(cx, Helper::Resize);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::RangeError));
     let invalid = cx.str("Invalid array length");
     const A: u32 = 0;
     const V: u32 = 1;
     const N: u32 = 2;
-    const L: u32 = 3;
-    const NEW: u32 = 4;
+    const N2: u32 = 3;
     let type_error = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
     let read_only =
         cx.str("Cannot assign to read only property 'length' of object '[object Array]'");
-    let mut f = Function::new([(1, ValType::F64), (1, ValType::I32), (1, rt(true, T_VALS))]);
+    let mut f = Function::new([(2, ValType::F64)]);
     let mut s = f.instructions();
     s.local_get(A)
         .struct_get(T_ARRAY, object::F_CLASS)
-        .i32_const(object::FROZEN)
+        .i32_const(object::FROZEN | object::LENGTH_READONLY)
         .i32_and();
     s.if_(BlockType::Empty);
     s.global_get(read_only).call(type_error);
     s.end();
-    s.local_get(V).call(to_number).local_tee(N);
-    // A valid length: an integer in [0, 2^32).
-    s.local_get(N).f64_trunc().f64_ne();
-    s.local_get(N).f64_const(0.0.into()).f64_lt().i32_or();
-    s.local_get(N)
-        .f64_const(4294967296.0.into())
-        .f64_ge()
-        .i32_or();
+    // ArraySetLength: ToUint32(v) must equal ToNumber(v) (two conversions, as the spec does).
+    s.local_get(V).call(to_number).local_set(N);
+    s.local_get(V).call(to_number).local_set(N2);
+    s.local_get(N).call(to_int32).f64_convert_i32_u();
+    s.local_get(N2).f64_ne();
     s.if_(BlockType::Empty);
     s.global_get(invalid).call(throw);
     s.end();
-    s.local_get(N).f64_const((MAX_DENSE as f64).into()).f64_gt();
+    s.local_get(A).local_get(N2).i32_trunc_f64_u().call(resize);
+    s.end();
+    f
+}
+
+/// `(a, len: i32)`: set the length (a valid one): shrinking deletes from the end and stops,
+/// with node's TypeError, at an element that isn't configurable; growing grows the store.
+fn resize(cx: &mut dyn Cx) -> Function {
+    let this = ah(cx, Helper::Resize);
+    let attrs = ah(cx, Helper::Attrs);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let type_error = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let (cannot, of_array) = (
+        cx.str("Cannot delete property '"),
+        cx.str("' of [object Array]"),
+    );
+    const A: u32 = 0;
+    const L: u32 = 1;
+    const NEW: u32 = 2;
+    const K: u32 = 3;
+    const B: u32 = 4;
+    let mut f = Function::new([
+        (1, rt(true, T_VALS)),
+        (1, ValType::I32),
+        (1, rt(true, T_BYTES)),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(L).i32_const(MAX_DENSE).i32_gt_u();
     s.if_(BlockType::Empty);
     s.unreachable(); // sparse arrays aren't implemented
     s.end();
-    s.local_get(N).i32_trunc_f64_u().local_set(L);
-    // Shrinking: clear the dropped elements. Growing past the capacity: grow the store.
     s.local_get(L)
         .local_get(A)
         .struct_get(T_ARRAY, F_LENGTH)
         .i32_lt_u();
     s.if_(BlockType::Empty);
-    s.local_get(A).struct_get(T_ARRAY, F_ELEMS);
-    s.local_get(L);
-    s.ref_null(HeapType::Abstract {
-        shared: false,
-        ty: wasm_encoder::AbstractHeapType::Eq,
-    });
-    s.local_get(A)
-        .struct_get(T_ARRAY, F_LENGTH)
-        .local_get(L)
-        .i32_sub();
-    s.array_fill(T_VALS);
+    {
+        // Elements that aren't configurable stop the deletion (T32).
+        s.local_get(A).struct_get(T_ARRAY, F_EATTRS).ref_is_null().i32_eqz();
+        s.local_get(A)
+            .struct_get(T_ARRAY, object::F_CLASS)
+            .i32_const(object::SEALED | object::FROZEN)
+            .i32_and();
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.local_get(A).struct_get(T_ARRAY, F_LENGTH).local_set(K);
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(K).local_get(L).i32_le_u().br_if(1);
+        s.local_get(A)
+            .struct_get(T_ARRAY, F_ELEMS)
+            .local_get(K)
+            .i32_const(1)
+            .i32_sub()
+            .array_get(T_VALS)
+            .ref_is_null()
+            .i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(A)
+            .local_get(K)
+            .i32_const(1)
+            .i32_sub()
+            .call(attrs)
+            .i32_const(object::FIXED)
+            .i32_and();
+        s.if_(BlockType::Empty);
+        // Keep the elements up to this one, then throw.
+        s.local_get(A).local_get(K).call(this);
+        s.global_get(cannot);
+        s.local_get(K)
+            .i32_const(1)
+            .i32_sub()
+            .f64_convert_i32_u()
+            .call(number_to_string);
+        s.call(concat);
+        s.global_get(of_array).call(concat);
+        s.call(type_error);
+        s.end();
+        s.end();
+        s.local_get(K).i32_const(1).i32_sub().local_set(K);
+        s.br(0).end().end();
+        s.end();
+        s.local_get(A).struct_get(T_ARRAY, F_ELEMS);
+        s.local_get(L);
+        s.ref_null(HeapType::Abstract {
+            shared: false,
+            ty: wasm_encoder::AbstractHeapType::Eq,
+        });
+        s.local_get(A)
+            .struct_get(T_ARRAY, F_LENGTH)
+            .local_get(L)
+            .i32_sub();
+        s.array_fill(T_VALS);
+        // The dropped elements' attributes.
+        s.local_get(A).struct_get(T_ARRAY, F_EATTRS).local_tee(B);
+        s.ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(L).local_get(B).ref_as_non_null().array_len().i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(B).ref_as_non_null().local_get(L).i32_const(0);
+        s.local_get(B).ref_as_non_null().array_len().local_get(L).i32_sub();
+        s.array_fill(T_BYTES);
+        s.end();
+        s.end();
+    }
     s.end();
     s.local_get(L)
         .local_get(A)
@@ -445,6 +720,7 @@ fn push(cx: &mut dyn Cx) -> Function {
 /// `join`: `undefined`/`null`/holes are empty, others ToString.
 fn join(cx: &mut dyn Cx) -> Function {
     let to_string = cx.helper(runtime::Helper::ToString);
+    let value = cx.helper(runtime::Helper::Prop(crate::props::Helper::Value));
     let is_nullish = cx.helper(runtime::Helper::IsNullish);
     let empty = cx.str("");
     const A: u32 = 0;
@@ -486,6 +762,8 @@ fn join(cx: &mut dyn Cx) -> Function {
         .local_tee(E);
     s.ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
+    // An accessor element (T32): its getter's value.
+    s.local_get(E).local_get(A).call(value).local_set(E);
     s.local_get(E).call(is_nullish).i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(E).call(to_string).local_set(P);
@@ -562,12 +840,19 @@ fn join(cx: &mut dyn Cx) -> Function {
 
 fn index_keys(cx: &mut dyn Cx) -> Function {
     let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+    let attrs = ah(cx, Helper::Attrs);
     const A: u32 = 0;
-    const I: u32 = 1;
-    const N: u32 = 2;
-    const OUT: u32 = 3;
-    let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_KEYS))]);
+    const ALL: u32 = 1;
+    const I: u32 = 2;
+    const N: u32 = 3;
+    const OUT: u32 = 4;
+    const HID: u32 = 5;
+    let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_KEYS)), (1, ValType::I32)]);
     let mut s = f.instructions();
+    // Non-enumerable elements (T32) are possible only with element attributes.
+    s.local_get(ALL).i32_eqz();
+    s.local_get(A).struct_get(T_ARRAY, F_EATTRS).ref_is_null().i32_eqz();
+    s.i32_and().local_set(HID);
     let elem = |s: &mut InstructionSink| {
         s.local_get(A)
             .struct_get(T_ARRAY, F_ELEMS)
@@ -575,6 +860,21 @@ fn index_keys(cx: &mut dyn Cx) -> Function {
             .array_get(T_VALS)
             .ref_is_null()
             .i32_eqz();
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(HID);
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(A)
+            .local_get(I)
+            .call(attrs)
+            .i32_const(object::HIDDEN)
+            .i32_and()
+            .i32_eqz();
+        s.else_();
+        s.i32_const(1);
+        s.end();
+        s.else_();
+        s.i32_const(0);
+        s.end();
     };
     // Count the elements, then fill.
     s.block(BlockType::Empty).loop_(BlockType::Empty);
@@ -628,6 +928,9 @@ fn args_len(s: &mut InstructionSink) {
 
 fn proto_push(cx: &mut dyn Cx) -> Function {
     let push = ah(cx, Helper::Push);
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let length_read_only =
+        cx.str("Cannot assign to read only property 'length' of object '[object Array]'");
     const I: u32 = 3;
     const N: u32 = 4;
     let mut f = Function::new([(2, ValType::I32)]);
@@ -645,6 +948,15 @@ fn proto_push(cx: &mut dyn Cx) -> Function {
     s.call(push);
     s.local_get(I).i32_const(1).i32_add().local_set(I);
     s.br(0).end().end();
+    // Then `length` is set: a read-only one throws even with nothing pushed (T32).
+    s.local_get(1)
+        .ref_cast_non_null(array())
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::LENGTH_READONLY | object::FROZEN)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(length_read_only).call(throw);
+    s.end();
     s.local_get(1)
         .ref_cast_non_null(array())
         .struct_get(T_ARRAY, F_LENGTH)
@@ -661,6 +973,11 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
         cx.str("Cannot delete property '"),
         cx.str("' of [object Array]"),
     );
+    let value = cx.helper(runtime::Helper::Prop(crate::props::Helper::Value));
+    let attrs = ah(cx, Helper::Attrs);
+    let set_attrs = ah(cx, Helper::SetAttrs);
+    let length_read_only =
+        cx.str("Cannot assign to read only property 'length' of object '[object Array]'");
     const L: u32 = 3;
     const V: u32 = 4;
     let mut f = Function::new([(1, ValType::I32), (1, jsval())]);
@@ -672,15 +989,31 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
         .local_tee(L)
         .i32_eqz();
     s.if_(BlockType::Empty);
-    s.global_get(G_UNDEFINED).return_();
-    s.end();
-    s.local_get(L).i32_const(1).i32_sub().local_set(L);
-    // A sealed or frozen array's elements can't be deleted (T16).
+    // `length` is still set (to 0): a read-only one throws (T32).
     s.local_get(1)
         .ref_cast_non_null(array())
         .struct_get(T_ARRAY, object::F_CLASS)
-        .i32_const(object::SEALED)
+        .i32_const(object::LENGTH_READONLY | object::FROZEN)
         .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(length_read_only).call(throw);
+    s.end();
+    s.global_get(G_UNDEFINED).return_();
+    s.end();
+    s.local_get(L).i32_const(1).i32_sub().local_set(L);
+    // Get the last element (an accessor's getter, T32), then delete it: not when it isn't
+    // configurable (sealed, frozen or by its attributes); then the new length.
+    s.local_get(1)
+        .ref_cast_non_null(array())
+        .struct_get(T_ARRAY, F_ELEMS)
+        .local_get(L)
+        .array_get(T_VALS)
+        .local_tee(V);
+    s.ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(V).local_get(1).call(value).local_set(V);
+    s.local_get(1).ref_cast_non_null(array()).local_get(L).call(attrs);
+    s.i32_const(object::FIXED).i32_and();
     s.if_(BlockType::Empty);
     s.global_get(cannot);
     s.local_get(L).f64_convert_i32_u().call(number_to_string);
@@ -688,12 +1021,15 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
     s.global_get(of_array).call(concat);
     s.call(throw);
     s.end();
+    s.end();
     s.local_get(1)
         .ref_cast_non_null(array())
-        .struct_get(T_ARRAY, F_ELEMS)
-        .local_get(L)
-        .array_get(T_VALS)
-        .local_set(V);
+        .struct_get(T_ARRAY, object::F_CLASS)
+        .i32_const(object::LENGTH_READONLY | object::FROZEN)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.global_get(length_read_only).call(throw);
+    s.end();
     s.local_get(1)
         .ref_cast_non_null(array())
         .struct_get(T_ARRAY, F_ELEMS)
@@ -703,6 +1039,7 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
         ty: wasm_encoder::AbstractHeapType::Eq,
     });
     s.array_set(T_VALS);
+    s.local_get(1).ref_cast_non_null(array()).local_get(L).i32_const(0).call(set_attrs);
     s.local_get(1)
         .ref_cast_non_null(array())
         .local_get(L)
