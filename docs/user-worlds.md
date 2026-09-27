@@ -16,8 +16,84 @@ The vendored WASI 0.3.1 packages can be imported by the world (`import wasi:cloc
 Each function the world exports needs a JS export whose name is its camelCase form (`make-point` →
 `export function makePoint`), or a string export name (`export { f as "make-point" }`). The compiler reports a
 world export without a JS function, a JS export the world doesn't have, a parameter-count mismatch, and an
-`async func` that isn't an `async function` (or the other way round). Interface exports and imports aren't
-supported yet.
+`async func` that isn't an `async function` (or the other way round).
+
+## Exporting an interface
+
+A world that exports an interface (`export host;`, `export acme:demo/host;`) is implemented, as in jco, by an
+exported object named after the interface in camelCase, whose keys are its functions in camelCase:
+
+```js
+function add(a, b) { return a + b; }
+export const host = {
+  add,                                   // a top-level function
+  greet(name) { return `hello ${name}`; }, // a method
+  parse: function (s) { return Number(s); },
+};
+```
+
+Every function of the interface needs a key, and every key must be a function of the interface. The object
+itself isn't a JS value (other code can't use `host`), and its methods can't use `this` or `arguments` (F130).
+
+## Importing an interface
+
+A world that imports an interface makes its functions importable by their camelCase names, from the interface's
+name with or without its version:
+
+```wit
+package acme:demo@0.1.0;
+
+interface host {
+  greet: func(name: string) -> string;
+  parse: func(s: string) -> result<u32, string>;
+}
+
+world app {
+  import host;
+  export run: func() -> string;
+}
+```
+
+```js
+import { greet, parse } from "acme:demo/host";   // or "acme:demo/host@0.1.0"
+
+export function run() {
+  try {
+    return greet("js") + parse("x");
+  } catch (e) {
+    return e.message;                            // "not a number: x", e.payload the same
+  }
+}
+```
+
+Arguments convert like an export's results (missing ones are `undefined`), and results arrive in the JS shapes
+of the table below. An import whose result is a `result<T, E>` returns its `ok` value and throws its `err` as
+jco's `ComponentError` does: an `Error` whose `payload` is the value and whose message is the value if it's a
+string, else `String(value) + " (see error.payload)"`. Only named imports of an interface's functions are
+supported (no `import * as`, no world-level `import f: func()`: F131).
+
+An `async func` import returns a promise, settled when the call finishes (a `result`'s `err` rejects it with
+the `ComponentError`). Several can run at once, and they run while the module's own timers do. Something must
+wait for them, so the world needs an `async func` export: the export's call keeps going until its promise
+settles, handling import completions and timers meanwhile.
+
+```js
+import { fetch } from "acme:demo/slow";          // fetch: async func(n: u32) -> list<u8>
+
+export async function go(n) {                    // go: async func(n: u32) -> string
+  const [a, b] = await Promise.all([fetch(n), fetch(n + 1)]);
+  return `${a.length} ${b.length}`;
+}
+```
+
+Compose the result with a component that exports the interface, e.g. one built from JS as above:
+
+```sh
+js2wasi3 build provider.js --wit world.wit --world provider -o provider.wasm
+js2wasi3 build app.js --wit world.wit --world app -o app.wasm
+wac plug app.wasm --plug provider.wasm -o composed.wasm
+wasmtime run --invoke 'run()' composed.wasm
+```
 
 ## Types
 
@@ -115,5 +191,7 @@ A module with timers needs `import wasi:clocks/monotonic-clock@0.3.1;` in its wo
 
 - `option<option<T>>`: `some(none)` and `none` are both `undefined` (F127).
 - 64-bit integers are numbers, not BigInts; integer results wrap instead of being range-checked (F124).
-- Resources, `future`, `stream`, interface exports and imports: not yet (T20 slices 5–6).
+- Resources, `future`, `stream`: not yet (T20 slice 6 for `future`/`stream`).
+- An `async func` import still pending when the export's promise settles finishes during a later async call
+  (F133).
 - Rest parameters in exported functions are rejected (F55).

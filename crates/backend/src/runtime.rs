@@ -195,6 +195,11 @@ pub trait Cx {
     fn to_int32(&mut self) -> u32;
     /// The host imports (commands; libraries with async exports, T20).
     fn imports(&mut self) -> crate::host::Imports;
+    /// A user world's import `i` (T20 slice 5): its function index, signature and unwrap
+    /// function (a top-level `result`).
+    fn user_import(&mut self, i: u32) -> (u32, js2wasi3_ir::AbiSig, Option<u32>);
+    /// How many imports the user world has.
+    fn user_import_count(&mut self) -> u32;
     /// Does the library have top-level code (`init`, T20)?
     fn has_init(&mut self) -> bool;
     /// A library's `init`: its function index, whether it may throw (or leave a rejection), and

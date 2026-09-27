@@ -180,6 +180,15 @@ pub fn import_list(random: bool) -> Vec<Import> {
 }
 
 /// The host imports of a library whose async exports wait for timers (T20).
+/// A library's host imports for `async func` imports without timers (T20 slice 5b).
+pub const LIBRARY_WAIT_IMPORTS: [Import; 5] = [
+    Import::WaitableSetNew,
+    Import::WaitableJoin,
+    Import::SubtaskDrop,
+    Import::BackpressureInc,
+    Import::BackpressureDec,
+];
+
 pub const LIBRARY_TIMER_IMPORTS: [Import; 8] = [
     Import::WaitableSetNew,
     Import::WaitableJoin,

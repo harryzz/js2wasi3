@@ -139,7 +139,15 @@ world; its scalar types decide the boundary: numbers ToNumber, integers ToInt32 
 a throw traps. Slice 4b-1: `option`, `result` (at the top: return or throw, `E` by jco's `payload` rule),
 `tuple`, `record`, `enum`, `flags` with jco's JS shapes; `crates/backend/src/wit.rs` has the Canonical ABI
 flattening, layout and conversions. Slice 4b-2: `list<T>` ↔ an array (numeric element types up to 32 bits and `f64`: the typed
-array, `list<u8>` ↔ `Uint8Array`, as in jco), `variant` ↔ `{tag, val}`; params past 16 flat values come in memory. User guide: [user-worlds.md](user-worlds.md).)
+array, `list<u8>` ↔ `Uint8Array`, as in jco), `variant` ↔ `{tag, val}`; params past 16 flat values come in memory. Slice 5a: an imported interface's functions are ES imports
+(`import { f } from "ns:pkg/iface"`): each is an IR function `(jsval…) -> jsval` calling `Intrinsic::CallImport`,
+whose backend adapter (`abi::Helper::Import`) lowers the arguments as the params' tuple and lifts the result, then
+frees what it allocated (the bump pointer goes back); an interface export is `export const iface = { … }`, its
+functions exported as `ns:pkg/iface#f`. Slice 5b: an `async func` import is `[async-lower]`: its adapter
+gives a promise; a subtask that doesn't return at once joins the export call's waitable set and a pending table
+(`handle → [promise, return area, import]`), and the callback's `Event` settles it (lift, the import's unwrap
+function, resolve or reject); the call keeps waiting while imports are pending. User guide:
+[user-worlds.md](user-worlds.md).)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

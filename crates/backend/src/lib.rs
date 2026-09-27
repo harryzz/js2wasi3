@@ -101,7 +101,10 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         })
         .collect();
     // Linear memory: output buffers, strings and `result`s at the boundary.
-    let abi = adapted.iter().any(|x| abi::needs_memory(&x.sig)) || command.is_some();
+    // A user world's imports (T20 slice 5) pass their arguments in memory.
+    let abi = adapted.iter().any(|x| abi::needs_memory(&x.sig))
+        || command.is_some()
+        || !module.imports.is_empty();
     let mut types = TypeSection::new();
     if js {
         runtime::types(&mut types);
@@ -130,12 +133,18 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let lifted: Vec<&ir::Export> = adapted.iter().copied().filter(|x| x.sig.is_async).collect();
     // A library's timers run while an async export waits (T20).
     let lib_timers = !lifted.is_empty() && uses_timers(module);
+    // `async func` imports (T20 slice 5b) wait in the async export's waitable set.
+    let async_imports = module.imports.iter().any(|x| x.sig.is_async);
     let import_list = if lib_timers {
         host::LIBRARY_TIMER_IMPORTS.to_vec()
+    } else if async_imports && !lifted.is_empty() {
+        host::LIBRARY_WAIT_IMPORTS.to_vec()
     } else {
         import_list
     };
-    let func_base = import_list.len() as u32 + lifted.len() as u32;
+    // A user world's imports come after the host's (T20 slice 5).
+    let user_imports = import_list.len() as u32 + lifted.len() as u32;
+    let func_base = user_imports + module.imports.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let host_base = runtime::GLOBALS + abi as u32;
     let host_globals = if command.is_some() {
@@ -168,6 +177,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         next_type: type_base,
         global_base: if js { host_base + host_globals } else { 0 },
         bump: runtime::GLOBALS,
+        user_imports,
         host_base,
         func_base,
         type_ids: HashMap::new(),
@@ -191,13 +201,28 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut imports = ImportSection::new();
     for x in &lifted {
         let ty = e.type_id(abi::task_return_params(&x.sig), vec![]);
+        // An interface's function (`ns:pkg/iface#f`, T20 slice 5) returns through its interface.
+        let (module, name) = match x.name.split_once('#') {
+            Some((iface, f)) => (format!("[export]{iface}"), f),
+            None => ("[export]$root".to_string(), x.name.as_str()),
+        };
         imports.import(
-            "[export]$root",
-            &format!("[task-return]{}", x.name),
+            &module,
+            &format!("[task-return]{name}"),
             wasm_encoder::EntityType::Function(ty),
         );
     }
     host::imports(&mut imports, &import_list, &mut |p, r| e.type_id(p, r));
+    for x in &module.imports {
+        let (params, results) = abi::import_type(&x.sig);
+        let ty = e.type_id(params, results);
+        let name = if x.sig.is_async {
+            format!("[async-lower]{}", x.name)
+        } else {
+            x.name.clone()
+        };
+        imports.import(&x.module, &name, wasm_encoder::EntityType::Function(ty));
+    }
     // The exception tag (`runtime::TAG`) comes with the JS runtime.
     let mut tags = TagSection::new();
     if js {
@@ -411,6 +436,9 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     for (i, imp) in import_list.iter().enumerate() {
         let (module, field) = imp.names();
         fnames.append(lifted.len() as u32 + i as u32, &format!("{module}#{field}"));
+    }
+    for (i, x) in module.imports.iter().enumerate() {
+        fnames.append(user_imports + i as u32, &format!("{}#{}", x.module, x.name));
     }
     for (i, f) in module.functions.iter().enumerate() {
         fnames.append(func_base + i as u32, &f.name);
@@ -701,6 +729,8 @@ struct Emitter<'m> {
     global_base: u32,
     /// Global index of the ABI bump pointer (when there are string exports).
     bump: u32,
+    /// Function index of the user world's first import (T20 slice 5).
+    user_imports: u32,
     /// Global index of the first host global (commands).
     host_base: u32,
     /// Number of imported functions: the IR function `i` has index `func_base + i`.
@@ -842,6 +872,16 @@ impl runtime::Cx for Emitter<'_> {
             .filter(|m| m.proto == b)
             .map(|m| (m.key.clone(), base + m.code.0, m.length))
             .collect()
+    }
+
+    fn user_import(&mut self, i: u32) -> (u32, ir::AbiSig, Option<u32>) {
+        let x = &self.m.imports[i as usize];
+        let unwrap = x.unwrap.map(|f| self.func_base + f.0);
+        (self.user_imports + i, x.sig.clone(), unwrap)
+    }
+
+    fn user_import_count(&mut self) -> u32 {
+        self.m.imports.len() as u32
     }
 
     fn has_init(&mut self) -> bool {
@@ -1388,6 +1428,13 @@ impl Emitter<'_> {
                             .i32_wrap_i64();
                         return Ok(true);
                     }
+                    Intrinsic::CallImport(i) => {
+                        let h = self.helper_index(Helper::Js(runtime::Helper::Abi(
+                            abi::Helper::Import(*i),
+                        )));
+                        s.call(h);
+                        return Ok(true);
+                    }
                     Intrinsic::StrUnit => {
                         s.array_get_u(runtime::T_STRING);
                         return Ok(true);
@@ -1430,6 +1477,7 @@ impl Emitter<'_> {
                     | Intrinsic::F64Lo
                     | Intrinsic::F64FromWords
                     | Intrinsic::RandomSeed
+                    | Intrinsic::CallImport(_)
                     | Intrinsic::StrUnit
                     | Intrinsic::StrNew
                     | Intrinsic::StrSet

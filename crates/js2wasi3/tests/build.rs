@@ -670,6 +670,166 @@ fn user_world_lists_and_variants() {
 }
 
 #[test]
+fn user_world_imports_compose_with_wac() {
+    let dir = out_dir("imports");
+    let fx = fixture("library/imports");
+    let wit = fx.join("world.wit");
+    let (app, provider, composed) = (
+        dir.join("app.wasm"),
+        dir.join("provider.wasm"),
+        dir.join("composed.wasm"),
+    );
+    for (js, out, world) in [("provider.js", &provider, "provider"), ("app.js", &app, "app")] {
+        let b = build(
+            &fx.join(js),
+            out,
+            &["--wit", wit.to_str().unwrap(), "--world", world],
+        );
+        assert!(b.status.success(), "{js}: {}", String::from_utf8_lossy(&b.stderr));
+    }
+    // The provider's interface export works on its own.
+    assert_eq!(invoke(&provider, "greet(\"x\")"), "\"hello x\"");
+    let plug = Command::new("wac")
+        .arg("plug")
+        .arg(&app)
+        .arg("--plug")
+        .arg(&provider)
+        .arg("-o")
+        .arg(&composed)
+        .output()
+        .expect("wac is installed (TOOLS.md)");
+    assert!(plug.status.success(), "{}", String::from_utf8_lossy(&plug.stderr));
+    // Every WIT type both ways (the app lowers, the provider lifts, and back); a `result`'s
+    // `err` is thrown as jco's ComponentError (an Error with `payload`).
+    let want = [
+        "5",
+        "43",
+        "-3",
+        "6",
+        "1.5",
+        "π",
+        "hello js",
+        "false",
+        r#"[{\"x\":4,\"y\":-1},{\"x\":11,\"y\":-8}]"#,
+        "[true,0,100,200]",
+        "xxx",
+        "undefined",
+        r#"[4,\"AB\"]"#,
+        "dark-blue:true:false",
+        "12",
+        "0",
+        "ok 42",
+        "threw true not a number: x not a number: x",
+        "ok undefined",
+        "threw true undefined (see error.payload) undefined",
+        "19",
+    ];
+    let want = format!(
+        "[{}]",
+        want.iter()
+            .map(|w| format!("\"{w}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert_eq!(invoke(&composed, "run(3)"), want);
+}
+
+#[test]
+fn async_imports_compose_with_wac() {
+    let dir = out_dir("async-imports");
+    let fx = fixture("library/imports");
+    let wit = fx.join("world.wit");
+    let (app, provider, composed) = (
+        dir.join("slow-app.wasm"),
+        dir.join("slow-provider.wasm"),
+        dir.join("slow-composed.wasm"),
+    );
+    for (js, out, world) in [
+        ("slow-provider.js", &provider, "slow-provider"),
+        ("slow-app.js", &app, "slow-app"),
+    ] {
+        let b = build(
+            &fx.join(js),
+            out,
+            &["--wit", wit.to_str().unwrap(), "--world", world],
+        );
+        assert!(b.status.success(), "{js}: {}", String::from_utf8_lossy(&b.stderr));
+    }
+    let plug = Command::new("wac")
+        .arg("plug")
+        .arg(&app)
+        .arg("--plug")
+        .arg(&provider)
+        .arg("-o")
+        .arg(&composed)
+        .output()
+        .expect("wac is installed (TOOLS.md)");
+    assert!(plug.status.success(), "{}", String::from_utf8_lossy(&plug.stderr));
+    // `tick` returns at once; `fetch` (50 ms) and two `delay-echo`s overlap (the provider's
+    // backpressure makes the later calls wait to start); the app's 1 ms timer runs meanwhile;
+    // an `err` rejects with a ComponentError.
+    assert_eq!(
+        invoke(&composed, "go(3)"),
+        "\"7,7,7 hihi true empty/empty first,timer,fetch,tick\""
+    );
+}
+
+#[test]
+fn user_world_import_errors() {
+    let dir = out_dir("import-errors");
+    let wit = dir.join("w.wit");
+    let js = dir.join("m.js");
+    let out = dir.join("m.wasm");
+    let err = |wit_text: Option<&str>, js_text: &str| {
+        std::fs::write(&js, js_text).unwrap();
+        let b = match wit_text {
+            Some(w) => {
+                std::fs::write(&wit, w).unwrap();
+                build(&js, &out, &["--wit", wit.to_str().unwrap()])
+            }
+            None => build(&js, &out, &[]),
+        };
+        assert!(!b.status.success());
+        String::from_utf8(b.stderr).unwrap()
+    };
+    let w = "package a:b;\ninterface h { f: func(); g: async func(); r: func(x: future<u8>); }\n\
+             world w { import h; export h2: interface { k: func() -> u32; } export run: func(); }\n";
+    let e = err(
+        Some(w),
+        "import { f, nope } from \"a:b/h\";\nimport { g } from \"a:b/h\";\n\
+         import { r } from \"a:b/h\";\nimport x from \"a:b/other\";\n\
+         export const h2 = { k() { return 1; }, extra() {} };\nexport function run() { f(); }\n",
+    );
+    for want in [
+        "1:13: error: `a:b/h` has no function `nope`",
+        "2:10: error: unsupported: importing the `async func` `g` in a world without an `async func` export",
+        "3:10: error: import of `r` from `a:b/h`: unsupported: parameter `x` of `r`",
+        "4:1: error: unsupported: import from `a:b/other`: the world doesn't import an interface of that name",
+        "5:40: error: the world's interface `h2` has no function `extra`",
+    ] {
+        assert!(e.contains(want), "{want}\n{e}");
+    }
+    let e = err(
+        Some(w),
+        "export const h2 = {};\nexport function run() {}\n",
+    );
+    assert!(e.contains("interface export `h2` has no function `k`"), "{e}");
+    let e = err(Some(w), "export function run() {}\n");
+    assert!(
+        e.contains("world `w` exports interface `h2`, and the module has no `export const h2 = { … }` for it"),
+        "{e}"
+    );
+    let e = err(
+        None,
+        "import { f } from \"a:b/h\";\nexport function run() { f(); }\n",
+    );
+    assert!(
+        e.contains("import from `a:b/h` without a world (`--wit`) that imports it"),
+        "{e}"
+    );
+}
+
+#[test]
 fn user_world_mismatches() {
     let dir = out_dir("world-mismatch");
     std::fs::create_dir_all(&dir).unwrap();

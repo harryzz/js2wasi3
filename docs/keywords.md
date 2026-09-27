@@ -63,7 +63,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
 | `implements` | ➖ | Reserved in strict mode; a syntax error in node too. |
-| `import` | ❌ | Rejected: single-file programs only (multi-file modules F7; `import.meta` and dynamic `import()` F79). WIT imports as ES imports come with T20. |
+| `import` | ⚠️ | `import { f } from "ns:pkg/iface"` imports a user world's interface functions (T20 slice 5, `--wit`; see [user-worlds.md](user-worlds.md)). Other imports are rejected: single-file programs only (multi-file modules F7; `import.meta` and dynamic `import()` F79). |
 | `in` | ✅ | Objects and arrays; `#x in o` (T16). |
 | `instanceof` | ✅ | Classes, functions, native errors, built-ins, `Symbol.hasInstance` (T25). |
 | `int` | ➖ | Removed in ES5. |

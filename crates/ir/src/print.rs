@@ -225,7 +225,8 @@ impl Printer<'_> {
                     | crate::Intrinsic::ArgGet(i)
                     | crate::Intrinsic::ArgsRest(i)
                     | crate::Intrinsic::GenLoad(i)
-                    | crate::Intrinsic::GenStore(i) => {
+                    | crate::Intrinsic::GenStore(i)
+                    | crate::Intrinsic::CallImport(i) => {
                         format!("{}.{i}", op.name())
                     }
                     crate::Intrinsic::NewGenerator { resume, slots }

@@ -1,6 +1,6 @@
 # T20: WIT async and user worlds
 
-Status: in progress (slices 1–4 done; next: slice 5, imports) | Depends on: T19
+Status: in progress (slices 1–5 done; next: slice 6, `future`/`stream`) | Depends on: T19
 
 ## Goal
 Accept a user `.wit` world. Map exported and imported functions with D4's conventions, including `async func` ↔ async JS functions,
@@ -223,6 +223,74 @@ functions (sync first: the adapters in reverse, lowering JS values into the flat
 result), then `async func` imports via `[async-lower]` + a subtask in the waitable set, surfaced as a Promise.
 Acceptance: a library world with one async export and one async import, composed with a test component via `wac`.
 
+### Slice 5a: sync imports, interface exports (done 2026-09-27)
+- **Imports:** `import { f, g as h } from "ns:pkg/iface"` (or `…@version`) for the functions of an interface the
+  user world imports (`component::UserWorld::imports`, `WorldInterface`; the CLI keys them by specifier with
+  and without the version, JS names camelCase, a string import name is the WIT name). The lowering
+  (`declare_import`) makes each one an IR function `(jsval…) -> jsval` (untyped params, result `Any`) whose
+  body is `Intrinsic::CallImport(i)` on an array of its arguments; a top-level `result` is unwrapped there (`ok`
+  returned, `err` thrown as jco's `ComponentError`: an Error with `payload`). IR: `Module::imports`
+  (`ir::Import`: core module/name + `AbiSig` with the whole WIT result). Backend: core imports after the host's;
+  `abi::Helper::Import(i)` (`import_adapter`): the args array is stored as the params' tuple with
+  `wit::lower_mem`, passed flat (`flat_load`) or by pointer past 16 values, a return area past 1 flat result,
+  the result lifted with `lift_flat`/`lift_mem`, then the bump pointer restored (`abi::import_type`). Modules
+  with imports have memory.
+- **Interface exports (F125, needed for the provider; the user chose this over a WAT provider):** a world's
+  `export host;` is implemented by `export const host = { add, greet(name) {…}, parse: function (s) {…} }`
+  (jco's shape). The CLI keys each function `host.fn` (→ core export `ns:pkg/iface#fn`); the lowering's
+  `declare_interface` declares methods / function expressions as top-level functions (`declare_function_as`)
+  or resolves names of top-level functions, and reports missing or extra keys, `this`, `arguments`. Async
+  interface functions return through `[export]<iface>` `[task-return]<fn>`.
+- Tests: `tests/fixtures/library/imports/{world.wit,provider.js,app.js}`: every type family through an import
+  and an interface export, versioned and unversioned specifiers, an import used as a value, `result` ok/err,
+  > 16 flat params; `crates/js2wasi3/tests/build.rs`: `user_world_imports_compose_with_wac` (builds both,
+  `wac plug`, `run(3)` on wasmtime), `user_world_import_errors` (unknown function / interface, `async func`
+  import, unsupported type, missing/extra interface functions, import without `--wit`). `cargo test` ok;
+  `scripts/diff.sh -j 4`: 97 passed, 0 failed, 16 skipped; sizes unchanged (`hello.js` 55715, `add.js` 289,
+  `library/async.js` 76153, `library/jobs.js` 65430).
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets` (the old warning only),
+  `scripts/diff.sh -j 4`, `wasm-tools validate`, `wac plug`, `wasmtime run --invoke`.
+
+**Not done (follow-ups):** F130 (interface export forms), F131 (world-level function imports, namespace
+imports, resources), F132 (`ComponentError` details). F125's exact parameter count stays open.
+
+**Next smallest step:** slice 5b: `async func` imports: `[async-lower]<f>` (params flat or by pointer, a return
+area pointer always, returns the subtask status), the subtask joined to the waitable set, the call's promise
+settled from `SUBTASK_RETURNED` events (lift the return area, then free it) in both loops (a library's async
+export and a command's `run`); acceptance: an app with one async export awaiting one async import, composed
+with a JS provider via `wac`.
+
+### Slice 5b: `async func` imports (done 2026-09-27)
+- **Lowering:** an `async func` import's stub returns `CallImport`'s promise; a top-level `result` is unwrapped
+  by `<f>$unwrap` (`ir::Import::unwrap`, also called by sync stubs), which the backend calls when the subtask
+  returns. An async import in a world without an `async func` export is rejected (nothing would wait for it).
+- **Backend:** core import `[async-lower]<f>` (`abi::import_type`: ≤ 4 flat params, else a pointer; a
+  return-area pointer if there's a result; an i32 status). `import_start`: make the promise; RETURNED at once →
+  `abi::Helper::ImportDone(i)`; else join the subtask to the call's waitable set (`G_WS`, made on first use) and
+  record `handle → [promise, ret, i]` in `G_PENDING` (a JS array) with a count `G_PENDING_N`
+  (`LIB_GLOBALS` 7 → 9). `ImportDone`: lift from the return area, unwrap in a `try_table`, resolve or reject.
+  `Helper::Event`: a SUBTASK_RETURNED event for a pending handle drops the subtask and settles it (a dispatch on
+  the import index); `Step` keeps waiting (backpressure raised) while imports are pending, with or without
+  timers; `host::LIBRARY_WAIT_IMPORTS` (waitable set, join, subtask drop, backpressure) when there are no timers.
+  The arguments and the return area stay allocated until the next export call resets the bump allocator.
+- **Acceptance (slice 5):** `tests/fixtures/library/imports/{slow-provider,slow-app}.js` (worlds `slow-provider`,
+  `slow-app` in `world.wit`): an async export awaiting three async imports (one returns at once, two overlap and
+  wait for the provider's backpressure, one rejects with a ComponentError) and an app timer meanwhile, composed
+  with `wac plug`, run on wasmtime (`async_imports_compose_with_wac`). `cargo test` ok; `scripts/diff.sh -j 4`:
+  97 passed, 0 failed, 16 skipped; `hello.js` 55715, `add.js` 289 (unchanged); `library/async.js` 76165 (+12),
+  `library/async-timers.js` 77498, `library/jobs.js` 65440 (+10): the two library globals, the pending check.
+- Commands run: `cargo build --release`, `cargo test`, `cargo clippy --all-targets` (the old warning only),
+  `scripts/diff.sh -j 4`, `wasm-tools validate`, `wac plug`, `wasmtime run --invoke`.
+
+**Not done (follow-ups):** F133 (imports pending past the export's promise, sync exports starting async
+imports, cancellation).
+
+**Next smallest step:** slice 6: `future<T>` ↔ Promise at the boundary (params and results of exports and
+imports: `future.new`/`future.read`/`future.write` built-ins with the waitable set, like the command's
+`write-via-stream` future), then `stream<u8>` ↔ async iterable of `Uint8Array` (read: an async generator over
+`stream.read`; write: `for await` over the JS iterable into `stream.write`); acceptance: a stream export echoes
+its input bytes.
+
 ## Slices (agreed 2026-09-26)
 1. **JS prerequisites for streams** (F72 and typed arrays; the user chose to do these first):
    a. `for await (x of it)` in async functions and top-level code: `Symbol.asyncIterator`, else the sync iterator
@@ -324,3 +392,11 @@ rejections), F83 (`wasi:random` in library worlds).
 - 2026-09-27: 4b-2 implemented: `ir::WitType::{List, Variant}` (`typed_kind`: numeric lists up to 32 bits and `f64` are typed arrays, as in jco; 64-bit lists plain arrays), component `Ty::{List, Variant}`; backend `wit.rs`: flatten/layout, `lift_mem` (flat_load + lift_flat), lists lifted from memory (typed arrays by byte copy, others element by element) and lowered with `cabi_realloc` (a typed array of the same kind: byte copy; any array-like: `length` + indices), variants and nested results share `lift_cases`/`lower_cases` (a variant case without payload has no `val`, like jco); params past 16 flat values come as a pointer to their tuple (F21; the backend's bail removed). Lowering sets `$typed` when a world has typed lists. Fixture `library/lists/{world.wit,lists.js}`: every call as expected on the first build.
 - 2026-09-27: 4b-2 done: user_world_lists_and_variants passes; cargo test ok, clippy (old warning only), diff.sh 97/0/16, sizes unchanged (hello.js 55715, add.js 289, library/async.js 76153). Notes / Result, README (Next up: slice 5; F21 ticked; F127/F128 retargeted; F129), design.md D4, README.md.
 - 2026-09-27: docs/user-worlds.md: user guide for --wit (type shapes, result return/throw with the payload rule, async, limits), examples run on wasmtime; linked from README.md and design.md D4.
+- 2026-09-27: slice 5 started (imports). Baseline: tools ok, hello.js 55715. Plan: 5a = sync function imports from a user world (`import { f } from "ns:pkg/iface"` / world-level `import f: func`), all value types via the adapters in reverse; 5b = `async func` imports (`[async-lower]`, subtask in the waitable set → Promise) + the `wac` acceptance.
+- 2026-09-27: 5a design: an imported function is an IR stub `(jsval…) -> jsval` (params untyped, like defaults) whose body calls `Intrinsic::CallImport(i)` on an array of its arguments; `ir::Module::imports` (core module/name, AbiSig with the whole WIT result). The backend's `abi::Helper::Import(i)` lowers the args array as the params tuple (`wit::lower_mem` → `flat_load`, or its pointer past 16), passes a return area past 1 flat result, lifts the result (`lift_flat`/`lift_mem`), and restores the bump pointer. A top-level `result` is unwrapped by the stub: `err` throws jco's ComponentError shape (an Error with `payload`). Only interface imports (`ns:pkg/iface[@v]`, specifier with or without the version); named specifiers only. IR done (Import, CallImport, print, validate).
+- 2026-09-27: 5a app side builds: `import { … } from "acme:demo/host"` → a valid component importing the interface (records, lists, result, string). Test provider: the user chose JS interface exports in jco's form (`export const host = { add, greet(name) {…} }`, F125) over a WAT provider; methods and top-level function names as values, `this`/`super`/`arguments` rejected.
+- 2026-09-27: interface exports (F125) implemented: component `UserWorld::export_interfaces` (+ `interface()` shared with imports), CLI matches `export const <camelName> = {…}` and keys functions `iface.fn` → core `ns:pkg/iface#fn`; lowering `declare_interface` (methods / function expressions declared as top-level functions via `declare_function_as`, or names of top-level functions; `this`/`arguments` rejected; missing/extra functions reported); async task.return from `[export]<iface>`. Found: an import stub's result slot was never observed (Bottom → calls typed as numbers): now `Any`. Smoke: app importing acme:demo/host + JS provider, `wac plug`, wasmtime: every call right (u32, string, record+list → list<record>, result ok/err → throw with payload).
+- 2026-09-27: fixture `library/imports/{world.wit,provider.js,app.js}` (every type family through an import and an interface export; versioned and unversioned specifiers; an import as a value; ok/err with payload; > 16 flat params) and tests `user_world_imports_compose_with_wac` (build both, `wac plug`, `run(3)`), `user_world_import_errors`: pass.
+- 2026-09-27: 5a done: Notes / Result, README (F130–F132; F125 partly), docs/user-worlds.md (interface exports, imports), design.md D4, keywords.md.
+- 2026-09-27: 5b implemented: `ir::Import::unwrap` (the lowering's `<f>$unwrap` function, shared by sync stubs and async completion); async stubs return `CallImport`'s promise; an async import needs an `async func` export in the world (else rejected). Backend: `[async-lower]<f>` (≤ 4 flat params, else a pointer; a return-area pointer; i32 status), `import_start` (promise; RETURNED at once → `Helper::ImportDone`; else join the subtask to the call's waitable set and record `handle → [promise, ret, i]` in `G_PENDING` (LIB_GLOBALS 7 → 9)), `Event` settles pending imports on SUBTASK_RETURNED (drop the subtask, lift, unwrap in a try_table → resolve / reject), `Step` waits while imports are pending (timers or not), `host::LIBRARY_WAIT_IMPORTS` when there are no timers. Fixture `library/imports/{slow-provider,slow-app}.js` + worlds: concurrent imports (provider backpressure → STARTING), one returning at once, an `err` rejection, an app timer meanwhile: `first,timer,fetch,tick` as expected, stable.
+- 2026-09-27: slice 5 done (acceptance 1 met: async export + async import composed with wac on wasmtime): Notes / Result 5b, README (Next up: slice 6; F133), docs/user-worlds.md (async imports), design.md D4.

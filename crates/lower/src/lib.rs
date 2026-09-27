@@ -134,8 +134,31 @@ pub struct WorldSig {
     pub types: Vec<ir::WitType>,
 }
 
-/// The exports of a user world, by JS export name.
-pub type Boundary = HashMap<String, WorldSig>;
+/// A function a user world imports (T20 slice 5), as `import { jsName } from "<specifier>"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldImport {
+    /// Its JS name (camelCase) and WIT name (a string import name: `import { "wit-name" as f }`).
+    pub js_name: String,
+    pub wit_name: String,
+    /// Its WIT result is a `result`: `ok` is returned, `err` thrown (jco's `ComponentError`: an
+    /// `Error` whose `payload` is the value).
+    pub throws: bool,
+    pub is_async: bool,
+    /// Its core import and types.
+    pub import: ir::Import,
+    /// Its WIT signature, for messages.
+    pub signature: String,
+    /// Why it can't be imported (a type that isn't supported), reported if the JS imports it.
+    pub unsupported: Option<String>,
+}
+
+/// A user world (T20): its exports by JS export name, and its imported functions by module
+/// specifier (an interface's name, with or without its version).
+#[derive(Debug, Clone, Default)]
+pub struct Boundary {
+    pub exports: HashMap<String, WorldSig>,
+    pub imports: HashMap<String, Vec<WorldImport>>,
+}
 
 /// Lower a whole module. Returns every unsupported construct as a diagnostic.
 pub fn lower(program: &Program) -> Result<ir::Module, Diagnostics> {
@@ -198,6 +221,8 @@ pub fn lower_with(
             fn_length: HashMap::new(),
             classes: HashMap::new(),
             class_adapters: HashMap::new(),
+            iface_exports: Vec::new(),
+            boundary_fns: Vec::new(),
         };
         l.run();
         if let Some(next) = l.next_facts() {
@@ -279,6 +304,14 @@ struct JsDoc {
     errors: Vec<String>,
 }
 
+/// A function of an interface export: a method (declared as a function), or the name of a
+/// top-level function (resolved after pass 1).
+#[derive(Clone, Copy)]
+enum IfaceFn<'a> {
+    Func(FuncId),
+    Name(&'a str),
+}
+
 /// Marker: a diagnostic has been recorded, abandon the current construct.
 struct Unsupported;
 type R<T> = Result<T, Unsupported>;
@@ -345,6 +378,10 @@ struct Lowerer<'p, 'a> {
     classes: HashMap<ScopeId, ClassFn<'a>>,
     /// Each class's `$code` functions: (call trap, construct adapter).
     class_adapters: HashMap<ScopeId, (FuncId, FuncId)>,
+    /// The functions of interface exports (T20 slice 5): (`iface.fn` key, function, where).
+    iface_exports: Vec<(String, IfaceFn<'a>, Span)>,
+    /// Every exported function by its boundary name: `export`s and interface functions.
+    boundary_fns: Vec<(String, FuncId, Span)>,
 }
 
 /// A class (T16): its constructor as an IR function `(self, this?, new_target?, params…) -> jsval`
@@ -841,6 +878,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.exported.insert(*f);
             }
         }
+        // Every exported function by its boundary name (T20 slice 5: interface functions too).
+        let mut boundary_fns: Vec<(String, FuncId, Span)> = Vec::new();
+        for e in &self.p.exports {
+            if e.from.is_none()
+                && let Some(Binding::Func(f)) = e.local.as_deref().and_then(|l| self.names.get(l))
+            {
+                boundary_fns.push((e.name.clone(), *f, e.span));
+            }
+        }
+        for (key, f, span) in std::mem::take(&mut self.iface_exports) {
+            let func = match f {
+                IfaceFn::Func(id) => id,
+                IfaceFn::Name(n) => match self.names.get(n) {
+                    Some(Binding::Func(id)) => *id,
+                    _ => {
+                        let what = format!("`{n}` in an interface export (not a top-level function)");
+                        self.unsupported(span, &what, "later");
+                        continue;
+                    }
+                },
+            };
+            self.exported.insert(func);
+            boundary_fns.push((key, func, span));
+        }
+        self.boundary_fns = boundary_fns.clone();
         for func in self.exported.clone() {
             let f = self.module.function(func);
             let pos = f.pos.expect("declared functions have a position");
@@ -868,19 +930,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         // A user world's signatures (T20): its parameter types, checked against the functions.
         if let Some(boundary) = self.boundary {
             if boundary
+                .exports
                 .values()
-                .any(|w| w.types.iter().any(ir::WitType::has_typed))
+                .map(|w| &w.types)
+                .chain(boundary.imports.values().flatten().map(|i| &i.import.sig.types))
+                .any(|ts| ts.iter().any(ir::WitType::has_typed))
             {
                 // Numeric lists are typed arrays (T20 slice 4b-2).
                 self.module.names.insert("$typed".to_string());
             }
-            for e in &self.p.exports {
-                let Some(Binding::Func(func)) =
-                    e.local.as_deref().and_then(|l| self.names.get(l)).copied()
-                else {
-                    continue;
-                };
-                let Some(w) = boundary.get(&e.name) else {
+            for (name, func, span) in &boundary_fns {
+                let (func, span) = (*func, *span);
+                let Some(w) = boundary.exports.get(name) else {
                     continue;
                 };
                 let f = self.module.function(func);
@@ -889,20 +950,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let mut errs = Vec::new();
                 if w.is_async != f.flags.is_async {
                     errs.push(if w.is_async {
-                        format!("the world's `{}` is an `async func`: export an `async function`", e.name)
+                        format!("the world's `{}` is an `async func`: export an `async function`", name)
                     } else {
-                        format!("the world's `{}` isn't an `async func`: export a function that isn't `async`", e.name)
+                        format!("the world's `{}` isn't an `async func`: export a function that isn't `async`", name)
                     });
                 }
                 if n != w.params.len() && !self.rest_param.contains(&func) {
                     errs.push(format!(
                         "`{}` takes {n} parameter{}, the world's function {}",
-                        e.name,
+                        name,
                         if n == 1 { "" } else { "s" },
                         w.params.len()
                     ));
                 }
-                let (line, col) = self.p.line_col(e.span.start);
+                let (line, col) = self.p.line_col(span.start);
                 for message in errs {
                     self.diags.push(Diagnostic {
                         path: self.p.path.clone(),
@@ -976,6 +1037,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         // Pass 3: exports.
         for e in &self.p.exports {
             let _ = self.export(e);
+        }
+        // Interface functions (T20 slice 5): `iface.fn`, renamed by the CLI.
+        for (name, func, span) in self.boundary_fns.clone() {
+            if name.contains('.') {
+                let pos = Some(self.pos(span));
+                self.module.exports.push(ir::Export {
+                    name,
+                    func,
+                    string_name: false,
+                    pos,
+                    sig: ir::AbiSig::default(),
+                });
+            }
         }
     }
 
@@ -1059,6 +1133,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Statement::VariableDeclaration(d) => self.declare_globals(d),
             Statement::ExportDeclaration(e) => match &e.declaration {
                 Declaration::FunctionDeclaration(f) => self.declare_function(f, e.span.start, fns),
+                Declaration::VariableDeclaration(d)
+                    if let Some((name, obj)) = self.interface_export(d) =>
+                {
+                    self.declare_interface(name, obj, fns)
+                }
                 Declaration::VariableDeclaration(d) => {
                     self.declare_globals(d)?;
                     Err(self.unsupported(
@@ -1085,11 +1164,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             },
             // `export { a, b as c }`: resolved from the export list in pass 3.
             Statement::ExportNamedDeclaration(_) => Ok(()),
-            Statement::ImportDeclaration(i) => Err(self.unsupported(
-                i.span,
-                "import of another module (multi-file modules, F7)",
-                "not scheduled",
-            )),
+            Statement::ImportDeclaration(i) => self.declare_import(i),
             Statement::ExportFromDeclaration(e) => Err(self.unsupported(
                 e.span,
                 "re-export from another module (multi-file modules, F7)",
@@ -1114,6 +1189,284 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// `doc_at`: where a JSDoc comment for the function would be attached (the start of the
     /// `export` statement or of the declaration).
+    /// `(result) -> jsval` for an import whose WIT result is a `result` (T20 slice 5): the `ok`
+    /// value, or throw the `err` value like jco's `ComponentError` (an Error whose `payload` is
+    /// the value, its message the value if a string, else `String(value) + " (see error.payload)"`).
+    fn unwrap_function(&mut self, wit_name: &str) -> FuncId {
+        let mut func = ir::Function::new(
+            format!("{wit_name}$unwrap"),
+            &[("result", Type::JsVal)],
+            Some(Type::JsVal),
+        );
+        let r = LocalId(0);
+        let v = func.add_local("val", Type::JsVal);
+        let e = func.add_local("error", Type::JsVal);
+        let get = |k: &str| Expr::intrinsic(Intrinsic::GetProp, vec![Expr::local(r), Expr::str(k)]);
+        let message = Expr::Cond {
+            cond: Box::new(Expr::TypeofIs {
+                arg: Box::new(Expr::local(v)),
+                tag: TypeofTag::String,
+            }),
+            then: Box::new(Expr::local(v)),
+            els: Box::new(Expr::intrinsic(
+                Intrinsic::Concat,
+                vec![
+                    Expr::intrinsic(Intrinsic::ToString, vec![Expr::local(v)]),
+                    Expr::str(" (see error.payload)"),
+                ],
+            )),
+            ty: Type::JsVal,
+        };
+        func.body = vec![
+            Stmt::Set(v, get("val")),
+            Stmt::If {
+                cond: Expr::binary(BinOp::Eq, Type::JsVal, get("tag"), Expr::str("err")),
+                then: vec![
+                    Stmt::Set(
+                        e,
+                        Expr::intrinsic(
+                            Intrinsic::NewError(ErrorKind::Error),
+                            vec![message, Expr::undefined()],
+                        ),
+                    ),
+                    Stmt::Expr(Expr::intrinsic(
+                        Intrinsic::SetProp,
+                        vec![Expr::local(e), Expr::str("payload"), Expr::local(v)],
+                    )),
+                    Stmt::Throw(Expr::local(e)),
+                ],
+                els: vec![],
+            },
+            Stmt::Return(Some(Expr::local(v))),
+        ];
+        self.module.add_function(func)
+    }
+
+    /// `export const host = { … }` where the user world exports an interface whose JS name is
+    /// `host` (T20 slice 5): its name and object literal.
+    fn interface_export(
+        &self,
+        d: &'a VariableDeclaration<'a>,
+    ) -> Option<(&'a str, &'a ObjectExpression<'a>)> {
+        let [decl] = d.declarations.as_slice() else {
+            return None;
+        };
+        let (BindingPattern::BindingIdentifier(b), Some(Expression::ObjectExpression(o))) =
+            (&decl.id, &decl.init)
+        else {
+            return None;
+        };
+        let prefix = format!("{}.", b.name);
+        let boundary = self.boundary?;
+        boundary
+            .exports
+            .keys()
+            .any(|k| k.starts_with(&prefix))
+            .then_some((b.name.as_str(), &**o))
+    }
+
+    /// An interface export's functions (jco's shape): `{ f(x) {…}, g: function (x) {…}, h,
+    /// i: topLevelFunction }`, keys the camelCase function names. The object isn't a value: its
+    /// functions are exported as `iface.fn`.
+    fn declare_interface(
+        &mut self,
+        name: &'a str,
+        obj: &'a ObjectExpression<'a>,
+        fns: &mut Vec<(&'a Function<'a>, FuncId)>,
+    ) -> R<()> {
+        let prefix = format!("{name}.");
+        let wanted: Vec<String> = self
+            .boundary
+            .map(|b| {
+                b.exports
+                    .keys()
+                    .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut result = Ok(());
+        let mut seen = Vec::new();
+        for prop in &obj.properties {
+            let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                result = Err(self.unsupported(prop.span(), "spread in an interface export", "later"));
+                continue;
+            };
+            let key = match (&p.key, p.computed, p.kind) {
+                (PropertyKey::StaticIdentifier(k), false, PropertyKind::Init) => k.name.as_str(),
+                (PropertyKey::StringLiteral(k), false, PropertyKind::Init) => k.value.as_str(),
+                _ => {
+                    let what = "a computed key or accessor in an interface export";
+                    result = Err(self.unsupported(p.span, what, "later"));
+                    continue;
+                }
+            };
+            if !wanted.iter().any(|w| w == key) {
+                self.diags.push(Diagnostic {
+                    path: self.p.path.clone(),
+                    line: self.pos(p.span).line,
+                    col: self.pos(p.span).col,
+                    message: format!("the world's interface `{name}` has no function `{key}`"),
+                    help: Some(format!("its functions: {}", wanted.join(", "))),
+                });
+                result = Err(Unsupported);
+                continue;
+            }
+            seen.push(key.to_string());
+            let f = match &p.value {
+                Expression::Identifier(r) => IfaceFn::Name(r.name.as_str()),
+                Expression::FunctionExpression(f) => {
+                    let scope = f.scope_id.get().expect("functions have scopes");
+                    let what = if self.an.uses_this.contains(&scope) {
+                        Some("`this` in an interface export's function")
+                    } else if self.an.uses_arguments.contains(&scope) {
+                        Some("`arguments` in an interface export's function")
+                    } else {
+                        None
+                    };
+                    if let Some(what) = what {
+                        result = Err(self.unsupported(p.span, what, "later"));
+                        continue;
+                    }
+                    let full = format!("{name}.{key}");
+                    match self.declare_function_as(f, &full, None, p.span.start, fns) {
+                        Ok(id) => IfaceFn::Func(id),
+                        Err(e) => {
+                            result = Err(e);
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    let what = "an interface export's function that isn't a method, a function \
+                                expression or the name of a top-level function";
+                    result = Err(self.unsupported(p.span, what, "later"));
+                    continue;
+                }
+            };
+            self.iface_exports.push((format!("{name}.{key}"), f, p.span));
+        }
+        for w in &wanted {
+            if !seen.contains(w) {
+                self.diags.push(Diagnostic {
+                    path: self.p.path.clone(),
+                    line: self.pos(obj.span).line,
+                    col: self.pos(obj.span).col,
+                    message: format!("interface export `{name}` has no function `{w}`"),
+                    help: None,
+                });
+                result = Err(Unsupported);
+            }
+        }
+        result
+    }
+
+    /// `import { f, g as h } from "ns:pkg/iface"` (T20 slice 5): each imported function of a user
+    /// world is a function `(jsval…) -> jsval` calling it ([`Intrinsic::CallImport`]).
+    fn declare_import(&mut self, i: &'a ImportDeclaration<'a>) -> R<()> {
+        let from = i.source.value.as_str();
+        let Some(funcs) = self.boundary.and_then(|b| b.imports.get(from)) else {
+            let what = if self.boundary.is_some() {
+                format!("import from `{from}`: the world doesn't import an interface of that name")
+            } else if from.contains(':') {
+                format!("import from `{from}` without a world (`--wit`) that imports it")
+            } else {
+                "import of another module (multi-file modules, F7)".into()
+            };
+            return Err(self.unsupported(i.span, &what, "not scheduled"));
+        };
+        if i.with_clause.is_some() || i.phase.is_some() {
+            return Err(self.unsupported(i.span, "import attributes or phases", "not scheduled"));
+        }
+        let mut result = Ok(());
+        for s in i.specifiers.iter().flatten() {
+            let ImportDeclarationSpecifier::ImportSpecifier(s) = s else {
+                let what = format!("default or namespace import from `{from}` (import each function by name)");
+                result = Err(self.unsupported(s.span(), &what, "later"));
+                continue;
+            };
+            let name = s.imported.name();
+            let found = funcs.iter().find(|w| match &s.imported {
+                ModuleExportName::StringLiteral(_) => w.wit_name == name.as_str(),
+                _ => w.js_name == name.as_str(),
+            });
+            let Some(w) = found else {
+                let known: Vec<&str> = funcs.iter().map(|w| w.js_name.as_str()).collect();
+                self.diags.push(Diagnostic {
+                    path: self.p.path.clone(),
+                    line: self.pos(s.span).line,
+                    col: self.pos(s.span).col,
+                    message: format!("`{from}` has no function `{name}`"),
+                    help: Some(format!("its functions: {}", known.join(", "))),
+                });
+                result = Err(Unsupported);
+                continue;
+            };
+            if let Some(why) = &w.unsupported {
+                self.diags.push(Diagnostic {
+                    path: self.p.path.clone(),
+                    line: self.pos(s.span).line,
+                    col: self.pos(s.span).col,
+                    message: format!("import of `{name}` from `{from}`: {why}"),
+                    help: None,
+                });
+                result = Err(Unsupported);
+                continue;
+            }
+            if w.is_async && !self.boundary.is_some_and(|b| b.exports.values().any(|e| e.is_async)) {
+                let what = format!(
+                    "importing the `async func` `{}` in a world without an `async func` export (nothing would wait for it)",
+                    w.wit_name
+                );
+                result = Err(self.unsupported(s.span, &what, "later"));
+                continue;
+            }
+            let index = match self
+                .module
+                .imports
+                .iter()
+                .position(|x| x.module == w.import.module && x.name == w.import.name)
+            {
+                Some(k) => k,
+                None => {
+                    let unwrap = w.throws.then(|| self.unwrap_function(&w.wit_name));
+                    self.module.imports.push(ir::Import {
+                        unwrap,
+                        ..w.import.clone()
+                    });
+                    self.module.imports.len() - 1
+                }
+            };
+            let unwrap = self.module.imports[index].unwrap;
+            let n = w.import.sig.params.len();
+            let names: Vec<String> = (0..n).map(|k| format!("p{k}")).collect();
+            let sig: Vec<(&str, Type)> = names.iter().map(|n| (n.as_str(), Type::JsVal)).collect();
+            let local = s.local.name.as_str();
+            let mut func = ir::Function::new(local, &sig, Some(Type::JsVal));
+            func.pos = Some(self.pos(s.span));
+            let args = Expr::Array((0..n as u32).map(|k| Some(Expr::local(LocalId(k)))).collect());
+            let call = Expr::intrinsic(Intrinsic::CallImport(index as u32), vec![args]);
+            // An `async func` gives a promise, settled through `unwrap` (the backend calls it).
+            func.body = vec![Stmt::Return(Some(match unwrap {
+                Some(u) if !w.is_async => Expr::Call {
+                    func: u,
+                    args: vec![call],
+                },
+                _ => call,
+            }))];
+            let id = self.module.add_function(func);
+            // Its body isn't lowered from JS: what it returns is any JS value.
+            self.observe(Slot::Result(id), Kind::Any);
+            self.hidden.insert(id, Hidden::default());
+            self.fn_length.insert(id, n as u32);
+            self.func_params.insert(id, vec![None; n]);
+            if let Some(sym) = s.local.symbol_id.get() {
+                self.funcs.insert(sym, id);
+            }
+            self.names.insert(local.to_string(), Binding::Func(id));
+        }
+        result
+    }
+
     fn declare_function(
         &mut self,
         f: &'a Function<'a>,
@@ -1121,6 +1474,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         fns: &mut Vec<(&'a Function<'a>, FuncId)>,
     ) -> R<()> {
         let id_node = f.id.as_ref().expect("function declarations have a name");
+        self.declare_function_as(f, id_node.name.as_str(), id_node.symbol_id.get(), doc_at, fns)
+            .map(|_| ())
+    }
+
+    /// Declare `f` as a top-level function named `name`, bound to `sym` if it has one (T20
+    /// slice 5: an interface export's methods have none).
+    fn declare_function_as(
+        &mut self,
+        f: &'a Function<'a>,
+        name: &str,
+        sym: Option<SymbolId>,
+        doc_at: u32,
+        fns: &mut Vec<(&'a Function<'a>, FuncId)>,
+    ) -> R<FuncId> {
         // Simple parameters are typed; the others (defaults, patterns: `None`) are `jsval`s bound
         // in the body's prologue, and a rest parameter is one more `jsval` (an array).
         let mut params = Vec::new();
@@ -1172,7 +1539,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         self.fn_length.insert(id, js_length(&f.params));
         let mut func = ir::Function::new(
-            id_node.name.as_str(),
+            name,
             &sig,
             returns_value.then(|| self.slot_ty(result)),
         );
@@ -1192,16 +1559,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         self.func_params
             .insert(id, params.iter().map(|(_, s)| *s).collect());
-        if let Some(sym) = id_node.symbol_id.get() {
+        if let Some(sym) = sym {
             self.funcs.insert(sym, id);
+            self.names.insert(name.to_string(), Binding::Func(id));
         }
-        self.names
-            .insert(id_node.name.to_string(), Binding::Func(id));
         if bad {
             return Err(Unsupported);
         }
         fns.push((f, id));
-        Ok(())
+        Ok(id)
     }
 
     /// A command's top-level variables are globals, assigned by `main` where they're declared.
@@ -1611,7 +1977,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             });
             let world = self
                 .boundary
-                .and_then(|b| b.get(&self.module.exports[i].name));
+                .and_then(|b| b.exports.get(&self.module.exports[i].name));
             let sig = if let Some(w) = world {
                 // The world decides; without a `result` a throw traps (T20).
                 ir::AbiSig {

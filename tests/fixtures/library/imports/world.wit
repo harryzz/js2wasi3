@@ -1,0 +1,58 @@
+package acme:demo@0.1.0;
+
+interface host {
+  record point { x: s32, y: s32 }
+  variant shape { circle(f64), empty }
+  enum color { red, dark-blue }
+  flags perms { read, write-all }
+  type big = tuple<u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8>;
+
+  add: func(a: u32, b: u32) -> u32;
+  neg: func(x: s8) -> s8;
+  wide: func(x: u64) -> u64;
+  half: func(x: f32) -> f32;
+  initial: func(s: string) -> char;
+  greet: func(name: string) -> string;
+  is-even: func(n: u32) -> bool;
+  shift: func(p: point, by: list<s32>) -> list<point>;
+  bytes: func(n: u32) -> list<u8>;
+  maybe: func(n: u32) -> option<string>;
+  pair: func(a: string, b: f64) -> tuple<f64, string>;
+  paint: func(c: color, p: perms) -> string;
+  area: func(s: shape) -> f64;
+  parse: func(s: string) -> result<u32, string>;
+  check: func(ok: bool) -> result;
+  count-many: func(a: big, b: string) -> u32;
+  log: func(msg: string);
+}
+
+/// Implements `host` in JS (`provider.js`).
+world provider {
+  export host;
+}
+
+/// Imports `host` (`app.js`); `wac plug app.wasm --plug provider.wasm` composes them.
+world app {
+  import host;
+  export run: func(n: u32) -> list<string>;
+}
+
+/// `async func` imports (T20 slice 5b).
+interface slow {
+  fetch: async func(n: u32) -> list<u8>;
+  delay-echo: async func(s: string) -> result<string, string>;
+  tick: async func();
+}
+
+/// Implements `slow` in JS (`slow-provider.js`); its timers need the clock.
+world slow-provider {
+  import wasi:clocks/monotonic-clock@0.3.1;
+  export slow;
+}
+
+/// Awaits `slow`'s functions (`slow-app.js`).
+world slow-app {
+  import wasi:clocks/monotonic-clock@0.3.1;
+  import slow;
+  export go: async func(n: u32) -> string;
+}

@@ -133,6 +133,8 @@ fn match_world(
     };
     // WIT name → JS export.
     let mut by_wit: std::collections::HashMap<String, &frontend::Export> = Default::default();
+    let mut ifaces: std::collections::HashMap<String, &component::WorldInterface> =
+        Default::default();
     for e in &program.exports {
         if e.from.is_some() || e.local.is_none() {
             continue; // reported by the lowering
@@ -152,6 +154,13 @@ fn match_world(
                 }
             }
         };
+        // `export const host = { … }` implements interface `host` (T20 slice 5).
+        if !e.string_name
+            && let Some(iface) = world.export_interfaces.iter().find(|i| camel_case(&i.name) == e.name)
+        {
+            ifaces.insert(e.name.clone(), iface);
+            continue;
+        }
         if !world.exports.iter().any(|w| w.name == wit) {
             diags.push(diag(
                 Some(e),
@@ -165,7 +174,7 @@ fn match_world(
         }
         by_wit.insert(wit, e);
     }
-    let mut boundary = js2wasi3_lower::Boundary::new();
+    let mut boundary = js2wasi3_lower::Boundary::default();
     let mut names = std::collections::HashMap::new();
     for w in &world.exports {
         let Some(e) = by_wit.get(&w.name) else {
@@ -197,7 +206,7 @@ fn match_world(
             None => ir::ErrType::Empty,
             Some(t) => ir::ErrType::Of(abi(t)),
         };
-        boundary.insert(
+        boundary.exports.insert(
             e.name.clone(),
             js2wasi3_lower::WorldSig {
                 params,
@@ -209,6 +218,117 @@ fn match_world(
             },
         );
         names.insert(e.name.clone(), w.name.clone());
+    }
+    // Exported interfaces (T20 slice 5): their functions are `iface.fn` in the lowering.
+    for iface in &world.export_interfaces {
+        let js = camel_case(&iface.name);
+        if !ifaces.contains_key(&js) {
+            diags.push(diag(
+                None,
+                format!(
+                    "world `{}` exports interface `{}`, and the module has no `export const {js} = {{ … }}` for it",
+                    world.name, iface.module
+                ),
+                None,
+            ));
+            continue;
+        }
+        for (name, sig) in &iface.functions {
+            let w = match sig {
+                Ok(w) => w,
+                Err(why) => {
+                    diags.push(diag(None, format!("interface `{}`: {why}", iface.module), None));
+                    continue;
+                }
+            };
+            let mut types = Vec::new();
+            let mut abi = |t: &component::Ty| match t {
+                component::Ty::Scalar(v) => ty(*v),
+                t => {
+                    types.push(wit_type(t, &ty));
+                    ir::AbiType::Compound(types.len() as u32 - 1)
+                }
+            };
+            let params = w.params.iter().map(|(_, t)| abi(t)).collect();
+            let result = w.result.as_ref().map(&mut abi);
+            let err = match &w.err {
+                None => ir::ErrType::Empty,
+                Some(t) => ir::ErrType::Of(abi(t)),
+            };
+            let key = format!("{js}.{}", camel_case(name));
+            boundary.exports.insert(
+                key.clone(),
+                js2wasi3_lower::WorldSig {
+                    params,
+                    result,
+                    throws: w.throws,
+                    is_async: w.is_async,
+                    err,
+                    types,
+                },
+            );
+            names.insert(key, format!("{}#{name}", iface.module));
+        }
+    }
+    // Imported interfaces (T20 slice 5), by name with and without the version.
+    for iface in &world.imports {
+        let mut funcs = Vec::new();
+        for (name, sig) in &iface.functions {
+            let mut types = Vec::new();
+            let mut abi = |t: &component::Ty| match t {
+                component::Ty::Scalar(v) => ty(*v),
+                t => {
+                    types.push(wit_type(t, &ty));
+                    ir::AbiType::Compound(types.len() as u32 - 1)
+                }
+            };
+            let (params, result, throws, is_async, signature, unsupported) = match sig {
+                Ok(w) => {
+                    // The whole WIT result: the stub unwraps a `result`.
+                    let whole = if w.throws {
+                        Some(component::Ty::Result {
+                            ok: w.result.clone().map(Box::new),
+                            err: w.err.clone().map(Box::new),
+                        })
+                    } else {
+                        w.result.clone()
+                    };
+                    (
+                        w.params.iter().map(|(_, t)| abi(t)).collect(),
+                        whole.as_ref().map(&mut abi),
+                        w.throws,
+                        w.is_async,
+                        w.signature.clone(),
+                        None,
+                    )
+                }
+                Err(why) => (Vec::new(), None, false, false, String::new(), Some(why.clone())),
+            };
+            funcs.push(js2wasi3_lower::WorldImport {
+                js_name: camel_case(name),
+                wit_name: name.clone(),
+                throws,
+                is_async,
+                import: ir::Import {
+                    module: iface.module.clone(),
+                    name: name.clone(),
+                    sig: ir::AbiSig {
+                        params,
+                        result,
+                        is_async,
+                        types,
+                        ..ir::AbiSig::default()
+                    },
+                    unwrap: None,
+                },
+                signature,
+                unsupported,
+            });
+        }
+        if let Some((plain, _)) = iface.module.split_once('@') {
+            boundary.imports.insert(plain.to_string(), funcs.clone());
+        }
+        boundary.imports.insert(iface.module.clone(), funcs);
     }
     if !diags.is_empty() {
         return Err(frontend::Diagnostics(diags).into());

@@ -19,7 +19,7 @@ use wasm_encoder::{BlockType, Catch, Function, InstructionSink, MemArg, ValType}
 
 use crate::host::{self, Import};
 use crate::runtime::{self, Cx, G_LOOP_NOW, G_WAIT, G_WAIT_AT, T_STRING};
-use crate::{object, promise, timers, wit};
+use crate::{array, object, promise, timers, wit};
 
 /// First address the allocator hands out (keeps 0 an invalid pointer).
 pub const HEAP_BASE: i32 = 8;
@@ -63,6 +63,12 @@ pub enum Helper {
     /// `(s: (ref $string)) -> i32`: a `char` result: the first code point of `s` (a lone
     /// surrogate gives U+FFFD); traps on the empty string.
     CodePointAt0,
+    /// `(args: jsval) -> jsval`: call the user world's import `i` (T20 slice 5, see
+    /// [`import_adapter`]).
+    Import(u32),
+    /// `(promise: jsval, ret: i32)`: the user world's `async func` import `i` returned (T20
+    /// slice 5b): lift its result from the return area `ret` and settle the call's promise.
+    ImportDone(u32),
 }
 
 impl Helper {
@@ -82,6 +88,8 @@ impl Helper {
             Helper::End => "async_end",
             Helper::FromCodePoint => "from_code_point",
             Helper::CodePointAt0 => "code_point_at_0",
+            Helper::Import(_) => "call_import",
+            Helper::ImportDone(_) => "import_done",
         }
     }
 
@@ -100,12 +108,16 @@ impl Helper {
             Helper::Event => (vec![I32; 3], vec![]),
             Helper::FromCodePoint => (vec![I32], vec![runtime::string_ref()]),
             Helper::CodePointAt0 => (vec![runtime::string_ref()], vec![I32]),
+            Helper::Import(_) => (vec![runtime::jsval()], vec![runtime::jsval()]),
+            Helper::ImportDone(_) => (vec![runtime::jsval(), I32], vec![]),
         }
     }
 
     pub fn body(self, cx: &mut dyn Cx, bump: u32) -> Function {
         match self {
             Helper::Realloc => realloc(bump),
+            Helper::Import(i) => import_adapter(cx, bump, i),
+            Helper::ImportDone(i) => import_done(cx, i),
             Helper::Utf8ToString => utf8_to_string(),
             Helper::StringToUtf8 => {
                 let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
@@ -225,40 +237,97 @@ impl Helper {
                 const EVENT: u32 = 0;
                 const INDEX: u32 = 1;
                 const PAYLOAD: u32 = 2;
+                const ENTRY: u32 = 3;
+                let lib = cx.host_globals();
                 let im = cx.imports();
-                let mut f = Function::new([]);
-                if im.list.is_empty() {
-                    // No timers: nothing to wait for.
+                let timers = im.list.contains(&Import::ClockNow);
+                let asyncs: Vec<u32> = (0..cx.user_import_count())
+                    .filter(|i| cx.user_import(*i).1.is_async)
+                    .collect();
+                let mut f = Function::new([(1, runtime::jsval())]);
+                if !timers && asyncs.is_empty() {
+                    // Nothing to wait for.
                     f.instructions().end();
                     return f;
                 }
-                let tick = cx.helper(runtime::Helper::Abi(Helper::Tick));
+                let tick = timers.then(|| cx.helper(runtime::Helper::Abi(Helper::Tick)));
+                let get = cx.helper(runtime::Helper::Obj(object::Helper::Get));
+                let set = cx.helper(runtime::Helper::Obj(object::Helper::Set));
+                let boxed = cx.helper(runtime::Helper::Box);
+                let to_number = cx.helper(runtime::Helper::ToNumber);
+                let dones: Vec<(u32, u32)> = asyncs
+                    .iter()
+                    .map(|i| (*i, cx.helper(runtime::Helper::Abi(Helper::ImportDone(*i)))))
+                    .collect();
                 let mut s = f.instructions();
-                // The wait ended: run the due timers.
-                s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
-                s.local_get(INDEX).global_get(G_WAIT).i32_eq().i32_and();
-                s.global_get(G_WAIT).i32_eqz().i32_eqz().i32_and();
-                s.local_get(PAYLOAD)
-                    .i32_const(SUBTASK_RETURNED)
-                    .i32_eq()
-                    .i32_and();
-                s.if_(BlockType::Empty);
-                s.global_get(G_WAIT).call(im.get(Import::SubtaskDrop));
-                s.i32_const(0).global_set(G_WAIT);
-                s.call(tick);
-                s.end();
+                if let Some(tick) = tick {
+                    // The wait ended: run the due timers.
+                    s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
+                    s.local_get(INDEX).global_get(G_WAIT).i32_eq().i32_and();
+                    s.global_get(G_WAIT).i32_eqz().i32_eqz().i32_and();
+                    s.local_get(PAYLOAD)
+                        .i32_const(SUBTASK_RETURNED)
+                        .i32_eq()
+                        .i32_and();
+                    s.if_(BlockType::Empty);
+                    s.global_get(G_WAIT).call(im.get(Import::SubtaskDrop));
+                    s.i32_const(0).global_set(G_WAIT);
+                    s.call(tick);
+                    s.return_();
+                    s.end();
+                }
+                if !dones.is_empty() {
+                    // An `async func` import returned (T20 slice 5b): settle its promise.
+                    let key = |s: &mut InstructionSink| {
+                        s.global_get(lib + G_PENDING);
+                        s.local_get(INDEX).f64_convert_i32_u().call(boxed);
+                    };
+                    let field = |s: &mut InstructionSink, k: f64| {
+                        s.local_get(ENTRY).f64_const(k.into()).call(boxed).call(get);
+                    };
+                    s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
+                    s.local_get(PAYLOAD)
+                        .i32_const(SUBTASK_RETURNED)
+                        .i32_eq()
+                        .i32_and();
+                    s.global_get(lib + G_PENDING).ref_is_null().i32_eqz().i32_and();
+                    s.if_(BlockType::Empty);
+                    key(&mut s);
+                    s.call(get).local_tee(ENTRY);
+                    s.global_get(runtime::G_UNDEFINED).ref_eq().i32_eqz();
+                    s.if_(BlockType::Empty);
+                    key(&mut s);
+                    s.global_get(runtime::G_UNDEFINED).call(set);
+                    s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
+                    s.global_set(lib + G_PENDING_N);
+                    s.local_get(INDEX).call(im.get(Import::SubtaskDrop));
+                    for (i, done) in dones {
+                        field(&mut s, 2.0);
+                        s.call(to_number).f64_const((i as f64).into()).f64_eq();
+                        s.if_(BlockType::Empty);
+                        field(&mut s, 0.0);
+                        field(&mut s, 1.0);
+                        s.call(to_number).i32_trunc_sat_f64_u();
+                        s.call(done);
+                        s.end();
+                    }
+                    s.end();
+                    s.end();
+                }
                 s.end();
                 f
             }
             Helper::End => {
                 let lib = cx.host_globals();
                 let im = cx.imports();
-                let timers = !im.list.is_empty();
+                let timers = im.list.contains(&Import::ClockNow);
                 let disarm = timers.then(|| cx.helper(runtime::Helper::Host(host::Helper::Disarm)));
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
                 if let Some(disarm) = disarm {
                     s.call(disarm);
+                }
+                if !im.list.is_empty() {
                     s.global_get(lib + G_BP);
                     s.if_(BlockType::Empty);
                     s.call(im.get(Import::BackpressureDec));
@@ -341,6 +410,216 @@ fn code_point_at_0() -> Function {
     f
 }
 
+/// Core params and results of a user world's import (T20 slice 5, a lowered function): its
+/// params flattened (past 16 values a pointer to them), its result flattened (past 1 value a
+/// pointer to a return area, as one more param).
+pub fn import_type(sig: &AbiSig) -> (Vec<ValType>, Vec<ValType>) {
+    let mut params = wit::flatten(&import_params(sig));
+    if params.len() > max_flat_import_params(sig) {
+        params = vec![ValType::I32];
+    }
+    if sig.is_async {
+        // `[async-lower]`: a pointer to the return area, and the subtask's status.
+        if sig.result.is_some() {
+            params.push(ValType::I32);
+        }
+        return (params, vec![ValType::I32]);
+    }
+    let results = sig.result.map_or(Vec::new(), |t| wit::flatten(&sig.wit(t)));
+    if results.len() > 1 {
+        params.push(ValType::I32);
+        return (params, Vec::new());
+    }
+    (params, results)
+}
+
+/// Canonical ABI: an async-lowered import takes at most 4 flat params (else a pointer).
+fn max_flat_import_params(sig: &AbiSig) -> usize {
+    if sig.is_async { 4 } else { MAX_FLAT_PARAMS }
+}
+
+/// An import's params as one tuple.
+fn import_params(sig: &AbiSig) -> WitType {
+    WitType::Tuple(sig.params.iter().map(|p| sig.wit(*p)).collect())
+}
+
+/// `$call_import(args) -> jsval` (T20 slice 5): call the user world's import `i` with the JS
+/// values in the array `args` (missing ones `undefined`). They are stored as the params' tuple
+/// with [`wit::lower_mem`] (so they convert like an export's result, and a value that doesn't
+/// fit traps), then passed flat or by pointer; the result is lifted to a JS value. The memory
+/// used (arguments, the return area, strings and lists the callee allocates) is freed after the
+/// call: the bump pointer goes back to where it was.
+fn import_adapter(cx: &mut dyn Cx, bump: u32, i: u32) -> Function {
+    let (func, sig, _) = cx.user_import(i);
+    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    let tuple = import_params(&sig);
+    let result = sig.result.map(|t| sig.wit(t));
+    let mut g = wit::Gen::new(1);
+    let (saved, area, ret) = (
+        g.local(ValType::I32),
+        g.local(ValType::I32),
+        g.local(ValType::I32),
+    );
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    let alloc = |s: &mut InstructionSink, t: &WitType, to: u32| {
+        let (size, align) = wit::size_align(t);
+        s.i32_const(0).i32_const(0).i32_const(align as i32).i32_const(size as i32);
+        s.call(realloc).local_set(to);
+    };
+    s.global_get(bump).local_set(saved);
+    let flat = wit::flatten(&tuple);
+    if !flat.is_empty() {
+        alloc(&mut s, &tuple, area);
+        wit::lower_mem(cx, &mut g, &mut s, &tuple, 0, area, 0);
+        if flat.len() > max_flat_import_params(&sig) {
+            s.local_get(area);
+        } else {
+            wit::flat_load(&mut g, &mut s, &tuple, area, 0);
+        }
+    }
+    if sig.is_async {
+        import_start(cx, &mut g, &mut s, i, func, result.as_ref(), ret);
+        s.end();
+        let mut f = Function::new(g.decls());
+        f.raw(body);
+        return f;
+    }
+    let rflat = result.as_ref().map_or(Vec::new(), wit::flatten);
+    match &result {
+        Some(t) if rflat.len() > 1 => {
+            alloc(&mut s, t, ret);
+            s.local_get(ret).call(func);
+            wit::lift_mem(cx, &mut g, &mut s, t, ret, 0);
+        }
+        Some(t) => {
+            s.call(func);
+            let slots: Vec<(u32, ValType)> = rflat.iter().map(|v| (g.local(*v), *v)).collect();
+            for (l, _) in slots.iter().rev() {
+                s.local_set(*l);
+            }
+            wit::lift_flat(cx, &mut g, &mut s, t, &slots);
+        }
+        None => {
+            s.call(func).global_get(runtime::G_UNDEFINED);
+        }
+    }
+    s.local_get(saved).global_set(bump);
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// The rest of an `async func` import's adapter (T20 slice 5b), its arguments on the stack:
+/// pass a return area, start the subtask and give a promise. It's settled at once if the
+/// subtask returned, else when [`Helper::Event`] sees it return: until then the subtask is in
+/// the call's waitable set and in the pending table (`handle` → `[promise, ret, i]`), and the
+/// arguments and return area stay allocated (the next export call frees them).
+fn import_start(
+    cx: &mut dyn Cx,
+    g: &mut wit::Gen,
+    s: &mut InstructionSink,
+    i: u32,
+    func: u32,
+    result: Option<&WitType>,
+    ret: u32,
+) {
+    let lib = cx.host_globals();
+    let im = cx.imports();
+    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    let new_promise = cx.helper(runtime::Helper::Prom(promise::Helper::New));
+    let done = cx.helper(runtime::Helper::Abi(Helper::ImportDone(i)));
+    let set = cx.helper(runtime::Helper::Obj(object::Helper::Set));
+    let boxed = cx.helper(runtime::Helper::Box);
+    let new_array = cx.helper(runtime::Helper::Arr(array::Helper::New));
+    let (st, p) = (g.local(ValType::I32), g.local(runtime::jsval()));
+    if let Some(t) = result {
+        let (size, align) = wit::size_align(t);
+        s.i32_const(0).i32_const(0).i32_const(align as i32).i32_const(size as i32);
+        s.call(realloc).local_tee(ret);
+    }
+    s.call(func).local_set(st);
+    s.call(new_promise).local_set(p);
+    s.local_get(st).i32_const(0xf).i32_and().i32_const(SUBTASK_RETURNED).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(p).local_get(ret).call(done);
+    s.else_();
+    {
+        s.global_get(lib + G_WS).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.call(im.get(Import::WaitableSetNew)).global_set(lib + G_WS);
+        s.end();
+        s.local_get(st).i32_const(4).i32_shr_u();
+        s.global_get(lib + G_WS).call(im.get(Import::WaitableJoin));
+        s.global_get(lib + G_PENDING).ref_is_null();
+        s.if_(BlockType::Empty);
+        s.array_new_fixed(runtime::T_VALS, 0).i32_const(0).call(new_array);
+        s.global_set(lib + G_PENDING);
+        s.end();
+        s.global_get(lib + G_PENDING);
+        s.local_get(st).i32_const(4).i32_shr_u().f64_convert_i32_u().call(boxed);
+        s.local_get(p);
+        s.local_get(ret).f64_convert_i32_u().call(boxed);
+        s.f64_const((i as f64).into()).call(boxed);
+        s.array_new_fixed(runtime::T_VALS, 3).i32_const(3).call(new_array);
+        s.call(set);
+        s.global_get(lib + G_PENDING_N).i32_const(1).i32_add();
+        s.global_set(lib + G_PENDING_N);
+    }
+    s.end();
+    s.local_get(p);
+}
+
+/// `$import_done(promise, ret)`: see [`Helper::ImportDone`]. The result is lifted from the
+/// return area; a top-level `result` goes through the import's unwrap function: the promise is
+/// fulfilled with what it returns, rejected with what it throws.
+fn import_done(cx: &mut dyn Cx, i: u32) -> Function {
+    let (_, sig, unwrap) = cx.user_import(i);
+    let resolve = cx.helper(runtime::Helper::Prom(promise::Helper::Resolve));
+    let reject = cx.helper(runtime::Helper::Prom(promise::Helper::Settle { rejected: true }));
+    const P: u32 = 0;
+    const RET: u32 = 1;
+    let mut g = wit::Gen::new(2);
+    let v = g.local(runtime::jsval());
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    match sig.result.map(|t| sig.wit(t)) {
+        Some(t) => wit::lift_mem(cx, &mut g, &mut s, &t, RET, 0),
+        None => {
+            s.global_get(runtime::G_UNDEFINED);
+        }
+    }
+    s.local_set(v);
+    if let Some(unwrap) = unwrap {
+        s.block(BlockType::Result(runtime::jsval()));
+        s.try_table(
+            BlockType::Empty,
+            [Catch::One {
+                tag: runtime::TAG,
+                label: 0,
+            }],
+        );
+        s.local_get(v).call(unwrap).local_set(v);
+        s.local_get(P).ref_cast_non_null(promise::promise());
+        s.local_get(v).call(resolve);
+        s.return_();
+        s.end();
+        s.unreachable();
+        s.end();
+        s.local_set(v);
+        s.local_get(P).ref_cast_non_null(promise::promise());
+        s.local_get(v).call(reject);
+    } else {
+        s.local_get(P).ref_cast_non_null(promise::promise());
+        s.local_get(v).call(resolve);
+    }
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
 /// Canonical ABI constants (see [`crate::host`]).
 const EVENT_SUBTASK: i32 = 1;
 const SUBTASK_RETURNED: i32 = 2;
@@ -351,7 +630,9 @@ const CALLBACK_WAIT: i32 = 2;
 fn step(cx: &mut dyn Cx) -> Function {
     let lib = cx.host_globals();
     let im = cx.imports();
-    let timers = !im.list.is_empty();
+    let timers = im.list.contains(&Import::ClockNow);
+    // Something to wait for: timers, or (T20 slice 5b) `async func` imports.
+    let waits = !im.list.is_empty();
     let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
     let ticks = cx
         .names("$ticks")
@@ -406,15 +687,24 @@ fn step(cx: &mut dyn Cx) -> Function {
         s.i32_const(1).global_set(lib + G_FAILED);
         s.i32_const(0).return_();
         s.end();
+        // Nothing to wait for (no timer, no import pending): done (the promise never settles).
+        let idle = |s: &mut InstructionSink| {
+            s.global_get(lib + G_PENDING_N).i32_eqz();
+            s.if_(BlockType::Empty);
+            s.i32_const(0).return_();
+            s.end();
+        };
+        if waits && !timers {
+            idle(&mut s);
+        }
         if timers {
             let next = cx.helper(runtime::Helper::Timer(timers::Helper::Next));
             let disarm = cx.helper(runtime::Helper::Host(host::Helper::Disarm));
             let tick = cx.helper(runtime::Helper::Abi(Helper::Tick));
-            // Nothing to wait for: done (the promise never settles).
             s.call(next).local_tee(D).i64_const(0).i64_lt_s();
             s.if_(BlockType::Empty);
-            s.i32_const(0).return_();
-            s.end();
+            idle(&mut s);
+            s.else_();
             // Keep a wait that ends no later than the earliest deadline (like `host::Helper::Loop`).
             s.global_get(G_WAIT).i32_eqz();
             s.global_get(G_WAIT_AT).local_get(D).i64_gt_u();
@@ -429,7 +719,7 @@ fn step(cx: &mut dyn Cx) -> Function {
                     .i32_eq();
                 s.if_(BlockType::Empty);
                 // It ended at once: run the timers and look again.
-                s.call(tick).br(2);
+                s.call(tick).br(3);
                 s.end();
                 s.local_get(ST).i32_const(4).i32_shr_u().global_set(G_WAIT);
                 s.local_get(D).global_set(G_WAIT_AT);
@@ -443,7 +733,11 @@ fn step(cx: &mut dyn Cx) -> Function {
                     .call(im.get(Import::WaitableJoin));
             }
             s.end();
-            // No other call may start while this one waits: they would share the timers.
+            s.end();
+        }
+        if waits {
+            // No other call may start while this one waits: they would share the timers, the
+            // pending imports and the memory they use.
             s.global_get(lib + G_BP).i32_eqz();
             s.if_(BlockType::Empty);
             s.call(im.get(Import::BackpressureInc));
@@ -466,8 +760,8 @@ fn step(cx: &mut dyn Cx) -> Function {
 /// Library globals (after the bump pointer, where a command has its host globals): the `init`
 /// state (0: not run, 1: done, 2: threw) and the error it threw; for an async call (T20) its
 /// promise, whether it failed and the error, the waitable set (0: none yet) and whether
-/// backpressure is raised.
-pub const LIB_GLOBALS: u32 = 7;
+/// backpressure is raised; the pending `async func` imports (slice 5b).
+pub const LIB_GLOBALS: u32 = 9;
 const G_INIT_STATE: u32 = 0;
 const G_INIT_ERROR: u32 = 1;
 const G_PROMISE: u32 = 2;
@@ -475,12 +769,16 @@ const G_FAILED: u32 = 3;
 const G_ERROR: u32 = 4;
 const G_WS: u32 = 5;
 const G_BP: u32 = 6;
+/// The pending `async func` imports (T20 slice 5b): subtask handle → `[promise, ret, import]`
+/// (a JS array, made on first use), and how many there are.
+const G_PENDING: u32 = 7;
+const G_PENDING_N: u32 = 8;
 
 /// The types of the [`LIB_GLOBALS`] (all start as 0 / null).
 pub fn lib_global_types() -> [ValType; LIB_GLOBALS as usize] {
     use ValType::I32;
     let v = runtime::jsval();
-    [I32, v, v, I32, v, I32, I32]
+    [I32, v, v, I32, v, I32, I32, v, I32]
 }
 
 /// What an [`adapter`] does.

@@ -141,6 +141,22 @@ pub struct Module {
     /// The code names a property `toString` (T25): `Function.prototype.toString` is installed and
     /// user functions carry their source text ([`Closure::source`]).
     pub to_string: bool,
+    /// Functions a user world imports (T20 slice 5), called with [`Intrinsic::CallImport`].
+    pub imports: Vec<Import>,
+}
+
+/// A function a user world imports (T20 slice 5): core import `name` of module `module` (the
+/// interface's name, as wit-component expects it; an `async func` adds `[async-lower]`).
+/// `sig.result` is the whole WIT result (a top-level `result` too; `throws` is unused).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    pub module: String,
+    pub name: String,
+    pub sig: AbiSig,
+    /// A top-level `result`'s unwrapping `(result: jsval) -> jsval`: `ok`'s value, or throws
+    /// `err`'s. An `async func` (`sig.is_async`, `[async-lower]`) calls it when the subtask
+    /// returns, settling the call's promise with what it gives or throws.
+    pub unwrap: Option<FuncId>,
 }
 
 /// A prototype method implemented in the prelude: `proto.prototype[key]` is a function object
@@ -865,6 +881,12 @@ pub enum Intrinsic {
     F64FromWords,
     /// 32 random bits from the host (`wasi:random/insecure`, commands only) (`i32`).
     RandomSeed,
+    /// Call [`Module::imports`]`[i]` (T20 slice 5) with the arguments in an array (`jsval`):
+    /// each converted to its WIT type like an export's result, the WIT result given back as a JS
+    /// value (a top-level `result` as `{ tag, val }`: the caller unwraps it). Converting the
+    /// arguments can run user code (`valueOf`, `toString`). An `async func` (slice 5b) gives a
+    /// promise instead, settled when the subtask returns (through [`Import::unwrap`]).
+    CallImport(u32),
     /// Code unit `i` (`i32`, in range) of a JS value known to be a string (`i32`, T21).
     StrUnit,
     /// The code units `[start, end)` (`i32`s, in range) of a string, as a new string.
@@ -1088,6 +1110,7 @@ impl Intrinsic {
             Intrinsic::F64Hi | Intrinsic::F64Lo => (&[F64], Some(I32)),
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
+            Intrinsic::CallImport(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::StrUnit => (&[JsVal, I32], Some(I32)),
             Intrinsic::StrSub => (&[JsVal, I32, I32], Some(JsVal)),
             Intrinsic::StrNew => (&[I32], Some(JsVal)),
@@ -1235,6 +1258,7 @@ impl Intrinsic {
             Intrinsic::F64Lo => "f64_lo",
             Intrinsic::F64FromWords => "f64_from_words",
             Intrinsic::RandomSeed => "random_seed",
+            Intrinsic::CallImport(_) => "call_import",
             Intrinsic::StrUnit => "str_unit",
             Intrinsic::StrSub => "str_sub",
             Intrinsic::StrNew => "str_new",
@@ -1322,6 +1346,7 @@ impl Intrinsic {
                 | Intrinsic::PrivateAdd { .. }
                 | Intrinsic::DelegateOpen
                 | Intrinsic::DelegateStep
+                | Intrinsic::CallImport(_)
         )
     }
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
-use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
+use wit_parser::{FunctionKind, InterfaceId, Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 pub mod names;
 
@@ -288,7 +288,7 @@ pub enum Ty {
     List(Box<Ty>),
 }
 
-/// A function a user world exports (T20).
+/// A function a user world exports (T20), or (slice 5) imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldExport {
     /// Its WIT name.
@@ -304,6 +304,17 @@ pub struct WorldExport {
     pub signature: String,
 }
 
+/// An interface a user world imports (T20 slice 5): its name as a core import module
+/// (`ns:pkg/iface@1.0.0`, or the plain name of an inline interface) and its functions (their
+/// signatures, or why they aren't supported), in order.
+#[derive(Debug, Clone)]
+pub struct WorldInterface {
+    pub module: String,
+    /// Its plain name (`iface`): JS names it in camelCase.
+    pub name: String,
+    pub functions: Vec<(String, Result<WorldExport, String>)>,
+}
+
 /// A world from the user's WIT (`--wit`).
 #[derive(Debug, Clone)]
 pub struct UserWorld {
@@ -311,6 +322,9 @@ pub struct UserWorld {
     pub id: WorldId,
     pub name: String,
     pub exports: Vec<WorldExport>,
+    /// Exported interfaces (T20 slice 5).
+    pub export_interfaces: Vec<WorldInterface>,
+    pub imports: Vec<WorldInterface>,
 }
 
 /// Load `world` (a name, `ns:pkg/world` or `None` for the only one) from the WIT file or
@@ -330,62 +344,27 @@ pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld>
     let id = resolve.select_world(&[pkg], world)?;
     let w = &resolve.worlds[id];
     let mut exports = Vec::new();
+    let mut export_interfaces = Vec::new();
     let mut errs = Vec::new();
     for (key, item) in &w.exports {
         match item {
-            WorldItem::Function(f) => {
-                let mut ok = true;
-                let mut ty = |t: &Type, what: String| match boundary_type(&resolve, t) {
-                    Ok(v) => Some(v),
-                    Err(why) => {
-                        errs.push(format!("unsupported: {what} of `{}`: {why}", f.name));
-                        ok = false;
-                        None
-                    }
-                };
-                let params: Vec<(String, Ty)> = f
-                    .params
-                    .iter()
-                    .filter_map(|p| {
-                        ty(&p.ty, format!("parameter `{}`", p.name)).map(|v| (p.name.clone(), v))
-                    })
-                    .collect();
-                // A `result<T, E>` result: return `T` or throw `E`.
-                let (result, throws, err) = match f.result.as_ref().map(|t| ty(t, "the result".into())) {
-                    Some(Some(Ty::Result { ok, err })) => (ok.map(|t| *t), true, err.map(|t| *t)),
-                    Some(t) => (t, false, None),
-                    None => (None, false, None),
-                };
-                if !ok {
-                    continue;
-                }
-                let signature = format!(
-                    "{}func({}){}",
-                    if f.kind.is_async() { "async " } else { "" },
-                    f.params
-                        .iter()
-                        .map(|p| format!("{}: {}", p.name, type_name(&resolve, &p.ty)))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    f.result
-                        .as_ref()
-                        .map_or(String::new(), |t| format!(" -> {}", type_name(&resolve, t)))
-                );
-                exports.push(WorldExport {
-                    name: f.name.clone(),
-                    params,
-                    result,
-                    throws,
-                    err,
-                    is_async: f.kind.is_async(),
-                    signature,
-                });
+            WorldItem::Function(f) => match function(&resolve, f) {
+                Ok(e) => exports.push(e),
+                Err(why) => errs.extend(why),
+            },
+            WorldItem::Interface { id: iface, .. } => {
+                export_interfaces.push(interface(&resolve, key, *iface));
             }
-            _ => errs.push(format!(
-                "unsupported: the world exports interface `{}` (only functions so far; planned: later)",
-                resolve.name_world_key(key)
-            )),
+            WorldItem::Type { .. } => {}
         }
+    }
+    // Imported interfaces (T20 slice 5); an unsupported function is reported if JS imports it.
+    let mut imports = Vec::new();
+    for (key, item) in &w.imports {
+        let WorldItem::Interface { id: iface, .. } = item else {
+            continue;
+        };
+        imports.push(interface(&resolve, key, *iface));
     }
     if !errs.is_empty() {
         bail!("world `{}`:\n  {}", w.name, errs.join("\n  "));
@@ -395,6 +374,84 @@ pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld>
         resolve,
         id,
         exports,
+        export_interfaces,
+        imports,
+    })
+}
+
+/// An imported or exported interface: its name and its functions' signatures.
+fn interface(resolve: &Resolve, key: &wit_parser::WorldKey, id: InterfaceId) -> WorldInterface {
+    let functions = resolve.interfaces[id]
+        .functions
+        .values()
+        .map(|f| {
+            let sig = match f.kind {
+                FunctionKind::Freestanding | FunctionKind::AsyncFreestanding => {
+                    function(resolve, f).map_err(|why| why.join("; "))
+                }
+                _ => Err(format!(
+                    "unsupported: `{}` is a resource function (planned: later)",
+                    f.name
+                )),
+            };
+            (f.name.clone(), sig)
+        })
+        .collect();
+    let name = match key {
+        wit_parser::WorldKey::Name(n) => n.clone(),
+        wit_parser::WorldKey::Interface(_) => resolve.interfaces[id].name.clone().unwrap_or_default(),
+    };
+    WorldInterface {
+        module: resolve.name_world_key(key),
+        name,
+        functions,
+    }
+}
+
+/// A world function's signature: its WIT types, a `result<T, E>` result split into `T` and `E`.
+fn function(resolve: &Resolve, f: &wit_parser::Function) -> Result<WorldExport, Vec<String>> {
+    let mut errs = Vec::new();
+    let mut ty = |t: &Type, what: String| match boundary_type(resolve, t) {
+        Ok(v) => Some(v),
+        Err(why) => {
+            errs.push(format!("unsupported: {what} of `{}`: {why}", f.name));
+            None
+        }
+    };
+    let params: Vec<(String, Ty)> = f
+        .params
+        .iter()
+        .filter_map(|p| ty(&p.ty, format!("parameter `{}`", p.name)).map(|v| (p.name.clone(), v)))
+        .collect();
+    // A `result<T, E>` result: return `T` or throw `E`.
+    let (result, throws, err) = match f.result.as_ref().map(|t| ty(t, "the result".into())) {
+        Some(Some(Ty::Result { ok, err })) => (ok.map(|t| *t), true, err.map(|t| *t)),
+        Some(t) => (t, false, None),
+        None => (None, false, None),
+    };
+    if !errs.is_empty() {
+        return Err(errs);
+    }
+    let signature = format!(
+        "{}func({}){}",
+        if f.kind.is_async() { "async " } else { "" },
+        f.params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, type_name(resolve, &p.ty)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        f.result
+            .as_ref()
+            .map_or(String::new(), |t| format!(" -> {}", type_name(resolve, t)))
+    );
+    Ok(WorldExport {
+        name: f.name.clone(),
+        params,
+        result,
+        throws,
+        err,
+        is_async: f.kind.is_async(),
+        signature,
     })
 }
 

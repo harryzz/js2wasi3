@@ -345,6 +345,11 @@ impl V<'_> {
             Expr::Str(_) => Some(Type::JsVal),
             Expr::Intrinsic { op, args } => {
                 let (params, result) = op.signature();
+                if let crate::Intrinsic::CallImport(i) = op
+                    && *i as usize >= self.m.imports.len()
+                {
+                    self.err(format!("$call_import.{i}: no such import"));
+                }
                 if args.len() != params.len() {
                     self.err(format!(
                         "${}: {} args for {} params",
