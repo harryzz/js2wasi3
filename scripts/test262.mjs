@@ -28,7 +28,8 @@
 //   crash        the compiler panicked
 //   timeout      build + run took longer than --timeout
 //   skip         not runnable here: `noStrict`/`raw` (sloppy mode), `_FIXTURE` files, module resolution
-//                (multi-file modules, F7), `$262` (host-defined test hooks)
+//                (multi-file modules, F7), `$262` (host-defined test hooks), script only (the build
+//                failed and node doesn't parse the test as a module either)
 // The run prints counts per directory, then every test whose status differs from the baseline
 // (or that isn't in it). Exit 1 if a test that passed in the baseline doesn't pass now.
 // Per-test details of the last run: out/test262/results.tsv (path, status, ms, reason).
@@ -118,6 +119,7 @@ function frontmatter(src) {
   return meta;
 }
 
+let fileCounter = 0;
 const harnessCache = new Map();
 function harness(name) {
   if (!harnessCache.has(name)) harnessCache.set(name, readFileSync(join(HARNESS, name), "utf8"));
@@ -169,7 +171,8 @@ async function one(rel, work) {
   if (meta.flags.includes("async")) parts.push(harness("doneprintHandle.js"));
   for (const inc of meta.includes) parts.push(harness(inc));
   parts.push(src);
-  const id = rel.replace(/[/.]/g, "_");
+  // Plain names: the WIT package/world name comes from the file name (F143).
+  const id = `t${++fileCounter}`;
   const js = join(work, `${id}.js`), wasm = join(work, `${id}.wasm`);
   writeFileSync(js, parts.join("\n"));
 
@@ -188,6 +191,12 @@ async function one(rel, work) {
       return { status: "unsupported", reason: firstLine(b.stderr.match(/unsupported: .*/)[0].replace(/ \(planned: .*\)$/, "")) };
     }
     if (early) return { status: "pass" };
+    // Valid as a script but not as a module (`function f(await)`, `var x; function x() {}`): node
+    // rejects the same source as a module too.
+    const mjs = join(work, `${id}.mjs`);
+    writeFileSync(mjs, parts.join("\n"));
+    const n = await run(process.execPath, ["--check", mjs], deadline - Date.now());
+    if (n.code !== 0 && !n.timedOut) return { status: "skip", reason: `script only (node: ${firstLine(n.stderr.match(/SyntaxError.*/)?.[0] ?? n.stderr)})` };
     return { status: "fail", reason: `build error: ${msg}` };
   }
   if (early) return { status: "fail", reason: `expected a ${meta.negative.type} at build time, but it built` };

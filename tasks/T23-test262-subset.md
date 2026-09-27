@@ -1,6 +1,6 @@
 # T23: test262 subset runner
 
-Status: in progress (slice 1 done: runner; slice 2 next), run only with approval | Depends on: T12+
+Status: in progress (slices 1–2 done; slice 3 next), run only with approval | Depends on: T12+
 
 ## Goal
 Run a chosen subset of test262 (by directory or feature list) through js2wasi3 + wasmtime and report the pass rate per directory.
@@ -11,7 +11,7 @@ Never run it after every edit. Only at the end of a task or on request. Ask befo
 
 ## Checklist
 - [x] Slice 1: runner (`scripts/test262.mjs`, `scripts/fetch-test262.sh`, pin in `TOOLS.md`)
-- [ ] Slice 2: first subset run, baseline committed
+- [x] Slice 2: first subset run, baseline committed
 - [ ] Slice 3: top failure causes recorded as follow-ups
 
 ## Notes / Result
@@ -48,8 +48,44 @@ default `-j` is half the logical CPUs: ~4.5 tests/s, i.e. the whole subset takes
 **Unsupported / known noise**: sloppy-mode tests are skipped; tests relying on script semantics fail as modules;
 unhandled rejections are fatal (node's behaviour; `async-function/evaluation-body.js`).
 
-**Next smallest step (slice 2)**: time `built-ins/JSON` and `built-ins/Map` (small), then ask the user before the
-full `subset` run (~1.5 h at -j 4); commit `tests/test262/baseline.json` from `--update`.
+### Slice 2: first subset run (2026-09-27)
+`node scripts/test262.mjs --update --causes 25 subset` (user-approved; 26,630 files, 6,500 s at -j 4, ~4.1 tests/s),
+then two reruns of the tests the runner had misclassified (below). Baseline: `tests/test262/baseline.json`
+(26,630 entries, 2.3 MB). Full log with the top 25 reasons per status: `out/test262/subset-2026-09-27.log`
+(gitignored; the counts there predate the reclassification).
+
+| directory | pass | fail | unsupported | crash | timeout | skip | pass% |
+|---|---|---|---|---|---|---|---|
+| built-ins/Array | 2047 | 494 | 478 | 0 | 11 | 52 | 67.6% |
+| built-ins/JSON | 87 | 22 | 53 | 0 | 0 | 3 | 53.7% |
+| built-ins/Map | 101 | 25 | 74 | 0 | 2 | 2 | 50.0% |
+| built-ins/Math | 162 | 0 | 165 | 0 | 0 | 0 | 49.5% |
+| built-ins/Promise | 367 | 181 | 173 | 0 | 7 | 4 | 50.4% |
+| built-ins/Set | 260 | 13 | 107 | 0 | 1 | 2 | 68.2% |
+| built-ins/String | 616 | 278 | 323 | 0 | 0 | 6 | 50.6% |
+| language/expressions | 6642 | 593 | 3191 | 0 | 0 | 738 | 63.7% |
+| language/statements | 5840 | 139 | 2861 | 9 | 1 | 500 | 66.0% |
+| **total** | **16122** | **1745** | **7425** | **9** | **22** | **1307** | **63.7%** |
+
+(pass% = pass / run, skips excluded.)
+
+**Runner fixes found by the run**
+- 110 "build errors" were tests valid only as scripts (`function f(await)`, `var x; function x() {}`, reserved
+  words): js2wasi3 is right to reject them as modules. On a build error the runner now asks `node --check` on the
+  same source as `.mjs`; if node rejects it too, the test is `skip` ("script only").
+- 10 tests failed with "generated WIT is invalid" because the temp file name (`…__proto__…`) became the WIT
+  package/world name (`--proto-`): a compiler bug (F143). The runner now names temp files `t<n>.js`; 9 of them pass.
+
+**Top reasons** (before slice 3 turns them into follow-ups): unsupported: global `Array` (2,302, mostly
+propertyHelper), `yield*` in an async generator (1,050), dynamic `import()` (469), `eval` (400), undeclared globals
+(`x`, `w`, `u`, `s`, `unresolvableReference`, …: ~1,200, F139), `globalThis` (256), private accessors (201),
+`Reflect` (197), BigInt (191), `Function` (155), computed instance field keys (144), regex literals (100);
+fail: wrapper objects (722 traps, F106), `Test262Error` assertions (448), `Object.defineProperty` traps (202), a
+recursion in `strict_eq < float` (27 "call stack exhausted"); crash: `await using` (9, F140); timeouts: 22.
+
+**Next smallest step (slice 3)**: group the top reasons in `out/test262/subset-2026-09-27.log` (and `results.tsv`)
+into follow-ups with counts; check a sample of each large `fail` group (Test262Error, `defineProperty` traps,
+`strict_eq` recursion, timeouts) for its cause.
 
 ## Handoff (written 2026-09-28, end of the T20 session)
 
@@ -91,3 +127,6 @@ cheap. Each test is a full build + wasmtime compile (~0.3–1 s), so whole-suite
 - 2026-09-27: runner `scripts/test262.mjs` (node): frontmatter → harness prepended → release `js2wasi3 build` → `wasmtime run -Sp3`; pass/fail/unsupported/crash/timeout/skip, counts per dir, `--list`, `--causes N`, baseline `tests/test262/baseline.json` (`--update`), changes vs baseline, `out/test262/results.tsv`.
 - 2026-09-27: speed: a test is ~0.12 s build (release; debug 0.66 s) + ~1.2 s wasmtime *compiling* the ~120 KB component (running is ms). wasmtime's compile cache is on by default and would grow ~1 MB per test (`~/.cache/wasmtime` is already 1.2 GB from diff.sh runs), so `-C cache=n`. `-O opt-level=0 -O regalloc-algorithm=single-pass -C parallel-compilation=n` roughly halves it; same results on Math/abs, Math/max, JSON/stringify (84 tests: 18 s at -j 8, was 30 s). With 8 jobs a test takes ~2x its solo time (WSL, 8 threads).
 - 2026-09-27: slice 1 done (notes above); F139–F142 recorded.
+- 2026-09-27: slice 2 started. `built-ins/JSON` + `built-ins/Map` (369 files): 188 pass, 48 fail, 127 unsupported, 2 timeout, 4 skip; 104 s at -j 4 (~3.5 tests/s, so the whole subset ≈ 2 h). The 2 timeouts are real: `new Map(iterable)` ignores a user-replaced `Map.prototype.set`, so it never throws and loops over an infinite iterator. Also seen: `getOrInsert`/`getOrInsertComputed` missing, `WeakMap`, `JSON.rawJSON`.
+- 2026-09-27: user approved the full `subset` run (~2 h, -j 4); started in the background with --update --causes 25.
+- 2026-09-27: full subset run done (6,500 s). Reclassified 110 script-only build errors as skips (runner checks `node --check` as a module) and fixed 10 WIT-name failures from temp file names (F143); baseline 16,122 pass / 1,745 fail / 7,425 unsupported / 9 crash / 22 timeout / 1,307 skip (63.7%). Slice 2 done.

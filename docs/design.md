@@ -251,7 +251,8 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 - Each test is compiled as one ES module (always strict) after its harness (`print` shim, `sta.js`, `assert.js`,
   `doneprintHandle.js` for async, `includes`) and run with `wasmtime run -Sp3` (no compile cache, opt-level 0,
   single-pass register allocator: compiling dominates). Statuses: pass / fail / unsupported (build rejected with
-  `unsupported:`) / crash (compiler panic) / timeout / skip (`noStrict`, `raw`, `_FIXTURE`, module resolution, `$262`).
+  `unsupported:`) / crash (compiler panic) / timeout / skip (`noStrict`, `raw`, `_FIXTURE`, module resolution, `$262`,
+  script only: the build failed and `node --check` rejects the source as a module too).
 - It prints counts per directory and the tests whose status differs from `tests/test262/baseline.json`; `--update`
   merges the run into it. Exit 1 if a test that passed there doesn't now. Details: `out/test262/results.tsv`.
 - Known noise: modules, not scripts (top-level `this`, global-object `var`s, `eval`); an unhandled rejection is fatal
