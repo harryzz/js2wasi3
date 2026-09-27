@@ -25,6 +25,10 @@ use oxc_span::{GetSpan, Span};
 use oxc_syntax::symbol::SymbolId;
 
 /// The JS source of the built-ins.
+/// `Array.prototype` methods that are native for arrays; the prelude's are their generic
+/// fallbacks (T35).
+pub const ARRAY_NATIVE: &[&str] = &["push", "pop", "join", "toString"];
+
 pub const PRELUDE: &str = concat!(
     include_str!("../builtins/math.js"),
     include_str!("../builtins/string.js"),

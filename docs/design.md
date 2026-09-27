@@ -56,8 +56,9 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   between dictionary entries and elements. T34: element writes are either [[Set]] (`array::Helper::SetIndex`: for an
   absent element, once `runtime::G_INDEX_PROTO` says an index key reached the prototype chain, setters and read-only
   properties there apply) or CreateDataProperty (`DefineIndex`: literals, spread, `__intrinsic_define`); the prelude
-  builds its own arrays with definitions (`$$append`). T33: holes read through the prototype chain. See
-  `crates/backend/src/array.rs`.)
+  builds its own arrays with definitions (`$$append`). T33: holes read through the prototype chain. T35: the native
+  `push`/`pop`/`join`/`toString` fall back to the prelude's generic versions (`ir::Module::array_generic`) for a
+  `this` that isn't an array. See `crates/backend/src/array.rs`.)
   (T30: primitive wrapper objects are `$wrapper`, a final subtype of `$object` with the primitive in `prim`; a String
   wrapper's indices and `length` are real read-only own properties. ToPrimitive unwraps through the built-in
   `valueOf`/`toString`; the prelude reads `prim` with `__intrinsic_unwrap` and wraps with `__intrinsic_to_object`.
@@ -197,6 +198,8 @@ algorithm and `toFixed` exact, so the digits match node; see `builtins/string.js
 `this.length`), so they take any array-like `this`; `push`/`pop`/`join`/`toString`/`values` stay native. `Array(…)` and
 `new Array(…)` are direct calls of `$$Array`. `sort` is a stable merge sort (the same order as V8's TimSort for a
 consistent comparator). Prelude code is typed by the same inference as user code: `+x.length` keeps a length an `f64`.)
+(T35: prelude intrinsics `__intrinsic_is_constructor(v)` and `__intrinsic_named("x")`, a compile-time constant telling
+whether the user's code names property `x`, so the prelude can skip paths that can't happen, like species.)
 (T21 slice 4: `builtins/object.js` (`Object.assign`/`fromEntries`, the `Object.prototype` methods, installed over the
 sentinels like the others, so ToPrimitive calls the prelude's `toString`) and `builtins/json.js` (`JSON.stringify`: the
 spec's algorithm writing pieces into one array joined at the end; node's circular-structure message). The intrinsic

@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T35 arrays: generic methods, `isConcatSpreadable`, species, `fromAsync` (targeted rerun)
+
+- Compiler: T35 (the native `push`/`pop`/`join`/`toString` fall back to the prelude's generic algorithms; `concat`'s
+  IsConcatSpreadable; ArraySpeciesCreate; `Array.fromAsync`; `Array.from` with a constructor `this`).
+- Run: `built-ins/Array`, `language/statements/for-of` (3,833 tests, 1,244 s at -j 4): 105 → pass, 0 regressions.
+  Subset: 21,831 of 24,820 run pass (88.0%); `built-ins/Array` 2642 of 3030 (87.2%).
+
 ## 2026-09-27: T34 array writes through the prototype chain (targeted rerun)
 
 - Compiler: T34 ([[Set]] on absent elements walks the prototype chain behind a flag; CreateDataProperty for elements;

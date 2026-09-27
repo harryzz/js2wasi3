@@ -1149,6 +1149,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.observe(Slot::Var(p), Kind::Any);
             }
             let code = self.adapter(func);
+            if proto == Builtin::Array && builtins::ARRAY_NATIVE.contains(&key) {
+                // The fallback of a native method for a `this` that isn't an array (T35).
+                self.module.array_generic.push((key.to_string(), code));
+                continue;
+            }
             self.module.builtin_methods.push(ir::BuiltinMethod {
                 proto,
                 key: key.to_string(),
@@ -5168,13 +5173,26 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Some(op) = stream_op(name) {
             return self.map_intrinsic(cx, c, name, Intrinsic::Stream(op));
         }
+        if name == "named" {
+            // Does the user's code name this property (a string literal argument)? A constant
+            // (T35): the prelude skips what can't happen, e.g. species without `species`.
+            let Some(Expression::StringLiteral(sl)) = c.arguments.first().and_then(|a| a.as_expression())
+            else {
+                return Err(self.unsupported(c.span, "intrinsic `named` argument", "T35"));
+            };
+            let named = self.prelude.user_props.contains(sl.value.as_str());
+            return Ok((
+                jsval_of(Val::new(Expr::bool(named), Type::Bool)),
+                Call::Intrinsic(Some(Kind::Bool)),
+            ));
+        }
         let arity = match name {
             "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
             "min" | "max" | "copysign" | "imul" | "from_words" => 2,
             "random_seed" => 0,
             "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
             "trap" => 0,
-            "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" => 1,
+            "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
             "inspect" => 2,
             "unit" => 2,
             "sub" | "str_set" | "define" => 3,
@@ -5212,6 +5230,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 None => Expr::intrinsic(Intrinsic::Inspect, vec![v]),
             };
             return Ok((e, Call::Intrinsic(Some(Kind::Str))));
+        }
+        if name == "is_constructor" {
+            // IsConstructor (T35).
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, e)?);
+            let e = jsval_of(Val::new(
+                Expr::intrinsic(Intrinsic::IsConstructor, vec![v]),
+                Type::Bool,
+            ));
+            return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
         }
         if name == "builtin_to_string" {
             let Some(e) = c.arguments[0].as_expression() else {

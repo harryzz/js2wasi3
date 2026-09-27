@@ -891,6 +891,15 @@ impl runtime::Cx for Emitter<'_> {
             .collect()
     }
 
+    fn array_generic(&mut self, key: &str) -> Option<u32> {
+        let base = self.func_base;
+        self.m
+            .array_generic
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, f)| base + f.0)
+    }
+
     fn builtin_methods(&mut self, b: ir::Builtin) -> Vec<(String, u32, u32)> {
         let base = self.func_base;
         self.m
@@ -1583,6 +1592,7 @@ impl Emitter<'_> {
                     Intrinsic::Unwrap => H::Wrap(wrapper::Helper::Unwrap),
                     Intrinsic::InspectAt(d) => H::Fmt(inspect::Helper::At(*d)),
                     Intrinsic::BuiltinToString => H::Obj(object::Helper::BuiltinToString),
+                    Intrinsic::IsConstructor => H::Func(func::Helper::IsConstructor),
                     Intrinsic::WellKnownSymbol(k) => H::WellKnownSymbol(*k),
                     Intrinsic::HasOwn => H::Obj(object::Helper::HasOwn),
                     Intrinsic::InstanceOf(b) => H::Obj(object::Helper::InstanceOf(*b)),

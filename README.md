@@ -61,7 +61,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Objects and prototypes, getters/setters, `Object.defineProperty` (also on array elements and `length`),
   `freeze`/`seal`; arrays and the iterator protocol.
 - Built-ins written in JS and compiled with the program (only what's used): `Math`, `String`/`Number` methods and
-  parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …), `Array.from`/`of`, `JSON.stringify`/`parse`, `Map`/`Set`, typed arrays and `ArrayBuffer`, `Object.assign`/`fromEntries`,
+  parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …, generic over array-likes, with species), `Array.from`/`of`/`fromAsync`, `JSON.stringify`/`parse`, `Map`/`Set`, typed arrays and `ArrayBuffer`, `Object.assign`/`fromEntries`,
   `hasOwnProperty` and the other `Object.prototype` methods.
 - Classes: fields (also computed keys), static members and `static {}` blocks, private `#x` fields, methods and
   getters/setters, `extends` (also built-in errors), `super`.

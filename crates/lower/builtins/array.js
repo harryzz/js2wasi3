@@ -1,19 +1,19 @@
 // Arrays (T21 slice 3). Conventions: crates/lower/src/builtins.rs.
 // `$$Array_prototype_x` is `Array.prototype.x`, `$$Array` is `Array(…)` / `new Array(…)`,
 // `$$Array_from` is `Array.from`. The methods are the spec's generic algorithms (any array-like
-// `this`); `push`, `pop`, `join`, `toString`, `values` are native (crates/backend/src/array.rs).
-// Not implemented: species (results are always plain arrays), `Symbol.isConcatSpreadable`.
+// `this`); `push`, `pop`, `join`, `toString`, `values` are native (crates/backend/src/array.rs) for
+// arrays: this file's `push`/`pop`/`join`/`toString` are their fallbacks for any other `this` (T35).
 // Uses string.js's `$$toInteger`, `$$clamp`, `$$relative`, `$$String`.
 
 // ---- helpers -----------------------------------------------------------------------------
 
-// ToObject(this) (T30: primitives are wrapped), with node's message for `undefined`/`null`.
 // Appends `v` to a prelude-made array (CreateDataProperty at `length`, T34): unlike `push`,
 // never meets setters or read-only indices on the prototype chain.
 function $$append(a, v) {
   __intrinsic_define(a, +a.length, v);
 }
 
+// ToObject(this) (T30: primitives are wrapped), with node's message for `undefined`/`null`.
 function $$thisObject(v, name) {
   if (v === undefined || v === null) {
     throw new TypeError("Array.prototype." + name + " called on null or undefined");
@@ -31,6 +31,39 @@ function $$lengthOf(o) {
     return 9007199254740991;
   }
   return n;
+}
+
+// ArraySpeciesCreate (T35): a plain array unless `o` is an array whose `constructor` has a
+// `Symbol.species` (then `new species(len)`). Built-in constructors have no species here, so
+// without `species` in the user's code the result is always a plain array.
+function $$speciesCreate(o, len) {
+  if (!__intrinsic_named("species") || !Array.isArray(o)) {
+    return $$newArray(len);
+  }
+  let c = o.constructor;
+  if (c !== null && (typeof c === "object" || typeof c === "function")) {
+    c = c[Symbol.species];
+    if (c === null) {
+      c = undefined;
+    }
+  }
+  if (c === undefined) {
+    return $$newArray(len);
+  }
+  if (!__intrinsic_is_constructor(c)) {
+    throw new TypeError("object.constructor[Symbol.species] is not a constructor");
+  }
+  return new c(len);
+}
+
+// CreateDataPropertyOrThrow (T35): an array defines directly, any other object (a species result)
+// through defineProperty, which throws when it can't.
+function $$put(a, k, v) {
+  if (Array.isArray(a)) {
+    __intrinsic_define(a, k, v);
+  } else {
+    Object.defineProperty(a, k, { value: v, writable: true, enumerable: true, configurable: true });
+  }
 }
 
 // HasProperty(o, k) for an object or a primitive.
@@ -161,7 +194,25 @@ function $$Array_of(...items) {
   return a;
 }
 
+// The array `Array.from`/`fromAsync` fill (T35): `new C()` / `new C(len)` when `this` is a
+// constructor (`Array.from.call(C, …)`), else a plain array.
+function $$fromCreate(c, len) {
+  if (__intrinsic_is_constructor(c)) {
+    return len === undefined ? new c() : new c(len);
+  }
+  return len === undefined ? [] : $$newArray(len);
+}
+
+// Call a callback with two arguments and `this` = thisArg.
+function $$call2(f, thisArg, a, b) {
+  if (thisArg === undefined) {
+    return f(a, b);
+  }
+  return f.call(thisArg, a, b);
+}
+
 function $$Array_from(items, mapfn, thisArg) {
+  const c = this;
   if (mapfn !== undefined && typeof mapfn !== "function") {
     throw new TypeError($$typeDescribe(mapfn) + " is not a function");
   }
@@ -170,28 +221,67 @@ function $$Array_from(items, mapfn, thisArg) {
       "object " + items + " is not iterable (cannot read property Symbol(Symbol.iterator))",
     );
   }
-  const a = [];
   if (typeof items === "string" || items[Symbol.iterator] !== undefined) {
+    const a = $$fromCreate(c, undefined);
     let k = 0;
     for (const v of items) {
-      if (mapfn === undefined) {
-        __intrinsic_define(a, k, v);
-      } else {
-        __intrinsic_define(a, k, $$call3(mapfn, thisArg, v, k, undefined));
-      }
+      $$put(a, k, mapfn === undefined ? v : $$call2(mapfn, thisArg, v, k));
       k++;
     }
+    a.length = k;
     return a;
   }
-  const len = $$lengthOf(items);
+  const o = __intrinsic_to_object(items);
+  const len = $$lengthOf(o);
+  const a = $$fromCreate(c, len);
   for (let k = 0; k < len; k++) {
-    const v = items[k];
-    if (mapfn === undefined) {
-      __intrinsic_define(a, k, v);
-    } else {
-      __intrinsic_define(a, k, $$call3(mapfn, thisArg, v, k, undefined));
+    const v = o[k];
+    $$put(a, k, mapfn === undefined ? v : $$call2(mapfn, thisArg, v, k));
+  }
+  a.length = len;
+  return a;
+}
+
+// Array.fromAsync (T35): async iterables, else sync iterables (values awaited, through
+// `for await`'s CreateAsyncFromSyncIterator), else array-likes (each value awaited); `mapfn`'s
+// results are awaited too.
+async function $$Array_fromAsync(asyncItems, mapfn, thisArg) {
+  const c = this;
+  if (mapfn !== undefined && typeof mapfn !== "function") {
+    throw new TypeError($$String(mapfn) + " is not a function");
+  }
+  if (asyncItems === undefined || asyncItems === null) {
+    throw new TypeError(
+      "Cannot read properties of " + asyncItems + " (reading 'Symbol(Symbol.asyncIterator)')",
+    );
+  }
+  let iterable = typeof asyncItems === "string";
+  if (!iterable) {
+    const m = asyncItems[Symbol.asyncIterator];
+    iterable = m !== undefined && m !== null;
+    if (!iterable) {
+      const n = asyncItems[Symbol.iterator];
+      iterable = n !== undefined && n !== null;
     }
   }
+  if (iterable) {
+    const a = $$fromCreate(c, undefined);
+    let k = 0;
+    for await (const v of asyncItems) {
+      $$put(a, k, mapfn === undefined ? v : await $$call2(mapfn, thisArg, v, k));
+      k++;
+    }
+    a.length = k;
+    return a;
+  }
+  const o = __intrinsic_to_object(asyncItems);
+  const len = $$lengthOf(o);
+  const a = $$fromCreate(c, len);
+  for (let k = 0; k < len; k++) {
+    const v = await o[k];
+    $$put(a, k, mapfn === undefined ? v : await $$call2(mapfn, thisArg, v, k));
+  }
+  a.length = len;
   return a;
 }
 
@@ -230,10 +320,10 @@ function $$Array_prototype_map(callbackfn, thisArg) {
   const o = $$thisObject(this, "map");
   const len = $$lengthOf(o);
   $$callable(callbackfn);
-  const a = $$newArray(len);
+  const a = $$speciesCreate(o, len);
   for (let k = 0; k < len; k++) {
     if ($$has(o, k)) {
-      __intrinsic_define(a, k, $$call3(callbackfn, thisArg, o[k], k, o));
+      $$put(a, k, $$call3(callbackfn, thisArg, o[k], k, o));
     }
   }
   return a;
@@ -243,13 +333,13 @@ function $$Array_prototype_filter(callbackfn, thisArg) {
   const o = $$thisObject(this, "filter");
   const len = $$lengthOf(o);
   $$callable(callbackfn);
-  const a = [];
+  const a = $$speciesCreate(o, 0);
   let n = 0;
   for (let k = 0; k < len; k++) {
     if ($$has(o, k)) {
       const v = o[k];
       if ($$call3(callbackfn, thisArg, v, k, o)) {
-        __intrinsic_define(a, n, v);
+        $$put(a, n, v);
         n++;
       }
     }
@@ -418,11 +508,11 @@ function $$Array_prototype_slice(start, end) {
   if (end !== undefined) {
     to = $$relative($$toInteger(end), len);
   }
-  const a = [];
+  const a = $$speciesCreate(o, to > from ? to - from : 0);
   let n = 0;
   for (let k = from; k < to; k++) {
     if ($$has(o, k)) {
-      __intrinsic_define(a, n, o[k]);
+      $$put(a, n, o[k]);
     }
     n++;
   }
@@ -430,22 +520,40 @@ function $$Array_prototype_slice(start, end) {
   return a;
 }
 
+// IsConcatSpreadable (T35): `Symbol.isConcatSpreadable` if defined, else IsArray.
+function $$spreadable(e) {
+  if (e === null || (typeof e !== "object" && typeof e !== "function")) {
+    return false;
+  }
+  const s = e[Symbol.isConcatSpreadable];
+  if (s !== undefined) {
+    return !!s;
+  }
+  return Array.isArray(e);
+}
+
 function $$Array_prototype_concat(...items) {
   const o = $$thisObject(this, "concat");
-  const a = [];
+  const a = $$speciesCreate(o, 0);
   let n = 0;
   for (let i = -1; i < +items.length; i++) {
     const e = i < 0 ? o : items[i];
-    if (Array.isArray(e)) {
-      const len = +e.length;
+    if ($$spreadable(e)) {
+      const len = $$lengthOf(e);
+      if (n + len > 9007199254740991) {
+        throw new TypeError("Invalid array length");
+      }
       for (let k = 0; k < len; k++) {
-        if (k in e) {
-          __intrinsic_define(a, n, e[k]);
+        if ($$has(e, k)) {
+          $$put(a, n, e[k]);
         }
         n++;
       }
     } else {
-      __intrinsic_define(a, n, e);
+      if (n >= 9007199254740991) {
+        throw new TypeError("Invalid array length");
+      }
+      $$put(a, n, e);
       n++;
     }
   }
@@ -466,7 +574,7 @@ function $$flatten(target, source, start, depth, mapper, thisArg) {
       if (depth > 0 && Array.isArray(e)) {
         n = $$flatten(target, e, n, depth - 1, undefined, undefined);
       } else {
-        __intrinsic_define(target, n, e);
+        $$put(target, n, e);
         n++;
       }
     }
@@ -480,7 +588,7 @@ function $$Array_prototype_flat(depth) {
   if (depth !== undefined) {
     d = $$toInteger(depth);
   }
-  const a = [];
+  const a = $$speciesCreate(o, 0);
   $$flatten(a, o, 0, d, undefined, undefined);
   return a;
 }
@@ -490,7 +598,7 @@ function $$Array_prototype_flatMap(mapper, thisArg) {
   if (typeof mapper !== "function") {
     throw new TypeError($$typeDescribe(mapper) + " is not a function");
   }
-  const a = [];
+  const a = $$speciesCreate(o, 0);
   $$flatten(a, o, 0, 1, mapper, thisArg);
   return a;
 }
@@ -617,12 +725,13 @@ function $$Array_prototype_splice(...args) {
     deleteCount = $$clamp($$toInteger(args[1]), len - start);
   }
   const itemCount = +args.length > 2 ? +args.length - 2 : 0;
-  const removed = $$newArray(deleteCount);
+  const removed = $$speciesCreate(o, deleteCount);
   for (let k = 0; k < deleteCount; k++) {
     if ($$has(o, start + k)) {
-      __intrinsic_define(removed, k, o[start + k]);
+      $$put(removed, k, o[start + k]);
     }
   }
+  removed.length = deleteCount;
   if (itemCount < deleteCount) {
     for (let k = start; k < len - deleteCount; k++) {
       if ($$has(o, k + deleteCount)) {
@@ -761,6 +870,75 @@ function $$Array_prototype_sort(comparefn) {
     }
   }
   return o;
+}
+
+// ---- generic push / pop / join / toString (T35) --------------------------------------------
+// The native methods call these when `this` isn't an array (`ir::Module::array_generic`).
+
+// ToObject(this) with the message V8 gives these four.
+function $$genericThis(v) {
+  if (v === undefined || v === null) {
+    throw new TypeError("Cannot convert undefined or null to object");
+  }
+  return __intrinsic_to_object(v);
+}
+
+function $$Array_prototype_push(...items) {
+  const o = $$genericThis(this);
+  let len = $$lengthOf(o);
+  const n = +items.length;
+  if (len + n > 9007199254740991) {
+    throw new TypeError(
+      "Pushing " + n + " elements on an array-like of length " + len +
+        " is disallowed, as the total surpasses 2**53-1",
+    );
+  }
+  for (let i = 0; i < n; i++) {
+    o[len] = items[i];
+    len++;
+  }
+  o.length = len;
+  return len;
+}
+
+function $$Array_prototype_pop() {
+  const o = $$genericThis(this);
+  const len = $$lengthOf(o);
+  if (len === 0) {
+    o.length = 0;
+    return undefined;
+  }
+  const k = len - 1;
+  const element = o[k];
+  delete o[k];
+  o.length = k;
+  return element;
+}
+
+function $$Array_prototype_join(separator) {
+  const o = $$genericThis(this);
+  const len = $$lengthOf(o);
+  const sep = separator === undefined ? "," : __intrinsic_to_string(separator);
+  let r = "";
+  for (let k = 0; k < len; k++) {
+    if (k > 0) {
+      r += sep;
+    }
+    const e = o[k];
+    if (e !== undefined && e !== null) {
+      r += __intrinsic_to_string(e);
+    }
+  }
+  return r;
+}
+
+function $$Array_prototype_toString() {
+  const o = $$genericThis(this);
+  const f = o.join;
+  if (typeof f === "function") {
+    return f.call(o);
+  }
+  return $$Object_prototype_toString.call(o);
 }
 
 // ---- copying variants (ES2023) -----------------------------------------------------------

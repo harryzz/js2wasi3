@@ -230,6 +230,9 @@ pub trait Cx {
     fn declare_func(&mut self, index: u32);
     /// Function index of the prelude's StringToNumber `(jsval) -> f64`, if the module has it (T21).
     fn string_to_number(&mut self) -> Option<u32>;
+    /// The prelude's generic fallback of a native `Array.prototype` method (T35): its `$code`
+    /// function index.
+    fn array_generic(&mut self, key: &str) -> Option<u32>;
     /// The prelude methods of a built-in prototype (T21): (key, `$code` function index, length).
     fn builtin_methods(&mut self, b: js2wasi3_ir::Builtin) -> Vec<(String, u32, u32)>;
     /// Can the module make a `Map`/`Set` (T25)?

@@ -1091,15 +1091,25 @@ fn index_keys(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `this` as an array, or a TypeError: the methods are only implemented for arrays so far.
+/// `this` must be an array for the native code: any other `this` goes to the prelude's generic
+/// method (T35), linked when the code names it.
 fn this_array(cx: &mut dyn Cx, s: &mut InstructionSink, name: &str) {
-    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
-    let msg = cx.str(&format!(
-        "Array.prototype.{name} is only implemented for arrays (js2wasi3)"
-    ));
     s.local_get(1).ref_test_non_null(array()).i32_eqz();
     s.if_(BlockType::Empty);
-    s.global_get(msg).call(throw);
+    match cx.array_generic(name) {
+        Some(generic) => {
+            s.local_get(0).local_get(1).local_get(2).call(generic).return_();
+        }
+        None => {
+            // Only reachable without the name in the code (e.g. `[].push` taken by a
+            // computed key built at run time, F109).
+            let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+            let msg = cx.str(&format!(
+                "Array.prototype.{name} is only implemented for arrays (js2wasi3)"
+            ));
+            s.global_get(msg).call(throw);
+        }
+    }
     s.end();
 }
 

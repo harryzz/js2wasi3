@@ -1,0 +1,22 @@
+// ArraySpeciesCreate (T35 slice 3): `constructor[Symbol.species]` for map/filter/slice/splice/concat/flat/flatMap.
+const t = (f) => { try { console.log(f()); } catch (e) { console.log(e.constructor.name + ": " + e.message); } };
+const a = [1, 2, 3];
+a.constructor = {};
+a.constructor[Symbol.species] = function (n) { this.args = [n]; };
+t(() => a.map((x) => x * 2));
+t(() => a.filter((x) => x > 1));
+t(() => a.slice(1));
+t(() => a.splice(0, 1));
+t(() => a.concat([9]));
+const b = [1, 2]; b.constructor = { [Symbol.species]: 1 };
+t(() => b.map((x) => x));
+const c = [1]; c.constructor = 1;
+t(() => c.map((x) => x));
+const d = [1]; d.constructor = { [Symbol.species]: null };
+t(() => d.map((x) => x));
+const e = [1, 2]; e.constructor = { [Symbol.species]: function () { return Object.freeze({}); } };
+t(() => e.map((x) => x));
+const f = [[1], 2]; f.constructor = { [Symbol.species]: Array };
+t(() => f.flat());
+t(() => f.flatMap((x) => x));
+t(() => Array.prototype.map.call({ length: 1, 0: 5 }, (x) => x));

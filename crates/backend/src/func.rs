@@ -76,6 +76,8 @@ pub fn vals() -> HeapType {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Helper {
+    /// `(v: jsval) -> i32`: IsConstructor (T35).
+    IsConstructor,
     /// `(code: (ref $code), construct: (ref null $code), env: (ref null $vals), name: (ref $string),
     /// length: i32, flags: i32) -> jsval`: a new function object (see the module docs and
     /// [`NEW_ORDINARY`], [`NEW_CLASS`]).
@@ -186,6 +188,7 @@ impl Helper {
             Helper::Empty => "Function.prototype",
             Helper::SetSource => "set_function_source",
             Helper::SetName => "set_function_name",
+            Helper::IsConstructor => "is_constructor",
             Helper::BuiltinCtor(_) => "builtin_constructor",
             Helper::Namespace(_) => "namespace",
             Helper::RequiresNew(_) => "requires_new",
@@ -233,6 +236,7 @@ impl Helper {
             Helper::BuiltinCtor(_) | Helper::Namespace(_) => (vec![], vec![v]),
             Helper::SetSource => (vec![v, s], vec![v]),
             Helper::SetName => (vec![v, v, v], vec![v]),
+            Helper::IsConstructor => (vec![v], vec![ValType::I32]),
             Helper::CallList => (vec![v, v, v, s], vec![v]),
             Helper::ListFromArrayLike => (vec![v], vec![rt(false, T_VALS)]),
         }
@@ -316,6 +320,22 @@ impl Helper {
             }
             Helper::ToString => to_string(cx),
             Helper::SetName => set_name(cx),
+            Helper::IsConstructor => {
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(0).ref_test_non_null(function());
+                s.if_(BlockType::Result(ValType::I32));
+                s.local_get(0)
+                    .ref_cast_non_null(function())
+                    .struct_get(T_FUNCTION, F_CONSTRUCT)
+                    .ref_is_null()
+                    .i32_eqz();
+                s.else_();
+                s.i32_const(0);
+                s.end();
+                s.end();
+                f
+            }
             Helper::BuiltinCtor(b) => builtin_ctor(cx, b),
             Helper::Namespace(ns) => namespace(cx, ns),
             Helper::RequiresNew(b) => {

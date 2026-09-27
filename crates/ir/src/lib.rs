@@ -111,6 +111,9 @@ pub struct Module {
     /// Built-in prototype methods implemented by the prelude (T21): installed on their prototype
     /// in place of the sentinels.
     pub builtin_methods: Vec<BuiltinMethod>,
+    /// The prelude's generic `Array.prototype` `push`/`pop`/`join`/`toString` (T35): the native
+    /// methods call these `$code` functions when `this` isn't an array. (key, code)
+    pub array_generic: Vec<(String, FuncId)>,
     /// Built-in constructors used as values (T25): `proto` is the built-in, `code` its prelude
     /// function (`$$Array`), called and constructed; `key` is unused.
     pub builtin_ctors: Vec<BuiltinMethod>,
@@ -754,6 +757,8 @@ pub enum Intrinsic {
     InspectAt(u8),
     /// `(v) -> bool`: node's `hasBuiltInToString(o)` (T25): `o.toString` is missing or comes from
     /// a built-in prototype.
+    /// IsConstructor(v) (`bool`, T35): a function with a construct entry.
+    IsConstructor,
     BuiltinToString,
     /// `Object.hasOwn(v, key)` (`bool`).
     HasOwn,
@@ -1125,7 +1130,7 @@ impl Intrinsic {
             | Intrinsic::ToObject
             | Intrinsic::Unwrap
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
-            Intrinsic::BuiltinToString => (&[JsVal], Some(Bool)),
+            Intrinsic::BuiltinToString | Intrinsic::IsConstructor => (&[JsVal], Some(Bool)),
             Intrinsic::NewError(ErrorKind::AggregateError) => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
@@ -1281,6 +1286,7 @@ impl Intrinsic {
             Intrinsic::Unwrap => "unwrap",
             Intrinsic::InspectAt(_) => "inspect_at",
             Intrinsic::BuiltinToString => "builtin_to_string",
+            Intrinsic::IsConstructor => "is_constructor",
             Intrinsic::HasOwn => "has_own",
             Intrinsic::InstanceOf(_) => "instanceof",
             Intrinsic::Prototype(_) => "prototype",
