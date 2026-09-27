@@ -16,6 +16,7 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 | binaryen (wasm-opt) | 133 | optional optimisation experiments only |
 | rustc/cargo | 1.98.1 | pinned in `rust-toolchain.toml` |
 | node | 24.21.0 | differential oracle for JS behaviour (latest LTS; was 20.19.2 until 2026-09-26) |
+| test262 | `7ab7fafa0003f73fc85c1b95d88094d33f7eb8bd` | conformance subset (`scripts/fetch-test262.sh`, `scripts/test262.mjs`; `main` on 2026-09-27) |
 
 ## Wasm feature status on wasmtime 49.0.1 (verified by `probes/run.sh`)
 

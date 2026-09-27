@@ -2,3 +2,4 @@
 /out
 /probes/out
 *.wasm
+/test262

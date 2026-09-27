@@ -226,6 +226,7 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 | IR snapshots | `crates/lower/tests/snapshots.rs` | `tests/fixtures/x.js` lowers to `x.ir` (`UPDATE_SNAPSHOTS=1` rewrites them) |
 | Components | `crates/js2wasi3/tests/build.rs`, `crates/backend/tests/emit.rs` | exports called with `wasmtime run --invoke` and compared with node's results (`x.out`, or values in the test); `console.js` against `console.out`/`.err` so `cargo test` covers a command without node |
 | Commands | `scripts/diff.sh` | node vs js2wasi3 + `wasmtime run -Sp3`: stdout, stderr and exit status |
+| Conformance | `scripts/test262.mjs` | a test262 subset (T23); only at the end of a task or on request |
 
 **Differential harness** (T11): `scripts/diff.sh [-j jobs] [fixture.js | dir]...`
 - The default is `tests/fixtures` and its subdirectories (T12: `exceptions/`), except `tests/fixtures/unsupported/`
@@ -244,6 +245,17 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 - Timers (T19): node refreshes its clock whenever a timer is made (ms steps), so the order of near-tied deadlines,
   or of a timer made inside a callback against others due soon, depends on node's speed and the machine's load.
   Keep such deadlines far apart in fixtures (see `tests/fixtures/async/timers.js`).
+
+**test262** (T23): `node scripts/test262.mjs [-j N] [--list] [--causes N] [--update] <dir | file | subset>...`
+- test262 is a blobless sparse clone in `test262/` (gitignored) at the commit pinned in `TOOLS.md`: `scripts/fetch-test262.sh`.
+- Each test is compiled as one ES module (always strict) after its harness (`print` shim, `sta.js`, `assert.js`,
+  `doneprintHandle.js` for async, `includes`) and run with `wasmtime run -Sp3` (no compile cache, opt-level 0,
+  single-pass register allocator: compiling dominates). Statuses: pass / fail / unsupported (build rejected with
+  `unsupported:`) / crash (compiler panic) / timeout / skip (`noStrict`, `raw`, `_FIXTURE`, module resolution, `$262`).
+- It prints counts per directory and the tests whose status differs from `tests/test262/baseline.json`; `--update`
+  merges the run into it. Exit 1 if a test that passed there doesn't now. Details: `out/test262/results.tsv`.
+- Known noise: modules, not scripts (top-level `this`, global-object `var`s, `eval`); an unhandled rejection is fatal
+  like node's (e.g. `async-function/evaluation-body.js`).
 
 ## Working rules
 - One task file = one session. Don't start the next task without approval.
