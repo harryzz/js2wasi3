@@ -54,6 +54,7 @@ mod runtime;
 mod timers;
 mod typed;
 mod wit;
+mod wrapper;
 
 use std::collections::HashMap;
 
@@ -1578,6 +1579,8 @@ impl Emitter<'_> {
                     Intrinsic::GetPrototypeOf => H::Obj(object::Helper::GetPrototypeOf),
                     Intrinsic::GetOwnPropertySymbols => H::Obj(object::Helper::GetOwnSymbols),
                     Intrinsic::BuiltinTag => H::Obj(object::Helper::TagOf),
+                    Intrinsic::ToObject => H::Wrap(wrapper::Helper::ToObject),
+                    Intrinsic::Unwrap => H::Wrap(wrapper::Helper::Unwrap),
                     Intrinsic::InspectAt(d) => H::Fmt(inspect::Helper::At(*d)),
                     Intrinsic::BuiltinToString => H::Obj(object::Helper::BuiltinToString),
                     Intrinsic::WellKnownSymbol(k) => H::WellKnownSymbol(*k),

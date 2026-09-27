@@ -1,6 +1,7 @@
 // Objects (T21 slice 4). Conventions: crates/lower/src/builtins.rs.
 // `$$Object_x` is `Object.x`, `$$Object_prototype_x` is `Object.prototype.x`. Object intrinsics:
-// `define(o, k, v)` (CreateDataProperty on an object). Not implemented: wrapper objects for primitive `this` / targets (they trap).
+// `define(o, k, v)` (CreateDataProperty on an object), `to_object(v)` (ToObject: primitives wrapped,
+// T30), `unwrap(v)` (a wrapper's primitive).
 // Uses string.js's `$$String`.
 
 // ToObject for an object or a primitive whose properties are only read.
@@ -18,26 +19,33 @@ function $$Object(v) {
   if (v === undefined || v === null) {
     return {};
   }
-  const t = typeof v;
-  if (t !== "object" && t !== "function") {
-    // A wrapper object (F88).
-    __intrinsic_trap();
-  }
-  return v;
+  return __intrinsic_to_object(v);
 }
 
-// `Boolean(v)` (T25; `new Boolean` wrapper objects: F88).
+// `Boolean(v)` (T25; `new Boolean(v)` wraps its result, T30).
 function $$Boolean(v) {
   return !!v;
 }
 
-function $$Object_assign(target, ...sources) {
-  const to = $$toObjectCheck(target);
-  const t = typeof to;
-  if (t !== "object" && t !== "function") {
-    // A wrapper object (F88).
-    __intrinsic_trap();
+// thisBooleanValue (T30).
+function $$thisBoolean(v, name) {
+  v = __intrinsic_unwrap(v);
+  if (typeof v !== "boolean") {
+    throw new TypeError("Boolean.prototype." + name + " requires that 'this' be a Boolean");
   }
+  return v;
+}
+
+function $$Boolean_prototype_valueOf() {
+  return $$thisBoolean(this, "valueOf");
+}
+
+function $$Boolean_prototype_toString() {
+  return $$thisBoolean(this, "toString") ? "true" : "false";
+}
+
+function $$Object_assign(target, ...sources) {
+  const to = __intrinsic_to_object(target);
   const n = +sources.length;
   for (let i = 0; i < n; i++) {
     const from = sources[i];

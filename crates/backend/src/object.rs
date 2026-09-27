@@ -32,7 +32,7 @@ use crate::runtime::{
     self, Cx, G_BUILTIN, G_NULL, G_PROTOS, G_UNDEFINED, T_ARRAY, T_BYTES, T_I32S, T_KEYS, T_OBJECT,
     T_STRING, T_VALS, TAG, jsval, object, rt, string, string_ref,
 };
-use crate::{array, func, numstr, props};
+use crate::{array, func, numstr, props, wrapper};
 
 pub const F_CLASS: u32 = 0;
 pub const F_PROTO: u32 = 1;
@@ -51,6 +51,8 @@ pub const CLASS_MATH: i32 = 5;
 pub const CLASS_JSON: i32 = 6;
 /// An async generator object (T20, a `$generator`, see `crate::asyncgen`).
 pub const CLASS_ASYNC_GEN: i32 = 7;
+/// A primitive wrapper object (T30, a `$wrapper`, see `crate::wrapper`).
+pub const CLASS_WRAPPER: i32 = 8;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -2784,6 +2786,8 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
         cx.str("[object Function]"),
     ];
     let no_prim = cx.str("Cannot convert object to primitive value");
+    let is_number = rh(cx, runtime::Helper::IsNumber);
+    let to_string = rh(cx, runtime::Helper::ToString);
     let builtin_tag = cx.has_tags().then(|| {
         (
             h(cx, Helper::BuiltinTag),
@@ -2853,6 +2857,18 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
         }
         s.end();
     }
+    // A Symbol wrapper: `Symbol.prototype[Symbol.toPrimitive]` gives its symbol (T30).
+    s.local_get(O).ref_test_non_null(wrapper::wrapper());
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .ref_cast_non_null(wrapper::wrapper())
+        .struct_get(runtime::T_WRAPPER, wrapper::F_PRIM)
+        .local_tee(T);
+    s.ref_test_non_null(runtime::symbol());
+    s.if_(BlockType::Empty);
+    s.local_get(T).return_();
+    s.end();
+    s.end();
     // Two rounds: I = 0, 1. The key of round I: toString when (I == 0) == (hint == string).
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).i32_const(2).i32_ge_u().br_if(1);
@@ -2877,6 +2893,32 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
     s.global_get(G_BUILTIN).ref_eq();
     s.if_(BlockType::Empty);
     {
+        // T30: the built-in `valueOf`/`toString` of a wrapper's own kind of prototype give its
+        // primitive (a prototype's global is set once a wrapper of its kind exists).
+        s.local_get(O).ref_test_non_null(wrapper::wrapper());
+        s.if_(BlockType::Empty);
+        {
+            s.local_get(O)
+                .ref_cast_non_null(wrapper::wrapper())
+                .struct_get(runtime::T_WRAPPER, wrapper::F_PRIM)
+                .local_set(T);
+            s.local_get(HD);
+            s.global_get(G_PROTOS + Builtin::String.index());
+            s.global_get(G_PROTOS + Builtin::Number.index());
+            s.global_get(G_PROTOS + Builtin::Boolean.index());
+            s.local_get(T).call(is_number);
+            s.typed_select(rt(true, T_OBJECT));
+            runtime::is_string(&mut s, T);
+            s.typed_select(rt(true, T_OBJECT));
+            s.ref_eq();
+            s.if_(BlockType::Empty);
+            s.local_get(T);
+            s.local_get(T).call(to_string);
+            s.local_get(KEY).global_get(value_of).ref_eq();
+            s.typed_select(jsval()).return_();
+            s.end();
+        }
+        s.end();
         s.local_get(KEY).global_get(value_of).ref_eq();
         s.if_(BlockType::Empty);
         // Object.prototype.valueOf returns the object: try the other method.
@@ -2896,6 +2938,19 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
             s.global_get(close_bracket).call(concat).return_();
             s.end();
         }
+        // T30: a wrapper's class.
+        s.local_get(O).ref_test_non_null(wrapper::wrapper());
+        s.if_(BlockType::Empty);
+        {
+            let wrapper_tag = rh(cx, runtime::Helper::Wrap(wrapper::Helper::Tag));
+            let concat = rh(cx, runtime::Helper::Concat);
+            let (open, close) = (cx.str("[object "), cx.str("]"));
+            s.global_get(open);
+            s.local_get(O).call(wrapper_tag).ref_cast_non_null(string());
+            s.call(concat);
+            s.global_get(close).call(concat).return_();
+        }
+        s.end();
         s.local_get(O).ref_test_non_null(func::function());
         s.if_(BlockType::Empty);
         s.global_get(tags[3]).return_();
@@ -3349,6 +3404,12 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
         s.local_get(T).return_();
         s.end();
     }
+    // T30: a wrapper's class.
+    let wrapper_tag = rh(cx, runtime::Helper::Wrap(wrapper::Helper::Tag));
+    s.local_get(O).ref_test_non_null(wrapper::wrapper());
+    s.if_(BlockType::Empty);
+    s.local_get(O).call(wrapper_tag).return_();
+    s.end();
     let tag = |cx: &mut dyn Cx, s: &mut InstructionSink, name: &str| {
         let g = cx.str(name);
         s.if_(BlockType::Empty);

@@ -5145,7 +5145,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "random_seed" => 0,
             "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
             "trap" => 0,
-            "builtin_tag" | "builtin_to_string" => 1,
+            "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" => 1,
             "inspect" => 2,
             "unit" => 2,
             "sub" | "str_set" | "define" => 3,
@@ -5194,6 +5194,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Type::Bool,
             ));
             return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
+        }
+        if name == "to_object" || name == "unwrap" {
+            // T30: wrapper objects.
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, e)?);
+            let op = if name == "to_object" {
+                Intrinsic::ToObject
+            } else {
+                Intrinsic::Unwrap
+            };
+            return Ok((Expr::intrinsic(op, vec![v]), Call::Intrinsic(Some(Kind::Any))));
         }
         if name == "builtin_tag" {
             // An object's `Symbol.toStringTag` (T25).

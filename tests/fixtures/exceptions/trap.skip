@@ -1,1 +1,1 @@
-a Wasm trap (an unimplemented wrapper object, F106) must not be caught, unlike node; checked in crates/js2wasi3/tests/build.rs (traps_are_not_caught)
+a Wasm trap (reading an unimplemented built-in method, `String.prototype.anchor`) must not be caught, unlike node; checked in crates/js2wasi3/tests/build.rs (traps_are_not_caught)

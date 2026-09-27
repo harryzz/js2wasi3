@@ -31,7 +31,7 @@ use wasm_encoder::{
 
 use crate::{
     abi, array, asyncfn, asyncgen, func, generator, host, inspect, iter, mapset, numstr, object,
-    promise, props, timers, typed,
+    promise, props, timers, typed, wrapper,
 };
 
 pub const T_NUMBER: u32 = 0;
@@ -95,8 +95,11 @@ pub const T_BUFFER: u32 = 25;
 /// `$typed`: a final subtype of `$object` (a typed array) with `kind: i32`, `buffer: (ref
 /// $buffer)`, `offset: i32` (bytes), `length: i32` (elements) (T20).
 pub const T_TYPED: u32 = 26;
+/// `$wrapper`: a final subtype of `$object` (a `String`/`Number`/`Boolean`/`Symbol` wrapper
+/// object) with `prim: jsval` (T30, see [`crate::wrapper`]).
+pub const T_WRAPPER: u32 = 27;
 /// Number of runtime types before the function types.
-pub const TYPES: u32 = 27;
+pub const TYPES: u32 = 28;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -383,6 +386,8 @@ pub fn types(types: &mut TypeSection) {
     mapiter_fields.push(field(StorageType::Val(rt(true, T_MTABLE)), true));
     mapiter_fields.push(field(StorageType::Val(ValType::I32), true));
     mapiter_fields.push(field(StorageType::Val(ValType::I32), false));
+    let mut wrapper_fields = object_fields.clone();
+    wrapper_fields.push(field(StorageType::Val(jsval()), false));
     let mut promise_fields = object_fields.clone();
     promise_fields.push(field(StorageType::Val(ValType::I32), true));
     promise_fields.push(field(StorageType::Val(jsval()), true));
@@ -540,6 +545,13 @@ pub fn types(types: &mut TypeSection) {
         sub_of(
             CompositeInnerType::Struct(StructType {
                 fields: typed_fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: wrapper_fields.into_boxed_slice(),
             }),
             true,
             Some(T_OBJECT),
@@ -782,6 +794,7 @@ pub enum Helper {
     },
     Num(numstr::Helper),
     Obj(object::Helper),
+    Wrap(wrapper::Helper),
     Func(func::Helper),
     Arr(array::Helper),
     Iter(iter::Helper),
@@ -826,6 +839,7 @@ impl Helper {
             Helper::NewSymbol => "new_symbol",
             Helper::Num(h) => h.name(),
             Helper::Obj(h) => h.name(),
+            Helper::Wrap(h) => h.name(),
             Helper::Func(h) => h.name(),
             Helper::Arr(h) => h.name(),
             Helper::Iter(h) => h.name(),
@@ -867,6 +881,7 @@ impl Helper {
             Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
             Helper::Obj(h) => h.signature(),
+            Helper::Wrap(h) => h.signature(),
             Helper::Func(h) => h.signature(),
             Helper::Arr(h) => h.signature(),
             Helper::Iter(h) => h.signature(),
@@ -911,6 +926,7 @@ impl Helper {
             Helper::NewSymbol => new_symbol(cx),
             Helper::Num(h) => h.body(cx),
             Helper::Obj(h) => h.body(cx),
+            Helper::Wrap(h) => h.body(cx),
             Helper::Func(h) => h.body(cx),
             Helper::Arr(h) => h.body(cx),
             Helper::Iter(h) => h.body(cx),

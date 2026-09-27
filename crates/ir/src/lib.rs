@@ -734,6 +734,10 @@ pub enum Intrinsic {
     GetOwnPropertySymbols,
     /// `(v) -> jsval`: an object's `Symbol.toStringTag` (T25): a string, or `undefined`.
     BuiltinTag,
+    /// `(v) -> jsval`: ToObject (T30): primitives wrapped, TypeError for `undefined`/`null`.
+    ToObject,
+    /// `(v) -> jsval`: the primitive of a wrapper object, anything else unchanged (T30).
+    Unwrap,
     /// `(v) -> jsval`: `util.inspect(v)` from depth `d` (T25, `console.log` format strings;
     /// strings quoted).
     InspectAt(u8),
@@ -1101,6 +1105,8 @@ impl Intrinsic {
             | Intrinsic::GetPrototypeOf
             | Intrinsic::GetOwnPropertySymbols
             | Intrinsic::BuiltinTag
+            | Intrinsic::ToObject
+            | Intrinsic::Unwrap
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::BuiltinToString => (&[JsVal], Some(Bool)),
             Intrinsic::NewError(ErrorKind::AggregateError) => (&[JsVal, JsVal, JsVal], Some(JsVal)),
@@ -1252,6 +1258,8 @@ impl Intrinsic {
             Intrinsic::GetPrototypeOf => "get_prototype_of",
             Intrinsic::GetOwnPropertySymbols => "get_own_property_symbols",
             Intrinsic::BuiltinTag => "builtin_tag",
+            Intrinsic::ToObject => "to_object",
+            Intrinsic::Unwrap => "unwrap",
             Intrinsic::InspectAt(_) => "inspect_at",
             Intrinsic::BuiltinToString => "builtin_to_string",
             Intrinsic::HasOwn => "has_own",

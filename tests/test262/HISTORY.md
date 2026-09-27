@@ -3,6 +3,27 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-27: T30 wrapper objects (targeted rerun)
+
+- Compiler: T30 (`new String/Number/Boolean`, `Object(prim)`, ToObject for `Array.prototype` methods, unwrapping in
+  ToPrimitive, this-value checks, `JSON.stringify`, `Object.prototype.toString`, `console.log`).
+- Run: the 765 non-passing tests that failed on a wrapper trap or use wrappers in their source (331 s at -j 4):
+  745 → pass, 0 regressions. The 20 left: native `join`/`pop`/`push` on non-arrays and `Symbol.isConcatSpreadable`
+  (F108), `String.prototype.match`/`search` (RegExp, T27).
+
+| directory | pass | fail | unsupported | crash | timeout | skip | pass% |
+|---|---|---|---|---|---|---|---|
+| built-ins/Array | 2290 | 410 | 319 | 0 | 11 | 52 | 75.6% |
+| built-ins/JSON | 108 | 20 | 34 | 0 | 0 | 3 | 66.7% |
+| built-ins/Map | 134 | 10 | 23 | 0 | 2 | 35 | 79.3% |
+| built-ins/Math | 276 | 2 | 39 | 0 | 0 | 10 | 87.1% |
+| built-ins/Promise | 406 | 186 | 39 | 0 | 8 | 93 | 63.5% |
+| built-ins/Set | 311 | 16 | 53 | 0 | 1 | 2 | 81.6% |
+| built-ins/String | 890 | 101 | 226 | 0 | 0 | 6 | 73.1% |
+| language/expressions | 8585 | 165 | 1325 | 0 | 0 | 1089 | 85.2% |
+| language/statements | 7912 | 106 | 813 | 0 | 1 | 518 | 89.6% |
+| **total** | **20912** | **1016** | **2871** | **0** | **23** | **1808** | **84.2%** |
+
 ## 2026-09-27: T29 `yield*` in async generators (targeted rerun)
 
 - Compiler: T29 (`yield*` in async generators, CreateAsyncFromSyncIterator in the prelude).

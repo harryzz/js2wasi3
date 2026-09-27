@@ -7,12 +7,12 @@
 
 // ---- helpers -----------------------------------------------------------------------------
 
-// RequireObjectCoercible(this) (primitives stay primitives: there are no wrapper objects).
+// ToObject(this) (T30: primitives are wrapped), with node's message for `undefined`/`null`.
 function $$thisObject(v, name) {
   if (v === undefined || v === null) {
     throw new TypeError("Array.prototype." + name + " called on null or undefined");
   }
-  return v;
+  return __intrinsic_to_object(v);
 }
 
 // LengthOfArrayLike.

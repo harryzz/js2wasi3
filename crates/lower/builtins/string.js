@@ -101,17 +101,19 @@ function $$occursAt(s, t, i) {
 // ---- String.prototype ----------------------------------------------------------------------
 
 function $$String_prototype_toString() {
-  if (typeof this !== "string") {
+  const s = __intrinsic_unwrap(this);
+  if (typeof s !== "string") {
     throw new TypeError("String.prototype.toString requires that 'this' be a String");
   }
-  return __intrinsic_to_string(this);
+  return s;
 }
 
 function $$String_prototype_valueOf() {
-  if (typeof this !== "string") {
+  const s = __intrinsic_unwrap(this);
+  if (typeof s !== "string") {
     throw new TypeError("String.prototype.valueOf requires that 'this' be a String");
   }
-  return __intrinsic_to_string(this);
+  return s;
 }
 
 function $$String_prototype_at(index) {
@@ -1390,6 +1392,7 @@ function $$Number_isSafeInteger(number) {
 
 // thisNumberValue.
 function $$thisNumber(v, name) {
+  v = __intrinsic_unwrap(v);
   if (typeof v !== "number") {
     throw new TypeError("Number.prototype." + name + " requires that 'this' be a Number");
   }

@@ -195,15 +195,15 @@ fn command_output_is_streamed() {
         "let s = \"0123456789\";\n\
          for (let i = 0; i < 6; i++) s = s + s;\n\
          for (let i = 0; i < 5000; i++) console.log(i, s);\n\
-         console.log(new Number(1));\n",
+         console.log(\"\".anchor);\n",
     )
     .unwrap();
     let out = dir.join("stream.wasm");
     let b = build(&src, &out, &[]);
     assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
     let (ok, stdout, stderr) = run_command(&out);
-    assert!(!ok, "the wrapper object traps");
-    assert!(String::from_utf8_lossy(&stderr).contains("wrapper_object_not_implemented"));
+    assert!(!ok, "the unimplemented method traps");
+    assert!(String::from_utf8_lossy(&stderr).contains("builtin_not_implemented"));
     let stdout = String::from_utf8(stdout).unwrap();
     let line = "0123456789".repeat(64);
     assert_eq!(stdout.lines().count(), 5000);
@@ -294,7 +294,7 @@ fn traps_are_not_caught() {
     assert!(!ok);
     let stderr = String::from_utf8_lossy(&stderr);
     assert!(
-        stderr.contains("wrapper_object_not_implemented"),
+        stderr.contains("builtin_not_implemented"),
         "{stderr}"
     );
     assert!(!stderr.contains("Uncaught"), "{stderr}");

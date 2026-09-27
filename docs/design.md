@@ -47,6 +47,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   an `$accessor { get, set }`; attributes: hidden, read-only, fixed, accessor, private; object flags for
   non-extensible / sealed / frozen. Private names are a fresh `$symbol` per class evaluation, captured like
   values. See `crates/backend/src/props.rs`, `crates/lower/src/classes.rs`.)
+  (T30: primitive wrapper objects are `$wrapper`, a final subtype of `$object` with the primitive in `prim`; a String
+  wrapper's indices and `length` are real read-only own properties. ToPrimitive unwraps through the built-in
+  `valueOf`/`toString`; the prelude reads `prim` with `__intrinsic_unwrap` and wraps with `__intrinsic_to_object`.
+  See `crates/backend/src/wrapper.rs`.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.

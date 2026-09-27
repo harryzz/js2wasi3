@@ -880,6 +880,9 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     const Q_STATE: u32 = 13;
     const Q_TAG: u32 = 14;
     const Q_SYMS: u32 = 15;
+    const W_BASE: u32 = 16;
+    const W_SKIP: u32 = 17;
+    const W_PRIM: u32 = 18;
     let mut f = Function::new([
         (1, rt(true, T_KEYS)),
         (2, ValType::I32),
@@ -890,8 +893,97 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         (3, ValType::I32),
         (1, jsval()),
         (1, rt(true, T_VALS)),
+        (1, rt(true, T_STRING)),
+        (1, ValType::I32),
+        (1, jsval()),
     ]);
     let mut s = f.instructions();
+    // A wrapper object (T30): node's `getBoxedBase`, `[String: 'ab']`, `[Number (Foo): 1]`; alone
+    // unless it has other keys than a string's indices (`[String: 'ab'] { x: 1 }`).
+    {
+        let tag = cx.helper(runtime::Helper::Wrap(crate::wrapper::Helper::Tag));
+        let (null_p, open_p, colon) = (cx.str(" (null prototype)"), cx.str(" ("), cx.str(": "));
+        let rparen = cx.str(")");
+        s.local_get(O).ref_test_non_null(crate::wrapper::wrapper());
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .ref_cast_non_null(crate::wrapper::wrapper())
+            .struct_get(runtime::T_WRAPPER, crate::wrapper::F_PRIM)
+            .local_set(W_PRIM);
+        s.global_get(lbracket);
+        s.local_get(O).call(tag).ref_cast_non_null(string()).local_tee(Q_TAG);
+        s.ref_cast_non_null(string()).call(concat).local_set(W_BASE);
+        s.local_get(O).call(ctor_name).local_set(NAME);
+        // On its own built-in prototype the name is the type's (`Symbol.prototype` may have no
+        // `constructor` of its own here).
+        for b in [
+            js2wasi3_ir::Builtin::String,
+            js2wasi3_ir::Builtin::Number,
+            js2wasi3_ir::Builtin::Boolean,
+            js2wasi3_ir::Builtin::Symbol,
+        ] {
+            s.local_get(O)
+                .struct_get(runtime::T_OBJECT, object::F_PROTO)
+                .global_get(runtime::G_PROTOS + b.index())
+                .ref_eq();
+            s.local_get(O)
+                .struct_get(runtime::T_OBJECT, object::F_PROTO)
+                .ref_is_null()
+                .i32_eqz()
+                .i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(Q_TAG).ref_cast_non_null(string()).local_set(NAME);
+            s.end();
+        }
+        s.local_get(NAME).ref_is_null();
+        s.if_(BlockType::Empty);
+        s.local_get(W_BASE).ref_as_non_null();
+        s.global_get(null_p).call(concat).local_set(W_BASE);
+        s.else_();
+        s.local_get(NAME)
+            .ref_as_non_null()
+            .local_get(Q_TAG)
+            .ref_cast_non_null(string())
+            .call(str_eq)
+            .i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(W_BASE).ref_as_non_null();
+        s.global_get(open_p).call(concat);
+        s.local_get(NAME).ref_as_non_null().call(concat);
+        s.global_get(rparen).call(concat).local_set(W_BASE);
+        s.end();
+        s.end();
+        s.local_get(W_BASE).ref_as_non_null();
+        s.global_get(colon).call(concat);
+        s.local_get(W_PRIM)
+            .local_get(DEPTH)
+            .local_get(INDENT)
+            .i32_const(1)
+            .call(format)
+            .call(concat);
+        s.global_get(rbracket).call(concat).local_set(W_BASE);
+        runtime::is_string(&mut s, W_PRIM);
+        s.local_set(W_SKIP);
+        // Other keys: the enumerable ones past a string's indices, and symbols.
+        s.local_get(O).call(own_keys).array_len();
+        s.local_get(W_SKIP);
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(W_PRIM).ref_cast_non_null(string()).array_len();
+        s.else_();
+        s.i32_const(0);
+        s.end();
+        s.i32_sub();
+        s.local_get(O).call(symbols).i32_or().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(W_BASE).ref_as_non_null().return_();
+        s.end();
+        s.local_get(W_BASE)
+            .ref_as_non_null()
+            .global_get(space)
+            .call(concat)
+            .local_set(PREFIX);
+        s.end();
+    }
     // A generator object (T18): `Object [Generator] ` (node's `Symbol.toStringTag` form).
     s.local_get(PREFIX).ref_is_null();
     s.local_get(O)
@@ -1133,7 +1225,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     }
     s.end();
     s.local_get(O);
-    s.local_get(DEPTH).local_get(INDENT).i32_const(0);
+    s.local_get(DEPTH).local_get(INDENT).local_get(W_SKIP);
     s.call(props).local_tee(KS).array_len().local_tee(N);
     s.local_get(EXTRA).i32_add();
     s.array_new_default(T_KEYS).local_set(OUT);

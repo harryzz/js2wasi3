@@ -29,7 +29,13 @@ function $$JSON_stringify(value, replacer, space) {
     propertyList = [];
     const len = +replacer.length;
     for (let i = 0; i < len; i++) {
-      const v = replacer[i];
+      let v = replacer[i];
+      if (typeof v === "object" && v !== null) {
+        const p = __intrinsic_unwrap(v);
+        if (typeof p === "string" || typeof p === "number") {
+          v = __intrinsic_to_string(v);
+        }
+      }
       let item = undefined;
       if (typeof v === "string") {
         item = v;
@@ -42,6 +48,14 @@ function $$JSON_stringify(value, replacer, space) {
     }
   }
   let gap = "";
+  if (typeof space === "object" && space !== null) {
+    const p = __intrinsic_unwrap(space);
+    if (typeof p === "number") {
+      space = +space;
+    } else if (typeof p === "string") {
+      space = __intrinsic_to_string(space);
+    }
+  }
   if (typeof space === "number") {
     let n = $$toInteger(space);
     if (n > 10) {
@@ -75,6 +89,25 @@ function $$jsonValue(state, holder, key, value) {
   }
   if (state.replacerFn !== undefined) {
     value = state.replacerFn.call(holder, key, value);
+  }
+  return $$jsonUnwrap(value);
+}
+
+// Number, String and Boolean wrapper objects (T30): ToNumber, ToString, their boolean.
+function $$jsonUnwrap(value) {
+  const p = __intrinsic_unwrap(value);
+  if (p === value) {
+    return value;
+  }
+  const t = typeof p;
+  if (t === "number") {
+    return +value;
+  }
+  if (t === "string") {
+    return __intrinsic_to_string(value);
+  }
+  if (t === "boolean") {
+    return p;
   }
   return value;
 }

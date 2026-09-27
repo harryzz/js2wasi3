@@ -9,6 +9,7 @@ let $$symbolFor = null;
 let $$symbolKey = null;
 
 function $$thisSymbol(v, name) {
+  v = __intrinsic_unwrap(v);
   if (typeof v !== "symbol") {
     throw new TypeError("Symbol.prototype." + name + " requires that 'this' be a Symbol");
   }

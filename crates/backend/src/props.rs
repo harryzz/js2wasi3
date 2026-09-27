@@ -506,6 +506,18 @@ fn desc(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(array).return_();
     s.end();
+    // T30: a wrapper is `[object String]` etc.
+    s.local_get(O).ref_test_non_null(crate::wrapper::wrapper());
+    s.if_(BlockType::Empty);
+    {
+        let tag = cx.helper(runtime::Helper::Wrap(crate::wrapper::Helper::Tag));
+        let (a, b) = (cx.str("[object "), cx.str("]"));
+        s.global_get(a);
+        s.local_get(O).call(tag).ref_cast_non_null(runtime::string());
+        s.call(concat);
+        s.global_get(b).call(concat).return_();
+    }
+    s.end();
     s.global_get(open);
     s.local_get(O).call(ctor_name).local_tee(N);
     s.ref_is_null();

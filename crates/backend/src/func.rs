@@ -150,9 +150,8 @@ pub enum Helper {
     Namespace(js2wasi3_ir::Namespace),
     /// The code of `Map`/`Set` called without `new`: node's TypeError.
     RequiresNew(Builtin),
-    /// The construct code of `String`/`Number`/`Boolean` (wrapper objects, F88), and the code of
-    /// a constructor stub (see `ir::Module::ctor_stubs`): traps.
-    WrapperTrap,
+    /// The code of a constructor stub (see `ir::Module::ctor_stubs`): traps.
+    StubTrap,
     /// The code of `Function.prototype.toString` (T25): the source text, or
     /// `function name() { [native code] }`.
     ToString,
@@ -190,7 +189,7 @@ impl Helper {
             Helper::BuiltinCtor(_) => "builtin_constructor",
             Helper::Namespace(_) => "namespace",
             Helper::RequiresNew(_) => "requires_new",
-            Helper::WrapperTrap => "wrapper_object_not_implemented",
+            Helper::StubTrap => "constructor_stub_not_implemented",
             Helper::ToString => "Function.prototype.toString",
         }
     }
@@ -230,7 +229,7 @@ impl Helper {
             | Helper::Empty
             | Helper::ToString
             | Helper::RequiresNew(_)
-            | Helper::WrapperTrap => (vec![v, v, v], vec![v]),
+            | Helper::StubTrap => (vec![v, v, v], vec![v]),
             Helper::BuiltinCtor(_) | Helper::Namespace(_) => (vec![], vec![v]),
             Helper::SetSource => (vec![v, s], vec![v]),
             Helper::SetName => (vec![v, v, v], vec![v]),
@@ -328,7 +327,7 @@ impl Helper {
                 s.unreachable().end();
                 f
             }
-            Helper::WrapperTrap => {
+            Helper::StubTrap => {
                 let trap = oh(cx, object::Helper::BuiltinTrap);
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
@@ -1238,13 +1237,14 @@ fn set_name(cx: &mut dyn Cx) -> Function {
 }
 
 /// A built-in constructor as a value (T25): calls run its prelude code (`Map`/`Set` throw without
-/// `new`), `new` runs it too (`String`/`Number`/`Boolean` wrappers trap, F88); `prototype` is the
+/// `new`), `new` runs it too (`String`/`Number`/`Boolean` make wrapper objects, T30); `prototype` is the
 /// built-in prototype, whose `constructor` it becomes; the prelude statics are own methods.
 fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     // A stub (only reached through `constructor`): its code traps.
+    let linked = cx.builtin_ctor(b).is_some();
     let (code, length) = cx.builtin_ctor(b).unwrap_or_else(|| {
         (
-            fh(cx, Helper::WrapperTrap),
+            fh(cx, Helper::StubTrap),
             b.ctor_length().expect("a built-in constructor"),
         )
     });
@@ -1259,7 +1259,9 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         _ => code,
     };
     let construct = match b {
-        Builtin::String | Builtin::Number | Builtin::Boolean => fh(cx, Helper::WrapperTrap),
+        Builtin::String | Builtin::Number | Builtin::Boolean if linked => cx.helper(
+            runtime::Helper::Wrap(crate::wrapper::Helper::Construct(b)),
+        ),
         _ => code,
     };
     cx.declare_func(call);
