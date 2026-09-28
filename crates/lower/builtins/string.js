@@ -612,7 +612,8 @@ function $$String_prototype_split(separator, limit) {
     throw new TypeError("String.prototype.split called on null or undefined");
   }
   // T27: a separator with a `Symbol.split` method (a RegExp) does the splitting.
-  if (separator !== undefined && separator !== null) {
+  // Only an object's method (ES2025: not a primitive's; node 24 still looks them up, T27).
+  if ((typeof separator === "object" && separator !== null) || typeof separator === "function") {
     const splitter = $$symbolMethod(separator, Symbol.split);
     if (splitter !== undefined) {
       return __intrinsic_call_list(splitter, separator, [this, limit]);
@@ -698,7 +699,8 @@ function $$String_prototype_replace(searchValue, replaceValue) {
     throw new TypeError("String.prototype.replace called on null or undefined");
   }
   // T27: a search value with a `Symbol.replace` method (a RegExp) does the replacing.
-  if (searchValue !== undefined && searchValue !== null) {
+  // Only an object's method (ES2025: not a primitive's; node 24 still looks them up, T27).
+  if ((typeof searchValue === "object" && searchValue !== null) || typeof searchValue === "function") {
     const replacer = $$symbolMethod(searchValue, Symbol.replace);
     if (replacer !== undefined) {
       return __intrinsic_call_list(replacer, searchValue, [this, replaceValue]);
@@ -729,7 +731,8 @@ function $$String_prototype_replaceAll(searchValue, replaceValue) {
     throw new TypeError("String.prototype.replaceAll called on null or undefined");
   }
   // T27: a RegExp must be global; `Symbol.replace` does the replacing.
-  if (searchValue !== undefined && searchValue !== null) {
+  // Only an object's method (ES2025: not a primitive's; node 24 still looks them up, T27).
+  if ((typeof searchValue === "object" && searchValue !== null) || typeof searchValue === "function") {
     $$reRequireGlobal(searchValue, "replaceAll");
     const replacer = $$symbolMethod(searchValue, Symbol.replace);
     if (replacer !== undefined) {

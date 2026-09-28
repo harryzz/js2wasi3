@@ -1,6 +1,6 @@
 # T27: `RegExp` and regex literals
 
-Status: todo (approved 2026-09-28, not started) | Depends on: T21 (prelude), T25 slice 5 (well-known symbols), T36
+Status: done (2026-09-28) | Depends on: T21 (prelude), T25 slice 5 (well-known symbols), T36
 (prelude intrinsics pattern: `call_list`, `to_key`, `object_desc`)
 
 ## Goal
@@ -69,17 +69,35 @@ Fixtures `tests/fixtures/builtins/regex-*.js` (`scripts/diff.sh`; node is the or
 `wasm-tools validate` + one wasmtime run; test262 as in slice 4.
 
 ## Acceptance
-- [ ] Fixtures in `tests/fixtures/builtins/regex-*.js` match node (`scripts/diff.sh`), including the string methods.
-- [ ] Programs without regexes link none of the engine.
-- [ ] F78 (regex literals) and the regex parts of F87 ticked.
+- [x] Fixtures in `tests/fixtures/builtins/regex-*.js` match node (`scripts/diff.sh`), including the string methods.
+- [x] Programs without regexes link none of the engine.
+- [x] F78 (regex literals) and the regex parts of F87 ticked.
 
 ## Notes / Result
+**What changed.** `crates/lower/builtins/regexp.js` (new): parser (AST of arrays, V8's SyntaxError texts), compiler to
+an `i32` program, backtracking VM with an explicit stack (choices, capture/register undo entries, lookaround
+barriers, a `STAR` fast path for greedy one-character loops), `exec`/`test`/accessors/`toString`,
+`RegExp.prototype[Symbol.*]` (`$$RegExp_prototype_$match` …, installed under the well-known symbols), the regex
+`String.prototype` methods; `string.js` `split`/`replace`/`replaceAll` dispatch through `Symbol.*` (objects only,
+ES2025) and `includes`/`startsWith`/`endsWith` reject RegExps. RegExp objects: `CLASS_REGEXP`, data under the private
+state key, own `lastIndex` (`object.rs`), printed by `inspect.rs`. New IR intrinsics `RegExpNew/Data/BuiltinExec`,
+`I32New/Get/Set/Len`; global `G_REGEXP_EXEC`; the backend inlines ToInt32 when |x| < 2^31 (all code). Unicode
+data from node (`scripts/gen-unicode.mjs`): `builtins/unicode-case.js`, `src/unicode_props.rs` (only the
+`\p{…}` texts a source names are appended to its prelude). The frontend has oxc check regex literals.
+**Commands.** `scripts/diff.sh`: 124 pass incl. the 6 `regex-*` fixtures (`timers-more.js` fails only under heavy load, as before), `cargo test` (all crates), test262
+subset with `--update`: 23,676 of 26,837 run pass (88.2%); `built-ins/RegExp` 1,188 pass / 447 timeout / 184 fail
+/ 45 unsupported; the 176 subset tests using regexes before: 162 pass.
+**Unsupported / deviations.** F170–F176 (speed of `u`-mode loops on huge strings, `v` string properties, species and
+subclassing, modifiers and `RegExp.escape`, the `matchAll` iterator's type, primitives' `Symbol.*` as in ES2025
+not node, run-time `\p{…}` names).
+**Next smallest step.** F170: a `u`-mode `STAR` (one code point per step) to clear the 441 property-escape
+timeouts.
 
 ## Checklist
 - [x] Slice 1: engine, literals, `RegExp`/`exec`/`test`/flags/accessors, printing (also lookaround, backreferences, basic `u`)
 - [x] Slice 2: string methods through `Symbol.*`
-- [ ] Slice 3: lookaround, backreferences, `u`/`v`, `\p{…}`, `d`
-- [ ] Slice 4: test262 (subset change asked first), follow-ups, baseline, docs (`docs/keywords.md`, README)
+- [x] Slice 3: lookaround, backreferences, `u`/`v`, `\p{…}`, `d`
+- [x] Slice 4: test262 (subset change asked first), follow-ups, baseline, docs (`docs/keywords.md`, README)
 
 ## Progress
 - 2026-09-28: handoff written after T38 (the user chose RegExp next; engine decision above agreed). Not started.
@@ -152,3 +170,7 @@ Fixtures `tests/fixtures/builtins/regex-*.js` (`scripts/diff.sh`; node is the or
   `builtins/regex-unicode.js`. The 176 regex-using subset tests: 162 pass, 2 fail (subclassing, F106), 12
   unsupported (BigInt, `eval`, Proxy …). The user approved adding `built-ins/RegExp` to the subset (`SUBSET`,
   `fetch-test262.sh`) and a commit of slices 1–3. Next: the full subset run for the new baseline, then follow-ups.
+- 2026-09-28: full subset run with `--update`: 9 regressions, all `cstm-*-on-*-primitive` (ES2025: `Symbol.split` etc.
+  are looked up only on objects; node 24 still does it on primitives): fixed to the spec (F175), merged, 17 now pass.
+  `regex-unicode.js` split into `regex-unicode.js` + `regex-case.js`; `$$reNormalize` skips sorting sorted input.
+  Follow-ups F170–F176. The user approved committing the baseline.

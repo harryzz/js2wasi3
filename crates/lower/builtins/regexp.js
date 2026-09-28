@@ -499,8 +499,12 @@ function $$reComplement(r) {
 // Sort and merge `[lo, hi, …]` pairs.
 function $$reNormalize(r) {
   const n = r.length / 2;
-  // Insertion sort of the pairs by `lo` (classes are small).
-  for (let i = 1; i < n; i++) {
+  // Insertion sort of the pairs by `lo` (classes are small; big sets, from `\p{…}`, arrive sorted).
+  let sorted = true;
+  for (let i = 1; i < n && sorted; i++) {
+    sorted = r[2 * i - 2] <= r[2 * i];
+  }
+  for (let i = 1; i < n && !sorted; i++) {
     const lo = r[2 * i];
     const hi = r[2 * i + 1];
     let j = i - 1;
@@ -2698,7 +2702,8 @@ function $$String_prototype_match(regexp) {
   if (this === undefined || this === null) {
     throw new TypeError("String.prototype.match called on null or undefined");
   }
-  if (regexp !== undefined && regexp !== null) {
+  // Only an object's method (ES2025: not a primitive's; node 24 still looks them up, T27).
+  if ((typeof regexp === "object" && regexp !== null) || typeof regexp === "function") {
     const matcher = $$reMethod(regexp, Symbol.match, "Symbol(Symbol.match)");
     if (matcher !== undefined) {
       return __intrinsic_call_list(matcher, regexp, [this]);
@@ -2713,7 +2718,8 @@ function $$String_prototype_matchAll(regexp) {
   if (this === undefined || this === null) {
     throw new TypeError("String.prototype.matchAll called on null or undefined");
   }
-  if (regexp !== undefined && regexp !== null) {
+  // Only an object's method (ES2025: not a primitive's; node 24 still looks them up, T27).
+  if ((typeof regexp === "object" && regexp !== null) || typeof regexp === "function") {
     $$reRequireGlobal(regexp, "matchAll");
     const matcher = $$reMethod(regexp, Symbol.matchAll, "Symbol(Symbol.matchAll)");
     if (matcher !== undefined) {
@@ -2729,7 +2735,8 @@ function $$String_prototype_search(regexp) {
   if (this === undefined || this === null) {
     throw new TypeError("String.prototype.search called on null or undefined");
   }
-  if (regexp !== undefined && regexp !== null) {
+  // Only an object's method (ES2025: not a primitive's; node 24 still looks them up, T27).
+  if ((typeof regexp === "object" && regexp !== null) || typeof regexp === "function") {
     const searcher = $$reMethod(regexp, Symbol.search, "Symbol(Symbol.search)");
     if (searcher !== undefined) {
       return __intrinsic_call_list(searcher, regexp, [this]);

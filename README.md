@@ -15,7 +15,7 @@ Generators and `async`/`await` are compiled to resumable state machines by an IR
 stack-switching proposal.
 
 > **Status: early and experimental.** A good part of the language works (see below and
-> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`Date`, regex…; `Math`, strings, arrays, `JSON`, `Map`/`Set`, `Object` methods, `Reflect` and number parsing/formatting are done)
+> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`Date`…; `Math`, strings, arrays, `JSON`, `Map`/`Set`, `Object` methods, `Reflect`, `RegExp` and number parsing/formatting are done)
 > doesn't exist yet. Unsupported code is rejected at build time with a clear diagnostic rather than
 > miscompiled. The known exception, built-in methods that crash when called, is listed in the docs.
 
@@ -79,7 +79,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   [docs/user-worlds.md](docs/user-worlds.md).
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 
-Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, regex, multi-file `import`, and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, multi-file `import`, and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works
