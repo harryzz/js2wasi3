@@ -396,7 +396,9 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.i32_const(0);
     s.ref_null(HeapType::Concrete(T_I32S));
     s.local_get(CODE).local_get(ENV);
+    // An ordinary function's construct entry: the shared one unless it has its own (T38).
     s.local_get(FLAGS).i32_const(NEW_ORDINARY).i32_and();
+    s.local_get(CONSTRUCT).ref_is_null().i32_and();
     s.if_(BlockType::Result(rt(true, T_CODE)));
     s.ref_func(ordinary);
     s.else_();

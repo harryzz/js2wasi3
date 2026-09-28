@@ -1782,6 +1782,9 @@ pub enum FnKind {
     Plain,
     /// A `function`: an own `prototype` object, `new` makes an object and calls the code.
     Ordinary,
+    /// A `function` that uses `new.target` (T38): like [`FnKind::Ordinary`], but `new` runs
+    /// `construct` (the `$code` shape `(self, new_target, args) -> jsval`), which passes it.
+    OrdinaryWith { construct: FuncId },
     /// A class: calling it throws (its code does), `new` runs `construct`, a function
     /// `(self, new_target, args) -> jsval` (the `$code` shape). Its `prototype` comes from
     /// [`Intrinsic::ClassSetup`].

@@ -59,7 +59,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `finally` | ✅ | Completion dispatch for every jump, also around `yield`/`await` (T12, T18, T19). |
 | `float` | ➖ | Removed in ES5. |
 | `for` | ✅ | `for`, `for-in`, `for-of` (iterator protocol, destructuring), `for await` (T20). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). |
-| `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments`, `toString` (source text, T25), names from computed keys (T25). Missing: `"" + f` in code that never names `toString` traps (F104); `new.target` outside class constructors (F57); assigning to a function declaration's name (F45). |
+| `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments`, `toString` (source text, T25), names from computed keys (T25). Missing: `"" + f` in code that never names `toString` traps (F104); assigning to a function declaration's name (F45). |
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
 | `implements` | ➖ | Reserved in strict mode; a syntax error in node too. |
@@ -71,7 +71,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `let` | ✅ | Block scope, a fresh binding per loop iteration, TDZ (also across `switch` cases). |
 | `long` | ➖ | Removed in ES5. |
 | `native` | ➖ | Removed in ES5. |
-| `new` | ✅ | Functions, classes, native errors, `Promise`; `new.target` in class constructors (see `function` for the rest). |
+| `new` | ✅ | Functions, classes, native errors, `Promise`; `new.target` in class constructors and ordinary functions and their arrows (T38; `undefined` when called, in methods and in static blocks). |
 | `null` | ✅ | |
 | `package` | ➖ | Reserved in strict mode; a syntax error in node too. |
 | `private` | ➖ | Reserved in strict mode (JS private members are `#x`, see `class`). |

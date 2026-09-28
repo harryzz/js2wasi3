@@ -1701,6 +1701,12 @@ impl Emitter<'_> {
                         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
                         func::NEW_ORDINARY
                     }
+                    ir::FnKind::OrdinaryWith { construct } => {
+                        let construct = self.func_base + construct.0;
+                        runtime::Cx::declare_func(self, construct);
+                        s.ref_func(construct);
+                        func::NEW_ORDINARY
+                    }
                     ir::FnKind::Generator => {
                         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
                         func::NEW_GENERATOR

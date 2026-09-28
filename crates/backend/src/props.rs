@@ -1473,14 +1473,23 @@ fn super_get(cx: &mut dyn Cx) -> Function {
     let to_key = oh(cx, object::Helper::ToKey);
     let lookup = oh(cx, object::Helper::Lookup);
     let value = ph(cx, Helper::Value);
+    let throw_read = cx.helper(runtime::Helper::ThrowRead);
     const HOME: u32 = 0;
     const KEY: u32 = 1;
     const THIS: u32 = 2;
-    let mut f = Function::new([]);
+    const P: u32 = 3;
+    const K: u32 = 4;
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (1, rt(true, T_STRING))]);
     let mut s = f.instructions();
+    // GetSuperBase before ToPropertyKey; a `null` base throws like `null.x` (T38, F168).
     as_obj(&mut s, HOME);
-    s.struct_get(T_OBJECT, F_PROTO);
-    s.local_get(KEY).call(to_key).call(lookup);
+    s.struct_get(T_OBJECT, F_PROTO).local_set(P);
+    s.local_get(KEY).call(to_key).local_set(K);
+    s.local_get(P).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.global_get(runtime::G_NULL).local_get(K).ref_as_non_null().call(throw_read);
+    s.end();
+    s.local_get(P).local_get(K).ref_as_non_null().call(lookup);
     s.local_get(THIS).call(value);
     s.end();
     let _ = CLASS_MASK;
@@ -1675,11 +1684,21 @@ fn super_set(cx: &mut dyn Cx) -> Function {
         (1, jsval()),
         (1, rt(true, T_OBJECT)),
     ]);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+    let (set_null, close) = (cx.str("Cannot set properties of null (setting '"), cx.str("')"));
     let mut s = f.instructions();
-    s.local_get(KEY).call(to_key).local_set(K);
-    s.local_get(THIS).ref_cast_non_null(object()).local_set(O);
+    // GetSuperBase before ToPropertyKey; a `null` base throws like `null.x = v` (T38, F168).
     as_obj(&mut s, HOME);
     s.struct_get(T_OBJECT, F_PROTO).local_set(P);
+    s.local_get(KEY).call(to_key).local_set(K);
+    s.local_get(P).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.global_get(set_null);
+    s.local_get(K).ref_as_non_null().call(concat);
+    s.global_get(close).call(concat).call(throw);
+    s.end();
+    s.local_get(THIS).ref_cast_non_null(object()).local_set(O);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(P).ref_is_null().br_if(1);
     s.local_get(P)

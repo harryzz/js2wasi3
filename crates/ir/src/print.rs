@@ -263,6 +263,8 @@ impl Printer<'_> {
                     match c.kind {
                         crate::FnKind::Plain => String::new(),
                         crate::FnKind::Ordinary => ", ctor".to_string(),
+                        crate::FnKind::OrdinaryWith { construct } =>
+                            format!(", ctor {}", self.func_name(construct.0)),
                         crate::FnKind::Generator => ", generator".to_string(),
                         crate::FnKind::Async => ", async".to_string(),
                         crate::FnKind::AsyncGenerator => ", async generator".to_string(),

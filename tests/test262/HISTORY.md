@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T38 `new.target` in functions, `super` with a `null` base (targeted rerun)
+
+- Compiler: T38 (`new.target` in ordinary functions and arrows; `super.x` throws for a `null` home prototype and reads
+  the base before converting the key).
+- Runs: the 68 non-passing subset tests mentioning `new.target`: 38 → pass (the rest mostly `eval`); the 5 F168 tests →
+  pass; regression checks `language/expressions/{function,arrow-function,new,super,call,new.target}`,
+  `language/statements/{function,class/subclass,class/super}`, `language/expressions/object/method-definition`
+  (~1,900 tests): 2 more pass, 0 regressions. Subset: 22,211 of 24,973 run pass (88.9%).
+
 ## 2026-09-28: T37 `Object.setPrototypeOf` (targeted rerun)
 
 - Compiler: T37 (`Object.setPrototypeOf`; `Object.prototype` methods read from namespaces).

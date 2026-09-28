@@ -384,7 +384,9 @@ impl V<'_> {
                     }
                     None => self.err(format!("closure of missing function #{}", c.code.0)),
                 }
-                if let crate::FnKind::Class { construct } = c.kind {
+                if let crate::FnKind::Class { construct } | crate::FnKind::OrdinaryWith { construct } =
+                    c.kind
+                {
                     match self.m.functions.get(construct.0 as usize) {
                         Some(f) => {
                             let ok = f.params == 3

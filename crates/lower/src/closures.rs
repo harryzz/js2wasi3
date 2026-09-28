@@ -34,6 +34,8 @@ pub enum Cap {
     This,
     /// The home object (for `super.x`) of the enclosing method, by value (T16).
     Home,
+    /// The enclosing function's `new.target`, by value (T38).
+    NewTarget,
     /// A private name's symbol ([`Analysis::privates`] index), by value.
     Private(u32),
     /// The cell holding an instance private method (filled when the class is evaluated), for its
@@ -80,8 +82,11 @@ pub struct Analysis {
     pub ctor_class: HashMap<ScopeId, ScopeId>,
     /// Methods and classes using `super.x` (themselves or in arrow functions).
     pub uses_home: HashSet<ScopeId>,
-    /// Classes whose constructor uses `new.target`.
+    /// Classes whose constructor uses `new.target`, and functions that use it themselves or
+    /// through their arrow functions (T38).
     pub uses_new_target: HashSet<ScopeId>,
+    /// `new.target` in a static block or static field initializer (by start): `undefined` (T38).
+    pub static_new_target: HashSet<u32>,
     /// Constructs this analysis can't handle: rejected by the lowering (span, what).
     pub unsupported: Vec<(Span, &'static str)>,
     /// Private names (T16), one per `#x` declared in a class.
@@ -319,7 +324,11 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
             Some(a) => (scoping.scope_parent_id(*a).unwrap_or(root), made_at[a]),
             None => (node.scope_id(), span.start),
         };
-        if static_class(&an, scoping, probe_scope, probe_pos).is_some() && which != 2 {
+        if static_class(&an, scoping, probe_scope, probe_pos).is_some() && which == 2 {
+            an.static_new_target.insert(span.start);
+            continue;
+        }
+        if static_class(&an, scoping, probe_scope, probe_pos).is_some() {
             if !chain.is_empty() {
                 an.unsupported.push((
                     span,
@@ -328,27 +337,22 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
             }
             continue;
         }
-        if which == 2 || super_call {
-            if !chain.is_empty() {
-                an.unsupported.push((
-                    span,
-                    if which == 2 {
-                        "`new.target` in an arrow function"
-                    } else {
-                        "`super()` in an arrow function"
-                    },
-                ));
-                continue;
-            }
-            if which == 2 {
-                match f {
-                    Some(s) if an.classes.contains_key(&s) => {
-                        an.uses_new_target.insert(s);
+        if which == 2 {
+            // T38: the nearest non-arrow function's; its arrows capture it.
+            match f {
+                Some(s) => {
+                    an.uses_new_target.insert(s);
+                    for a in chain {
+                        captures.entry(a).or_default().insert(Cap::NewTarget);
                     }
-                    _ => an
-                        .unsupported
-                        .push((span, "`new.target` outside a class constructor")),
                 }
+                None => an.unsupported.push((span, "`new.target` outside a function")),
+            }
+            continue;
+        }
+        if super_call {
+            if !chain.is_empty() {
+                an.unsupported.push((span, "`super()` in an arrow function"));
             }
             continue;
         }

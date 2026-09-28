@@ -230,6 +230,7 @@ pub fn lower_with(
             nested: HashMap::new(),
             nested_decl: HashMap::new(),
             adapters: HashMap::new(),
+            ctor_adapters: HashMap::new(),
             lowered: HashSet::new(),
             hidden: HashMap::new(),
             fn_scope: HashMap::new(),
@@ -380,6 +381,8 @@ struct Lowerer<'p, 'a> {
     nested_decl: HashMap<SymbolId, ScopeId>,
     /// The `$code` adapter of each function used as a value.
     adapters: HashMap<FuncId, FuncId>,
+    /// Construct entries of functions that use `new.target` (T38), by function.
+    ctor_adapters: HashMap<FuncId, FuncId>,
     /// Functions whose body is lowered (nested ones are lowered where they're created).
     lowered: HashSet<FuncId>,
     /// Hidden leading params of each JS function.
@@ -466,6 +469,9 @@ impl<'a> FnAst<'a> {
             FnAst::Func(f) => f.r#async,
             FnAst::Arrow(a) => a.r#async,
         }
+    }
+    fn is_generator(self) -> bool {
+        matches!(self, FnAst::Func(f) if f.generator)
     }
 }
 
@@ -1563,11 +1569,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let hidden = Hidden {
             self_: false,
             this: self.an.uses_this.contains(&scope),
-            new_target: false,
+            // T38: a constructor's `new.target` (`undefined` when called).
+            new_target: self.an.uses_new_target.contains(&scope) && !f.generator && !f.r#async,
         };
         let mut sig: Vec<(&str, Type)> = Vec::new();
         if hidden.this {
             sig.push(("this", Type::JsVal));
+        }
+        if hidden.new_target {
+            sig.push(("new.target", Type::JsVal));
         }
         for (n, sym) in &params {
             let ty = sym.map_or(Type::JsVal, |s| self.slot_ty(Slot::Var(s)));
@@ -2199,7 +2209,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self_: self.an.captures.get(&scope).is_some_and(|c| !c.is_empty())
                     || self.an.self_ref.contains(&scope),
                 this: !arrow && self.an.uses_this.contains(&scope),
-                new_target: false,
+                // T38: only constructors take it; elsewhere `new.target` is `undefined`.
+                new_target: !arrow
+                    && !method
+                    && !f.is_generator()
+                    && !f.is_async()
+                    && self.an.uses_new_target.contains(&scope),
             };
             let id = FuncId(self.module.functions.len() as u32);
             let mut sig: Vec<(String, Type)> = Vec::new();
@@ -2208,6 +2223,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             if hidden.this {
                 sig.push(("this".into(), Type::JsVal));
+            }
+            if hidden.new_target {
+                sig.push(("new.target".into(), Type::JsVal));
             }
             let mut params = Vec::new();
             let uses_arguments = self.an.uses_arguments.contains(&scope);
@@ -2532,6 +2550,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let name = match cap {
                 Cap::This => "this".to_string(),
                 Cap::Home => "home".to_string(),
+                Cap::NewTarget => "new.target".to_string(),
                 Cap::Private(i) => self.an.privates[*i as usize].name.clone(),
                 Cap::PrivMethod(i) => format!("{}.cell", self.an.privates[*i as usize].name),
                 Cap::FieldKey(_) => "key.cell".to_string(),
@@ -2552,6 +2571,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             match cap {
                 Cap::This => cx.this = Some(l),
                 Cap::Home => cx.home = Some(l),
+                Cap::NewTarget => cx.new_target = Some(l),
                 Cap::Private(i) => {
                     cx.privates.insert(*i, l);
                 }
@@ -2699,6 +2719,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ir::FnKind::Generator
             } else if self.module.function(id).flags.is_async {
                 ir::FnKind::Async
+            } else if constructor && self.hidden[&id].new_target {
+                ir::FnKind::OrdinaryWith {
+                    construct: self.ctor_adapter(id),
+                }
             } else if constructor {
                 ir::FnKind::Ordinary
             } else {
@@ -2724,6 +2748,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             env.push(match cap {
                 Cap::This => cx.this.map_or_else(Expr::undefined, Expr::Local),
                 Cap::Home => cx.home.map_or_else(Expr::undefined, Expr::Local),
+                Cap::NewTarget => cx.new_target.map_or_else(Expr::undefined, Expr::Local),
                 Cap::FieldKey(at) => match cx.field_keys.get(&at) {
                     Some(l) => Expr::Local(*l),
                     None => {
@@ -2807,6 +2832,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ir::FnKind::Generator
             } else if f.flags.is_async {
                 ir::FnKind::Async
+            } else if self.hidden.get(&func).is_some_and(|h| h.new_target) {
+                ir::FnKind::OrdinaryWith {
+                    construct: self.ctor_adapter(func),
+                }
             } else {
                 ir::FnKind::Ordinary
             },
@@ -2814,6 +2843,71 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             shared: true,
             source: self.fn_source.get(&func).and_then(|s| self.source_text(*s)),
         }))
+    }
+
+    /// What `new` runs for a function that uses `new.target` (T38): `f$construct(self, new_target,
+    /// args) -> jsval` makes `this` from `new_target.prototype`, calls the typed function `func` with
+    /// both, and gives its result if that is an object, else `this`.
+    fn ctor_adapter(&mut self, func: FuncId) -> FuncId {
+        if let Some(a) = self.ctor_adapters.get(&func) {
+            return *a;
+        }
+        let f = self.module.function(func).clone();
+        let hidden = self.hidden[&func];
+        let mut a = ir::Function::new(
+            format!("{}$construct", f.name),
+            &[
+                ("self", Type::JsVal),
+                ("new.target", Type::JsVal),
+                ("args", Type::JsVal),
+            ],
+            Some(Type::JsVal),
+        );
+        a.pos = f.pos;
+        let this = a.add_local("this", Type::JsVal);
+        let mut args = Vec::new();
+        if hidden.self_ {
+            args.push(Expr::Local(LocalId(0)));
+        }
+        if hidden.this {
+            args.push(Expr::Local(this));
+        }
+        args.push(Expr::Local(LocalId(1)));
+        let rest = self.rest_param.contains(&func);
+        for i in hidden.count()..f.params {
+            let op = if rest && i == f.params - 1 {
+                Intrinsic::ArgsRest(i - hidden.count())
+            } else {
+                Intrinsic::ArgGet(i - hidden.count())
+            };
+            let arg = Expr::intrinsic(op, vec![Expr::Local(LocalId(2))]);
+            args.push(match f.locals[i as usize].ty {
+                Type::JsVal => arg,
+                ty => Expr::convert(Type::JsVal, ty, arg),
+            });
+        }
+        let call = Expr::Call { func, args };
+        let result = match f.result {
+            None => Expr::Seq {
+                body: vec![Stmt::Expr(call)],
+                value: Box::new(Expr::undefined()),
+            },
+            Some(Type::JsVal) => call,
+            Some(ty) => Expr::convert(ty, Type::JsVal, call),
+        };
+        a.body = vec![
+            Stmt::Set(
+                this,
+                Expr::intrinsic(Intrinsic::CreateThis, vec![Expr::Local(LocalId(1))]),
+            ),
+            Stmt::Return(Some(Expr::intrinsic(
+                Intrinsic::CtorReturn { derived: false },
+                vec![result, Expr::Local(this)],
+            ))),
+        ];
+        let id = self.module.add_function(a);
+        self.ctor_adapters.insert(func, id);
+        id
     }
 
     /// What calls through a function value run: `f$code(self, this, args) -> jsval` calls the typed
@@ -2840,6 +2934,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if hidden.this {
             args.push(Expr::Local(LocalId(1)));
+        }
+        if hidden.new_target {
+            args.push(Expr::undefined());
         }
         let rest = self.rest_param.contains(&func);
         for i in hidden.count()..f.params {
@@ -3966,8 +4063,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.named(cx, e, None)
             }
             Expression::ThisExpression(_) => Ok(Val::js(self.this_value(cx), Kind::Any)),
-            Expression::NewTarget(_) => Ok(Val::js(
-                cx.new_target.map_or_else(Expr::undefined, Expr::Local),
+            Expression::NewTarget(nt) => Ok(Val::js(
+                cx.new_target
+                    .filter(|_| !self.an.static_new_target.contains(&nt.span.start))
+                    .map_or_else(Expr::undefined, Expr::Local),
                 Kind::Any,
             )),
             Expression::ClassExpression(c) => {
@@ -4654,6 +4753,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let hidden = self.hidden[&func];
         let mut args: Vec<Expr> = self_obj.into_iter().collect();
         if hidden.this {
+            args.push(Expr::undefined());
+        }
+        if hidden.new_target {
             args.push(Expr::undefined());
         }
         let mut extra = Vec::new();

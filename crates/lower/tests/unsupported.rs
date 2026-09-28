@@ -221,11 +221,11 @@ fn declarations_and_functions() {
 #[test]
 fn all_errors_are_reported() {
     let e =
-        errors("export function f() {\n  let s = new.target;\n  new WeakMap();\n  return /a/;\n}");
+        errors("export function f() {\n  let s = Proxy;\n  new WeakMap();\n  return /a/;\n}");
     assert_eq!(
         e,
         vec![
-            "2:11 unsupported: `new.target` outside a class constructor (planned: later)",
+            "2:11 unsupported: global `Proxy` (planned: T21)",
             "3:7 unsupported: global `WeakMap` (planned: T21)",
             "4:10 unsupported: expression `RegExpLiteral` (planned: later)",
         ]
@@ -428,14 +428,12 @@ fn classes() {
         "class A { get #x() { return 1; } set #x(v) {} static get #s() { return 2; } m() { [this.#x] = [this.#x + A.#s]; } }\nnew A().m();",
         "const k = 'a';\nclass A { [k] = 1; static [k + 1] = 2; }\nconsole.log(new A().a);",
         "class A { static #p = 1; static { var v = this.#p; this.f = () => v; } static g(o) { return o?.#p; } }\nconsole.log(A.g(A));",
+        // T38: `new.target` in functions and arrows.
+        "function f() { return () => new.target; }\nnew f();",
     ] {
         lowers(src);
     }
     for (src, err) in [
-        (
-            "function f() { return new.target; }",
-            "1:23 unsupported: `new.target` outside a class constructor (planned: later)",
-        ),
         (
             "class A {}\nclass B extends A { constructor() { const f = () => super(); f(); } }",
             "2:53 unsupported: `super()` in an arrow function (planned: later)",
