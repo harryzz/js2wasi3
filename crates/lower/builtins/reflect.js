@@ -252,23 +252,35 @@ function $$Reflect_set(target, propertyKey, V, ...rest) {
   return true;
 }
 
-function $$Reflect_setPrototypeOf(target, proto) {
-  $$reflectTarget(target, "setPrototypeOf");
-  if (proto !== null && !$$isObject(proto)) {
-    throw new TypeError("Object prototype may only be an Object or null: " + $$reflectWhat(proto));
-  }
+// [[SetPrototypeOf]] of an ordinary object after the argument checks: 0 done, 1 not extensible,
+// 2 a cycle, 3 `Object.prototype` (an immutable prototype exotic object). Also `Object.setPrototypeOf`.
+function $$setPrototypeOf(target, proto) {
   if (Object.getPrototypeOf(target) === proto) {
-    return true;
+    return 0;
   }
-  // Object.prototype is an immutable prototype exotic object.
-  if (!Object.isExtensible(target) || target === Object.prototype) {
-    return false;
+  if (target === Object.prototype) {
+    return 3;
+  }
+  if (!Object.isExtensible(target)) {
+    return 1;
   }
   for (let p = proto; p !== null; p = Object.getPrototypeOf(p)) {
     if (p === target) {
-      return false;
+      return 2;
     }
   }
   __intrinsic_set_proto(target, proto);
-  return true;
+  return 0;
+}
+
+function $$checkProto(proto) {
+  if (proto !== null && !$$isObject(proto)) {
+    throw new TypeError("Object prototype may only be an Object or null: " + $$reflectWhat(proto));
+  }
+}
+
+function $$Reflect_setPrototypeOf(target, proto) {
+  $$reflectTarget(target, "setPrototypeOf");
+  $$checkProto(proto);
+  return $$setPrototypeOf(target, proto) === 0;
 }

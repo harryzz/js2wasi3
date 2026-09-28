@@ -3985,7 +3985,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             {
                 self.timer_value(span, ir::TIMER_NEXT_TICK)
             }
-            Expression::StaticMemberExpression(sm) if self.is_global(&sm.object, "Math") => {
+            Expression::StaticMemberExpression(sm)
+                if self.is_global(&sm.object, "Math")
+                    && !(self.prelude.ctor_values.contains("Math")
+                        && builtins::inherited_prop("Math", &sm.property.name)) =>
+            {
                 if sm.optional {
                     return Err(self.unsupported(span, "`Math?.x`", "later"));
                 }
@@ -4435,7 +4439,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && self.is_global(&m.object, &obj.name)
             && self.prelude.has_statics(&obj.name)
             && !(self.prelude.ctor_values.contains(obj.name.as_str())
-                && builtins::FUNCTION_PROPS.contains(&m.property.name.as_str()))
+                && builtins::inherited_prop(&obj.name, &m.property.name))
         {
             // `Math.nope(…)`, `JSON.parse(…)`: a static the prelude doesn't implement.
             let what = format!("`{}.{}`", obj.name, m.property.name);

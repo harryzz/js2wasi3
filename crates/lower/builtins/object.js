@@ -80,6 +80,28 @@ function $$Object_assign(target, ...sources) {
   return to;
 }
 
+// Uses reflect.js's `$$setPrototypeOf` (T37).
+function $$Object_setPrototypeOf(o, proto) {
+  if (o === undefined || o === null) {
+    throw new TypeError("Object.setPrototypeOf called on null or undefined");
+  }
+  $$checkProto(proto);
+  if (!$$isObject(o)) {
+    return o;
+  }
+  const status = $$setPrototypeOf(o, proto);
+  if (status === 1) {
+    throw new TypeError($$reflectWhat(o) + " is not extensible");
+  }
+  if (status === 2) {
+    throw new TypeError("Cyclic __proto__ value");
+  }
+  if (status === 3) {
+    throw new TypeError("Immutable prototype object 'Object.prototype' cannot have their prototype set");
+  }
+  return o;
+}
+
 function $$Object_fromEntries(iterable) {
   if (iterable === undefined || iterable === null) {
     throw new TypeError("undefined is not iterable");

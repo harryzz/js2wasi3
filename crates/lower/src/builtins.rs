@@ -129,6 +129,25 @@ pub(crate) struct Prelude {
 /// them uses the constructor value (T25).
 pub(crate) const FUNCTION_PROPS: &[&str] = &["apply", "call", "bind", "name", "length"];
 
+/// `Object.prototype` methods: read from a namespace (`Reflect.hasOwnProperty(…)`, T37) they go
+/// through the namespace value, which inherits them.
+pub(crate) const OBJECT_PROTO_PROPS: &[&str] = &[
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toString",
+    "toLocaleString",
+    "valueOf",
+    "constructor",
+];
+
+/// Is `global.prop` inherited rather than a static of the prelude: `Function.prototype`'s
+/// properties of a constructor value, `Object.prototype`'s methods of a namespace?
+pub(crate) fn inherited_prop(global: &str, prop: &str) -> bool {
+    FUNCTION_PROPS.contains(&prop)
+        || (js2wasi3_ir::Namespace::parse(global).is_some() && OBJECT_PROTO_PROPS.contains(&prop))
+}
+
 /// Names that gate native built-in code (T25): `keys`/`entries` are linked only when the user's
 /// code names them; `console.log` recognizes array iterators only when it can make one.
 pub(crate) const GATED: &[&str] = &[
@@ -332,7 +351,7 @@ impl Prelude {
                         let value = || match p.semantic.nodes().parent_kind(node.id()) {
                             AstKind::StaticMemberExpression(m) => {
                                 m.object.span() != r.span
-                                    || FUNCTION_PROPS.contains(&m.property.name.as_str())
+                                    || inherited_prop(&r.name, &m.property.name)
                             }
                             // A spread call goes through the value.
                             AstKind::CallExpression(c) if c.callee.span() == r.span => {

@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T37 `Object.setPrototypeOf` (targeted rerun)
+
+- Compiler: T37 (`Object.setPrototypeOf`; `Object.prototype` methods read from namespaces).
+- Runs: the 35 non-passing subset tests mentioning `setPrototypeOf`: 19 → pass, 5 → fail (super references, F168);
+  `built-ins/Reflect/enumerate/undefined.js` → pass; regression check `built-ins/{Math,JSON,Reflect}` (645 tests): no
+  changes. Subset: 22,166 of 24,973 run pass (88.8%).
+
 ## 2026-09-28: T36 `Reflect` (targeted reruns; subset + `built-ins/Reflect`)
 
 - Compiler: T36 (`Reflect` namespace, all 13 functions in the prelude; built-in functions as values aren't
