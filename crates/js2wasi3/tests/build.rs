@@ -1064,7 +1064,7 @@ fn module_errors_are_diagnostics() {
     for want in [
         "main.js:2:8: error: cannot find module `./b`",
         "help: node needs the file's extension: `./b.js`?",
-        "main.js:3:8: error: unsupported: package import `lodash`",
+        "main.js:3:8: error: Cannot find package 'lodash' imported from",
         "main.js:4:8: error: unsupported: node's built-in module `node:fs`",
     ] {
         assert!(err.contains(want), "missing {want:?} in:\n{err}");

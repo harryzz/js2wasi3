@@ -20,6 +20,7 @@
 use std::fmt;
 
 mod link;
+mod packages;
 pub use link::{Fs, Host, Linked, Options, SourceMap, link};
 
 use oxc_ast::ast;

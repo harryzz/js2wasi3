@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T41 slice 5, packages (targeted run)
+
+- Compiler: bare specifiers resolved from `node_modules` (test262 has no packages; bare specifiers there name missing
+  modules, still errors).
+- Run: `language/module-code`, `language/import`, `language/export`, `language/expressions/dynamic-import` and the 17
+  other subset tests naming a bare specifier, with `--update` (2,031 tests, ~7 min at -j 4): no changes. Subset:
+  25,911 of 28,107 run pass (92.2%).
+
 ## 2026-09-29: T41 multi-file modules, slice 4 (targeted run)
 
 - Compiler: dynamic `import()` of modules known at build time (patterns, `--include`); modules only `import()`

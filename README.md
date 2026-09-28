@@ -85,9 +85,11 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   literals, `const`s, `?:`, template and `+` patterns like ``import(`./locales/${lang}.js`)``); `--include <glob>`
   adds modules for specifiers only known at run time (an `import()` the build can't work out is an error without
   it). Code that doesn't exist at build time can't be loaded (like `eval`).
+- Packages: bare specifiers (`import x from "pkg"`) resolved from `node_modules` at build time as node does
+  (`exports` conditions and patterns, `imports`, `main`); ES module packages only.
 
-Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, packages from
-`node_modules`, and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, CommonJS packages, node's built-in
+modules (`node:fs`), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

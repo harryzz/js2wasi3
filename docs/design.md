@@ -217,7 +217,9 @@ graph; one that fails to parse or link (or imports one that does) isn't in the p
 the error at run time, as node does. With any `import()` every module is a function; `import(x, o)` becomes
 `$$DynamicImport(k, x, o)` (`k`: the importer), which resolves `x` against the importer's absolute directory, looks it
 up in the table (absolute path → module, namespace), and evaluates it with the same evaluator (the spec's Evaluate,
-one promise per module) one job later.)
+one promise per module) one job later. Slice 5: bare specifiers are resolved at build time with node's ESM algorithm
+(`frontend/src/packages.rs`: `node_modules` upwards, `exports`/`imports` with node 24's conditions, legacy `main`);
+CommonJS files and node's built-in modules are rejected.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

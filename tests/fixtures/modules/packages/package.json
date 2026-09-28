@@ -1,0 +1,1 @@
+{ "name": "packages-fixture", "type": "module", "imports": { "#config": "./app/config.js", "#shapes/*": "shapes/*" } }

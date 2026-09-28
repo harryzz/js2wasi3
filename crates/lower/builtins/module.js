@@ -22,8 +22,9 @@ function $$ModuleNamespace(keys, getters) {
 // AsyncModuleExecutionFulfilled/Rejected and GatherAvailableAncestors, so the modules that don't wait
 // for an async one run while it's suspended, and the ticks match node's.
 // `import()` (`$$DynamicImport`) looks its specifier up in `table`: [absolute path, module, is JSON,
-// namespace], or [path, -1, is JSON, null, error class, message] for one that fails to parse or
-// link (node rejects then too). The specifier is resolved against the importer's `paths` entry
+// namespace], or [path, -1, is JSON, null, error class, message, code] for one that fails to parse
+// or link (node rejects then too); a package's key is the importer's directory, `\n` and the
+// specifier. The specifier is resolved against the importer's `paths` entry
 // ([directory, file]), and the module evaluated the same way (a job later: node's loader takes a
 // few more).
 // `entry`: the entry's index. `sync` (a library's `init`): the entry's evaluation throws instead
@@ -253,10 +254,18 @@ function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
       reject($$moduleError(Error, "ERR_UNKNOWN_BUILTIN_MODULE", `No such built-in module: ${spec} (node's built-in modules aren't available in js2wasi3)`));
       return promise;
     } else {
-      reject($$moduleError(Error, "ERR_MODULE_NOT_FOUND", `Cannot find package '${spec}' imported from ${from}`));
-      return promise;
+      // A package (T41 slice 5): resolved at build time from this directory.
+      const key = dir + "\n" + spec;
+      for (let i = 0; i < table.length; i++) {
+        if (table[i][0] === key) entry = table[i];
+      }
+      if (entry === undefined) {
+        const name = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0];
+        reject($$moduleError(Error, "ERR_MODULE_NOT_FOUND", `Cannot find package '${name}' imported from ${from}`));
+        return promise;
+      }
     }
-    const url = $$fileUrl(entry[0]);
+    const url = entry[0].includes("\n") ? spec : $$fileUrl(entry[0]);
     let problem;
     if (type !== undefined && type !== "json") {
       problem = $$moduleError(TypeError, "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED", `Import attribute "type" with value "${type}" is not supported in ${url}`);
@@ -274,8 +283,12 @@ function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
       await undefined;
       if (entry[1] < 0) {
         // It (or a module it imports) doesn't parse or link: the same error every time.
-        if (entry[6] === undefined) entry.push(entry[4] === "SyntaxError" ? new SyntaxError(entry[5]) : new Error(entry[5]));
-        reject(entry[6]);
+        if (entry[7] === undefined) {
+          const e = entry[4] === "SyntaxError" ? new SyntaxError(entry[5]) : new Error(entry[5]);
+          if (entry[6] !== "") e.code = entry[6];
+          entry.push(e);
+        }
+        reject(entry[7]);
         return;
       }
       try {

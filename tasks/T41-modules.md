@@ -1,6 +1,6 @@
 # T41: Multi-file ES modules (F7, F79)
 
-Status: in progress (started 2026-09-28) | Depends on: T20 (user worlds: WIT imports), T21 (prelude)
+Status: done (started 2026-09-28, finished 2026-09-29) | Depends on: T20 (user worlds: WIT imports), T21 (prelude)
 
 ## Goal
 A program can be several files: static `import`/`export` between them (named, default, namespace, re-exports,
@@ -227,14 +227,34 @@ committing the baseline.
   else `main`), at build time, in `Graph::resolve` (today: "package import" rejected); then `import()` of a bare
   literal too. Consider shims for a few `node:` modules (scriptc does `events`, `path`, `process`).
 
+**Slice 5 (2026-09-29).** Bare specifiers (packages).
+- `crates/frontend/src/packages.rs`: node's ESM resolution at build time: PACKAGE_RESOLVE (`node_modules` from the
+  importer's directory up to `/`, scoped names, self-reference by the nearest `package.json`'s `name`), `exports`
+  (string, fallback arrays, condition objects with node 24's `node`/`import`/`module-sync`/`default` in key order, `*`
+  patterns by PATTERN_KEY_COMPARE, `null`), `imports` (`#name`, bare targets), without `exports` the legacy `main`
+  (as is, `.js`, `.json`, `/index.js`) or `index.js`; `module` is ignored, as node does. An order-keeping JSON value
+  parser (`parse_json`, also behind JSON modules now). Package files have absolute paths.
+- Linker: bare and `#` specifiers go through it (node's messages and codes in the diagnostics: ERR_MODULE_NOT_FOUND,
+  ERR_PACKAGE_PATH_NOT_EXPORTED, …); node's built-ins without `node:` (`fs`, `path/posix`) are rejected like `node:fs`;
+  CommonJS files are rejected (`.cjs`, or a package `.js` without `"type": "module"` or ESM syntax that uses `module`/
+  `exports`/`require`; F194). `import()` of a bare literal is resolved at build time and keyed by the importer's
+  directory and the specifier; a failure rejects at run time with node's message and `code`.
+- Tests: fixture `modules/packages` (its own `node_modules`: conditions, patterns, `null`, `#imports` with a bare
+  target, self-reference, a package's nested `node_modules` shadowing a top one, scoped, legacy `main` vs `module`,
+  `package.json` through `exports` as JSON, `import()` of packages and its errors) matches node; frontend tests
+  `packages`, `json_values_keep_key_order`, `exports_patterns_and_conditions`; the build test's `lodash` message.
+  `cargo test`: all pass. test262 (module dirs, dynamic-import, the 17 other tests naming bare specifiers): no changes.
+- Unsupported / follow-ups: CommonJS packages (F194), node's built-in modules (F200: shims for a few, as scriptc
+  does), `import()` of a bare specifier computed at run time (only literals).
+
 ## Checklist
 - [x] design questions decided and recorded
 - [x] slice 1: static imports
 - [x] slice 2: namespaces and re-exports
 - [x] slice 3: top-level `await` in dependencies, `import.meta` (and JSON modules)
 - [x] slice 4: dynamic `import()`
-- [ ] slice 5 (or a new task): bare specifiers
-- [ ] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md, README)
+- [x] slice 5: bare specifiers
+- [x] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md, README)
 
 ## Progress
 - 2026-09-28: handoff written after T40 (the user chose multi-file modules next; dynamic `import()` scoped with
@@ -296,3 +316,6 @@ committing the baseline.
 - 2026-09-28: slice 4 started (dynamic `import()`).
 - 2026-09-28: slice 4 core: `frontend::Host` (read + list; `Fs`), `frontend::Options { command, include }`, CLI `build --include <glob>`. Linker: `import()` targets from specifier patterns (literals, `const`s, `?:`/`||`/`??`, template and `+` with `*` inside one segment; `.js`/`.mjs`/`.json` files), `--include` globs (`**`), a table of [absolute path, module, JSON, namespace]; missing files are left out (their `import()` rejects, as node); an unresolvable `import()` without `--include` is a build error. Dynamic programs always use module functions; `import(x, o)` → `$$DynamicImport(k, x, o)` (inserted text may call the prelude: `SourceMap::is_inserted`). Prelude: `$$EvaluateModules` generalized (spec Evaluate with per-module capabilities, entry index, `sync` for a library `init`), `$$moduleImport` (EvaluateImportCall's checks, node's ERR_MODULE_NOT_FOUND / ERR_IMPORT_ATTRIBUTE_* errors, load one job later). Bugs found: evaluating inside `import()` synchronously ran the module before the importer's next statement and a nested Evaluate reset the outer DFS stack (hang): the load now waits a job. node's loader takes 4–7 extra jobs (differs for new vs. loaded modules): not matched (follow-up). Fixture `modules/dynamic` (+ `main.flags`; `diff.sh` reads `x.flags`, builds from the fixture's dir) passes.
 - 2026-09-29: two-phase loading (modules only `import()` reaches load after the static graph; their errors reject at run time: `lazy`/`failed`/`poisoned`); runner passes `--include` for tests with `import(`; test262 dynamic-import 454/548; targeted `--update` (1,984 tests): 0 regressions, 330 → pass, subset 92.2%. Docs, follow-up F199, Notes / Result for slice 4.
+- 2026-09-29: slice 5 started (bare specifiers).
+- 2026-09-29: `frontend/src/packages.rs`: node's PACKAGE_RESOLVE (node_modules upwards from the importer, self-reference, `exports` with conditions node/import/module-sync/default in key order, `*` patterns by PATTERN_KEY_COMPARE, arrays, `null`; `imports` for `#x`; legacy `main`/index.js; `module` ignored as node does) and an order-keeping JSON value parser. Linker: bare/`#` specifiers resolve through it (node's messages + code in diagnostics), built-ins without `node:` (`fs`) rejected like `node:fs`, CommonJS files (`.cjs`; a package `.js` without `type: module`, ESM syntax, using `module`/`exports`/`require`) rejected (F194). `import()` of a bare literal: resolved at build time, keyed by importer dir + spec; failures rejected at run time with node's code. Probes match node (static and dynamic, incl. ERR_PACKAGE_PATH_NOT_EXPORTED texts).
+- 2026-09-29: fixture `modules/packages` (own `node_modules`) matches node; frontend tests `packages` etc.; `cargo test` all pass; test262 targeted (2,031 tests): no changes. Slice 5 done, T41 done: docs, F200, Notes / Result.

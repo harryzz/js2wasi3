@@ -26,7 +26,7 @@ use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::symbol::SymbolId;
 
-use crate::{Allocator, Diagnostic, Diagnostics, Program, line_col, parse};
+use crate::{Allocator, Diagnostic, Diagnostics, Program, line_col, packages, parse};
 
 /// Where each part of a joined source came from.
 #[derive(Debug, Clone, Default)]
@@ -140,14 +140,15 @@ pub fn link(
         lazy: false,
         pending: Vec::new(),
         poisoned: Vec::new(),
+        bare_failed: Vec::new(),
     };
     g.load(entry.to_string(), source)?;
     // Then what only `import()` loads (its errors reject at run time).
     g.lazy = true;
     g.includes()?;
     while !g.pending.is_empty() {
-        let path = g.pending.remove(0);
-        g.dynamic_target(path)?;
+        let (key, path) = g.pending.remove(0);
+        g.dynamic_target(key, path)?;
     }
     if !g.diags.is_empty() {
         return Err(sorted(g.diags));
@@ -167,166 +168,10 @@ pub fn link(
 /// `"__proto__"` key made computed so it stays an own property, as `JSON.parse` makes it. Or where
 /// the text isn't JSON, and why.
 fn json_module(text: &str) -> Result<String, (usize, String)> {
-    struct P<'s> {
-        s: &'s [u8],
-        at: usize,
-        proto: Vec<(usize, usize)>,
-    }
-    impl P<'_> {
-        fn ws(&mut self) {
-            while self.at < self.s.len() && matches!(self.s[self.at], b' ' | b'\t' | b'\n' | b'\r') {
-                self.at += 1;
-            }
-        }
-        fn fail<T>(&self, what: &str) -> Result<T, (usize, String)> {
-            let found = match self.s.get(self.at) {
-                None => "the end of the text".to_string(),
-                Some(_) => {
-                    let c = std::str::from_utf8(&self.s[self.at..]).ok().and_then(|t| t.chars().next());
-                    format!("`{}`", c.unwrap_or('?'))
-                }
-            };
-            Err((self.at, format!("expected {what}, found {found}")))
-        }
-        fn eat(&mut self, c: u8) -> bool {
-            let ok = self.s.get(self.at) == Some(&c);
-            self.at += ok as usize;
-            ok
-        }
-        fn digits(&mut self) -> usize {
-            let start = self.at;
-            while self.s.get(self.at).is_some_and(u8::is_ascii_digit) {
-                self.at += 1;
-            }
-            self.at - start
-        }
-        /// A string; its value when it's a key.
-        fn string(&mut self) -> Result<String, (usize, String)> {
-            let mut value = Vec::new();
-            self.at += 1;
-            loop {
-                match self.s.get(self.at) {
-                    None => return self.fail("`\"`"),
-                    Some(b'"') => break,
-                    Some(c) if *c < 0x20 => return self.fail("a character (control characters must be escaped)"),
-                    Some(b'\\') => {
-                        self.at += 1;
-                        match self.s.get(self.at) {
-                            Some(b'u') => {
-                                let hex = self.s.get(self.at + 1..self.at + 5).and_then(|h| std::str::from_utf8(h).ok());
-                                let Some(u) = hex.and_then(|h| u16::from_str_radix(h, 16).ok()).filter(|_| hex.unwrap().bytes().all(|b| b.is_ascii_hexdigit())) else {
-                                    self.at += 1;
-                                    return self.fail("four hex digits");
-                                };
-                                value.push(u);
-                                self.at += 5;
-                            }
-                            Some(c) if b"\"\\/bfnrt".contains(c) => {
-                                value.push(*c as u16);
-                                self.at += 1;
-                            }
-                            _ => return self.fail("an escape (`\\\"`, `\\n`, `\\u0041`, …)"),
-                        }
-                    }
-                    Some(_) => {
-                        let rest = std::str::from_utf8(&self.s[self.at..]).unwrap_or("");
-                        let c = rest.chars().next().unwrap_or('\u{fffd}');
-                        let mut buf = [0u16; 2];
-                        value.extend_from_slice(c.encode_utf16(&mut buf));
-                        self.at += c.len_utf8().max(1);
-                    }
-                }
-            }
-            self.at += 1;
-            Ok(String::from_utf16_lossy(&value))
-        }
-        fn value(&mut self) -> Result<(), (usize, String)> {
-            self.ws();
-            match self.s.get(self.at) {
-                Some(b'{') => {
-                    self.at += 1;
-                    self.ws();
-                    if self.eat(b'}') {
-                        return Ok(());
-                    }
-                    loop {
-                        self.ws();
-                        if self.s.get(self.at) != Some(&b'"') {
-                            return self.fail("a property name in double quotes");
-                        }
-                        let start = self.at;
-                        if self.string()? == "__proto__" {
-                            self.proto.push((start, self.at));
-                        }
-                        self.ws();
-                        if !self.eat(b':') {
-                            return self.fail("`:`");
-                        }
-                        self.value()?;
-                        self.ws();
-                        if self.eat(b'}') {
-                            return Ok(());
-                        }
-                        if !self.eat(b',') {
-                            return self.fail("`,` or `}`");
-                        }
-                    }
-                }
-                Some(b'[') => {
-                    self.at += 1;
-                    self.ws();
-                    if self.eat(b']') {
-                        return Ok(());
-                    }
-                    loop {
-                        self.value()?;
-                        self.ws();
-                        if self.eat(b']') {
-                            return Ok(());
-                        }
-                        if !self.eat(b',') {
-                            return self.fail("`,` or `]`");
-                        }
-                    }
-                }
-                Some(b'"') => self.string().map(|_| ()),
-                Some(b'-' | b'0'..=b'9') => {
-                    self.eat(b'-');
-                    if !self.eat(b'0') && self.digits() == 0 {
-                        return self.fail("a digit");
-                    }
-                    if self.eat(b'.') && self.digits() == 0 {
-                        return self.fail("a digit");
-                    }
-                    if self.eat(b'e') || self.eat(b'E') {
-                        let _ = self.eat(b'+') || self.eat(b'-');
-                        if self.digits() == 0 {
-                            return self.fail("a digit");
-                        }
-                    }
-                    Ok(())
-                }
-                _ => {
-                    for word in ["true", "false", "null"] {
-                        if self.s[self.at..].starts_with(word.as_bytes()) {
-                            self.at += word.len();
-                            return Ok(());
-                        }
-                    }
-                    self.fail("a JSON value")
-                }
-            }
-        }
-    }
-    let mut p = P { s: text.as_bytes(), at: 0, proto: Vec::new() };
-    p.value()?;
-    p.ws();
-    if p.at < text.len() {
-        return p.fail("the end of the text");
-    }
+    let (_, proto) = packages::parse_json(text)?;
     let mut out = String::from("export default ");
     let mut pos = 0;
-    for (start, end) in p.proto {
+    for (start, end) in proto {
         out.push_str(&text[pos..start]);
         out.push('[');
         out.push_str(&text[start..end]);
@@ -429,6 +274,12 @@ fn glob_match(seg: &[Part], name: &str) -> bool {
 
 /// A path made absolute against the working directory (lexically: symlinks stay, as the
 /// run-time lookup joins paths the same way).
+/// A directory (`a/b/`, or empty for the working directory) made absolute, ending with `/`.
+pub(crate) fn absolute_dir(dir: &str) -> String {
+    let abs = if dir.is_empty() { absolute(".") } else { absolute(dir) };
+    if abs.ends_with('/') { abs } else { format!("{abs}/") }
+}
+
 fn absolute(path: &str) -> String {
     if path.starts_with('/') {
         return normalize(path);
@@ -521,8 +372,8 @@ struct Module<'a> {
     /// Loaded only for `import()` (after the static graph): its errors reject that `import()` at
     /// run time, as in node, instead of failing the build.
     lazy: bool,
-    /// Such a module's error: the error's class and message.
-    failed: Option<(String, String)>,
+    /// Such a module's error: the error's class, message and node's `code` (or empty).
+    failed: Option<Failed>,
 }
 
 struct Graph<'a, 'r> {
@@ -539,11 +390,16 @@ struct Graph<'a, 'r> {
     /// Loading modules only `import()` reaches (after the static graph).
     lazy: bool,
     /// What `import()` can load, not looked at yet.
-    pending: Vec<String>,
+    pending: Vec<(String, String)>,
     /// By module: loaded only for `import()` and fails, or imports one that does (then not in the
     /// program: its `import()` rejects with that error).
-    poisoned: Vec<Option<(String, String)>>,
+    poisoned: Vec<Option<Failed>>,
+    /// `import()` of a package that doesn't resolve: its key and error.
+    bare_failed: Vec<(String, Failed)>,
 }
+
+/// A module that fails to load for `import()`: the error's class, message and node's `code`.
+type Failed = (String, String, String);
 
 /// A piece of an `import()` specifier known at build time: text, or any text without `/`.
 #[derive(Debug, Clone, PartialEq)]
@@ -571,9 +427,14 @@ impl<'a> Graph<'a, '_> {
         if self.modules[m].lazy {
             // Its `import()` rejects with the first error (slice 4).
             if self.modules[m].failed.is_none() {
+                // Messages end with node's code: `… (ERR_MODULE_NOT_FOUND)`.
+                let (message, code) = match message.rsplit_once(" (ERR_") {
+                    Some((m, c)) if c.ends_with(')') => (m.to_string(), format!("ERR_{}", &c[..c.len() - 1])),
+                    _ => (message, String::new()),
+                };
                 self.modules[m].failed = Some(match message.strip_prefix("SyntaxError: ") {
-                    Some(rest) => ("SyntaxError".into(), rest.into()),
-                    None => ("Error".into(), message),
+                    Some(rest) => ("SyntaxError".into(), rest.into(), code),
+                    None => ("Error".into(), message, code),
                 });
             }
             return;
@@ -596,7 +457,7 @@ impl<'a> Graph<'a, '_> {
             // A module only `import()` loads: an empty stand-in that rejects.
             Err(d) if self.lazy => {
                 let message = d.0.first().map_or_else(String::new, |d| d.message.clone());
-                (parse(self.alloc, &path, "")?, Some(("SyntaxError".to_string(), message)))
+                (parse(self.alloc, &path, "")?, Some(("SyntaxError".to_string(), message, String::new())))
             }
             Err(d) => return Err(d),
         };
@@ -627,6 +488,26 @@ impl<'a> Graph<'a, '_> {
             lazy: self.lazy,
             failed,
         });
+        // node runs `.cjs` files, and `.js` files of a package without `"type": "module"` that
+        // have no ESM syntax, as CommonJS (slice 5; F194).
+        let esm = ast.body.iter().any(|s| s.is_module_declaration()) || !self.modules[m].meta.is_empty() || tla;
+        let commonjs_names = ["module", "exports", "require"];
+        let cjs_refs = self.modules[m].p.semantic.scoping().root_unresolved_references().keys().any(|k| commonjs_names.contains(&k.as_str()));
+        let path = self.modules[m].p.path.clone();
+        let package_cjs = path.contains("node_modules/")
+            && path.ends_with(".js")
+            && !esm
+            && cjs_refs
+            && packages::package_type(self.host, &path[..=path.rfind('/').unwrap_or(0)]).as_deref() != Some("module");
+        if path.ends_with(".cjs") || package_cjs {
+            self.diag(
+                m,
+                Span::new(0, 0),
+                "unsupported: CommonJS module (node runs this file as CommonJS: `module.exports`, `require`) (planned: F194)".into(),
+                None,
+            );
+            return Ok(m);
+        }
         for stmt in &ast.body {
             let (span, source, with) = match stmt {
                 Statement::ImportDeclaration(i) => {
@@ -713,14 +594,30 @@ impl<'a> Graph<'a, '_> {
             for pat in pats {
                 let [Part::Lit(first), ..] = &pat[..] else { continue };
                 if !is_relative(first) {
-                    continue; // a bare or `node:` specifier: rejected when it runs, as in node
+                    // A package (slice 5): resolved now, looked up by the importer's directory
+                    // and the specifier. A `node:` or other URL specifier rejects when it runs.
+                    if pat.len() == 1 && !first.contains(':') {
+                        let key = format!("{}\n{first}", absolute_dir(&dir));
+                        let from = absolute(&self.modules[m].p.path);
+                        let failed = |message: String, code: &str| ("Error".to_string(), message, code.to_string());
+                        if packages::is_builtin(first) {
+                            let message = format!("node's built-in module '{first}' isn't available in js2wasi3");
+                            self.bare_failed.push((key, failed(message, "ERR_UNKNOWN_BUILTIN_MODULE")));
+                        } else {
+                            match packages::resolve(self.host, &dir, first) {
+                                Ok(path) => self.pending.push((key, path)),
+                                Err(f) => self.bare_failed.push((key, failed(format!("{} imported from {from}", f.message), f.code))),
+                            }
+                        }
+                    }
+                    continue;
                 }
                 let mut full = pat.clone();
                 if !first.starts_with('/') {
                     full[0] = Part::Lit(format!("{dir}{first}"));
                 }
                 let paths = self.expand(&full);
-                self.pending.extend(paths);
+                self.pending.extend(paths.into_iter().map(|p| (absolute(&p), p)));
             }
         }
         Ok(())
@@ -728,7 +625,7 @@ impl<'a> Graph<'a, '_> {
 
     /// Load `path` for `import()` (a JSON module by its extension) and add it to the table; a file
     /// that isn't there is left out (its `import()` rejects, as in node).
-    fn dynamic_target(&mut self, path: String) -> Result<(), Diagnostics> {
+    fn dynamic_target(&mut self, key: String, path: String) -> Result<(), Diagnostics> {
         let json = path.ends_with(".json");
         let k = match self.index.get(&path) {
             Some(&k) => k,
@@ -740,8 +637,8 @@ impl<'a> Graph<'a, '_> {
                 Err(_) => return Ok(()),
             },
         };
-        if !self.table.iter().any(|(_, t)| *t == k) {
-            self.table.push((absolute(&path), k));
+        if !self.table.iter().any(|(t, _)| *t == key) {
+            self.table.push((key, k));
         }
         Ok(())
     }
@@ -768,7 +665,7 @@ impl<'a> Graph<'a, '_> {
                     help: None,
                 });
             }
-            self.pending.extend(paths);
+            self.pending.extend(paths.into_iter().map(|p| (absolute(&p), p)));
         }
         Ok(())
     }
@@ -857,7 +754,7 @@ impl<'a> Graph<'a, '_> {
             Err((at, what)) if self.lazy => {
                 let m = self.load(path, "")?;
                 let (line, col) = line_col(text, at as u32);
-                self.modules[m].failed = Some(("SyntaxError".into(), format!("invalid JSON at {line}:{col}: {what}")));
+                self.modules[m].failed = Some(("SyntaxError".into(), format!("invalid JSON at {line}:{col}: {what}"), String::new()));
                 Ok(Some(m))
             }
             Err((at, what)) => {
@@ -938,13 +835,28 @@ impl<'a> Graph<'a, '_> {
         if spec.contains(':') {
             return Some(Request::Wit);
         }
-        self.diag(
-            m,
-            span,
-            format!("unsupported: package import `{spec}` (a bare specifier: node_modules) (planned: T41 slice 5)"),
-            Some("import files by relative path, e.g. `./lib.js`".into()),
-        );
-        None
+        if packages::is_builtin(spec) {
+            self.diag(
+                m,
+                span,
+                format!("unsupported: node's built-in module `{spec}` (planned: not scheduled)"),
+                None,
+            );
+            return None;
+        }
+        // A package (slice 5), or `#name` from the package's `imports`.
+        let from = self.modules[m].p.path.clone();
+        let dir = match from.rfind('/') {
+            Some(k) => &from[..=k],
+            None => "",
+        };
+        match packages::resolve(self.host, dir, spec) {
+            Ok(path) => Some(Request::File(path)),
+            Err(f) => {
+                self.diag(m, span, format!("{} imported from {from} ({})", f.message, f.code), None);
+                None
+            }
+        }
     }
 
     /// Record module `m`'s import bindings and exports.
@@ -1170,7 +1082,7 @@ impl<'a> Graph<'a, '_> {
             return Err(sorted(self.diags));
         }
         // A module `import()` loads fails if it or a module it imports fails (the first found).
-        fn poison(g: &Graph, m: usize, seen: &mut Vec<bool>) -> Option<(String, String)> {
+        fn poison(g: &Graph, m: usize, seen: &mut Vec<bool>) -> Option<Failed> {
             if seen[m] {
                 return None;
             }
@@ -1255,22 +1167,27 @@ impl<'a> Graph<'a, '_> {
                     format!("[{}, {}]", js_string(dir), js_string(&abs))
                 })
                 .collect();
-            let table: Vec<String> = self
+            let failed = |key: &str, json: bool, (class, message, code): &Failed| {
+                format!(
+                    "[{}, -1, {json}, null, {}, {}, {}]",
+                    js_string(key),
+                    js_string(class),
+                    js_string(message),
+                    js_string(code)
+                )
+            };
+            let mut table: Vec<String> = self
                 .table
                 .iter()
                 .map(|(key, k)| {
                     let json = self.modules[*k].p.path.ends_with(".json");
                     match &self.poisoned[*k] {
-                        Some((class, message)) => format!(
-                            "[{}, -1, {json}, null, {}, {}]",
-                            js_string(key),
-                            js_string(class),
-                            js_string(message)
-                        ),
+                        Some(f) => failed(key, json, f),
                         None => format!("[{}, {}, {json}, {}]", js_string(key), at[k], names[&Binding::Namespace(*k)]),
                     }
                 })
                 .collect();
+            table.extend(self.bare_failed.iter().map(|(key, f)| failed(key, false, f)));
             out.push_str(&format!(
                 "{}$$EvaluateModules(__intrinsic_module_bodies(), [{}], [{}], [{}], [{}], {}, {});\n",
                 if command { "await " } else { "" },
@@ -1784,7 +1701,7 @@ fn is_identifier_name(s: &str) -> bool {
 }
 
 /// `a/./b/../c.js` → `a/c.js` (lexically; `..` past the start stays).
-fn normalize(path: &str) -> String {
+pub(crate) fn normalize(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split('/') {
         match part {
@@ -1827,6 +1744,9 @@ mod tests {
                 }
             }
             out.sort();
+            if out.is_empty() {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+            }
             Ok(out)
         }
     }
@@ -1992,8 +1912,9 @@ mod tests {
         let tail = |k: &&str| k.split("/app/").nth(1).unwrap_or(k).to_string();
         let mut keys: Vec<String> = keys.iter().map(tail).collect();
         keys.sort();
-        // (`""` and `main.js`: the importer's directory and file.)
-        assert_eq!(keys, ["", "lib/a.js", "lib/b.js", "lib/c.js", "loc/en.js", "loc/fr.js", "main.js"], "{first}");
+        // (`""` and `main.js`: the importer's directory and file; `pkg`: not found, rejects.)
+        assert_eq!(keys, ["", "\\u000apkg", "lib/a.js", "lib/b.js", "lib/c.js", "loc/en.js", "loc/fr.js", "main.js"], "{first}");
+        assert!(first.contains("\"Cannot find package 'pkg' imported from "), "{first}");
         assert!(l.source.contains("\n$$DynamicImport(0, k);\n$$DynamicImport(0, `./loc/${x}.js`);\n"), "{}", l.source);
         // Unknown specifiers need `--include`.
         let err = join(&[("m.js", "import(f());\n")]).err().unwrap().to_string();
@@ -2015,5 +1936,47 @@ mod tests {
         assert!(!glob_match(&[lit("a"), w.clone(), lit(".js")], "b.js"));
         assert!(glob_match(&[w.clone()], ""));
         assert_eq!(merge(vec![lit("./a"), lit("/"), w.clone(), w, lit(".js")]), vec![lit("./a/"), Part::Wild, lit(".js")]);
+    }
+
+    #[test]
+    fn packages() {
+        let files = [
+            ("/w/app/main.js", "import a from 'p';\nimport b from 'p/sub/x';\nimport c from '@s/q';\nimport d from '#here';\nconsole.log(a, b, c, d);\n"),
+            ("/w/app/package.json", r##"{"name": "app", "imports": {"#here": "./here.js"}}"##),
+            ("/w/app/here.js", "export default 4;\n"),
+            ("/w/node_modules/p/package.json", r#"{"name": "p", "exports": {".": {"import": "./i.js", "default": "./d.js"}, "./sub/*": "./s/*.js"}}"#),
+            ("/w/node_modules/p/i.js", "export default 1;\n"),
+            ("/w/node_modules/p/s/x.js", "export default 2;\n"),
+            ("/w/app/node_modules/@s/q/package.json", r#"{"name": "@s/q", "main": "lib"}"#),
+            ("/w/app/node_modules/@s/q/lib/index.js", "export default 3;\n"),
+        ];
+        let l = join(&files).unwrap();
+        for want in ["/w/node_modules/p/i.js", "/w/node_modules/p/s/x.js", "/w/app/node_modules/@s/q/lib/index.js", "/w/app/here.js"] {
+            let map = l.map.as_ref().unwrap();
+            assert!(map.files.iter().any(|(p, _)| p == want), "{want} not loaded");
+        }
+        let err = |main: &str, extra: &[(&str, &str)]| {
+            let mut files = vec![("/w/app/main.js", main)];
+            files.extend_from_slice(&files_of(extra));
+            join(&files).err().unwrap().to_string()
+        };
+        fn files_of<'a>(f: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+            f.to_vec()
+        }
+        let pj = ("/w/node_modules/p/package.json", r#"{"exports": {"./a": "./a.js"}}"#);
+        let e = err("import 'p/b';\n", &[pj]);
+        assert!(e.contains("Package subpath './b' is not defined by \"exports\" in /w/node_modules/p/package.json imported from /w/app/main.js (ERR_PACKAGE_PATH_NOT_EXPORTED)"), "{e}");
+        let e = err("import 'nope';\nimport 'fs/promises';\n", &[]);
+        assert!(e.contains("main.js:1:8: error: Cannot find package 'nope' imported from /w/app/main.js (ERR_MODULE_NOT_FOUND)"), "{e}");
+        assert!(e.contains("main.js:2:8: error: unsupported: node's built-in module `fs/promises`"), "{e}");
+        let e = err("import 'c';\n", &[("/w/node_modules/c/package.json", "{}"), ("/w/node_modules/c/index.js", "module.exports = 1;\n")]);
+        assert!(e.contains("index.js:1:1: error: unsupported: CommonJS module"), "{e}");
+        // `"type": "module"`: the same file is ESM (and `module` is an undeclared global).
+        let ok = join(&[
+            ("/w/app/main.js", "import 'c';\n"),
+            ("/w/node_modules/c/package.json", r#"{"type": "module"}"#),
+            ("/w/node_modules/c/index.js", "module.exports = 1;\n"),
+        ]);
+        assert!(ok.is_ok());
     }
 }
