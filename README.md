@@ -81,8 +81,12 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Programs of several files: `import`/`export` between ES modules (relative paths), joined into one component at
   build time (namespaces, re-exports, live bindings, cycles, top-level `await` in node's order, `import.meta`, JSON
   modules); `build --command` makes an entry with exports a command, as node runs it.
+- Dynamic `import()` of modules known at build time: the build finds what each `import()` can load (string
+  literals, `const`s, `?:`, template and `+` patterns like ``import(`./locales/${lang}.js`)``); `--include <glob>`
+  adds modules for specifiers only known at run time (an `import()` the build can't work out is an error without
+  it). Code that doesn't exist at build time can't be loaded (like `eval`).
 
-Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, dynamic `import()`, packages from
+Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, packages from
 `node_modules`, and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 

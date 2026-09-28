@@ -7,6 +7,7 @@
 #   A dir means its *.js files (not subdirectories); in a dir named `modules`, each `<case>/main.js`
 #   is the entry of a multi-file program (T41). `x.skip` next to `x.js` skips it; its
 #   first line is the reason. Each fixture should take under 2 s: slower ones are flagged.
+#   `x.flags` next to `x.js`: extra build options (T41: `--include`), from the fixture's directory.
 #   `x.uncaught` next to `x.js`: the program ends with an uncaught exception. node's stderr (source
 #   excerpt and stack) is first reduced to `Uncaught <message>`, as a js2wasi3 command prints it
 #   (scripts/node-uncaught.mjs).
@@ -39,7 +40,13 @@ one() {
     mv "$d/node.err" "$d/node.err.raw"
     node "$ROOT/scripts/node-uncaught.mjs" "$d/node.err.raw" >"$d/node.err"
   fi
-  if ! "$BIN" build "$f" -o "$d/x.wasm" 2>"$d/build.err"; then
+  # `x.flags` next to `x.js`: more build options (one line, e.g. `--include 'lib/*.js'`), used
+  # from the fixture's directory.
+  local flags=()
+  if [ -f "${f%.js}.flags" ]; then
+    eval "flags=($(head -1 "${f%.js}.flags"))"
+  fi
+  if ! (cd "$(dirname "$f")" && "$BIN" build "$f" -o "$d/x.wasm" "${flags[@]}") 2>"$d/build.err"; then
     echo "FAIL $(($(now_ms) - t0)) build failed" >"$res"
     cat "$d/build.err" >"$diff"
     return

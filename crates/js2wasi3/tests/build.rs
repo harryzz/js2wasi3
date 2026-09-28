@@ -1038,6 +1038,18 @@ fn library_from_several_modules() {
 }
 
 #[test]
+fn library_with_dynamic_import() {
+    // T41 slice 4: `import()` of a template pattern in an async export.
+    let out = out_dir("modules-lib-dynamic").join("lib.wasm");
+    let b = build(&fixture("modules/library-dynamic/lib.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert_eq!(invoke(&out, "run(\"square\", 7)"), "ok(49)");
+    assert_eq!(invoke(&out, "run(\"double\", 7)"), "ok(14)");
+    let err = invoke(&out, "run(\"nope\", 7)");
+    assert!(err.starts_with("err({name: \"Error\", message: \"Cannot find module"), "{err}");
+}
+
+#[test]
 fn module_errors_are_diagnostics() {
     let dir = out_dir("modules-errors");
     let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();

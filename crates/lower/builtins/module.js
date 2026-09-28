@@ -13,14 +13,24 @@ function $$ModuleNamespace(keys, getters) {
   return ns;
 }
 
-// Async module evaluation (T41 slice 3): a command whose dependency has top-level `await`. The
-// module linker makes each module's top-level code a function (`bodies`, in evaluation order, the
-// entry last; an async function for a module with top-level `await`) and gives each one's
-// requested modules (`requests`, indices into `bodies`); the generated code awaits this. It's the
-// spec's Evaluate (16.2.1.5.3): InnerModuleEvaluation (Tarjan's DFS over the cycles),
-// ExecuteAsyncModule, AsyncModuleExecutionFulfilled/Rejected and GatherAvailableAncestors, so the
-// modules that don't wait for an async one run while it's suspended, and the ticks match node's.
-function $$EvaluateModules(bodies, tla, requests) {
+// Module evaluation (T41 slices 3–4): a program with a dependency that has top-level `await`, or
+// with `import()`. The module linker makes each module's top-level code a function (`bodies`, in
+// evaluation order, the entry last among the statically imported ones; an async function for a
+// module with top-level `await`) and gives each one's requested modules (`requests`, indices into
+// `bodies`); the generated code calls this first. It's the spec's Evaluate (16.2.1.5.3):
+// InnerModuleEvaluation (Tarjan's DFS over the cycles), ExecuteAsyncModule,
+// AsyncModuleExecutionFulfilled/Rejected and GatherAvailableAncestors, so the modules that don't wait
+// for an async one run while it's suspended, and the ticks match node's.
+// `import()` (`$$DynamicImport`) looks its specifier up in `table`: [absolute path, module, is JSON,
+// namespace], or [path, -1, is JSON, null, error class, message] for one that fails to parse or
+// link (node rejects then too). The specifier is resolved against the importer's `paths` entry
+// ([directory, file]), and the module evaluated the same way (a job later: node's loader takes a
+// few more).
+// `entry`: the entry's index. `sync` (a library's `init`): the entry's evaluation throws instead
+// of rejecting.
+let $$moduleImport = undefined;
+
+function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
   const n = bodies.length;
   // Status: 0 new, 1 evaluating, 2 evaluating-async, 3 evaluated.
   const status = [];
@@ -33,6 +43,8 @@ function $$EvaluateModules(bodies, tla, requests) {
   const errors = [];
   // [[AsyncEvaluationOrder]]: 0 unset, -1 done.
   const asyncOrder = [];
+  // [[TopLevelCapability]]: [promise, resolve, reject] or undefined.
+  const caps = [];
   for (let i = 0; i < n; i++) {
     status.push(0);
     dfsIndex.push(0);
@@ -43,16 +55,10 @@ function $$EvaluateModules(bodies, tla, requests) {
     failed.push(false);
     errors.push(undefined);
     asyncOrder.push(0);
+    caps.push(undefined);
   }
   let nextOrder = 1;
-  const entry = n - 1;
-  let resolveTop;
-  let rejectTop;
-  const top = new Promise((resolve, reject) => {
-    resolveTop = resolve;
-    rejectTop = reject;
-  });
-  const stack = [];
+  let stack = [];
 
   function inner(m, index) {
     if (status[m] === 2 || status[m] === 3) {
@@ -127,7 +133,7 @@ function $$EvaluateModules(bodies, tla, requests) {
     if (status[m] === 3) return;
     asyncOrder[m] = -1;
     status[m] = 3;
-    if (m === entry) resolveTop(undefined);
+    if (caps[m] !== undefined) caps[m][1](undefined);
     const list = [];
     gather(m, list);
     list.sort((a, b) => asyncOrder[a] - asyncOrder[b]);
@@ -145,7 +151,7 @@ function $$EvaluateModules(bodies, tla, requests) {
         }
         asyncOrder[p] = -1;
         status[p] = 3;
-        if (p === entry) resolveTop(undefined);
+        if (caps[p] !== undefined) caps[p][1](undefined);
       }
     }
   }
@@ -158,22 +164,180 @@ function $$EvaluateModules(bodies, tla, requests) {
     asyncOrder[m] = -1;
     const ps = parents[m];
     for (let k = 0; k < ps.length; k++) rejected(ps[k], e);
-    if (m === entry) rejectTop(e);
+    if (caps[m] !== undefined) caps[m][2](e);
   }
 
-  try {
-    inner(entry, 0);
-  } catch (e) {
-    for (let k = 0; k < stack.length; k++) {
-      status[stack[k]] = 3;
-      failed[stack[k]] = true;
-      errors[stack[k]] = e;
+  // Evaluate(): a promise for module `m`'s evaluation (its cycle's, once it has run).
+  function evaluate(m) {
+    if (status[m] === 2 || status[m] === 3) m = cycleRoot[m];
+    if (caps[m] !== undefined) return caps[m][0];
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    caps[m] = [promise, resolve, reject];
+    stack = [];
+    try {
+      inner(m, 0);
+    } catch (e) {
+      for (let k = 0; k < stack.length; k++) {
+        status[stack[k]] = 3;
+        failed[stack[k]] = true;
+        errors[stack[k]] = e;
+      }
+      reject(e);
+      return promise;
     }
-    rejectTop(e);
-    return top;
+    if (asyncOrder[m] <= 0) resolve(undefined);
+    return promise;
   }
-  if (asyncOrder[entry] === 0) resolveTop(undefined);
-  return top;
+
+  // import(): the specifier and options are checked as the spec's EvaluateImportCall does, the
+  // module found in the table, evaluated, and the promise resolved with its namespace.
+  $$moduleImport = (k, specifier, options) => {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    let spec;
+    let type;
+    try {
+      spec = `${specifier}`;
+      if (options !== undefined) {
+        if (options === null || (typeof options !== "object" && typeof options !== "function")) {
+          throw new TypeError("The second argument to import() must be an object");
+        }
+        const attributes = options.with;
+        if (attributes !== undefined) {
+          if (attributes === null || (typeof attributes !== "object" && typeof attributes !== "function")) {
+            throw new TypeError("The 'with' option of import() must be an object");
+          }
+          const keys = Object.keys(attributes);
+          const values = [];
+          for (let i = 0; i < keys.length; i++) {
+            const v = attributes[keys[i]];
+            if (typeof v !== "string") throw new TypeError("Import attribute value must be a string");
+            values.push(v);
+          }
+          for (let i = 0; i < keys.length; i++) {
+            if (keys[i] === "type") type = values[i];
+          }
+          for (let i = 0; i < keys.length; i++) {
+            if (keys[i] !== "type") {
+              throw $$moduleError(TypeError, "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED",
+                `Import attribute "${keys[i]}" with value "${values[i]}" is not supported in ${$$fileUrl(paths[k][1])}`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      reject(e);
+      return promise;
+    }
+    const [dir, from] = paths[k];
+    let entry;
+    if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/")) {
+      const key = $$normalizePath(spec.startsWith("/") ? spec : dir + spec);
+      for (let i = 0; i < table.length; i++) {
+        if (table[i][0] === key) entry = table[i];
+      }
+      if (entry === undefined) {
+        reject($$moduleError(Error, "ERR_MODULE_NOT_FOUND", `Cannot find module '${key}' imported from ${from}`));
+        return promise;
+      }
+    } else if (spec.startsWith("node:")) {
+      reject($$moduleError(Error, "ERR_UNKNOWN_BUILTIN_MODULE", `No such built-in module: ${spec} (node's built-in modules aren't available in js2wasi3)`));
+      return promise;
+    } else {
+      reject($$moduleError(Error, "ERR_MODULE_NOT_FOUND", `Cannot find package '${spec}' imported from ${from}`));
+      return promise;
+    }
+    const url = $$fileUrl(entry[0]);
+    let problem;
+    if (type !== undefined && type !== "json") {
+      problem = $$moduleError(TypeError, "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED", `Import attribute "type" with value "${type}" is not supported in ${url}`);
+    } else if (entry[2] && type === undefined) {
+      problem = $$moduleError(TypeError, "ERR_IMPORT_ATTRIBUTE_MISSING", `Module "${url}" needs an import attribute of "type: json"`);
+    } else if (!entry[2] && type === "json") {
+      problem = $$moduleError(TypeError, "ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE", `Module "${url}" is not of type "json"`);
+    }
+    if (problem !== undefined) {
+      reject(problem);
+      return promise;
+    }
+    // The host loads the module in a later job (as engines do; node's loader takes a few).
+    (async () => {
+      await undefined;
+      if (entry[1] < 0) {
+        // It (or a module it imports) doesn't parse or link: the same error every time.
+        if (entry[6] === undefined) entry.push(entry[4] === "SyntaxError" ? new SyntaxError(entry[5]) : new Error(entry[5]));
+        reject(entry[6]);
+        return;
+      }
+      try {
+        await evaluate(entry[1]);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      resolve(entry[3]);
+    })();
+    return promise;
+  };
+
+  if (sync) {
+    stack = [];
+    caps[entry] = [undefined, () => {}, () => {}];
+    try {
+      inner(entry, 0);
+    } catch (e) {
+      for (let k = 0; k < stack.length; k++) {
+        status[stack[k]] = 3;
+        failed[stack[k]] = true;
+        errors[stack[k]] = e;
+      }
+      throw e;
+    }
+    return undefined;
+  }
+  return evaluate(entry);
+}
+
+// A node-style error with a `code`.
+function $$moduleError(C, code, message) {
+  const e = new C(message);
+  e.code = code;
+  return e;
+}
+
+// `/a/./b/../c` → `/a/c` (as the module linker's `normalize`).
+function $$normalizePath(path) {
+  const parts = path.split("/");
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p === ".") continue;
+    if (p === ".." && out.length > 0 && out[out.length - 1] !== ".." && out[out.length - 1] !== "") {
+      out.pop();
+      continue;
+    }
+    out.push(p);
+  }
+  return out.join("/");
+}
+
+// node's `url.pathToFileURL(path)` for an absolute path.
+function $$fileUrl(path) {
+  return "file://" + $$urlEncode(path, "\"#%<>?`{}^|[]\\~");
+}
+
+// `import(x, o)` (T41 slice 4): the linker writes `$$DynamicImport(<importer>, x, o)`.
+function $$DynamicImport(k, specifier, options) {
+  return $$moduleImport(k, specifier, options);
 }
 
 // `import.meta` (T41 slice 3): one null-prototype object per module, made before any module runs,

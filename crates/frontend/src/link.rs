@@ -16,6 +16,8 @@
 //! `import.meta` object, and, when a command's dependency has top-level `await`, the call that runs
 //! the modules as separate functions in the spec's async order ([`SourceMap::modules`]). A JSON
 //! module (`with { type: "json" }`) is checked and loaded as `export default <the JSON>;`.
+//! `import()` (slice 4) loads the modules its specifier patterns match (or `--include` names),
+//! after the static graph; one of them that fails to parse or link rejects at run time.
 
 use std::collections::{HashMap, HashSet};
 
@@ -58,6 +60,13 @@ struct Segment {
 }
 
 impl SourceMap {
+    /// Is the text at this joined offset the linker's (`$$DynamicImport(` at an `import(`, a
+    /// renamed identifier), not copied from a file?
+    pub fn is_inserted(&self, offset: u32) -> bool {
+        let k = self.segments.partition_point(|s| s.at <= offset);
+        k > 0 && !self.segments[k - 1].copied
+    }
+
     /// The file, 1-based line and column of a joined offset.
     pub fn locate(&self, offset: u32) -> (&str, u32, u32) {
         let k = self.segments.partition_point(|s| s.at <= offset).saturating_sub(1);
@@ -75,28 +84,75 @@ pub struct Linked {
     pub map: Option<SourceMap>,
 }
 
-/// Load the modules the entry imports (through `read`) and join them. `command`: the program is
-/// a command even if the entry has exports (as node runs it): they're dropped like a dependency's.
+/// What the linker reads: files, and directories (for `import()` patterns and `--include`).
+pub trait Host {
+    fn read(&mut self, path: &str) -> std::io::Result<String>;
+    /// A directory's entries: name, and whether it's a directory.
+    fn list(&mut self, dir: &str) -> std::io::Result<Vec<(String, bool)>>;
+}
+
+/// The file system.
+pub struct Fs;
+
+impl Host for Fs {
+    fn read(&mut self, path: &str) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+    fn list(&mut self, dir: &str) -> std::io::Result<Vec<(String, bool)>> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(if dir.is_empty() { "." } else { dir })? {
+            let e = e?;
+            let is_dir = std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir());
+            out.push((e.file_name().to_string_lossy().into_owned(), is_dir));
+        }
+        out.sort();
+        Ok(out)
+    }
+}
+
+/// How to link: `command`: the program is a command even if the entry has exports (as node runs
+/// it): they're dropped like a dependency's. `include`: globs of modules `import()` may load at run
+/// time (`--include`, slice 4).
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    pub command: bool,
+    pub include: Vec<String>,
+}
+
+/// Load the modules the entry imports (through `host`) and join them.
 pub fn link(
     alloc: &Allocator,
     entry: &str,
     source: &str,
-    command: bool,
-    read: &mut dyn FnMut(&str) -> std::io::Result<String>,
+    options: &Options,
+    host: &mut dyn Host,
 ) -> Result<Linked, Diagnostics> {
+    let command = options.command;
     let mut g = Graph {
         alloc,
-        read,
+        host,
         command,
         modules: Vec::new(),
         index: HashMap::new(),
         diags: Vec::new(),
+        table: Vec::new(),
+        include: options.include.clone(),
+        lazy: false,
+        pending: Vec::new(),
+        poisoned: Vec::new(),
     };
     g.load(entry.to_string(), source)?;
+    // Then what only `import()` loads (its errors reject at run time).
+    g.lazy = true;
+    g.includes()?;
+    while !g.pending.is_empty() {
+        let path = g.pending.remove(0);
+        g.dynamic_target(path)?;
+    }
     if !g.diags.is_empty() {
         return Err(sorted(g.diags));
     }
-    if g.modules.iter().all(|m| m.requests.is_empty() && m.meta.is_empty())
+    if g.modules.iter().all(|m| m.requests.is_empty() && m.meta.is_empty() && m.dynamic.is_empty())
         && !(command && !g.modules[0].p.exports.is_empty())
     {
         return Ok(Linked {
@@ -282,6 +338,105 @@ fn json_module(text: &str) -> Result<String, (usize, String)> {
     Ok(out)
 }
 
+/// The specifier patterns of an `import()` argument known at build time: string literals,
+/// template literals and `+` (their other parts match anything), both sides of `?:`, `||` and
+/// `??`, and `const`s initialized with those. `None`: unknown.
+fn patterns(p: &Program, e: &Expression, depth: u32) -> Option<Vec<Vec<Part>>> {
+    if depth > 8 {
+        return None;
+    }
+    match e.without_parentheses() {
+        Expression::StringLiteral(s) => Some(vec![vec![Part::Lit(s.value.to_string())]]),
+        Expression::TemplateLiteral(t) => {
+            let mut pat = Vec::new();
+            for (i, q) in t.quasis.iter().enumerate() {
+                pat.push(Part::Lit(q.value.cooked?.to_string()));
+                if i < t.expressions.len() {
+                    pat.push(Part::Wild);
+                }
+            }
+            Some(vec![pat])
+        }
+        Expression::BinaryExpression(b) if b.operator == BinaryOperator::Addition => {
+            let side = |e: &Expression| patterns(p, e, depth + 1).unwrap_or_else(|| vec![vec![Part::Wild]]);
+            let (l, r) = (side(&b.left), side(&b.right));
+            let mut out = Vec::new();
+            for a in &l {
+                for b in &r {
+                    out.push(a.iter().chain(b).cloned().collect());
+                }
+            }
+            Some(out)
+        }
+        Expression::ConditionalExpression(c) => {
+            let mut out = patterns(p, &c.consequent, depth + 1)?;
+            out.extend(patterns(p, &c.alternate, depth + 1)?);
+            Some(out)
+        }
+        Expression::LogicalExpression(l) if l.operator != LogicalOperator::And => {
+            let mut out = patterns(p, &l.left, depth + 1)?;
+            out.extend(patterns(p, &l.right, depth + 1)?);
+            Some(out)
+        }
+        Expression::Identifier(id) => {
+            let scoping = p.semantic.scoping();
+            let sym = scoping.get_reference(id.reference_id()).symbol_id()?;
+            if !scoping.symbol_flags(sym).is_const_variable() {
+                return None;
+            }
+            let decl = scoping.symbol_declaration(sym);
+            let AstKind::VariableDeclarator(d) = p.semantic.nodes().kind(decl) else { return None };
+            patterns(p, d.init.as_ref()?, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Adjacent texts joined, adjacent wildcards merged.
+fn merge(pat: Vec<Part>) -> Vec<Part> {
+    let mut out: Vec<Part> = Vec::new();
+    for part in pat {
+        match (out.last_mut(), part) {
+            (Some(Part::Lit(a)), Part::Lit(b)) => a.push_str(&b),
+            (Some(Part::Wild), Part::Wild) => {}
+            (_, part) => out.push(part),
+        }
+    }
+    out
+}
+
+fn is_relative(spec: &str) -> bool {
+    spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/')
+}
+
+/// A pattern the build can look up: it starts with a relative or absolute path.
+fn is_relative_pattern(pat: &[Part]) -> bool {
+    matches!(pat.first(), Some(Part::Lit(t)) if is_relative(t))
+}
+
+fn is_module_file(name: &str) -> bool {
+    name.ends_with(".js") || name.ends_with(".mjs") || name.ends_with(".json")
+}
+
+/// Does `name` match a path segment's pattern?
+fn glob_match(seg: &[Part], name: &str) -> bool {
+    match seg.split_first() {
+        None => name.is_empty(),
+        Some((Part::Lit(t), rest)) => name.strip_prefix(t.as_str()).is_some_and(|n| glob_match(rest, n)),
+        Some((Part::Wild, rest)) => (0..=name.len()).filter(|k| name.is_char_boundary(*k)).any(|k| glob_match(rest, &name[k..])),
+    }
+}
+
+/// A path made absolute against the working directory (lexically: symlinks stay, as the
+/// run-time lookup joins paths the same way).
+fn absolute(path: &str) -> String {
+    if path.starts_with('/') {
+        return normalize(path);
+    }
+    let cwd = std::env::current_dir().map_or_else(|_| "/".to_string(), |d| d.to_string_lossy().into_owned());
+    normalize(&format!("{cwd}/{path}"))
+}
+
 /// node's `url.pathToFileURL(path)` for an absolute POSIX path.
 fn file_url(path: &str) -> String {
     let mut out = String::from("file://");
@@ -361,15 +516,47 @@ struct Module<'a> {
     tla: bool,
     /// Where it uses `import.meta`.
     meta: Vec<Span>,
+    /// Its `import()` expressions.
+    dynamic: Vec<Dynamic>,
+    /// Loaded only for `import()` (after the static graph): its errors reject that `import()` at
+    /// run time, as in node, instead of failing the build.
+    lazy: bool,
+    /// Such a module's error: the error's class and message.
+    failed: Option<(String, String)>,
 }
 
 struct Graph<'a, 'r> {
     alloc: &'a Allocator,
-    read: &'r mut dyn FnMut(&str) -> std::io::Result<String>,
+    host: &'r mut dyn Host,
     command: bool,
     modules: Vec<Module<'a>>,
     index: HashMap<String, usize>,
     diags: Vec<Diagnostic>,
+    /// What `import()` can load (slice 4): the module's absolute path (the lookup key) and index.
+    table: Vec<(String, usize)>,
+    /// `--include` globs.
+    include: Vec<String>,
+    /// Loading modules only `import()` reaches (after the static graph).
+    lazy: bool,
+    /// What `import()` can load, not looked at yet.
+    pending: Vec<String>,
+    /// By module: loaded only for `import()` and fails, or imports one that does (then not in the
+    /// program: its `import()` rejects with that error).
+    poisoned: Vec<Option<(String, String)>>,
+}
+
+/// A piece of an `import()` specifier known at build time: text, or any text without `/`.
+#[derive(Debug, Clone, PartialEq)]
+enum Part {
+    Lit(String),
+    Wild,
+}
+
+/// An `import()` (slice 4): where it is, where its specifier starts, and whether the build knows
+/// the modules it can load.
+struct Dynamic {
+    span: Span,
+    arg: u32,
 }
 
 /// A specifier resolved against the importing file.
@@ -381,6 +568,16 @@ enum Request {
 
 impl<'a> Graph<'a, '_> {
     fn diag(&mut self, m: usize, span: Span, message: String, help: Option<String>) {
+        if self.modules[m].lazy {
+            // Its `import()` rejects with the first error (slice 4).
+            if self.modules[m].failed.is_none() {
+                self.modules[m].failed = Some(match message.strip_prefix("SyntaxError: ") {
+                    Some(rest) => ("SyntaxError".into(), rest.into()),
+                    None => ("Error".into(), message),
+                });
+            }
+            return;
+        }
         let p = &self.modules[m].p;
         let (line, col) = p.line_col(span.start);
         self.diags.push(Diagnostic {
@@ -394,7 +591,15 @@ impl<'a> Graph<'a, '_> {
 
     fn load(&mut self, path: String, source: &str) -> Result<usize, Diagnostics> {
         let source: &'a str = self.alloc.alloc_str(source);
-        let p = parse(self.alloc, &path, source)?;
+        let (p, failed) = match parse(self.alloc, &path, source) {
+            Ok(p) => (p, None),
+            // A module only `import()` loads: an empty stand-in that rejects.
+            Err(d) if self.lazy => {
+                let message = d.0.first().map_or_else(String::new, |d| d.message.clone());
+                (parse(self.alloc, &path, "")?, Some(("SyntaxError".to_string(), message)))
+            }
+            Err(d) => return Err(d),
+        };
         let m = self.modules.len();
         self.index.insert(path, m);
         let ast = p.ast;
@@ -418,6 +623,9 @@ impl<'a> Graph<'a, '_> {
             targets: HashMap::new(),
             tla,
             meta,
+            dynamic: Vec::new(),
+            lazy: self.lazy,
+            failed,
         });
         for stmt in &ast.body {
             let (span, source, with) = match stmt {
@@ -456,8 +664,214 @@ impl<'a> Graph<'a, '_> {
             self.modules[m].requests.push(target);
             self.modules[m].targets.insert(span.start, target);
         }
+        self.dynamic_imports(m)?;
         self.scan(m);
         Ok(m)
+    }
+
+    /// Module `m`'s `import()` expressions: the modules each can load join the graph and the table;
+    /// one whose specifier the build can't work out needs `--include`.
+    fn dynamic_imports(&mut self, m: usize) -> Result<(), Diagnostics> {
+        let p = &self.modules[m].p;
+        let mut found = Vec::new();
+        for node in p.semantic.nodes().iter() {
+            let AstKind::ImportExpression(i) = node.kind() else { continue };
+            if i.phase.is_some() {
+                found.push((i.span, 0, Err("unsupported: import phases (`import.source()`, `import.defer()`) (planned: not scheduled)")));
+                continue;
+            }
+            let arg = i.source.span().start;
+            let pats = patterns(p, &i.source, 0).map(|ps| ps.into_iter().map(merge).collect::<Vec<_>>());
+            found.push((i.span, arg, Ok(pats)));
+        }
+        for (span, arg, pats) in found {
+            let pats = match pats {
+                Err(message) => {
+                    self.diag(m, span, message.into(), None);
+                    continue;
+                }
+                Ok(p) => p,
+            };
+            self.modules[m].dynamic.push(Dynamic { span, arg });
+            let known = pats.filter(|ps| ps.iter().all(|p| is_relative_pattern(p) || matches!(p[..], [Part::Lit(_)])));
+            let Some(pats) = known else {
+                if self.include.is_empty() {
+                    self.diag(
+                        m,
+                        span,
+                        "`import()` of a module the build can't work out (only string literals, `const`s, `?:` and template or `+` patterns starting with `./`, `../` or `/`)".into(),
+                        Some("name the modules it may load with `--include <glob>` (e.g. `--include 'plugins/*.js'`)".into()),
+                    );
+                }
+                continue;
+            };
+            let from = &self.modules[m].p.path;
+            let dir = match from.rfind('/') {
+                Some(k) => from[..=k].to_string(),
+                None => String::new(),
+            };
+            for pat in pats {
+                let [Part::Lit(first), ..] = &pat[..] else { continue };
+                if !is_relative(first) {
+                    continue; // a bare or `node:` specifier: rejected when it runs, as in node
+                }
+                let mut full = pat.clone();
+                if !first.starts_with('/') {
+                    full[0] = Part::Lit(format!("{dir}{first}"));
+                }
+                let paths = self.expand(&full);
+                self.pending.extend(paths);
+            }
+        }
+        Ok(())
+    }
+
+    /// Load `path` for `import()` (a JSON module by its extension) and add it to the table; a file
+    /// that isn't there is left out (its `import()` rejects, as in node).
+    fn dynamic_target(&mut self, path: String) -> Result<(), Diagnostics> {
+        let json = path.ends_with(".json");
+        let k = match self.index.get(&path) {
+            Some(&k) => k,
+            None => match self.host.read(&path) {
+                Ok(text) => match self.load_file(path.clone(), &text, json)? {
+                    Some(k) => k,
+                    None => return Ok(()),
+                },
+                Err(_) => return Ok(()),
+            },
+        };
+        if !self.table.iter().any(|(_, t)| *t == k) {
+            self.table.push((absolute(&path), k));
+        }
+        Ok(())
+    }
+
+    /// The `--include` globs' modules (relative to the working directory).
+    fn includes(&mut self) -> Result<(), Diagnostics> {
+        for glob in self.include.clone() {
+            let mut pat = Vec::new();
+            for (i, piece) in glob.split('*').enumerate() {
+                if i > 0 {
+                    pat.push(Part::Wild);
+                }
+                if !piece.is_empty() {
+                    pat.push(Part::Lit(piece.to_string()));
+                }
+            }
+            let paths = self.expand(&pat);
+            if paths.is_empty() {
+                self.diags.push(Diagnostic {
+                    path: glob.clone(),
+                    line: 1,
+                    col: 1,
+                    message: "--include: the glob matches no module (`.js`, `.mjs` or `.json` file)".into(),
+                    help: None,
+                });
+            }
+            self.pending.extend(paths);
+        }
+        Ok(())
+    }
+
+    /// The module files a pattern names: `*` (`Part::Wild`) matches within one path segment, and
+    /// a segment `**` any number of directories. Only `.js`, `.mjs` and `.json` files.
+    fn expand(&mut self, pat: &[Part]) -> Vec<String> {
+        // Split into segments at `/`.
+        let mut segs: Vec<Vec<Part>> = vec![Vec::new()];
+        for part in pat {
+            match part {
+                Part::Wild => segs.last_mut().unwrap().push(Part::Wild),
+                Part::Lit(t) => {
+                    for (i, piece) in t.split('/').enumerate() {
+                        if i > 0 {
+                            segs.push(Vec::new());
+                        }
+                        if !piece.is_empty() {
+                            segs.last_mut().unwrap().push(Part::Lit(piece.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        let absolute = segs.len() > 1 && segs[0].is_empty();
+        let mut out = Vec::new();
+        let start = if absolute { "/".to_string() } else { String::new() };
+        let segs: Vec<Vec<Part>> = segs.into_iter().filter(|s| !s.is_empty()).collect();
+        self.walk(start, &segs, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn walk(&mut self, dir: String, segs: &[Vec<Part>], out: &mut Vec<String>) {
+        let Some((seg, rest)) = segs.split_first() else { return };
+        let join = |name: &str| {
+            if dir.is_empty() || dir.ends_with('/') {
+                format!("{dir}{name}")
+            } else {
+                format!("{dir}/{name}")
+            }
+        };
+        if let [Part::Lit(name)] = &seg[..] {
+            let path = normalize(&join(name));
+            if !rest.is_empty() {
+                self.walk(path, rest, out);
+            } else if is_module_file(name) {
+                out.push(path);
+            }
+            return;
+        }
+        // `**` (from `--include`): this directory and every one below.
+        let doublestar = seg.len() == 2 && seg.iter().all(|p| *p == Part::Wild);
+        let Ok(entries) = self.host.list(&dir) else { return };
+        if doublestar {
+            for (name, is_dir) in entries {
+                if is_dir && !name.starts_with('.') && name != "node_modules" {
+                    self.walk(join(&name), segs, out);
+                }
+            }
+            return self.walk(dir, rest, out);
+        }
+        for (name, is_dir) in entries {
+            if name.starts_with('.') || !glob_match(seg, &name) {
+                continue;
+            }
+            if rest.is_empty() {
+                if !is_dir && is_module_file(&name) {
+                    out.push(normalize(&join(&name)));
+                }
+            } else if is_dir {
+                self.walk(join(&name), rest, out);
+            }
+        }
+    }
+
+    /// Load a file's text as a module (`json`: a JSON module, checked first).
+    fn load_file(&mut self, path: String, text: &str, json: bool) -> Result<Option<usize>, Diagnostics> {
+        if !json {
+            return self.load(path, text).map(Some);
+        }
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        match json_module(text) {
+            Ok(source) => self.load(path, &source).map(Some),
+            Err((at, what)) if self.lazy => {
+                let m = self.load(path, "")?;
+                let (line, col) = line_col(text, at as u32);
+                self.modules[m].failed = Some(("SyntaxError".into(), format!("invalid JSON at {line}:{col}: {what}")));
+                Ok(Some(m))
+            }
+            Err((at, what)) => {
+                let (line, col) = line_col(text, at as u32);
+                self.diags.push(Diagnostic {
+                    path,
+                    line,
+                    col,
+                    message: format!("invalid JSON: {what}"),
+                    help: None,
+                });
+                Ok(None)
+            }
+        }
     }
 
     /// Resolve and load `source`, requested by module `m`: `None` for a WIT interface or an error.
@@ -482,25 +896,8 @@ impl<'a> Graph<'a, '_> {
         if let Some(&k) = self.index.get(&path) {
             return Ok(Some(k));
         }
-        match (self.read)(&path) {
-            Ok(text) if json => {
-                let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-                match json_module(text) {
-                    Ok(source) => self.load(path, &source).map(Some),
-                    Err((at, what)) => {
-                        let (line, col) = line_col(text, at as u32);
-                        self.diags.push(Diagnostic {
-                            path,
-                            line,
-                            col,
-                            message: format!("invalid JSON: {what}"),
-                            help: None,
-                        });
-                        Ok(None)
-                    }
-                }
-            }
-            Ok(text) => self.load(path, &text).map(Some),
+        match self.host.read(&path) {
+            Ok(text) => self.load_file(path, &text, json),
             Err(e) => {
                 let help = (!spec.ends_with(".js") && !spec.ends_with(".mjs"))
                     .then(|| format!("node needs the file's extension: `{spec}.js`?"));
@@ -772,6 +1169,20 @@ impl<'a> Graph<'a, '_> {
         if !self.diags.is_empty() {
             return Err(sorted(self.diags));
         }
+        // A module `import()` loads fails if it or a module it imports fails (the first found).
+        fn poison(g: &Graph, m: usize, seen: &mut Vec<bool>) -> Option<(String, String)> {
+            if seen[m] {
+                return None;
+            }
+            seen[m] = true;
+            if let Some(f) = &g.modules[m].failed {
+                return Some(f.clone());
+            }
+            g.modules[m].requests.iter().find_map(|&r| poison(g, r, seen))
+        }
+        self.poisoned = (0..self.modules.len())
+            .map(|m| poison(&self, m, &mut vec![false; self.modules.len()]))
+            .collect();
 
         let namespaces = self.namespaces(&binds);
         let names = self.names(&binds, &namespaces);
@@ -780,7 +1191,7 @@ impl<'a> Graph<'a, '_> {
         let mut out = String::new();
         // Each module's `import.meta` (slice 3): node's properties, from the file's absolute path.
         for m in 0..self.modules.len() {
-            if let Some(name) = names.get(&Binding::Meta(m)) {
+            if let Some(name) = names.get(&Binding::Meta(m)).filter(|_| self.poisoned[m].is_none()) {
                 let path = &self.modules[m].p.path;
                 let abs = std::fs::canonicalize(path)
                     .or_else(|_| std::path::absolute(path))
@@ -811,11 +1222,13 @@ impl<'a> Graph<'a, '_> {
             ));
         }
         // A dependency with top-level `await` (slice 3, commands only: a library's `init` can't
-        // wait): every module becomes a function, run by the spec's algorithm.
-        let evaluate = (self.command || self.modules[0].p.exports.is_empty())
-            && self.modules[1..].iter().any(|m| m.tla);
+        // wait) or an `import()` (slice 4): every module becomes a function, run by the spec's
+        // algorithm; `import()` evaluates the modules it loads the same way.
+        let command = self.command || self.modules[0].p.exports.is_empty();
+        let dynamic = self.modules.iter().any(|m| !m.dynamic.is_empty());
+        let evaluate = (command && self.modules[1..].iter().any(|m| m.tla)) || dynamic;
+        let at: HashMap<usize, usize> = order.iter().enumerate().map(|(k, m)| (*m, k)).collect();
         if evaluate {
-            let at: HashMap<usize, usize> = order.iter().enumerate().map(|(k, m)| (*m, k)).collect();
             let tla: Vec<&str> = order.iter().map(|m| if self.modules[*m].tla { "true" } else { "false" }).collect();
             let requests: Vec<String> = order
                 .iter()
@@ -830,10 +1243,43 @@ impl<'a> Graph<'a, '_> {
                     format!("[{}]", r.join(", "))
                 })
                 .collect();
+            // For `import()`: each importer's directory and file (absolute), and the table.
+            let paths: Vec<String> = order
+                .iter()
+                .map(|m| {
+                    if self.modules[*m].dynamic.is_empty() {
+                        return "null".into();
+                    }
+                    let abs = absolute(&self.modules[*m].p.path);
+                    let dir = &abs[..=abs.rfind('/').unwrap_or(0)];
+                    format!("[{}, {}]", js_string(dir), js_string(&abs))
+                })
+                .collect();
+            let table: Vec<String> = self
+                .table
+                .iter()
+                .map(|(key, k)| {
+                    let json = self.modules[*k].p.path.ends_with(".json");
+                    match &self.poisoned[*k] {
+                        Some((class, message)) => format!(
+                            "[{}, -1, {json}, null, {}, {}]",
+                            js_string(key),
+                            js_string(class),
+                            js_string(message)
+                        ),
+                        None => format!("[{}, {}, {json}, {}]", js_string(key), at[k], names[&Binding::Namespace(*k)]),
+                    }
+                })
+                .collect();
             out.push_str(&format!(
-                "await $$EvaluateModules(__intrinsic_module_bodies(), [{}], [{}]);\n",
+                "{}$$EvaluateModules(__intrinsic_module_bodies(), [{}], [{}], [{}], [{}], {}, {});\n",
+                if command { "await " } else { "" },
                 tla.join(", "),
-                requests.join(", ")
+                requests.join(", "),
+                paths.join(", "),
+                table.join(", "),
+                at[&0],
+                !command
             ));
         }
         map.generated = out.len() as u32;
@@ -846,7 +1292,12 @@ impl<'a> Graph<'a, '_> {
             });
         }
         for &m in &order {
-            let edits = self.edits(m, &binds, &names, &entry_exports);
+            let mut edits = self.edits(m, &binds, &names, &entry_exports);
+            // `import(x, o)` → `$$DynamicImport(<importer>, x, o)` (slice 4).
+            for d in &self.modules[m].dynamic {
+                edits.push(Edit::new(d.span.start, d.arg, format!("$$DynamicImport({}, ", at[&m])));
+            }
+            edits.sort_by_key(|e| (e.start, e.end));
             if !out.is_empty() {
                 // A module's last statement may rely on ASI: end it.
                 map.segments.push(Segment {
@@ -934,6 +1385,12 @@ impl<'a> Graph<'a, '_> {
         let mut seen = vec![false; self.modules.len()];
         let mut out = Vec::new();
         visit(self, 0, &mut seen, &mut out);
+        // Modules only `import()` loads (slice 4): after the entry, each after its dependencies.
+        for &(_, k) in &self.table {
+            if self.poisoned[k].is_none() {
+                visit(self, k, &mut seen, &mut out);
+            }
+        }
         out
     }
 
@@ -942,12 +1399,15 @@ impl<'a> Graph<'a, '_> {
     /// they export): each module's exports, by name in code-unit order, and their bindings.
     fn namespaces(&self, binds: &HashMap<(usize, SymbolId), Binding>) -> Vec<(usize, Vec<(String, Binding)>)> {
         let mut todo: Vec<usize> = binds
-            .values()
-            .filter_map(|b| match b {
+            .iter()
+            .filter(|((m, _), _)| self.poisoned[*m].is_none())
+            .filter_map(|(_, b)| match b {
                 Binding::Namespace(t) => Some(*t),
                 _ => None,
             })
             .collect();
+        // Every module `import()` can load (slice 4).
+        todo.extend(self.table.iter().map(|(_, k)| *k).filter(|k| self.poisoned[*k].is_none()));
         todo.sort();
         todo.dedup();
         let mut out: Vec<(usize, Vec<(String, Binding)>)> = Vec::new();
@@ -1346,16 +1806,43 @@ fn normalize(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn join(files: &[(&str, &str)]) -> Result<Linked, Diagnostics> {
+    /// Files in memory.
+    struct Mem(HashMap<String, String>);
+
+    impl Host for Mem {
+        fn read(&mut self, path: &str) -> std::io::Result<String> {
+            self.0.get(path).cloned().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        fn list(&mut self, dir: &str) -> std::io::Result<Vec<(String, bool)>> {
+            let prefix = if dir.is_empty() || dir.ends_with('/') { dir.to_string() } else { format!("{dir}/") };
+            let mut out: Vec<(String, bool)> = Vec::new();
+            for path in self.0.keys() {
+                let Some(rest) = path.strip_prefix(&prefix) else { continue };
+                let entry = match rest.split_once('/') {
+                    Some((d, _)) => (d.to_string(), true),
+                    None => (rest.to_string(), false),
+                };
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+            out.sort();
+            Ok(out)
+        }
+    }
+
+    fn join_with(files: &[(&str, &str)], include: &[&str]) -> Result<Linked, Diagnostics> {
         let alloc = Allocator::default();
-        let map: HashMap<String, String> =
-            files.iter().map(|(p, s)| (p.to_string(), s.to_string())).collect();
-        let mut read = |p: &str| {
-            map.get(p)
-                .cloned()
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        let mut host = Mem(files.iter().map(|(p, s)| (p.to_string(), s.to_string())).collect());
+        let options = Options {
+            command: false,
+            include: include.iter().map(|s| s.to_string()).collect(),
         };
-        link(&alloc, files[0].0, files[0].1, false, &mut read)
+        link(&alloc, files[0].0, files[0].1, &options, &mut host)
+    }
+
+    fn join(files: &[(&str, &str)]) -> Result<Linked, Diagnostics> {
+        join_with(files, &[])
     }
 
     #[test]
@@ -1430,7 +1917,8 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            l.source.starts_with("await $$EvaluateModules(__intrinsic_module_bodies(), [true, false, false], [[], [0], [0, 1]]);\n"),
+            l.source.starts_with("$$EvaluateModules(__intrinsic_module_bodies(), [true, false, false], [[], [0], [0, 1]], [null, null, null], [], 2, true);\n")
+                || l.source.starts_with("await $$EvaluateModules(__intrinsic_module_bodies(), [true, false, false], [[], [0], [0, 1]], [null, null, null], [], 2, false);\n"),
             "{}",
             l.source
         );
@@ -1482,5 +1970,50 @@ mod tests {
         assert!(e.contains("import attribute `type: \"css\"` isn't supported"), "{e}");
         let e = err(&[("main.js", "import d from './d.json' with { type: 'json' };\n"), ("d.json", "\n [1,]")]);
         assert!(e.starts_with("d.json:2:5: error: invalid JSON: expected a JSON value, found `]`"), "{e}");
+    }
+
+    #[test]
+    fn dynamic_import_patterns() {
+        let files = [
+            ("app/main.js", "const k = './lib/a.js';\nimport(k);\nimport(`./loc/${x}.js`);\nimport(c ? './lib/b.js' : './missing.js');\nimport('./lib/' + y);\nimport('pkg');\n"),
+            ("app/lib/a.js", "export const a = 1;\n"),
+            ("app/lib/b.js", "import './c.js';\n"),
+            ("app/lib/c.js", ""),
+            ("app/lib/notes.txt", ""),
+            ("app/loc/en.js", ""),
+            ("app/loc/fr.js", ""),
+            ("app/loc/sub/de.js", ""),
+        ];
+        let l = join(&files).unwrap();
+        let first = l.source.lines().find(|l| l.contains("$$EvaluateModules")).unwrap();
+        // The table: every module a pattern names (not `notes.txt`, not the subdirectory), by
+        // absolute path; `./missing.js` and `pkg` reject at run time.
+        let keys: Vec<&str> = first.split('"').filter(|k| k.starts_with('/')).collect();
+        let tail = |k: &&str| k.split("/app/").nth(1).unwrap_or(k).to_string();
+        let mut keys: Vec<String> = keys.iter().map(tail).collect();
+        keys.sort();
+        // (`""` and `main.js`: the importer's directory and file.)
+        assert_eq!(keys, ["", "lib/a.js", "lib/b.js", "lib/c.js", "loc/en.js", "loc/fr.js", "main.js"], "{first}");
+        assert!(l.source.contains("\n$$DynamicImport(0, k);\n$$DynamicImport(0, `./loc/${x}.js`);\n"), "{}", l.source);
+        // Unknown specifiers need `--include`.
+        let err = join(&[("m.js", "import(f());\n")]).err().unwrap().to_string();
+        assert!(err.starts_with("m.js:1:1: error: `import()` of a module the build can't work out"), "{err}");
+        assert!(err.contains("--include <glob>"), "{err}");
+        let l = join_with(&[("m.js", "import(f());\n"), ("p/a.js", ""), ("p/q/b.json", "1"), ("p/q/r/c.js", "")], &["p/**/*.js"]).unwrap();
+        assert!(l.source.contains("/p/a.js\""), "{}", l.source);
+        assert!(l.source.contains("/p/q/r/c.js\""), "{}", l.source);
+        assert!(!l.source.contains("b.json"), "{}", l.source);
+        let err = join_with(&[("m.js", "import(f());\n")], &["nothing/*.js"]).err().unwrap().to_string();
+        assert!(err.contains("the glob matches no module"), "{err}");
+    }
+
+    #[test]
+    fn glob_segments() {
+        let w = Part::Wild;
+        let lit = |s: &str| Part::Lit(s.into());
+        assert!(glob_match(&[lit("a"), w.clone(), lit(".js")], "ab.c.js"));
+        assert!(!glob_match(&[lit("a"), w.clone(), lit(".js")], "b.js"));
+        assert!(glob_match(&[w.clone()], ""));
+        assert_eq!(merge(vec![lit("./a"), lit("/"), w.clone(), w, lit(".js")]), vec![lit("./a/"), Part::Wild, lit(".js")]);
     }
 }

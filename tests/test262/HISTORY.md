@@ -3,6 +3,18 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T41 multi-file modules, slice 4 (targeted run)
+
+- Compiler: dynamic `import()` of modules known at build time (patterns, `--include`); modules only `import()`
+  loads that fail to parse or link reject at run time.
+- Runner: a test with `import()` is built with `--include <its file>` and, when it names `./…_FIXTURE.js` files,
+  `--include <dir>/*_FIXTURE.js` (the modules a run-time specifier may name); those fixtures are linked next to it.
+- Run: the module directories and the 1,035 other subset tests with `import`/`export`/`import(`/`import.meta`/
+  attributes, with `--update` (1,984 tests, ~7 min at -j 4): 0 regressions, 330 → pass. `dynamic-import`: 454 of 548
+  run (82.8%); still failing: 20 syntax tests whose `import('')` rejects unhandled (node exits 1 too), `unary-expr`
+  (a specifier that is `true`: a package name, rejected as in node), 2 namespace `defineProperty` (F193); unsupported: `globalThis`
+  (53), assignment to a function binding (18). Subset: 25,911 of 28,107 run pass (92.2%).
+
 ## 2026-09-28: T41 multi-file modules, slice 3 (targeted run)
 
 - Compiler: top-level `await` in dependencies in the spec's order (module functions + `$$EvaluateModules`),

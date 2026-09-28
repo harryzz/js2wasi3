@@ -917,16 +917,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.module.init = self.main;
             }
             self.func_params.insert(self.main.unwrap(), Vec::new());
-            if self.command {
-                let ranges = self.p.map.as_ref().map(|m| m.modules.clone()).unwrap_or_default();
-                for k in 0..ranges.len() {
-                    let mut f = ir::Function::new(format!("module${k}"), &[], None);
-                    f.pos = Some(Pos { line: 1, col: 1 });
-                    let id = self.module.add_function(f);
-                    self.func_params.insert(id, Vec::new());
-                    self.hidden.insert(id, Hidden::default());
-                    self.module_bodies.push(id);
-                }
+            let ranges = self.p.map.as_ref().map(|m| m.modules.clone()).unwrap_or_default();
+            for k in 0..ranges.len() {
+                let mut f = ir::Function::new(format!("module${k}"), &[], None);
+                f.pos = Some(Pos { line: 1, col: 1 });
+                let id = self.module.add_function(f);
+                self.func_params.insert(id, Vec::new());
+                self.hidden.insert(id, Hidden::default());
+                self.module_bodies.push(id);
             }
         }
         self.declare_nested();
@@ -1090,7 +1088,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if let Some(main) = self.main {
             self.lower_main(main, &top);
-            if !self.command && self.module.function(main).flags.is_async {
+            let async_top = std::iter::once(main)
+                .chain(self.module_bodies.iter().copied())
+                .any(|f| self.module.function(f).flags.is_async);
+            if !self.command && async_top {
                 self.library_await(&top);
             }
         }

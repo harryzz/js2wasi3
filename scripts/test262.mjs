@@ -169,7 +169,12 @@ function skipReason(rel, src, meta) {
 // ---- run one test
 // `./x.js` specifiers of static imports, re-exports and `import()` with a literal.
 function relativeImports(src) {
-  return [...src.matchAll(/(?:\bfrom|\bimport|\bimport\s*\()\s*['"](\.\/[^'"]+)['"]/g)].map((m) => m[1].slice(2));
+  const found = [...src.matchAll(/(?:\bfrom|\bimport|\bimport\s*\()\s*['"](\.\/[^'"]+)['"]/g)].map((m) => m[1].slice(2));
+  // With `import()`, any fixture the test names may be what it computes (T41 slice 4).
+  if (/\bimport\s*\(/.test(src)) {
+    for (const m of src.matchAll(/['"]\.\/([^'"/]+_FIXTURE\.js)['"]/g)) found.push(m[1]);
+  }
+  return found;
 }
 // Link the files `src` imports from `from` into `to`, and what they import (`seen`: file names).
 function linkImports(from, src, to, seen) {
@@ -222,16 +227,23 @@ async function one(rel, work) {
   const wasm = join(work, `${id}.wasm`);
   // A test importing modules (`./x_FIXTURE.js`, or itself) keeps its name, in a directory of its
   // own next to the files it imports (T41).
+  const include = [];
   if (relativeImports(src).length) {
     const dir = join(work, id);
     mkdirSync(dir);
     js = join(dir, basename(rel));
     linkImports(dirname(join(TESTS, rel)), src, dir, new Set([basename(rel)]));
+    // Specifiers computed at run time: the fixtures are the modules the build knows (`--include`).
+    if (/\bimport\s*\(/.test(src) && readdirSync(dir).some((f) => f.endsWith("_FIXTURE.js"))) {
+      include.push("--include", join(dir, "*_FIXTURE.js"));
+    }
   }
+  // An `import()` of a specifier the build can't work out loads nothing else (T41 slice 4).
+  if (/\bimport\s*\(/.test(src)) include.push("--include", js);
   writeFileSync(js, parts.join("\n"));
 
   const deadline = Date.now() + opt.timeout * 1000;
-  const b = await run(BIN, ["build", "--command", js, "-o", wasm], deadline - Date.now());
+  const b = await run(BIN, ["build", "--command", js, "-o", wasm, ...include], deadline - Date.now());
   const phase = meta.negative?.phase;
   const early = phase === "parse" || phase === "early" || phase === "resolution";
   if (b.timedOut) return { status: "timeout", reason: "build" };

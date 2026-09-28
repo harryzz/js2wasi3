@@ -44,6 +44,10 @@ enum Cmd {
         /// exports are dropped.
         #[arg(long, conflicts_with = "wit")]
         command: bool,
+        /// Modules `import()` may load whose specifiers the build can't work out (a glob relative
+        /// to the working directory: `*` within a path segment, `**` any directories). Repeatable.
+        #[arg(long, value_name = "GLOB")]
+        include: Vec<String>,
     },
 }
 
@@ -443,7 +447,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Ir { file } => {
             let source = read(&file)?;
             let program =
-                js2wasi3_lower::parse_entry(&alloc, &file, &source, false, &mut |p| std::fs::read_to_string(p))?;
+                js2wasi3_lower::parse_entry(&alloc, &file, &source, &Default::default(), &mut frontend::Fs)?;
             print!("{}", js2wasi3_lower::lower(&program)?);
         }
         Cmd::Build {
@@ -453,10 +457,17 @@ fn main() -> anyhow::Result<()> {
             world,
             wit,
             command,
+            include,
         } => {
             let source = read(&entry)?;
             let program =
-                js2wasi3_lower::parse_entry(&alloc, &entry, &source, command, &mut |p| std::fs::read_to_string(p))?;
+                js2wasi3_lower::parse_entry(
+                &alloc,
+                &entry,
+                &source,
+                &frontend::Options { command, include },
+                &mut frontend::Fs,
+            )?;
             if let Some(wit) = wit {
                 if program.exports.is_empty() {
                     anyhow::bail!(

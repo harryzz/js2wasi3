@@ -209,7 +209,15 @@ its own function (`module$k`; globals stay shared, TDZ checks as in `main`) and 
 objects; `builtins/module.js` runs the spec's InnerModuleEvaluation / ExecuteAsyncModule /
 AsyncModuleExecutionFulfilled (the ticks match node's). Other programs keep one `main`. `import.meta` is a generated
 per-module `const` made by `$$ImportMeta` with the source's absolute path at build time; a JSON module (`with { type:
-"json" }`) is checked at build time and loaded as `export default <the JSON>;` (`"__proto__"` keys made computed).)
+"json" }`) is checked at build time and loaded as `export default <the JSON>;` (`"__proto__"` keys made computed). Slice 4: `import()` loads only modules known at build time. The linker
+finds each one's specifier patterns (string literals, `const`s, `?:`/`||`/`??`, template and `+` patterns, `*`
+within a path segment) and matches them against the files (`frontend::Host::list`); `--include <glob>` adds modules
+for specifiers it can't work out (without it, such an `import()` is a build error). Those modules load after the static
+graph; one that fails to parse or link (or imports one that does) isn't in the program: its table entry rejects with
+the error at run time, as node does. With any `import()` every module is a function; `import(x, o)` becomes
+`$$DynamicImport(k, x, o)` (`k`: the importer), which resolves `x` against the importer's absolute directory, looks it
+up in the table (absolute path → module, namespace), and evaluates it with the same evaluator (the spec's Evaluate,
+one promise per module) one job later.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

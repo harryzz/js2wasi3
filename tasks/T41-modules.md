@@ -120,12 +120,12 @@ adding `language/module-code` to the subset and sparse checkout). Whole subset a
 committing the baseline.
 
 ## Acceptance
-- [ ] One-file programs compile exactly as before (same bytes for the existing fixtures, modulo F186).
-- [ ] Multi-file fixtures match node: named/default/namespace imports, re-exports, live bindings, cycles, TDZ,
+- [x] One-file programs compile exactly as before (same bytes for the existing fixtures, modulo F186).
+- [x] Multi-file fixtures match node: named/default/namespace imports, re-exports, live bindings, cycles, TDZ,
       evaluation order, top-level `await` in a dependency, errors (missing file/export) at build time.
-- [ ] `import()` of build-time-known modules (literal, constant, conditional, pattern, `--include`) works; an
+- [x] `import()` of build-time-known modules (literal, constant, conditional, pattern, `--include`) works; an
       unresolvable one is a build error; unknown at run time → a rejected promise like node's.
-- [ ] test262: the runner resolves fixtures; the affected tests' results are in the baseline; 0 regressions.
+- [x] test262: the runner resolves fixtures; the affected tests' results are in the baseline; 0 regressions.
 
 ## Notes / Result
 **Slices 1–2 (2026-09-28).** Design: (a) scope hoisting, recorded in `docs/design.md` D4.
@@ -198,12 +198,41 @@ committing the baseline.
   (module functions are already there when a module is async; for dynamic ones every module in the graph becomes a
   function) and returns a promise of its namespace. Then constants, conditionals, template patterns, `--include`.
 
+**Slice 4 (2026-09-29).** Dynamic `import()` of modules known at build time.
+- Linker (`frontend::link`): `Host` (read + list directories; `Fs`), `Options { command, include }`. Each `import()`'s
+  specifier patterns (`patterns`: string literals, template literals and `+` with `*` for the unknown parts, both sides
+  of `?:`/`||`/`??`, `const`s initialized with those), matched against the files (`expand`/`walk`/`glob_match`: `*`
+  within a segment, `**` in `--include`; `.js`/`.mjs`/`.json` only). Missing files and bare/`node:` literals are left
+  out (they reject at run time, as in node). An `import()` without a relative pattern is a build error unless
+  `--include` is given. The modules only `import()` reaches load after the static graph (`lazy`): their parse, link and
+  resolution errors mark them `failed`, and every table entry whose static closure reaches one is `poisoned` (not in
+  the program; rejects with the error). The table: [absolute path, module, JSON, namespace] or [path, -1, JSON, null,
+  class, message]. With any `import()` every module is a function (commands `await` the evaluator, a library's `init`
+  runs it synchronously); `import(x, o)` → `$$DynamicImport(k, x, o)`; inserted text may call the prelude
+  (`SourceMap::is_inserted`).
+- Prelude: `$$EvaluateModules(bodies, tla, requests, paths, table, entry, sync)`: the spec's Evaluate with a
+  capability per module; `$$moduleImport`: EvaluateImportCall's specifier/options checks, resolution against the
+  importer's absolute directory, node's errors (`ERR_MODULE_NOT_FOUND` for files and packages,
+  `ERR_IMPORT_ATTRIBUTE_*`), the load one job later (a synchronous load ran the module before the importer's next
+  statement, and a nested Evaluate reset the outer DFS stack: a hang), resolve with the namespace.
+- CLI: `build --include <glob>` (repeatable). `scripts/diff.sh`: `x.flags` (extra build options, built from the
+  fixture's directory). Runner: `--include` of the test and its named fixtures for tests with `import(`.
+- Tests: fixture `modules/dynamic` (+ `main.flags`), `modules/library-dynamic` (build test
+  `library_with_dynamic_import`), frontend tests `dynamic_import_patterns`, `glob_segments`; `cargo test`: all pass.
+  Gating: all fixtures byte-identical to the slice-2 build except the TLA fixtures and F186's.
+- test262: 0 regressions, 330 → pass; `dynamic-import` 454 of 548 run (82.8%); subset 25,911 of 28,107 run (92.2%).
+- Unsupported / follow-ups: F199 (node's loader ticks). `import.source()`/`import.defer()` rejected (node lacks them).
+- **Next smallest step (slice 5)**: bare specifiers. Resolve `pkg` / `pkg/sub` from the importer's directory up
+  through `node_modules/<pkg>/package.json` (`exports` with the `import`/`node`/`default` conditions, else `module`,
+  else `main`), at build time, in `Graph::resolve` (today: "package import" rejected); then `import()` of a bare
+  literal too. Consider shims for a few `node:` modules (scriptc does `events`, `path`, `process`).
+
 ## Checklist
 - [x] design questions decided and recorded
 - [x] slice 1: static imports
 - [x] slice 2: namespaces and re-exports
 - [x] slice 3: top-level `await` in dependencies, `import.meta` (and JSON modules)
-- [ ] slice 4: dynamic `import()`
+- [x] slice 4: dynamic `import()`
 - [ ] slice 5 (or a new task): bare specifiers
 - [ ] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md, README)
 
@@ -264,3 +293,6 @@ committing the baseline.
 - 2026-09-28: JSON modules: the linker checks import attributes (only `type: "json"`; others, a missing one on `.json`, one on a non-JSON file: build errors worded after node's ERR_IMPORT_ATTRIBUTE_*), validates the file with a small JSON checker (`json_module`: errors at the JSON file's line/col; BOM stripped) and loads `export default <text>;` with `"__proto__"` keys made computed (own properties, as JSON.parse). Fixture `modules/json` passes (default, namespace, `export { default as x } from … with`, one object shared, mutation). Found: `console.log` prints an own `__proto__` key bare, node `['__proto__']` (F198; changing inspect would touch every program's bytes).
 - 2026-09-28: frontend tests `async_dependency_makes_module_functions`, `import_meta_is_a_generated_binding`, `json_modules`; build test: library with a JSON module + `import.meta` (`modules/library/config.json`, `describe()`), a library with a TLA dependency is rejected at the dependency; the old `import.meta` rejection case now uses `eval`. test262 (import, module-code, export, import.meta): 36 changed, 0 regressions; runner skips `import-text`/`import-bytes` (node 24 lacks them); `import.meta/syntax/goal-script.js` unsupported → fail (expects a script-goal SyntaxError; every file is a module here, as node's ESM detection also runs it).
 - 2026-09-28: targeted test262 `--update` (module dirs + 402 tests with imports/exports/`import.meta`/attributes, 1,351 tests): 37 changed, 0 regressions (2 load timeouts pass alone); subset 25,581 of 28,108 run (91.0%), module-code 90.9%. Gating re-checked with the final code: 163 fixtures built by the old compiler, all byte-identical except the 3 TLA fixtures (now split into module functions) and the 3 F186 fixtures (new output among old variants).
+- 2026-09-28: slice 4 started (dynamic `import()`).
+- 2026-09-28: slice 4 core: `frontend::Host` (read + list; `Fs`), `frontend::Options { command, include }`, CLI `build --include <glob>`. Linker: `import()` targets from specifier patterns (literals, `const`s, `?:`/`||`/`??`, template and `+` with `*` inside one segment; `.js`/`.mjs`/`.json` files), `--include` globs (`**`), a table of [absolute path, module, JSON, namespace]; missing files are left out (their `import()` rejects, as node); an unresolvable `import()` without `--include` is a build error. Dynamic programs always use module functions; `import(x, o)` → `$$DynamicImport(k, x, o)` (inserted text may call the prelude: `SourceMap::is_inserted`). Prelude: `$$EvaluateModules` generalized (spec Evaluate with per-module capabilities, entry index, `sync` for a library `init`), `$$moduleImport` (EvaluateImportCall's checks, node's ERR_MODULE_NOT_FOUND / ERR_IMPORT_ATTRIBUTE_* errors, load one job later). Bugs found: evaluating inside `import()` synchronously ran the module before the importer's next statement and a nested Evaluate reset the outer DFS stack (hang): the load now waits a job. node's loader takes 4–7 extra jobs (differs for new vs. loaded modules): not matched (follow-up). Fixture `modules/dynamic` (+ `main.flags`; `diff.sh` reads `x.flags`, builds from the fixture's dir) passes.
+- 2026-09-29: two-phase loading (modules only `import()` reaches load after the static graph; their errors reject at run time: `lazy`/`failed`/`poisoned`); runner passes `--include` for tests with `import(`; test262 dynamic-import 454/548; targeted `--update` (1,984 tests): 0 regressions, 330 → pass, subset 92.2%. Docs, follow-up F199, Notes / Result for slice 4.

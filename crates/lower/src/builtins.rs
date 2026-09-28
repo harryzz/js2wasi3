@@ -159,10 +159,10 @@ pub fn parse_entry<'a>(
     alloc: &'a Allocator,
     path: &str,
     source: &'a str,
-    command: bool,
-    read: &mut dyn FnMut(&str) -> std::io::Result<String>,
+    options: &frontend::Options,
+    host: &mut dyn frontend::Host,
 ) -> Result<Program<'a>, Diagnostics> {
-    let linked = frontend::link(alloc, path, source, command, read)?;
+    let linked = frontend::link(alloc, path, source, options, host)?;
     let Some(map) = linked.map else {
         return parse(alloc, path, source);
     };

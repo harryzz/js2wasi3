@@ -20,7 +20,7 @@
 use std::fmt;
 
 mod link;
-pub use link::{Linked, SourceMap, link};
+pub use link::{Fs, Host, Linked, Options, SourceMap, link};
 
 use oxc_ast::ast;
 use oxc_parser::Parser;
@@ -257,7 +257,7 @@ impl<'a> Program<'a> {
     /// Is this offset in code the module linker wrote (namespace objects, T41), which may use
     /// the prelude?
     pub fn is_generated(&self, offset: u32) -> bool {
-        self.map.as_ref().is_some_and(|m| offset < m.generated)
+        self.map.as_ref().is_some_and(|m| offset < m.generated || m.is_inserted(offset))
     }
 
     /// Does the reference at this offset name an import (an immutable binding, T41)?
