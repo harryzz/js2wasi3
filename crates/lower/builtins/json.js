@@ -109,6 +109,12 @@ function $$jsonUnwrap(value) {
   if (t === "boolean") {
     return p;
   }
+  if (__intrinsic_bigint_mode()) {
+    // T40: a BigInt wrapper's BigInt (then a TypeError).
+    if (t === "bigint") {
+      return p;
+    }
+  }
   return value;
 }
 

@@ -343,6 +343,15 @@ fn hash(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(runtime::object()).call(id);
     s.return_();
     s.end();
+    if cx.bigint() {
+        // T40: by value.
+        let big_hash = cx.helper(runtime::Helper::Big(crate::bigint::Helper::Hash));
+        crate::bigint::is_bigint(&mut s, V);
+        s.if_(BlockType::Empty);
+        s.local_get(V).ref_cast_non_null(crate::bigint::bigint());
+        s.call(big_hash).return_();
+        s.end();
+    }
     s.i32_const(0x2545_F491);
     s.end();
     f
@@ -383,6 +392,18 @@ fn same(cx: &mut dyn Cx) -> Function {
     s.local_get(B).ref_cast_non_null(runtime::string());
     s.call(str_eq).return_();
     s.end();
+    if cx.bigint() {
+        // T40: BigInts by value.
+        let cmp = cx.helper(runtime::Helper::Big(crate::bigint::Helper::Cmp));
+        crate::bigint::is_bigint(&mut s, A);
+        crate::bigint::is_bigint(&mut s, B);
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(A).ref_cast_non_null(crate::bigint::bigint());
+        s.local_get(B).ref_cast_non_null(crate::bigint::bigint());
+        s.call(cmp).i32_eqz().return_();
+        s.end();
+    }
     s.i32_const(0);
     s.end();
     f

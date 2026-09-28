@@ -176,6 +176,12 @@ fn to_object(cx: &mut dyn Cx) -> Function {
     };
     s.local_get(V).ref_test_non_null(symbol());
     wrap(&mut s, protos[0]);
+    if cx.bigint() {
+        // T40.
+        let proto = oh(cx, object::Helper::Proto(Builtin::BigInt));
+        crate::bigint::is_bigint(&mut s, V);
+        wrap(&mut s, proto);
+    }
     s.local_get(V).ref_test_non_null(string());
     wrap(&mut s, protos[1]);
     s.local_get(V).call(is_number);
@@ -271,6 +277,12 @@ fn tag(cx: &mut dyn Cx) -> Function {
     s.typed_select(jsval());
     s.local_get(P).ref_test_non_null(symbol());
     s.typed_select(jsval());
+    if cx.bigint() {
+        let name = cx.str("BigInt");
+        s.global_get(name);
+        crate::bigint::is_bigint(&mut s, P);
+        s.i32_eqz().typed_select(jsval());
+    }
     s.end();
     f
 }

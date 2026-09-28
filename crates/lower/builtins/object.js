@@ -44,6 +44,19 @@ function $$Boolean_prototype_toString() {
   return $$thisBoolean(this, "toString") ? "true" : "false";
 }
 
+// `Object.is`: SameValue (T40: BigInts compare by value through `===`).
+function $$Object_is(value1, value2) {
+  if (typeof value1 === "number" && typeof value2 === "number") {
+    if (value1 !== value1) {
+      return value2 !== value2;
+    }
+    if (value1 === 0 && value2 === 0) {
+      return 1 / value1 === 1 / value2;
+    }
+  }
+  return value1 === value2;
+}
+
 function $$Object_assign(target, ...sources) {
   const to = __intrinsic_to_object(target);
   const n = +sources.length;

@@ -20,10 +20,10 @@ table in [`tasks/README.md`](../tasks/README.md).
 | | ✅ | 🟡 | ❌ | ➖ |
 |---|---|---|---|---|
 | Keywords (66 entries) | 28 | 10 | 4 | 24 |
-| Built-in objects, properties, methods (21) | 11 | 8 | 2 | – |
+| Built-in objects, properties, methods (25) | 11 | 13 | 1 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
-What's most needed, in order: the rest of the built-in library (BigInt, `Intl`), spread into `console.log` and calls through `console.log`
+What's most needed, in order: the rest of the built-in library (`Intl`, BigInt typed arrays), spread into `console.log` and calls through `console.log`
 as a value, `typeof` of an undeclared name, then the language gaps below (tagged templates, regex, multi-file
 `import`).
 
@@ -98,14 +98,16 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `with` | ➖ | Not allowed in strict mode / ES modules: a syntax error in node too. |
 | `yield` | ✅ | `yield`, `yield*`, `next`/`return`/`throw`, `finally` on `return()` (T18). |
 
-Other syntax found missing while probing (not on the list): tagged templates (F78; regex literals are done, T27), BigInt
-literals (not scheduled), spread arguments into `console.log(...xs)`, `console.log` used as a value.
+Other syntax found missing while probing (not on the list): tagged templates (F78; regex literals are done, T27), spread
+arguments into `console.log(...xs)`, `console.log` used as a value. BigInt literals and operators work since T40 (see
+`BigInt` below).
 
 ## 2. JavaScript objects, properties and methods
 
 | Word | Status | Notes / what's missing |
 |---|---|---|
 | `Array` | 🟡 | Literals, indexing, `length`, holes, spread, destructuring, iteration, `Array.isArray`, `Array(…)`/`new Array(…)`, `Array.from`/`of`, and every prototype method (T21: `map`, `forEach`, `filter`, `reduce`/`reduceRight`, `some`/`every`, `find*`, `indexOf`/`lastIndexOf`/`includes`, `at`, `slice`, `splice`, `concat`, `flat`/`flatMap`, `fill`, `copyWithin`, `reverse`, `shift`/`unshift`, `sort` (stable), `toSorted`/`toReversed`/`toSpliced`/`with`, `push`/`pop`/`join`/`toString`/`values`) and (T25) `keys`/`entries`/`toLocaleString`, `Array` as a value, spread into `Array(…)`. T32: `Object.defineProperty` on elements (accessor elements, non-writable/non-enumerable/non-configurable elements) and on `length` (non-writable `length`, shrinking stops at a non-configurable element), printed like node (`[Getter]`). T33/T34: holes read and writes to absent elements go through the prototype chain (`Array.prototype[i]` getters/setters). T35: `push`/`pop`/`join`/`toString` on any `this`, `Symbol.isConcatSpreadable`, species (`constructor[Symbol.species]`), `Array.fromAsync`, `Array.from` with a constructor `this`. Missing: subclass results (`class X extends Array`, F106, F108); sparse arrays past 2^26 (F50, F160); callbacks are slow (F92). |
+| `BigInt` | 🟡 | T40: literals (decimal, hex, octal, binary), `typeof`, every operator (`+ - * / % **`, unary `-`/`~`, `& \| ^ << >>`, `++`/`--`, compound assignment) with V8's errors (mixing with numbers, `+1n`, `>>>`, division by zero, negative exponents, size over 2^30 bits), comparisons with numbers and strings, `==`/`===`/`Object.is`, Map/Set keys, `BigInt(…)`, `asIntN`/`asUintN`, `toString(radix)`/`valueOf`/`toLocaleString` (en-US), `Object(1n)` wrappers, `Number(1n)`, `JSON.stringify` (TypeError, `toJSON`), printed like node (`1n`). Programs without BigInts compile as before. Missing: `BigInt64Array`/`BigUint64Array` (F116), WIT `s64`/`u64` as BigInts (F124), `toLocaleString` with locales or options (needs `Intl`). |
 | `Date` | 🟡 | T26: `new Date(…)` (every form; subclasses), `Date()`, `Date.now`/`UTC`/`parse` (ISO and V8's common legacy forms), every getter and setter (local = UTC), `toString`/`toDateString`/`toTimeString`/`toUTCString`/`toGMTString`/`toISOString`/`toJSON`, `valueOf`, `[Symbol.toPrimitive]`, `getYear`/`setYear`, printed like node. Local time is UTC (no time zone in WASI 0.3.1: node with `TZ=UTC` agrees). Missing: `toLocale*String` with locales or options (needs `Intl`), `Date` in a library (the clock import), `toTemporalInstant` (node 24 lacks it). |
 | `eval` | ❌ | See keywords. |
 | `function` | 🟡 | See keywords. |

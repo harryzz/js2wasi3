@@ -62,6 +62,8 @@ const SUBSET = [
   "built-ins/RegExp",
   // T26.
   "built-ins/Date",
+  // T40.
+  "built-ins/BigInt",
 ];
 // Features node 24.21.0 (the oracle, TOOLS.md) doesn't implement: proper tail calls and proposals it
 // doesn't ship yet. Tests using them are skipped.

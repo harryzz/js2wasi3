@@ -232,6 +232,17 @@ fn format(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(string()).call(concat);
     s.global_get(sym_close).call(concat).return_();
     s.end();
+    if cx.bigint() {
+        // T40: `123n`.
+        let big_to_string = cx.helper(runtime::Helper::Big(crate::bigint::Helper::ToString));
+        let suffix = cx.str("n");
+        crate::bigint::is_bigint(&mut s, V);
+        s.if_(BlockType::Empty);
+        s.local_get(V).ref_cast_non_null(crate::bigint::bigint());
+        s.i32_const(10).call(big_to_string);
+        s.global_get(suffix).call(concat).return_();
+        s.end();
+    }
     // A function: `[Function: name]` / `[class Name extends Parent]`, then its own enumerable
     // properties like an object's.
     s.local_get(V).ref_test_non_null(func::function());
@@ -959,7 +970,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         ] {
             s.local_get(O)
                 .struct_get(runtime::T_OBJECT, object::F_PROTO)
-                .global_get(runtime::G_PROTOS + b.index())
+                .global_get(runtime::proto_global(b))
                 .ref_eq();
             s.local_get(O)
                 .struct_get(runtime::T_OBJECT, object::F_PROTO)

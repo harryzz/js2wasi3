@@ -47,6 +47,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/typedarray.js"),
     include_str!("../builtins/stream.js"),
     include_str!("../builtins/asyncgen.js"),
+    include_str!("../builtins/bigint.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -131,6 +132,9 @@ pub(crate) const DATE_INSPECT: &str = "$$dateInspect";
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
 pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
+
+/// The prelude's StringToBigInt (T40): the runtime's comparisons of strings with BigInts call it.
+pub(crate) const STRING_TO_BIGINT: &str = "$$StringToBigInt";
 
 /// The prelude's stream reader and pump (T20 slice 6b): the backend lifts and lowers a user
 /// world's streams with them.
@@ -229,6 +233,8 @@ pub(crate) struct Prelude {
     /// The property names (and strings) in the user's code (T25: native methods are linked only
     /// when named, see `ir::Module::names`).
     pub user_props: HashSet<String>,
+    /// Can the user's code make a BigInt (T40: a literal, or it names the global `BigInt`)?
+    pub bigint: bool,
 }
 
 /// Properties a built-in constructor has as a function (`Array.apply`, `String.name`): reading
@@ -292,6 +298,7 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     "Float64Array",
     "RegExp",
     "Date",
+    "BigInt",
 ];
 
 /// Constructors whose prelude function `$$X` is what `new X(…)` runs and that throw when called
@@ -351,10 +358,24 @@ impl Prelude {
             .filter_map(|n| out.names.get(*n))
             .map(|s| item_of[s])
             .collect();
+        // Can the user's code make a BigInt (T40): a BigInt literal or the global `BigInt`?
+        out.bigint = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::BigIntLiteral(b) => !p.in_prelude(b.span.start),
+            AstKind::IdentifierReference(r) => {
+                r.name == "BigInt"
+                    && !p.in_prelude(r.span.start)
+                    && scoping.get_reference(r.reference_id()).symbol_id().is_none()
+            }
+            _ => false,
+        });
         // Prototype methods by property name: `slice` → `$$String_prototype_slice`, ….
         let mut methods: HashMap<String, Vec<usize>> = HashMap::new();
         for (name, sym) in &out.names {
-            if let Some((_, m)) = name.split_once("_prototype_") {
+            if let Some((b, m)) = name.split_once("_prototype_") {
+                // `BigInt.prototype`'s only where there can be BigInts (T40).
+                if b == "$$BigInt" && !out.bigint {
+                    continue;
+                }
                 // `Date.prototype[Symbol.toPrimitive]` (T26) is reached by naming `toPrimitive`.
                 let m = if m == "$toPrimitive" { "toPrimitive" } else { m };
                 methods.entry(m.to_string()).or_default().push(item_of[sym]);
@@ -534,6 +555,19 @@ impl Prelude {
                 _ => continue,
             };
             add(target, span, &mut roots);
+        }
+        // The runtime compares strings with BigInts through the prelude's StringToBigInt, and
+        // ToPrimitive of a BigInt wrapper reaches `valueOf`/`toString` (T40).
+        if out.bigint {
+            for name in [
+                STRING_TO_BIGINT,
+                "$$BigInt_prototype_valueOf",
+                "$$BigInt_prototype_toString",
+            ] {
+                if let Some(sym) = out.names.get(name) {
+                    roots.push(item_of[sym]);
+                }
+            }
         }
         // Constructors used as values: their function, and the statics the code names.
         for (name, sym) in &out.names {

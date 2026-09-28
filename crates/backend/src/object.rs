@@ -226,6 +226,8 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         Builtin::ArrayBuffer | Builtin::TypedArray | Builtin::Typed(_) => &[],
         // T27, T26: all from the prelude.
         Builtin::RegExp | Builtin::Date => &[],
+        // T40: the prelude's methods replace them.
+        Builtin::BigInt => &["toString", "toLocaleString", "valueOf"],
     }
 }
 
@@ -409,6 +411,7 @@ impl Helper {
                 Builtin::Typed(_) => "typed_array_prototype",
                 Builtin::RegExp => "RegExp.prototype",
                 Builtin::Date => "Date.prototype",
+                Builtin::BigInt => "BigInt.prototype",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -614,7 +617,7 @@ impl Helper {
                 s.i32_const(0).return_();
                 s.end();
                 for b in Builtin::ALL {
-                    s.local_get(HD).global_get(G_PROTOS + b.index()).ref_eq();
+                    s.local_get(HD).global_get(runtime::proto_global(b)).ref_eq();
                     s.if_(BlockType::Empty);
                     s.i32_const(1).return_();
                     s.end();
@@ -1253,7 +1256,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     let alloc = h(cx, Helper::Alloc);
     let define = h(cx, Helper::Define);
     let parent = parent(b).map(|p| h(cx, Helper::Proto(p)));
-    let g = G_PROTOS + b.index();
+    let g = runtime::proto_global(b);
     // (%MapIteratorPrototype% and %SetIteratorPrototype% have no `constructor`, T25.)
     let mut props: Vec<(u32, Option<u32>)> =
         if matches!(b, Builtin::MapIterator | Builtin::SetIterator) {
@@ -1753,6 +1756,15 @@ fn primitive_proto(cx: &mut dyn Cx, s: &mut InstructionSink, v: u32) {
         h(cx, Helper::Proto(Builtin::Boolean)),
         h(cx, Helper::Proto(Builtin::Symbol)),
     );
+    let big = cx.bigint();
+    if big {
+        // T40.
+        let gp = h(cx, Helper::Proto(Builtin::BigInt));
+        crate::bigint::is_bigint(s, v);
+        s.if_(BlockType::Result(rt(false, T_OBJECT)));
+        s.call(gp);
+        s.else_();
+    }
     s.local_get(v).ref_test_non_null(runtime::symbol());
     s.if_(BlockType::Result(rt(false, T_OBJECT)));
     s.call(yp);
@@ -1769,6 +1781,9 @@ fn primitive_proto(cx: &mut dyn Cx, s: &mut InstructionSink, v: u32) {
     s.end();
     s.end();
     s.end();
+    if big {
+        s.end();
+    }
 }
 
 fn get(cx: &mut dyn Cx) -> Function {
@@ -3643,6 +3658,7 @@ pub fn builtin_tag_name(b: Builtin) -> Option<&'static str> {
         Builtin::Generator => "Generator",
         Builtin::AsyncGenerator => "AsyncGenerator",
         Builtin::Symbol => "Symbol",
+        Builtin::BigInt => "BigInt",
         Builtin::ArrayIterator => "Array Iterator",
         Builtin::MapIterator => "Map Iterator",
         Builtin::SetIterator => "Set Iterator",

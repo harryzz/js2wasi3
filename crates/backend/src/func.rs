@@ -152,6 +152,8 @@ pub enum Helper {
     Namespace(js2wasi3_ir::Namespace),
     /// The code of `Map`/`Set` called without `new`: node's TypeError.
     RequiresNew(Builtin),
+    /// The construct code of `BigInt` (T40): node's TypeError, "X is not a constructor".
+    NotConstructor(Builtin),
     /// The code of a constructor stub (see `ir::Module::ctor_stubs`): traps.
     StubTrap,
     /// The code of `Function.prototype.toString` (T25): the source text, or
@@ -192,6 +194,7 @@ impl Helper {
             Helper::BuiltinCtor(_) => "builtin_constructor",
             Helper::Namespace(_) => "namespace",
             Helper::RequiresNew(_) => "requires_new",
+            Helper::NotConstructor(_) => "not_a_constructor",
             Helper::StubTrap => "constructor_stub_not_implemented",
             Helper::ToString => "Function.prototype.toString",
         }
@@ -232,6 +235,7 @@ impl Helper {
             | Helper::Empty
             | Helper::ToString
             | Helper::RequiresNew(_)
+            | Helper::NotConstructor(_)
             | Helper::StubTrap => (vec![v, v, v], vec![v]),
             Helper::BuiltinCtor(_) | Helper::Namespace(_) => (vec![], vec![v]),
             Helper::SetSource => (vec![v, s], vec![v]),
@@ -338,9 +342,13 @@ impl Helper {
             }
             Helper::BuiltinCtor(b) => builtin_ctor(cx, b),
             Helper::Namespace(ns) => namespace(cx, ns),
-            Helper::RequiresNew(b) => {
+            Helper::RequiresNew(b) | Helper::NotConstructor(b) => {
                 let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
-                let msg = cx.str(&format!("Constructor {} requires 'new'", b.name()));
+                let msg = cx.str(&if matches!(self, Helper::RequiresNew(_)) {
+                    format!("Constructor {} requires 'new'", b.name())
+                } else {
+                    format!("{} is not a constructor", b.name())
+                });
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
                 s.global_get(msg).call(throw);
@@ -1283,13 +1291,17 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         _ => code,
     };
     let construct = match b {
-        Builtin::String | Builtin::Number | Builtin::Boolean if linked => cx.helper(
+        Builtin::String | Builtin::Number | Builtin::Boolean if linked => Some(cx.helper(
             runtime::Helper::Wrap(crate::wrapper::Helper::Construct(b)),
-        ),
-        _ => code,
+        )),
+        // `new BigInt` throws (T40; it has [[Construct]]: `Reflect.construct(f, [], BigInt)`).
+        Builtin::BigInt => Some(fh(cx, Helper::NotConstructor(b))),
+        _ => Some(code),
     };
     cx.declare_func(call);
-    cx.declare_func(construct);
+    if let Some(c) = construct {
+        cx.declare_func(c);
+    }
     let statics: Vec<(u32, u32, u32)> = cx
         .builtin_statics(b)
         .into_iter()
@@ -1300,7 +1312,7 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         .collect();
     let (name, prototype, constructor) =
         (cx.str(b.name()), cx.str("prototype"), cx.str("constructor"));
-    let g = runtime::G_CTORS + b.index();
+    let g = runtime::ctor_global(b);
     const F: u32 = 0;
     const P: u32 = 1;
     let mut f = Function::new([(1, jsval()), (1, rt(true, T_OBJECT))]);
@@ -1309,7 +1321,11 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(g).return_();
     s.end();
-    s.ref_func(call).ref_func(construct);
+    s.ref_func(call);
+    match construct {
+        Some(c) => s.ref_func(c),
+        None => s.ref_null(HeapType::Concrete(T_CODE)),
+    };
     s.ref_null(HeapType::Concrete(T_VALS));
     s.global_get(name).i32_const(length as i32).i32_const(0);
     s.call(new).local_tee(F);

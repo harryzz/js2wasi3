@@ -30,8 +30,8 @@ use wasm_encoder::{
 };
 
 use crate::{
-    abi, array, asyncfn, asyncgen, func, generator, host, inspect, iter, mapset, numstr, object,
-    promise, props, timers, typed, wrapper,
+    abi, array, asyncfn, asyncgen, bigint, func, generator, host, inspect, iter, mapset, numstr,
+    object, promise, props, timers, typed, wrapper,
 };
 
 pub const T_NUMBER: u32 = 0;
@@ -98,7 +98,10 @@ pub const T_TYPED: u32 = 26;
 /// `$wrapper`: a final subtype of `$object` (a `String`/`Number`/`Boolean`/`Symbol` wrapper
 /// object) with `prim: jsval` (T30, see [`crate::wrapper`]).
 pub const T_WRAPPER: u32 = 27;
-/// Number of runtime types before the function types.
+/// `$bigint`: a final `(array (mut i32))`, sign then magnitude limbs (T40, see [`crate::bigint`]).
+/// Only in a module that can make a BigInt ([`Cx::bigint`]): the last type of the group then.
+pub const T_BIGINT: u32 = 28;
+/// Number of runtime types before the function types (one more with `$bigint`).
 pub const TYPES: u32 = 28;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
@@ -174,8 +177,30 @@ pub const G_INDEX_PROTO: u32 = G_TIMER_ID + 1;
 /// `(mut (ref null $object))` (T27): the built-in `RegExp.prototype.exec` as installed, so the
 /// prelude can skip the lookup-and-call of RegExpExec while it's still in place.
 pub const G_REGEXP_EXEC: u32 = G_INDEX_PROTO + 1;
-/// Number of runtime globals before the user globals.
+/// Number of runtime globals before the user globals, without the BigInt ones.
 pub const GLOBALS: u32 = G_REGEXP_EXEC + 1;
+/// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
+/// only in a module that can make a BigInt ([`Cx::bigint`]).
+pub const G_BIGINT_PROTO: u32 = GLOBALS;
+pub const G_BIGINT_CTOR: u32 = GLOBALS + 1;
+/// How many globals the BigInt support adds.
+pub const BIGINT_GLOBALS: u32 = 2;
+
+/// The global holding built-in `b`'s prototype.
+pub fn proto_global(b: js2wasi3_ir::Builtin) -> u32 {
+    match b {
+        js2wasi3_ir::Builtin::BigInt => G_BIGINT_PROTO,
+        _ => G_PROTOS + b.index(),
+    }
+}
+
+/// The global holding built-in `b`'s constructor as a value (T25).
+pub fn ctor_global(b: js2wasi3_ir::Builtin) -> u32 {
+    match b {
+        js2wasi3_ir::Builtin::BigInt => G_BIGINT_CTOR,
+        _ => G_CTORS + b.index(),
+    }
+}
 
 /// `$oddball` kinds: the global index of each singleton equals its kind.
 const K_UNDEFINED: i32 = 0;
@@ -269,6 +294,14 @@ pub trait Cx {
     /// Its statics implemented by the prelude: (key, code, length).
     fn builtin_statics(&mut self, b: js2wasi3_ir::Builtin) -> Vec<(String, u32, u32)>;
 
+    /// Can the module make a BigInt (T40)? The helpers handle them only then.
+    fn bigint(&mut self) -> bool;
+    /// Function index of the prelude's StringToBigInt `(jsval) -> jsval` (T40).
+    fn string_to_bigint(&mut self) -> Option<u32>;
+    /// Function indices of the backend's `f64` `%` and `**` helpers (T40).
+    fn js_rem(&mut self) -> u32;
+    fn js_pow(&mut self) -> u32;
+
     fn str(&mut self, s: &str) -> u32 {
         let units: Vec<u16> = s.encode_utf16().collect();
         self.string(&units)
@@ -330,8 +363,9 @@ pub fn typeof_code(tag: TypeofTag) -> i32 {
     TypeofTag::ALL.iter().position(|t| *t == tag).unwrap() as i32
 }
 
-/// Emit the `rec` group. Must be the first entries of the type section.
-pub fn types(types: &mut TypeSection) {
+/// Emit the `rec` group. Must be the first entries of the type section. With `bigint` (T40) it
+/// ends with `$bigint`.
+pub fn types(types: &mut TypeSection, bigint: bool) {
     let sub_of = |inner, is_final, supertype_idx| SubType {
         is_final,
         supertype_idx,
@@ -409,7 +443,7 @@ pub fn types(types: &mut TypeSection) {
     promise_fields.push(field(StorageType::Val(rt(true, T_VALS)), true));
     promise_fields.push(field(StorageType::Val(ValType::I32), true));
     promise_fields.push(field(StorageType::Val(ValType::I32), true));
-    types.ty().rec([
+    let mut group = vec![
         st(ValType::F64),
         st(ValType::I32),
         // $string: not final, `$symbol` extends it.
@@ -571,11 +605,19 @@ pub fn types(types: &mut TypeSection) {
             true,
             Some(T_OBJECT),
         ),
-    ]);
+    ];
+    if bigint {
+        group.push(sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::Val(ValType::I32),
+            true,
+        )))));
+    }
+    types.ty().rec(group);
 }
 
-/// Emit the runtime globals. Must be the first entries of the global section.
-pub fn globals(globals: &mut GlobalSection) {
+/// Emit the runtime globals. Must be the first entries of the global section. With `bigint`
+/// (T40), [`G_BIGINT_PROTO`] and [`G_BIGINT_CTOR`] follow.
+pub fn globals(globals: &mut GlobalSection, bigint: bool) {
     for kind in [K_UNDEFINED, K_NULL, K_FALSE, K_TRUE] {
         globals.global(
             GlobalType {
@@ -720,15 +762,17 @@ pub fn globals(globals: &mut GlobalSection) {
     globals.global(int, &ConstExpr::i32_const(0));
     // T34: index keys on the arrays' prototype chain.
     globals.global(int, &ConstExpr::i32_const(0));
-    // T27: `RegExp.prototype.exec`.
-    globals.global(
-        GlobalType {
-            val_type: rt(true, T_OBJECT),
-            mutable: true,
-            shared: false,
-        },
-        &ConstExpr::ref_null(object()),
-    );
+    // T27: `RegExp.prototype.exec`; T40: `BigInt.prototype`, `BigInt`.
+    for _ in 0..1 + if bigint { BIGINT_GLOBALS } else { 0 } {
+        globals.global(
+            GlobalType {
+                val_type: rt(true, T_OBJECT),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(object()),
+        );
+    }
 }
 
 /// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
@@ -819,6 +863,7 @@ pub enum Helper {
         or_equal: bool,
     },
     Num(numstr::Helper),
+    Big(bigint::Helper),
     Obj(object::Helper),
     Wrap(wrapper::Helper),
     Func(func::Helper),
@@ -864,6 +909,7 @@ impl Helper {
             Helper::JsLess { .. } => "js_less",
             Helper::NewSymbol => "new_symbol",
             Helper::Num(h) => h.name(),
+            Helper::Big(h) => h.name(),
             Helper::Obj(h) => h.name(),
             Helper::Wrap(h) => h.name(),
             Helper::Func(h) => h.name(),
@@ -906,6 +952,7 @@ impl Helper {
             Helper::JsLess { .. } => (vec![v, v], vec![ValType::I32]),
             Helper::ThrowRead => (vec![v, s], vec![]),
             Helper::Num(h) => h.signature(),
+            Helper::Big(h) => h.signature(),
             Helper::Obj(h) => h.signature(),
             Helper::Wrap(h) => h.signature(),
             Helper::Func(h) => h.signature(),
@@ -929,7 +976,7 @@ impl Helper {
         match self {
             Helper::Box => box_number(),
             Helper::ToNumber => to_number(cx),
-            Helper::ToBoolean => to_boolean(),
+            Helper::ToBoolean => to_boolean(cx),
             Helper::IsNumber => is_number(),
             Helper::IsNullish => is_nullish(),
             Helper::StrictEq => strict_eq(cx),
@@ -951,6 +998,7 @@ impl Helper {
             Helper::JsLess { swap, or_equal } => js_less(cx, swap, or_equal),
             Helper::NewSymbol => new_symbol(cx),
             Helper::Num(h) => h.body(cx),
+            Helper::Big(h) => h.body(cx),
             Helper::Obj(h) => h.body(cx),
             Helper::Wrap(h) => h.body(cx),
             Helper::Func(h) => h.body(cx),
@@ -1045,6 +1093,13 @@ fn to_number(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(no_num).call(throw);
     s.end();
+    if cx.bigint() {
+        let no_big = cx.str("Cannot convert a BigInt value to a number");
+        bigint::is_bigint(&mut s, V);
+        s.if_(BlockType::Empty);
+        s.global_get(no_big).call(throw);
+        s.end();
+    }
     // ToNumber of a string: the prelude's StringToNumber (T21). It's linked when the IR converts a
     // JS value to a number; a runtime-only conversion in a module without one traps (F85).
     s.local_get(V).ref_test_non_null(string());
@@ -1081,10 +1136,22 @@ fn to_number(cx: &mut dyn Cx) -> Function {
 }
 
 /// `$to_boolean(v: jsval) -> i32`: JS ToBoolean on primitives.
-fn to_boolean() -> Function {
+fn to_boolean(cx: &mut dyn Cx) -> Function {
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
+    if cx.bigint() {
+        // T40: false only for 0n.
+        bigint::is_bigint(&mut s, V);
+        s.if_(BlockType::Empty);
+        s.local_get(V)
+            .ref_cast_non_null(bigint::bigint())
+            .array_len()
+            .i32_const(1)
+            .i32_gt_u()
+            .return_();
+        s.end();
+    }
     s.local_get(V).ref_test_non_null(i31());
     s.if_(BlockType::Result(ValType::I32));
     s.local_get(V).ref_cast_non_null(i31()).i31_get_s();
@@ -1134,6 +1201,11 @@ fn is_number() -> Function {
     f
 }
 
+/// The function index of `$is_nullish`.
+pub fn is_nullish_fn(cx: &mut dyn Cx) -> u32 {
+    cx.helper(Helper::IsNullish)
+}
+
 /// `$is_nullish(v: jsval) -> i32`: `undefined` or `null`.
 fn is_nullish() -> Function {
     let mut f = Function::new([]);
@@ -1178,7 +1250,22 @@ fn strict_eq(cx: &mut dyn Cx) -> Function {
     as_string(&mut s, 1);
     s.call(str_eq);
     s.else_();
-    s.local_get(0).local_get(1).ref_eq();
+    if cx.bigint() {
+        // T40: BigInts compare by value.
+        bigint::is_bigint(&mut s, 0);
+        bigint::is_bigint(&mut s, 1);
+        s.i32_and();
+        s.if_(BlockType::Result(ValType::I32));
+        let cmp = cx.helper(Helper::Big(bigint::Helper::Cmp));
+        s.local_get(0).ref_cast_non_null(bigint::bigint());
+        s.local_get(1).ref_cast_non_null(bigint::bigint());
+        s.call(cmp).i32_eqz();
+        s.else_();
+        s.local_get(0).local_get(1).ref_eq();
+        s.end();
+    } else {
+        s.local_get(0).local_get(1).ref_eq();
+    }
     s.end();
     s.end();
     s.end();
@@ -1227,6 +1314,21 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(0).local_get(1).ref_eq().return_();
     s.end();
+    if cx.bigint() {
+        // T40: a BigInt equals a BigInt, a string or a number (a boolean as one) of the same
+        // value.
+        let big_eq = cx.helper(Helper::Big(bigint::Helper::LooseEq));
+        bigint::is_bigint(&mut s, 0);
+        s.if_(BlockType::Empty);
+        s.local_get(0).ref_cast_non_null(bigint::bigint());
+        s.local_get(1).call(big_eq).return_();
+        s.end();
+        bigint::is_bigint(&mut s, 1);
+        s.if_(BlockType::Empty);
+        s.local_get(1).ref_cast_non_null(bigint::bigint());
+        s.local_get(0).call(big_eq).return_();
+        s.end();
+    }
     s.block(BlockType::Result(ValType::I32));
     both_strings(&mut s, 0, 1);
     s.if_(BlockType::Result(ValType::I32));
@@ -1266,6 +1368,13 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Function));
     s.else_();
+    let big = cx.bigint();
+    if big {
+        bigint::is_bigint(&mut s, V);
+        s.if_(BlockType::Result(ValType::I32));
+        s.i32_const(typeof_code(TypeofTag::BigInt));
+        s.else_();
+    }
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Object));
@@ -1276,6 +1385,9 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.local_tee(K);
     s.local_get(K).i32_const(K_TRUE).i32_eq();
     s.i32_sub();
+    if big {
+        s.end();
+    }
     s.end();
     s.end();
     s.end();
@@ -1425,6 +1537,14 @@ fn to_string(cx: &mut dyn Cx) -> Function {
         .call(number_to_string)
         .return_();
     s.end();
+    if cx.bigint() {
+        let big_to_string = cx.helper(Helper::Big(bigint::Helper::ToString));
+        bigint::is_bigint(&mut s, V);
+        s.if_(BlockType::Empty);
+        s.local_get(V).ref_cast_non_null(bigint::bigint());
+        s.i32_const(10).call(big_to_string).return_();
+        s.end();
+    }
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     s.local_get(V)
@@ -1475,6 +1595,16 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     s.local_get(1).call(to_string);
     s.call(concat);
     s.else_();
+    if cx.bigint() {
+        // T40: a BigInt adds only to a BigInt (the binary helper throws otherwise).
+        let add = cx.helper(Helper::Big(bigint::Helper::Binary(js2wasi3_ir::BinOp::Add)));
+        bigint::is_bigint(&mut s, 0);
+        bigint::is_bigint(&mut s, 1);
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.local_get(0).local_get(1).call(add).return_();
+        s.end();
+    }
     s.local_get(0).call(to_number);
     s.local_get(1).call(to_number);
     s.f64_add().call(box_);
@@ -1865,6 +1995,24 @@ fn js_less(cx: &mut dyn Cx, swap: bool, or_equal: bool) -> Function {
     }
     s.return_();
     s.end();
+    if cx.bigint() {
+        // T40: a BigInt compares with a BigInt, a string (as a BigInt; not one: false) or a
+        // number (by value; NaN: false). `c` is x's comparison with y: -1, 0, 1, or 2 (unordered).
+        let big_cmp = cx.helper(Helper::Big(bigint::Helper::CmpAny));
+        bigint::is_bigint(&mut s, A);
+        bigint::is_bigint(&mut s, B);
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.local_get(x).local_get(y).call(big_cmp).local_tee(D);
+        if or_equal {
+            s.i32_const(0).i32_ge_s();
+            s.local_get(D).i32_const(2).i32_ne().i32_and();
+        } else {
+            s.i32_const(-1).i32_eq();
+        }
+        s.return_();
+        s.end();
+    }
     s.local_get(A).call(to_number);
     s.local_get(B).call(to_number);
     if swap {

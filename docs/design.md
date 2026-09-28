@@ -66,6 +66,15 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   wrapper's indices and `length` are real read-only own properties. ToPrimitive unwraps through the built-in
   `valueOf`/`toString`; the prelude reads `prim` with `__intrinsic_unwrap` and wraps with `__intrinsic_to_object`.
   See `crates/backend/src/wrapper.rs`.)
+  (T40: a BigInt is a `$bigint`, a final `(array (mut i32))`: the sign, then 32-bit magnitude limbs, little-endian,
+  normalized; never changed once made, so `===`, `==`, SameValueZero and Map/Set hashing compare contents. The type
+  (the last of the `rec` group) and the globals of `BigInt.prototype`/`BigInt` (after the runtime's; `Builtin::BigInt`
+  is outside `Builtin::ALL`) exist only when `ir::Module::bigint` says the user's code can make one (a BigInt literal,
+  or it names `BigInt`); without it the module is byte-for-byte what it was. The arithmetic is native
+  (`crates/backend/src/bigint.rs`: schoolbook multiplication with `i64` products, Knuth's division D, shifts,
+  `& | ^` on two's complement, correctly rounded `Number(…)`); an operator with an operand of unknown kind becomes
+  `Intrinsic::Numeric(op)` (ToNumeric, then the BigInt or the number operation; the result is `Any`), and relational
+  operators `JsLess`. Literals are constant globals.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
@@ -242,6 +251,11 @@ fails to instantiate), so the local offset is 0, like node with `TZ=UTC` (`scrip
 The clock is `wasi:clocks/system-clock.now`, imported by commands only when used (its `instant` comes back in memory
 at 16, below `abi::HEAP_BASE`); a library using `Date` is rejected. `toLocale*String` give node's `en-US` forms and
 throw for other locales or options (no `Intl`).)
+(T40: `builtins/bigint.js` has `BigInt(…)`, StringToBigInt (the runtime's string/BigInt comparisons call it:
+`Module::string_to_bigint`), `asIntN`/`asUintN` and the prototype methods, linked only in a BigInt module. Prelude code
+that needs a BigInt case in shared built-ins (`Number(1n)`, `JSON.stringify` of a wrapper) puts it in
+`if (__intrinsic_bigint_mode()) { … }`: the lowering keeps the block's statements in a BigInt module and drops the
+whole `if` otherwise, so the IR of other programs doesn't change.)
 (T20: typed arrays and `ArrayBuffer`s are native `$typed`/`$buffer` objects (`crates/backend/src/typed.rs`: element
 access, printing) with their constructors and methods in `builtins/typedarray.js` on `Intrinsic::Typed` operations.)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude

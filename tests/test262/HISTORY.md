@@ -3,6 +3,18 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T40 BigInt (targeted run; subset + `built-ins/BigInt`)
+
+- Compiler: T40 (BigInt values, operators, `BigInt(…)` and its methods, gated so programs without BigInts compile to
+  the same bytes; `Object.is`).
+- Subset change: `built-ins/BigInt` added (77 files: 75 pass, 1 fail (`prop-desc.js`: the global object), 1 skip).
+- Run: every test whose compiled output can differ, with `--update` (the other tests build byte-identical modules:
+  checked on the fixtures): `built-ins/BigInt`, the 267 baseline-"unsupported" subset tests mentioning BigInt, the
+  96 including a harness file that names `BigInt`, the 4 using `Object.is` (400 tests, ~3 min at -j 4): 0
+  regressions; 205 unsupported → pass; still unsupported for other reasons: `Function` (122), `Float16Array`,
+  `globalThis`, BigInt typed arrays (F116), dynamic `import`; 4 time out (a pre-existing `Promise.all` hang,
+  F187). Subset: 25,018 of 27,496 run pass (91.0%).
+
 ## 2026-09-28: T26 `Date` (full subset run on a-03; subset + `built-ins/Date`)
 
 - Compiler: T26 (`Date` in the prelude, local time = UTC; constructor values inherit `Object.prototype` methods;

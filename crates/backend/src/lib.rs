@@ -40,6 +40,7 @@ mod abi;
 mod array;
 mod asyncfn;
 mod asyncgen;
+mod bigint;
 mod func;
 mod generator;
 mod host;
@@ -115,7 +116,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         || !module.imports.is_empty();
     let mut types = TypeSection::new();
     if js {
-        runtime::types(&mut types);
+        runtime::types(&mut types, module.bigint);
     }
     let n = module.functions.len() as u32;
     // Imported functions come first in the function index space.
@@ -155,7 +156,8 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let payload_base = user_imports + module.imports.len() as u32;
     let func_base = payload_base + abi::PAYLOAD_OPS * payloads.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
-    let host_base = runtime::GLOBALS + abi as u32;
+    let runtime_globals = runtime::GLOBALS + module.bigint as u32 * runtime::BIGINT_GLOBALS;
+    let host_base = runtime_globals + abi as u32;
     let host_globals = if command.is_some() {
         host::GLOBALS
     } else if module.init.is_some() || module.exports.iter().any(|x| x.sig.is_async) {
@@ -175,7 +177,11 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             }
         });
     }
-    let type_base = if js { runtime::TYPES } else { 0 };
+    let type_base = if js {
+        runtime::TYPES + module.bigint as u32
+    } else {
+        0
+    };
     let mut e = Emitter {
         scratch_f64: 0,
         m: module,
@@ -186,7 +192,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         types,
         next_type: type_base,
         global_base: if js { host_base + host_globals } else { 0 },
-        bump: runtime::GLOBALS,
+        bump: runtime_globals,
         user_imports,
         payload_base,
         payloads: payloads.clone(),
@@ -325,7 +331,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
 
     let mut globals = GlobalSection::new();
     if js {
-        runtime::globals(&mut globals);
+        runtime::globals(&mut globals, module.bigint);
     }
     if abi {
         globals.global(
@@ -403,8 +409,11 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             }),
         );
     }
-    for units in &e.strings {
-        runtime::string_global(&mut globals, units);
+    for c in &e.strings {
+        match c {
+            ConstGlobal::Str(units) => runtime::string_global(&mut globals, units),
+            ConstGlobal::BigInt(words) => bigint::const_global(&mut globals, words),
+        }
     }
 
     let mut exports = ExportSection::new();
@@ -712,6 +721,13 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
 
 // ---- emitter -------------------------------------------------------------------------------
 
+/// A constant global after the module's own: a string, or a BigInt's words (T40).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum ConstGlobal {
+    Str(Vec<u16>),
+    BigInt(Vec<i32>),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Helper {
     JsRem,
@@ -775,8 +791,9 @@ struct Emitter<'m> {
     /// Helpers in index order. Helper `k` has function index `helper_base + k`.
     helpers: Vec<Helper>,
     /// Interned string constants, emitted as globals after the user globals.
-    strings: Vec<Vec<u16>>,
-    string_ids: HashMap<Vec<u16>, u32>,
+    /// String constants, and BigInt constants (T40): globals after the module's.
+    strings: Vec<ConstGlobal>,
+    string_ids: HashMap<ConstGlobal, u32>,
     /// The number → string tables (data segment 0) are needed.
     tables: bool,
     /// The code of each shared closure: its object is global `shared_base + k`.
@@ -791,14 +808,7 @@ impl runtime::Cx for Emitter<'_> {
     }
 
     fn string(&mut self, units: &[u16]) -> u32 {
-        let base = self.global_base + (self.m.globals.len() + self.shared.len()) as u32;
-        if let Some(k) = self.string_ids.get(units) {
-            return base + k;
-        }
-        let k = self.strings.len() as u32;
-        self.strings.push(units.to_vec());
-        self.string_ids.insert(units.to_vec(), k);
-        base + k
+        self.const_global(ConstGlobal::Str(units.to_vec()))
     }
 
     fn tables_data(&mut self) -> u32 {
@@ -830,6 +840,22 @@ impl runtime::Cx for Emitter<'_> {
 
     fn string_to_number(&mut self) -> Option<u32> {
         self.m.string_to_number.map(|f| self.func_base + f.0)
+    }
+
+    fn bigint(&mut self) -> bool {
+        self.m.bigint
+    }
+
+    fn string_to_bigint(&mut self) -> Option<u32> {
+        self.m.string_to_bigint.map(|f| self.func_base + f.0)
+    }
+
+    fn js_rem(&mut self) -> u32 {
+        self.helper_index(Helper::JsRem)
+    }
+
+    fn js_pow(&mut self) -> u32 {
+        self.helper_index(Helper::JsPow)
     }
 
     fn date_call(&mut self) -> Option<u32> {
@@ -984,6 +1010,18 @@ impl runtime::Cx for Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// The global index of a constant (interned).
+    fn const_global(&mut self, c: ConstGlobal) -> u32 {
+        let base = self.global_base + (self.m.globals.len() + self.shared.len()) as u32;
+        if let Some(k) = self.string_ids.get(&c) {
+            return base + k;
+        }
+        let k = self.strings.len() as u32;
+        self.strings.push(c.clone());
+        self.string_ids.insert(c, k);
+        base + k
+    }
+
     fn type_id(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
         if let Some(t) = self.type_ids.get(&(params.clone(), results.clone())) {
             return *t;
@@ -1357,6 +1395,29 @@ impl Emitter<'_> {
                 {
                     bail!("internal error: console output in a module that isn't a command");
                 }
+                if let Intrinsic::BigIntConst = op {
+                    // T40: a global made once from the literal's decimal digits.
+                    let Expr::Str(units) = &args[0] else {
+                        bail!("internal error: a BigInt constant needs its digits");
+                    };
+                    let digits = String::from_utf16_lossy(units);
+                    let g = self.const_global(ConstGlobal::BigInt(bigint::from_decimal(&digits)));
+                    s.global_get(g);
+                    return Ok(true);
+                }
+                if matches!(op, Intrinsic::BigIntToNumber | Intrinsic::BigIntToString) {
+                    // T40: the first argument is a BigInt (the prelude checked).
+                    self.expr(s, frames, &args[0])?;
+                    s.ref_cast_non_null(bigint::bigint());
+                    let h = if *op == Intrinsic::BigIntToNumber {
+                        bigint::Helper::ToF64
+                    } else {
+                        self.expr(s, frames, &args[1])?;
+                        bigint::Helper::ToString
+                    };
+                    s.call(self.helper_index(Helper::Js(H::Big(h))));
+                    return Ok(true);
+                }
                 if let Intrinsic::F64FromWords = op {
                     // (hi << 32) | (lo as u32)
                     self.expr(s, frames, &args[0])?;
@@ -1591,6 +1652,12 @@ impl Emitter<'_> {
                 }
                 let h = match op {
                     Intrinsic::JsAdd => H::JsAdd,
+                    Intrinsic::ToNumeric => H::Big(bigint::Helper::ToNumeric),
+                    Intrinsic::Numeric(n) => H::Big(bigint::Helper::Numeric(*n)),
+                    Intrinsic::BigIntFromNumber => H::Big(bigint::Helper::FromF64),
+                    Intrinsic::BigIntConst
+                    | Intrinsic::BigIntToNumber
+                    | Intrinsic::BigIntToString => unreachable!("above"),
                     Intrinsic::Concat => H::Concat,
                     Intrinsic::ToString => H::ToString,
                     Intrinsic::NumberToString => H::Num(numstr::Helper::NumberToString),

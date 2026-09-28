@@ -15,7 +15,7 @@ Generators and `async`/`await` are compiled to resumable state machines by an IR
 stack-switching proposal.
 
 > **Status: early and experimental.** A good part of the language works (see below and
-> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`Date`…; `Math`, strings, arrays, `JSON`, `Map`/`Set`, `Object` methods, `Reflect`, `RegExp` and number parsing/formatting are done)
+> [docs/keywords.md](docs/keywords.md)). Much of the built-in library (`Intl`, `Proxy`…; `Math`, strings, arrays, `JSON`, `Map`/`Set`, `Object` methods, `Reflect`, `RegExp`, `Date`, BigInt and number parsing/formatting are done)
 > doesn't exist yet. Unsupported code is rejected at build time with a clear diagnostic rather than
 > miscompiled. The known exception, built-in methods that crash when called, is listed in the docs.
 
@@ -52,7 +52,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 
 ## What works
 
-- Numbers, strings (UTF-16), booleans, `null`/`undefined`, symbols; operators, including `**`, `&&=`/`||=`/`??=`,
+- Numbers, BigInts, strings (UTF-16), booleans, `null`/`undefined`, symbols; operators, including `**`, `&&=`/`||=`/`??=`,
   template literals.
 - `let`/`const`/`var` with TDZ checks, closures, arrow functions, `this`, default/rest parameters, destructuring,
   spread.

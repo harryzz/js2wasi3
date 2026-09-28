@@ -206,6 +206,7 @@ pub fn lower_with(
                 bind: prelude.bind,
                 to_string: prelude.to_string,
                 ctor_stubs: prelude.constructor,
+                bigint: prelude.bigint,
                 names: builtins::GATED
                     .iter()
                     .filter(|n| prelude.user_props.contains(**n))
@@ -802,6 +803,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40)?
+    fn bigint_mode_test(&self, test: &Expression<'a>) -> bool {
+        matches!(test, Expression::CallExpression(c)
+            if matches!(&c.callee, Expression::Identifier(id) if id.name == "__intrinsic_bigint_mode")
+                && self.p.in_prelude(c.span.start))
+    }
+
+    /// Can `v` be a BigInt (T40)? Only in a module that can make one, and only a JS value of
+    /// unknown kind.
+    fn may_be_bigint(&self, v: &Val) -> bool {
+        self.module.bigint && v.kind == Kind::Any
+    }
+
     /// JS ToNumber of `v` (a string goes through the runtime's ToNumber: the prelude's
     /// StringToNumber, T21).
     fn num(&mut self, v: Val, span: Span) -> R<Expr> {
@@ -1118,6 +1132,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     self.observe(Slot::Var(p), Kind::Any);
                 }
                 self.module.date_inspect = Some(func);
+                continue;
+            }
+            if name == builtins::STRING_TO_BIGINT {
+                // Called by the runtime with a string (T40).
+                self.module.string_to_bigint = Some(func);
+                if let Some(Some(p)) = self.func_params[&func].first() {
+                    self.observe(Slot::Var(*p), Kind::Str);
+                }
                 continue;
             }
             if name == builtins::STRING_TO_NUMBER {
@@ -3228,6 +3250,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.extend(self.jump(cx, Jump::Return, v));
                 Ok(())
             }
+            Statement::IfStatement(i) if self.bigint_mode_test(&i.test) => {
+                // `if (__intrinsic_bigint_mode()) { … }` in the prelude (T40): the block only in a
+                // module that can make a BigInt, else nothing (the IR stays as without it).
+                if self.module.bigint {
+                    out.extend(self.stmt_body(cx, &i.consequent));
+                }
+                Ok(())
+            }
             Statement::IfStatement(i) => {
                 let c = self.cond_expr(cx, &i.test);
                 let then = self.stmt_body(cx, &i.consequent);
@@ -3922,8 +3952,33 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         ))
                     }
                 },
+                UnaryOperator::UnaryNegation
+                    if matches!(u.argument.without_parentheses(), Expression::BigIntLiteral(_)) =>
+                {
+                    // `-5n` (T40): a negative constant.
+                    let Expression::BigIntLiteral(b) = u.argument.without_parentheses() else {
+                        unreachable!("checked by the guard")
+                    };
+                    let digits = Expr::Str(format!("-{}", b.value).encode_utf16().collect());
+                    Ok(Val::js(
+                        Expr::intrinsic(Intrinsic::BigIntConst, vec![digits]),
+                        Kind::Any,
+                    ))
+                }
                 op => {
                     let v = self.expr(cx, &u.argument)?;
+                    if op != UnaryOperator::UnaryPlus && self.may_be_bigint(&v) {
+                        // T40: `-x` / `~x` of a BigInt.
+                        let n = if op == UnaryOperator::UnaryNegation {
+                            ir::NumericOp::Neg
+                        } else {
+                            ir::NumericOp::BitNot
+                        };
+                        return Ok(Val::js(
+                            Expr::intrinsic(Intrinsic::Numeric(n), vec![jsval_of(v)]),
+                            Kind::Any,
+                        ));
+                    }
                     let v = self.num(v, span)?;
                     let e = match op {
                         UnaryOperator::UnaryNegation => Expr::unary(UnOp::Neg, Type::F64, v),
@@ -3979,6 +4034,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     ty: var.ty,
                     kind: var.kind,
                 })
+            }
+            Expression::UpdateExpression(u)
+                if self.module.bigint && {
+                    let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument else {
+                        unreachable!("members are handled above")
+                    };
+                    self.resolve(cx, id).is_ok_and(|v| v.kind == Kind::Any)
+                } =>
+            {
+                // Postfix (T40): the old value's ToNumeric, which may be a BigInt.
+                let (var, op) = self.update_target(cx, u)?;
+                let old = cx.func.add_local("old", Type::JsVal);
+                let read = jsval_of(self.read_var(&var));
+                let new = Val::js(
+                    Expr::intrinsic(Intrinsic::Numeric(inc_dec(op)), vec![Expr::Local(old)]),
+                    Kind::Any,
+                );
+                let new = self.store(Slot::Var(var.sym), var.ty, new);
+                let mut body = vec![Stmt::Set(
+                    old,
+                    Expr::intrinsic(Intrinsic::ToNumeric, vec![read]),
+                )];
+                body.extend(self.write_var(cx, &var, new));
+                let value = Box::new(Expr::Local(old));
+                Ok(Val::js(Expr::Seq { body, value }, Kind::Any))
             }
             Expression::UpdateExpression(u) => {
                 // Postfix: the value is the old value as a number.
@@ -4077,7 +4157,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     _ => Val::js(len, Kind::Any),
                 })
             }
-            Expression::BigIntLiteral(_) => Err(self.unsupported(span, "BigInt", "not scheduled")),
+            Expression::BigIntLiteral(b) => {
+                // T40: a constant made once (its decimal digits).
+                let digits = Expr::Str(b.value.encode_utf16().collect());
+                Ok(Val::js(
+                    Expr::intrinsic(Intrinsic::BigIntConst, vec![digits]),
+                    Kind::Any,
+                ))
+            }
             Expression::ObjectExpression(o) => self.object_literal(cx, o),
             Expression::ArrayExpression(a) => Ok(Val::js(
                 self.array_literal(cx, &a.elements, None, span)?,
@@ -4275,11 +4362,25 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             B::ShiftRight => Some(BinOp::Shr),
             _ => None,
         };
+        let numeric = |op, l, r| {
+            // T40: a BigInt may meet the operator.
+            Expr::intrinsic(
+                Intrinsic::Numeric(ir::NumericOp::Binary(op)),
+                vec![jsval_of(l), jsval_of(r)],
+            )
+        };
+        let may_be_bigint = self.may_be_bigint(&l) || self.may_be_bigint(&r);
         if let Some(op) = bitwise {
+            if may_be_bigint {
+                return Ok(Val::js(numeric(op, l, r), Kind::Any));
+            }
             let (l, r) = (to_i32(self.num(l, span)?), to_i32(self.num(r, span)?));
             return Ok(num(from_i32(Expr::binary(op, Type::I32, l, r))));
         }
         if b.operator == B::ShiftRightZeroFill {
+            if may_be_bigint {
+                return Ok(Val::js(numeric(BinOp::ShrU, l, r), Kind::Any));
+            }
             let (l, r) = (self.num(l, span)?, self.num(r, span)?);
             return Ok(num(ushr(cx, l, r)));
         }
@@ -4305,8 +4406,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Some((op, strict)) = eq {
             return Ok(Val::new(equality(l, r, op, strict), Type::Bool));
         }
-        // Relational operators on two JS values: strings compare as strings (T21).
-        if l.ty == Type::JsVal && r.ty == Type::JsVal {
+        // Relational operators on two JS values: strings compare as strings (T21). T40: also when
+        // one operand may be a BigInt.
+        if (l.ty == Type::JsVal && r.ty == Type::JsVal) || may_be_bigint {
             let less = match b.operator {
                 B::LessThan => Some((false, false)),
                 B::GreaterThan => Some((true, false)),
@@ -4315,7 +4417,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 _ => None,
             };
             if let Some((swap, or_equal)) = less {
-                let e = Expr::intrinsic(Intrinsic::JsLess { swap, or_equal }, vec![l.e, r.e]);
+                let e = Expr::intrinsic(
+                    Intrinsic::JsLess { swap, or_equal },
+                    vec![jsval_of(l), jsval_of(r)],
+                );
                 return Ok(Val::new(e, Type::Bool));
             }
         }
@@ -4338,6 +4443,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ));
             }
         };
+        if may_be_bigint {
+            return Ok(Val::js(numeric(op, l, r), Kind::Any));
+        }
         let e = Expr::binary(op, Type::F64, self.num(l, span)?, self.num(r, span)?);
         let ty = if op.is_comparison() {
             Type::Bool
@@ -5323,6 +5431,35 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Call::Intrinsic(Some(Kind::Bool)),
             ));
         }
+        if let Some((op, n)) = match name {
+            "bigint_from_number" => Some((Intrinsic::BigIntFromNumber, 1)),
+            "bigint_to_number" => Some((Intrinsic::BigIntToNumber, 1)),
+            "bigint_to_string" => Some((Intrinsic::BigIntToString, 2)),
+            _ => None,
+        } {
+            // T40: `(x: number) -> bigint`, `(b: bigint) -> number`, `(b, radix) -> string`.
+            if c.arguments.len() != n {
+                return Err(self.unsupported(c.span, &format!("intrinsic `{name}` arity"), "T40"));
+            }
+            let mut args = Vec::new();
+            for (i, a) in c.arguments.iter().enumerate() {
+                let Some(e) = a.as_expression() else {
+                    return Err(self.unsupported(a.span(), "spread argument", "T40"));
+                };
+                let v = self.expr(cx, e)?;
+                args.push(match (op, i) {
+                    (Intrinsic::BigIntFromNumber, _) => self.num(v, e.span())?,
+                    (Intrinsic::BigIntToString, 1) => to_i32(self.num(v, e.span())?),
+                    _ => jsval_of(v),
+                });
+            }
+            let e = Expr::intrinsic(op, args);
+            return Ok(match op {
+                Intrinsic::BigIntToNumber => (e, Call::Intrinsic(Some(Kind::Num))),
+                Intrinsic::BigIntToString => (e, Call::Intrinsic(Some(Kind::Str))),
+                _ => (e, Call::Intrinsic(Some(Kind::Any))),
+            });
+        }
         let arity = match name {
             "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
             "min" | "max" | "copysign" | "imul" | "from_words" => 2,
@@ -6118,6 +6255,34 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
         let tk = cx.func.add_local("key", Type::JsVal);
+        if self.module.bigint {
+            // T40: the property may hold a BigInt: ToNumeric, then `± 1` of its kind.
+            let old = cx.func.add_local("old", Type::JsVal);
+            let new = cx.func.add_local("new", Type::JsVal);
+            let n = if u.operator == UpdateOperator::Increment {
+                ir::NumericOp::Inc
+            } else {
+                ir::NumericOp::Dec
+            };
+            let get = member_get(&private, Expr::Local(to), Expr::Local(tk));
+            let body = vec![
+                Stmt::Set(to, obj),
+                Stmt::Set(tk, key),
+                Stmt::Set(old, Expr::intrinsic(Intrinsic::ToNumeric, vec![get])),
+                Stmt::Set(
+                    new,
+                    Expr::intrinsic(Intrinsic::Numeric(n), vec![Expr::Local(old)]),
+                ),
+                Stmt::Expr(member_set(
+                    &private,
+                    Expr::Local(to),
+                    Expr::Local(tk),
+                    Expr::Local(new),
+                )),
+            ];
+            let value = Box::new(Expr::Local(if u.prefix { new } else { old }));
+            return Ok(Val::js(Expr::Seq { body, value }, Kind::Any));
+        }
         let old = cx.func.add_local("old", Type::F64);
         let new = cx.func.add_local("new", Type::F64);
         let op = if u.operator == UpdateOperator::Increment {
@@ -6407,6 +6572,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let Some(old) = old else {
             return Ok(rhs);
         };
+        if self.may_be_bigint(&old) || self.may_be_bigint(&rhs) {
+            // T40: a BigInt may meet the operator.
+            let bop = arith.or(bitwise).or((op == A::ShiftRightZeroFill).then_some(BinOp::ShrU));
+            if let Some(bop) = bop {
+                let e = Expr::intrinsic(
+                    Intrinsic::Numeric(ir::NumericOp::Binary(bop)),
+                    vec![jsval_of(old), jsval_of(rhs)],
+                );
+                return Ok(Val::js(e, Kind::Any));
+            }
+        }
         Ok(if op == A::Addition {
             add(old, rhs)
         } else if let Some(bop) = arith {
@@ -6444,7 +6620,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// `++x` / `x++` as a statement: the variable and the converted new value.
     fn update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<(Var, Expr)> {
         let (var, op) = self.update_target(cx, u)?;
-        let old = self.num(self.read_var(&var), u.span)?;
+        let old = self.read_var(&var);
+        if self.may_be_bigint(&old) {
+            // T40: `± 1` of the kind of its ToNumeric.
+            let new = Val::js(
+                Expr::intrinsic(Intrinsic::Numeric(inc_dec(op)), vec![jsval_of(old)]),
+                Kind::Any,
+            );
+            return Ok((var, self.store(Slot::Var(var.sym), var.ty, new)));
+        }
+        let old = self.num(old, u.span)?;
         let new = Val::num(Expr::binary(op, Type::F64, old, Expr::f64(1.0)));
         Ok((var, self.store(Slot::Var(var.sym), var.ty, new)))
     }
@@ -7109,6 +7294,15 @@ fn to_boundary(e: Expr, ty: Type, kind: Kind, a: ir::AbiType) -> Expr {
             ),
         },
         t => convert_any(ty, t, e),
+    }
+}
+
+/// `++`/`--`'s [`ir::NumericOp`] (T40).
+fn inc_dec(op: BinOp) -> ir::NumericOp {
+    if op == BinOp::Add {
+        ir::NumericOp::Inc
+    } else {
+        ir::NumericOp::Dec
     }
 }
 

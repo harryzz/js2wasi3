@@ -156,6 +156,12 @@ pub struct Module {
     pub to_string: bool,
     /// Functions a user world imports (T20 slice 5), called with [`Intrinsic::CallImport`].
     pub imports: Vec<Import>,
+    /// The code can make a BigInt (T40: a BigInt literal, or it names the global `BigInt`): the
+    /// runtime's `$bigint` type and its cases in the generic helpers exist only then.
+    pub bigint: bool,
+    /// The prelude's StringToBigInt `(JsVal) -> JsVal` (T40): a BigInt, or `undefined` if the
+    /// string isn't a StringIntegerLiteral. Set with [`Module::bigint`].
+    pub string_to_bigint: Option<FuncId>,
 }
 
 /// A function a user world imports (T20 slice 5): core import `name` of module `module` (the
@@ -573,6 +579,9 @@ pub enum Builtin {
     RegExp,
     /// T26.
     Date,
+    /// T40. Not in [`Builtin::ALL`] (whose order is the runtime's global layout): its prototype and
+    /// constructor globals exist only in a module that can make a BigInt.
+    BigInt,
 }
 
 /// The typed array constructors (T20), by kind; [`TYPED_SIZES`]: their element sizes.
@@ -657,6 +666,7 @@ impl Builtin {
             Builtin::Typed(k) => TYPED_NAMES[k as usize],
             Builtin::RegExp => "RegExp",
             Builtin::Date => "Date",
+            Builtin::BigInt => "BigInt",
         }
     }
 
@@ -671,6 +681,9 @@ impl Builtin {
     }
 
     pub fn parse(s: &str) -> Option<Builtin> {
+        if s == "BigInt" {
+            return Some(Builtin::BigInt);
+        }
         Builtin::ALL.into_iter().find(|b| b.name() == s)
     }
 
@@ -687,6 +700,7 @@ impl Builtin {
             Builtin::Typed(_) => Some(3),
             Builtin::RegExp => Some(2),
             Builtin::Date => Some(7),
+            Builtin::BigInt => Some(1),
             _ => None,
         }
     }
@@ -773,6 +787,23 @@ pub enum Intrinsic {
     RegExpData,
     /// `(f) -> bool`: is `f` the built-in `RegExp.prototype.exec` (T27)?
     RegExpBuiltinExec,
+    /// `(digits) -> jsval` (T40): a BigInt constant; the argument is an [`Expr::Str`] of its
+    /// decimal digits (a literal's value), made once as a global.
+    BigIntConst,
+    /// `(v) -> jsval` (T40): ToNumeric: a number or a BigInt (objects through ToPrimitive, hint
+    /// number; anything else ToNumber).
+    ToNumeric,
+    /// A numeric operator on JS values that may be BigInts (T40, only in a module that can make
+    /// one): ToNumeric of the operands, then the BigInt operation (a TypeError when a BigInt
+    /// meets a number) or the number one. `(a, b) -> jsval` for a binary operator, `(v) -> jsval`
+    /// otherwise.
+    Numeric(NumericOp),
+    /// `(x: f64) -> jsval` (T40): the BigInt of an integral number (the prelude checks).
+    BigIntFromNumber,
+    /// `(v) -> f64` (T40): a BigInt as a number (correctly rounded).
+    BigIntToNumber,
+    /// `(v, radix: i32) -> jsval` (T40): a BigInt's digits in `radix` (2–36), a string.
+    BigIntToString,
     /// `(data) -> jsval`: a new Date object holding `data` (T26, see `builtins/date.js`).
     DateNew,
     /// `(v) -> jsval`: a Date's data; `undefined` for anything else (T26).
@@ -1180,6 +1211,12 @@ impl Intrinsic {
             Intrinsic::BuiltinToString | Intrinsic::IsConstructor | Intrinsic::RegExpBuiltinExec => {
                 (&[JsVal], Some(Bool))
             }
+            Intrinsic::BigIntConst | Intrinsic::ToNumeric => (&[JsVal], Some(JsVal)),
+            Intrinsic::Numeric(NumericOp::Binary(_)) => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::Numeric(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::BigIntFromNumber => (&[F64], Some(JsVal)),
+            Intrinsic::BigIntToNumber => (&[JsVal], Some(F64)),
+            Intrinsic::BigIntToString => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::NewError(ErrorKind::AggregateError) => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
@@ -1344,6 +1381,12 @@ impl Intrinsic {
             Intrinsic::DateData => "date_data",
             Intrinsic::ToPrimitive => "to_primitive",
             Intrinsic::RegExpBuiltinExec => "regexp_builtin_exec",
+            Intrinsic::BigIntConst => "bigint",
+            Intrinsic::ToNumeric => "to_numeric",
+            Intrinsic::Numeric(_) => "numeric",
+            Intrinsic::BigIntFromNumber => "bigint_from_number",
+            Intrinsic::BigIntToNumber => "bigint_to_number",
+            Intrinsic::BigIntToString => "bigint_to_string",
             Intrinsic::Unwrap => "unwrap",
             Intrinsic::InspectAt(_) => "inspect_at",
             Intrinsic::BuiltinToString => "builtin_to_string",
@@ -1541,6 +1584,8 @@ impl Intrinsic {
                 | Intrinsic::DelegateStep
                 | Intrinsic::CallImport(_)
                 | Intrinsic::Stream(StreamOp::Write)
+                | Intrinsic::ToNumeric
+                | Intrinsic::Numeric(_)
         )
     }
 }
@@ -1655,6 +1700,20 @@ pub enum UnOp {
     Fround,
     /// `I32` (T21): count leading zeros.
     Clz,
+}
+
+/// [`Intrinsic::Numeric`]'s operators (T40).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NumericOp {
+    /// `Sub`, `Mul`, `Div`, `Rem`, `Pow`, `And`, `Or`, `Xor`, `Shl`, `Shr`, `ShrU` (`+` is
+    /// [`Intrinsic::JsAdd`]).
+    Binary(BinOp),
+    /// Unary `-` and `~`.
+    Neg,
+    BitNot,
+    /// `v + 1` and `v - 1` of `++`/`--` (the operand already ToNumeric'd for a postfix value).
+    Inc,
+    Dec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

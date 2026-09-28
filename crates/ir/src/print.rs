@@ -218,6 +218,7 @@ impl Printer<'_> {
                     crate::Intrinsic::NewError(k) => format!("new_{}", k.name()),
                     crate::Intrinsic::InstanceOf(b) => format!("instanceof_{}", b.name()),
                     crate::Intrinsic::Prototype(b) => format!("{}_prototype", b.name()),
+                    crate::Intrinsic::Numeric(n) => format!("numeric.{n:?}"),
                     crate::Intrinsic::NewCell(t)
                     | crate::Intrinsic::CellGet(t)
                     | crate::Intrinsic::CellSet(t) => format!("{}.{t}", op.name()),

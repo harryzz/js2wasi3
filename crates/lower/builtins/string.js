@@ -1433,6 +1433,14 @@ function $$Number(...args) {
   if (args.length === 0) {
     return 0;
   }
+  if (__intrinsic_bigint_mode()) {
+    // T40: ToNumeric, and a BigInt converts.
+    const prim = __intrinsic_to_primitive(args[0], 1);
+    if (typeof prim === "bigint") {
+      return __intrinsic_bigint_to_number(prim);
+    }
+    return +prim;
+  }
   return +args[0];
 }
 
