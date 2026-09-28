@@ -84,3 +84,9 @@ UTC), `toISOString`, `toJSON` (used by `JSON.stringify`), `toString`/`toDateStri
   statement (same hole as `date_now` had); `Date` clock in libraries (import `wasi:clocks/system-clock` in
   library worlds); `toLocale*String` with locales/options (`Intl`); V8 legacy `Date.parse` quirks not matched
   (`10:61` → 10:00); host time zone once `wasi:clocks/timezone` is stable and in wasmtime), ask before commit.
+- 2026-09-28: fixed the `Math.random` hole found above: `random_seed` in a library no longer returns a bare
+  `Err(Unsupported)` (which dropped the statement with no diagnostic; the build succeeded). Reached through a
+  value (`const M = Math; M.random()`) it now throws an Error at run time, like the clock (shared
+  `library_throws` in lower); a direct `Math.random` in a library is still a build error. Test: `lib.js` `rand`
+  in `build.rs::builtins_in_a_library`. The other bare `Err(Unsupported)` returns in lower follow a pushed
+  diagnostic. `cargo test` all pass.

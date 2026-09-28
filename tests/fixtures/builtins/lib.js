@@ -61,3 +61,9 @@ export function isoDay(ms) {
 export function now() {
   return Date.now();
 }
+
+// `Math.random` reached through a value: throws in a library (no `wasi:random` import yet).
+export function rand() {
+  const M = Math;
+  return M.random();
+}

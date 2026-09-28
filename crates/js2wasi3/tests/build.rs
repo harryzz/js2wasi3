@@ -274,6 +274,10 @@ fn builtins_in_a_library() {
             "reparse(\"{\\\"a\\\":[1,2.5,\\\"x\\\"]}\")",
             "ok(\"{\\\"a\\\":[2,3.5,\\\"x\\\"]}\")",
         ),
+        (
+            "rand()",
+            "err({name: \"Error\", message: \"random numbers (`Math.random`) aren\\'t available in a module with exports yet (js2wasi3)\"})",
+        ),
         // T26: `Date` works in a library; reading the clock throws.
         ("iso-day(86400000)", "ok(\"1970-01-02\")"),
         (

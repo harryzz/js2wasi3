@@ -5347,12 +5347,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return Err(self.unsupported(c.span, &format!("intrinsic `{name}` arity"), "T21"));
         }
         if name == "random_seed" {
-            // An import (`wasi:random`): commands only. `check_builtin` reported it where the
-            // user's code names `Math.random`.
-            if !self.command {
-                return Err(Unsupported);
-            }
-            let e = from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![]));
+            // An import (`wasi:random`): commands only. `check_builtin` rejects `Math.random` where
+            // the user's code names it; reached another way in a library (`const M = Math;
+            // M.random()`), it throws: a bare `Err(Unsupported)` here would drop the statement
+            // without a diagnostic.
+            let e = if self.command {
+                from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![]))
+            } else {
+                library_throws("random numbers (`Math.random`) aren't available in a module with exports yet (js2wasi3)")
+            };
             return Ok((e, Call::Intrinsic(Some(Kind::Num))));
         }
         if name == "date_now" {
@@ -5361,14 +5364,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let e = if self.command {
                 Expr::intrinsic(Intrinsic::DateNow, vec![])
             } else {
-                let msg = "the current time (the system clock) isn't available in a module with exports yet (js2wasi3)";
-                Expr::Seq {
-                    body: vec![Stmt::Throw(Expr::intrinsic(
-                        Intrinsic::NewError(ErrorKind::Error),
-                        vec![Expr::str(msg), Expr::undefined()],
-                    ))],
-                    value: Box::new(Expr::f64(f64::NAN)),
-                }
+                library_throws("the current time (the system clock) isn't available in a module with exports yet (js2wasi3)")
             };
             return Ok((e, Call::Intrinsic(Some(Kind::Num))));
         }
@@ -7301,6 +7297,18 @@ fn anonymous_function(e: &Expression) -> bool {
     }
 }
 
+/// A host import a library can't make yet (T26: the clock, `Math.random`): throws an `Error`
+/// with `msg` (the expression's value, NaN, is never used).
+fn library_throws(msg: &str) -> Expr {
+    Expr::Seq {
+        body: vec![Stmt::Throw(Expr::intrinsic(
+            Intrinsic::NewError(ErrorKind::Error),
+            vec![Expr::str(msg), Expr::undefined()],
+        ))],
+        value: Box::new(Expr::f64(f64::NAN)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -7308,3 +7316,4 @@ mod tests {
         assert!(super::NODE_GLOBALS.is_sorted(), "binary_search needs a sorted list");
     }
 }
+
