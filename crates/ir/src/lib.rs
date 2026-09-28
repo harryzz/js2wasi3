@@ -808,6 +808,9 @@ pub enum Intrinsic {
     DateNew,
     /// `(v) -> jsval`: a Date's data; `undefined` for anything else (T26).
     DateData,
+    /// `() -> jsval`: a new module namespace object (T41, see `builtins/module.js`): empty, with a
+    /// null prototype.
+    ModuleNew,
     /// `() -> f64`: the system clock in ms since the epoch (T26, `wasi:clocks/system-clock`, commands
     /// only).
     DateNow,
@@ -1301,6 +1304,7 @@ impl Intrinsic {
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
             Intrinsic::DateNow => (&[], Some(F64)),
+            Intrinsic::ModuleNew => (&[], Some(JsVal)),
             Intrinsic::ToPrimitive => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::CallImport(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::StrUnit => (&[JsVal, I32], Some(I32)),
@@ -1379,6 +1383,7 @@ impl Intrinsic {
             Intrinsic::RegExpData => "regexp_data",
             Intrinsic::DateNew => "date_new",
             Intrinsic::DateData => "date_data",
+            Intrinsic::ModuleNew => "module_new",
             Intrinsic::ToPrimitive => "to_primitive",
             Intrinsic::RegExpBuiltinExec => "regexp_builtin_exec",
             Intrinsic::BigIntConst => "bigint",

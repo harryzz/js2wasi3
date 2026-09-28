@@ -1024,3 +1024,48 @@ fn library_calls_run_their_jobs() {
         assert_eq!(invoke(&out, call), want, "{call}");
     }
 }
+
+#[test]
+fn library_from_several_modules() {
+    let out = out_dir("modules-lib").join("lib.wasm");
+    let b = build(&fixture("modules/library/lib.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert_eq!(invoke(&out, "area(2)"), "ok(12)");
+    assert_eq!(invoke(&out, "double(21)"), "ok(42)");
+    assert_eq!(invoke(&out, "square(3)"), "ok(9)");
+}
+
+#[test]
+fn module_errors_are_diagnostics() {
+    let dir = out_dir("modules-errors");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("a.js", "export const x = 1;\n");
+    write(
+        "main.js",
+        "import { y } from './a.js';\nimport './b';\nimport 'lodash';\nimport 'node:fs';\n",
+    );
+    let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
+    assert!(!b.status.success());
+    let err = String::from_utf8_lossy(&b.stderr);
+    for want in [
+        "main.js:2:8: error: cannot find module `./b`",
+        "help: node needs the file's extension: `./b.js`?",
+        "main.js:3:8: error: unsupported: package import `lodash`",
+        "main.js:4:8: error: unsupported: node's built-in module `node:fs`",
+    ] {
+        assert!(err.contains(want), "missing {want:?} in:\n{err}");
+    }
+    write("main.js", "import { y } from './a.js';\nconsole.log(y);\n");
+    let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
+    let err = String::from_utf8_lossy(&b.stderr);
+    assert!(
+        err.contains("main.js:1:10: error: SyntaxError: The requested module './a.js' does not provide an export named 'y'"),
+        "{err}"
+    );
+    // A diagnostic of the lowering points into the module it's in.
+    write("a.js", "// a\nexport function f() {\n  return import.meta;\n}\n");
+    write("main.js", "import { f } from './a.js';\nf();\n");
+    let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
+    let err = String::from_utf8_lossy(&b.stderr);
+    assert!(err.contains("a.js:3:10: error: unsupported:"), "{err}");
+}

@@ -119,7 +119,7 @@ use oxc_syntax::{
 };
 use patterns::{Mode, Pat, Src};
 
-pub use builtins::{PRELUDE, parse};
+pub use builtins::{PRELUDE, parse, parse_entry};
 
 /// An export's signature in a user world (T20): WIT types, whether it returns a `result`
 /// (then a throw is its `err`), and whether it's an `async func`.
@@ -684,20 +684,17 @@ struct Var {
     ty: Type,
     kind: Kind,
     /// Accesses throw a ReferenceError while the variable is uninitialized.
-    guard: Option<(Guard, SymbolId)>,
+    guard: Option<(Guard, SymbolId, u32)>,
+    /// Writes throw (`const`, an import).
+    constant: bool,
 }
 
 impl<'p, 'a> Lowerer<'p, 'a> {
     // ---- diagnostics -------------------------------------------------------------------
 
     fn unsupported(&mut self, span: Span, what: &str, planned: &str) -> Unsupported {
-        let (mut line, col) = line_col(self.p.source, span.start);
-        let mut path = self.p.path.clone();
-        if self.p.in_prelude(span.start) {
-            // A built-in the compiler can't lower yet: a bug in the prelude.
-            path = "<builtins>".to_string();
-            line -= line_col(self.p.source, self.p.user_end + 1).0 - 1;
-        }
+        // In the prelude: a built-in the compiler can't lower yet, a bug in the prelude.
+        let (path, line, col) = self.p.locate(span.start);
         self.diags.push(Diagnostic {
             path,
             line,
@@ -709,7 +706,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     fn pos(&self, span: Span) -> Pos {
-        let (line, col) = line_col(self.p.source, span.start);
+        let (line, col) = match &self.p.map {
+            Some(_) if !self.p.in_prelude(span.start) => {
+                let (_, line, col) = self.p.locate(span.start);
+                (line, col)
+            }
+            _ => line_col(self.p.source, span.start),
+        };
         Pos { line, col }
     }
 
@@ -1005,7 +1008,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         w.params.len()
                     ));
                 }
-                let (line, col) = self.p.line_col(span.start);
+                let Pos { line, col } = self.pos(span);
                 for message in errs {
                     self.diags.push(Diagnostic {
                         path: self.p.path.clone(),
@@ -1477,7 +1480,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let Some(w) = found else {
                 let known: Vec<&str> = funcs.iter().map(|w| w.js_name.as_str()).collect();
                 self.diags.push(Diagnostic {
-                    path: self.p.path.clone(),
+                    path: self.p.locate(s.span.start).0,
                     line: self.pos(s.span).line,
                     col: self.pos(s.span).col,
                     message: format!("`{from}` has no function `{name}`"),
@@ -1488,7 +1491,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             };
             if let Some(why) = &w.unsupported {
                 self.diags.push(Diagnostic {
-                    path: self.p.path.clone(),
+                    path: self.p.locate(s.span.start).0,
                     line: self.pos(s.span).line,
                     col: self.pos(s.span).col,
                     message: format!("import of `{name}` from `{from}`: {why}"),
@@ -2746,6 +2749,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         } else {
             own
         };
+        let name = self.p.original_name(&name).to_string();
         Ok(Expr::Closure(Box::new(ir::Closure {
             code,
             name,
@@ -2854,7 +2858,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let n = n.strip_suffix(builtins::VALUE).unwrap_or(n);
                 n.rsplit('_').next().unwrap_or(n).to_string()
             }
-            None => f.name.clone(),
+            None => self.p.original_name(&f.name).to_string(),
         };
         let length = builtins::length(&f.name).unwrap_or(self.fn_length[&func]);
         Expr::Closure(Box::new(ir::Closure {
@@ -5340,6 +5344,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// The user's code names a prelude declaration: already reported (see `run`).
     fn prelude_leak(&self, id: &IdentifierReference<'a>) -> bool {
         !self.p.in_prelude(id.span.start)
+            && !self.p.is_generated(id.span.start)
             && self
                 .scoping
                 .get_reference(id.reference_id())
@@ -5469,7 +5474,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
             "regexp_new" | "regexp_data" | "regexp_builtin_exec" => 1,
             "date_new" | "date_data" => 1,
-            "date_now" => 0,
+            "date_now" | "module_new" => 0,
             "to_primitive" => 2,
             "to_key" | "object_desc" => 1,
             "set_proto" => 2,
@@ -5494,6 +5499,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 library_throws("random numbers (`Math.random`) aren't available in a module with exports yet (js2wasi3)")
             };
             return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+        }
+        if name == "module_new" {
+            // T41: `console.log`, descriptors and writes recognize namespaces only then.
+            self.module.names.insert("$module".to_string());
+            return Ok((Expr::intrinsic(Intrinsic::ModuleNew, vec![]), Call::Intrinsic(Some(Kind::Any))));
         }
         if name == "date_now" {
             // An import (`wasi:clocks/system-clock`, T26): commands only; in a library, reading the
@@ -6650,6 +6660,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             return Err(self.unsupported(span, &format!("global `{}`", id.name), "T21"));
         };
+        let constant = self.scoping.symbol_flags(sym).is_const_variable() || self.p.is_import(span.start);
         if let Some(&l) = cx.values.get(&sym) {
             // A captured value or the function's own name: never changes.
             return Ok(Var {
@@ -6658,6 +6669,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ty: Type::JsVal,
                 kind: Kind::Any,
                 guard: None,
+                constant,
             });
         }
         if let Some(&(l, checked)) = cx.cells.get(&sym) {
@@ -6673,7 +6685,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 sym,
                 ty: self.slot_ty(Slot::Var(sym)),
                 kind: self.slot_kind(Slot::Var(sym)),
-                guard: checked.then_some((Guard::Cell(l), sym)),
+                guard: checked.then_some((Guard::Cell(l), sym, span.start)),
+                constant,
             });
         }
         let place = if let Some(l) = cx.locals.get(&sym) {
@@ -6701,13 +6714,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 sym,
                 ty,
                 kind,
-                guard: guard.map(|g| (g, sym)),
+                guard: guard.map(|g| (g, sym, span.start)),
+                constant,
             });
         }
         if self.funcs.contains_key(&sym) {
             return Err(self.unsupported(
                 span,
-                &format!("assignment to function `{}`", id.name),
+                &format!(
+                    "assignment to function `{}`",
+                    self.p.written_name(span.start).unwrap_or_else(|| self.p.original_name(&id.name))
+                ),
                 "later",
             ));
         }
@@ -6729,8 +6746,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// The TDZ check of a guarded variable access: throws a ReferenceError like node's.
-    fn tdz_check(&self, guard: Guard, sym: SymbolId) -> Stmt {
-        let name = self.scoping.symbol_name(sym);
+    /// `at`: where the variable is used (a joined program names an import by its local name there).
+    fn tdz_check(&self, guard: Guard, sym: SymbolId, at: u32) -> Stmt {
+        let name = self
+            .p
+            .written_name(at)
+            .unwrap_or_else(|| self.p.original_name(self.scoping.symbol_name(sym)));
         let throw = Stmt::Throw(Expr::intrinsic(
             Intrinsic::NewError(ErrorKind::ReferenceError),
             vec![
@@ -6757,8 +6778,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     fn read_var(&self, var: &Var) -> Val {
         let e = read(var.place, var.ty);
         let e = match var.guard {
-            Some((g, sym)) => Expr::Seq {
-                body: vec![self.tdz_check(g, sym)],
+            Some((g, sym, at)) => Expr::Seq {
+                body: vec![self.tdz_check(g, sym, at)],
                 value: Box::new(e),
             },
             None => e,
@@ -6773,10 +6794,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// Store `value` (already converted to the variable's type) into a variable. The TDZ check
     /// comes after the value is computed, as in JS.
     fn write_var(&self, cx: &mut FnCx, var: &Var, value: Expr) -> Vec<Stmt> {
-        if self.scoping.symbol_flags(var.sym).is_const_variable() {
+        if var.constant {
             // T24: the value is evaluated, then (after the TDZ check) the write throws.
             let mut out = vec![Stmt::Expr(value)];
-            out.extend(var.guard.map(|(g, sym)| self.tdz_check(g, sym)));
+            out.extend(var.guard.map(|(g, sym, at)| self.tdz_check(g, sym, at)));
             out.push(Stmt::Throw(Expr::intrinsic(
                 Intrinsic::NewError(ErrorKind::TypeError),
                 vec![
@@ -6788,11 +6809,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         match var.guard {
             None => vec![set(var.place, var.ty, value)],
-            Some((g, sym)) => {
+            Some((g, sym, at)) => {
                 let tmp = cx.func.add_local("tmp", var.ty);
                 vec![
                     Stmt::Set(tmp, value),
-                    self.tdz_check(g, sym),
+                    self.tdz_check(g, sym, at),
                     set(var.place, var.ty, Expr::Local(tmp)),
                 ]
             }
@@ -6801,7 +6822,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// An assignment used as a value: the stored value.
     fn assign_value(&self, cx: &mut FnCx, var: &Var, value: Expr) -> Expr {
-        let constant = self.scoping.symbol_flags(var.sym).is_const_variable();
+        let constant = var.constant;
         match (var.place, var.guard) {
             (Place::Local(l), None) if !constant => Expr::Tee(l, Box::new(value)),
             _ => Expr::Seq {
@@ -6869,12 +6890,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// Reject assigning to a function's binding: calls to it are direct.
     fn check_assignable(&mut self, var: &Var, span: Span) -> R<()> {
+        if var.constant {
+            return Ok(()); // the write throws
+        }
         if self.nested_decl.contains_key(&var.sym) || self.an.self_names.contains_key(&var.sym) {
             return Err(self.unsupported(
                 span,
                 &format!(
                     "assignment to function `{}`",
-                    self.scoping.symbol_name(var.sym)
+                    self.p.original_name(self.scoping.symbol_name(var.sym))
                 ),
                 "later",
             ));

@@ -78,8 +78,12 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   exported interfaces as objects (`export const iface = { … }`), so components compose with `wac plug`; see
   [docs/user-worlds.md](docs/user-worlds.md).
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
+- Programs of several files: `import`/`export` between ES modules (relative paths), joined into one component at
+  build time (namespaces, re-exports, live bindings, cycles); `build --command` makes an entry with exports a
+  command, as node runs it.
 
-Not yet: many built-ins (`Date`, `WeakMap`), `arguments` in arrow functions, multi-file `import`, and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, dynamic `import()`, packages from
+`node_modules`, and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

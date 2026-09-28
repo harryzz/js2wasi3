@@ -1,6 +1,6 @@
 # T41: Multi-file ES modules (F7, F79)
 
-Status: todo (handoff written 2026-09-28, not started) | Depends on: T20 (user worlds: WIT imports), T21 (prelude)
+Status: in progress (started 2026-09-28) | Depends on: T20 (user worlds: WIT imports), T21 (prelude)
 
 ## Goal
 A program can be several files: static `import`/`export` between them (named, default, namespace, re-exports,
@@ -128,11 +128,43 @@ committing the baseline.
 - [ ] test262: the runner resolves fixtures; the affected tests' results are in the baseline; 0 regressions.
 
 ## Notes / Result
+**Slices 1–2 (2026-09-28).** Design: (a) scope hoisting, recorded in `docs/design.md` D4.
+- `crates/frontend/src/link.rs`: loads the graph (relative specifiers resolved lexically against the importer's
+  path; node's rules: extension required, `node:` and bare specifiers rejected, WIT `ns:pkg/iface` specifiers left to
+  the lowering), ResolveExport (locals, indirect, stars, cycles, ambiguity), InitializeEnvironment's checks (node's
+  SyntaxError texts at build time), names (a binding keeps its name unless it clashes: another module's top-level
+  name, a global some module reads, a nested binding where an importer's reference would be captured; new names
+  `x$1`), text edits by span (imports deleted, dependencies' `export` keywords removed, `export default <expr>` →
+  `const default$1 = …`, shorthand `{ x }` → `{ x: x$1 }`), namespace objects first, modules in post-order joined
+  with `\n;\n`. `SourceMap`: segments (joined offset → file offset), original names, written names at replaced
+  references, import references, the generated prefix.
+- `frontend::Program`: `map`, `locate`, `original_name`, `written_name`, `is_import`, `is_generated`;
+  `parse_linked`. `lower::parse_entry(alloc, path, source, command, read)` (CLI `build`, `ir`).
+- Lowering: diagnostics through `locate`; `Var.guard` carries the reference offset (TDZ message names what the
+  importer wrote); `Var.constant` (a `const` or an import: writes throw); function/class `name` through
+  `original_name`; generated code may call the prelude.
+- Runtime (gated on `$module`): `module_new` / `CLASS_MODULE`, descriptors, write errors, `isFrozen`, tag,
+  printing. Prelude: `builtins/module.js`.
+- CLI: `build --command`. Scripts: `diff.sh` runs `modules/<case>/main.js`; `test262.mjs` compiles module tests
+  in place with their imports linked, runs resolution negatives, uses `--command`; three module dirs in the subset.
+- Tests: fixtures `tests/fixtures/modules/{basic,live,cycle,tdz,names,defaults,namespace}` (all match node),
+  `modules/library/lib.js` (build test), `crates/js2wasi3/tests/build.rs` (`library_from_several_modules`,
+  `module_errors_are_diagnostics`), `frontend` unit tests (`link::tests`). Single-file fixtures: byte-identical
+  (160 of 162; the other 2 are F186 and give only old variants).
+- test262: module-code 88.4% (namespace 31/38, top-level-await 237/250), subset 25,556 of 28,118 run (90.9%),
+  0 regressions.
+- Unsupported / follow-ups: F192 (TLA order), F193 (namespace internals), F194 (CommonJS detection), F195
+  (`toString` text, positions), F196 (runner harness), F197 (namespace exports from a library).
+- **Next smallest step (slice 3)**: F192. Idea: keep declarations shared, but let the lowering build `main` from
+  per-module segments (the linker can record each module's statement range): a module with top-level `await`,
+  or one waiting on such a dependency, becomes an async step started when its dependencies' promises settle, the
+  others run in order at once (the spec's async module evaluation). Then `import.meta` (`url` as `file://` of the
+  source path?) and JSON modules (`with { type: "json" }`: a module whose default export is the parsed value).
 
 ## Checklist
-- [ ] design questions decided and recorded
-- [ ] slice 1: static imports
-- [ ] slice 2: namespaces and re-exports
+- [x] design questions decided and recorded
+- [x] slice 1: static imports
+- [x] slice 2: namespaces and re-exports
 - [ ] slice 3: top-level `await` in dependencies, `import.meta`
 - [ ] slice 4: dynamic `import()`
 - [ ] slice 5 (or a new task): bare specifiers
@@ -142,3 +174,49 @@ committing the baseline.
 - 2026-09-28: handoff written after T40 (the user chose multi-file modules next; dynamic `import()` scoped with
   them: build-time-known modules only, see "What we know"). State at handoff: `main` at `3b4ce2a`, pushed; test262
   subset 25,018 of 27,496 run pass (91.0%).
+- 2026-09-28: started. Tools unchanged (`check-tools.sh` ok). Design question 1 decided: (a) scope hoisting at the
+  source level, in a new `frontend::link` (per-module parse + semantic drive renames by symbol; span edits, no
+  codegen, so comments/JSDoc stay), recorded in `docs/design.md` D4. node checks: a TDZ error on an imported binding
+  names the importer's local (`import d from` → "Cannot access 'd' before initialization"), so replaced references
+  keep their original text for messages; anonymous `export default function` is named `default`; a missing file is
+  `ERR_MODULE_NOT_FOUND` (a build error here). Evaluation (Q2): post-order DFS, one `main`/`init`; namespaces (Q3):
+  slice 2; gating (Q4): an entry without module imports takes the old path unchanged; libraries (Q5): entry exports only.
+- 2026-09-28: slice 1 core in place: `crates/frontend/src/link.rs` (load, resolve, ResolveExport with stars,
+  names, edits, join + `SourceMap`), `Program::{map, locate, original_name, written_name}`,
+  `frontend::parse_linked`, `lower::parse_entry` (CLI `build`/`ir` use it). Lowering: `unsupported`/`pos` go through
+  `locate`; TDZ messages take the name written at the reference (`Var.guard` carries its offset); function/class
+  names through `original_name`. Fixtures `tests/fixtures/modules/{basic,live,cycle,tdz,names}/main.js`: all 5 match
+  node (`scripts/diff.sh tests/fixtures/modules/*/main.js`). Frontend unit tests: 11 pass.
+- 2026-09-28: gating checked: old (`HEAD` worktree) vs new build of all 162 non-module fixtures: 161 byte-identical,
+  `generators/basics.js` is F186 (its new outputs are among the old build's 6 variants). Error paths checked (missing
+  export/file, bare, `node:`, parse and lowering errors in a dependency point at its file). Library entry: deps' code
+  joins `init`, `export { double } from './util.js'` becomes a WIT export (`crates/js2wasi3/tests/build.rs`:
+  `library_from_several_modules`, `module_errors_are_diagnostics`). Fixed: `export { K as default }` was dropped.
+  Fixture `modules/defaults` (default forms, ASI at joins, a module shadowing `JSON`, one module via two paths).
+  `diff.sh`: `modules/<case>/main.js` are entries. `cargo test --no-fail-fast`: all pass
+  (`streams_compose_with_wac` failed once under parallel load, passes alone 3/3: F134's GC flakiness).
+- 2026-09-28: test262 runner: tests with `./` imports are compiled under their own name in a per-test dir with the
+  files they import symlinked (`relativeImports`/`linkImports`), resolution-phase negatives run (a build error
+  passes), every test is built with the new `build --command` (a command even if the entry has exports, as node runs
+  it: the linker strips the entry's exports like a dependency's). Added `language/module-code`, `language/import`,
+  `language/export` to the sparse checkout and `SUBSET`. Fixes from the first runs: `export { x } from` must
+  resolve (SyntaxError, InitializeEnvironment), attributes rejected before reading the file, the entry's anonymous
+  default gets a binding when joined, an entry export clashing with a global another module reads is renamed and
+  re-exported (`export { A$1 as A }`), writes through an import throw "Assignment to constant variable."
+  (`SourceMap::imports`, `Var::constant`). Module dirs + the 1,031 earlier tests: 631 pass, 3 fail (now fixed),
+  0 regressions; module-code 81.3% (namespaces 0/38: slice 2), top-level-await 94.8%.
+- 2026-09-28: slice 2 (namespaces): the linker emits `const namespace$N = $$ModuleNamespace([keys], [() => b…]);`
+  before the modules (keys in code-unit order, `export *` names resolved, ambiguous ones left out; nested
+  namespaces too); that prefix is `SourceMap::generated` and may call the prelude (`prelude_leak`, prelude roots).
+  `builtins/module.js` (`$$ModuleNamespace`, appended last to `PRELUDE`), intrinsic `module_new` (`$module_new`,
+  `CLASS_MODULE` = 12, null prototype; the lowering adds name `$module`). Runtime hooks, all gated on `$module`:
+  `object_desc` "[object Module]" (delete message), getter-only write → node's read-only message, descriptors
+  are `{ value, writable: true, enumerable: true, configurable: false }`, `isFrozen` false, builtin tag "Module",
+  `console.log` `[Module: null prototype] { … }` (values through the getters; empty `{  }` as node prints).
+  Fixture `modules/namespace` passes; all 7 module fixtures pass. Gating re-checked: 160 of 162 byte-identical,
+  2 are F186 with only old variants (a `local.tee` I had turned into set+get was the first diff).
+  Not done: `Object.defineProperty(ns, k, { value: same })` succeeds in node (spec [[DefineOwnProperty]]); here
+  "Cannot redefine property"; printing an export still in its TDZ (node: `<uninitialized>`) throws.
+- 2026-09-28: checkpoint after slices 1–2: targeted test262 `--update` (module dirs + 1,032 import/export tests,
+  1,981 tests): 0 regressions; subset 25,556 of 28,118 run (90.9%). Docs: HISTORY.md, keywords.md (`import`,
+  `export`, `default`), design.md D4, README, follow-ups F192–F197, F7 ticked. Notes / Result written for slices 1–2.

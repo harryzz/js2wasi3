@@ -59,6 +59,9 @@ pub const CLASS_REFLECT: i32 = 9;
 pub const CLASS_REGEXP: i32 = 10;
 /// A Date (T26): its data `[time value]` (`builtins/date.js`) is under the private `G_SYM_STATE` key.
 pub const CLASS_DATE: i32 = 11;
+/// A module namespace object (T41, `builtins/module.js`): its getters are shown as data
+/// properties, writes fail with node's messages.
+pub const CLASS_MODULE: i32 = 12;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -360,6 +363,8 @@ pub enum Helper {
     DateNew,
     /// `(v) -> jsval`: a Date's data; `undefined` otherwise (T26).
     DateData,
+    /// `() -> jsval`: a new module namespace object (T41): empty, null prototype.
+    ModuleNew,
     /// `(v, hint: i32) -> jsval`: ToPrimitive of any value (T26): objects through [`Helper::ToPrimitive`].
     ToPrimitiveValue,
     /// `(args: jsval (an `$array`)) -> jsval`: an unmapped `arguments` object (T25): the indices,
@@ -454,6 +459,7 @@ impl Helper {
             Helper::RegExpNew => "regexp_new",
             Helper::RegExpData => "regexp_data",
             Helper::DateNew => "date_new",
+            Helper::ModuleNew => "module_new",
             Helper::DateData => "date_data",
             Helper::ToPrimitiveValue => "to_primitive_value",
         }
@@ -509,6 +515,7 @@ impl Helper {
             | Helper::RegExpData
             | Helper::DateNew
             | Helper::DateData => (vec![v], vec![v]),
+            Helper::ModuleNew => (vec![], vec![v]),
             Helper::ToPrimitiveValue => (vec![v, I32], vec![v]),
         }
     }
@@ -589,6 +596,7 @@ impl Helper {
             Helper::RegExpNew => regexp_new(cx),
             Helper::RegExpData => regexp_data(cx),
             Helper::DateNew => date_new(cx),
+            Helper::ModuleNew => module_new(cx),
             Helper::DateData => date_data(cx),
             Helper::ToPrimitiveValue => to_primitive_value(cx),
             Helper::CheckDestructure => check_destructure(cx),
@@ -2864,6 +2872,16 @@ fn date_new(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// `$module_new()` (T41), see [`Helper::ModuleNew`].
+fn module_new(cx: &mut dyn Cx) -> Function {
+    let alloc = h(cx, Helper::Alloc);
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.i32_const(CLASS_MODULE).ref_null(object()).call(alloc);
+    s.end();
+    f
+}
+
 /// `$date_data(v)` (T26), see [`Helper::DateData`].
 fn date_data(cx: &mut dyn Cx) -> Function {
     let own = h(cx, Helper::OwnGet);
@@ -3707,6 +3725,11 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
             .i32_const(c)
             .i32_eq();
     };
+    if cx.names("$module") {
+        // T41: a module namespace's `Symbol.toStringTag`.
+        class(&mut s, CLASS_MODULE);
+        tag(cx, &mut s, "Module");
+    }
     if cx.has_maps() {
         class(&mut s, mapset::CLASS_MAP);
         tag(cx, &mut s, "Map");

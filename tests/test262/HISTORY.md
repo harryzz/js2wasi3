@@ -3,6 +3,21 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T41 multi-file modules, slices 1–2 (targeted run; subset + `language/module-code`, `language/import`, `language/export`)
+
+- Compiler: T41 slices 1–2 (modules joined at the source level: static imports and exports, re-exports, `export *`,
+  namespace objects, read-only imports; `build --command`). Single-file programs build byte-identical modules
+  (checked on every fixture), so only tests with `import`/`export` can change.
+- Runner: tests importing `./` files are compiled under their own name next to (symlinks of) the files they import;
+  resolution-phase negatives run (a build error passes); every test is built with `--command`.
+- Subset change: `language/module-code` (755 files), `language/import` (191), `language/export` (3) added: 537 pass,
+  8 fail (namespace internals in the TDZ and `defineProperty`, F193; a test importing another test, F196), 77
+  unsupported (import attributes 31, `Function` 19, `globalThis` 12, dynamic `import()` 10), 327 skipped (`import
+  defer`/`source`, fixtures, `$262`).
+- Run: those directories and the 1,032 subset tests containing `import`/`export`, with `--update` (1,981 tests, ~5
+  min at -j 4): 0 regressions, 1 unsupported → pass. Subset: 25,556 of 28,118 run pass (90.9%; the old subset
+  25,019 of 27,496).
+
 ## 2026-09-28: T40 BigInt (targeted run; subset + `built-ins/BigInt`)
 
 - Compiler: T40 (BigInt values, operators, `BigInt(…)` and its methods, gated so programs without BigInts compile to

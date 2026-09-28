@@ -48,6 +48,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/stream.js"),
     include_str!("../builtins/asyncgen.js"),
     include_str!("../builtins/bigint.js"),
+    include_str!("../builtins/module.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -149,6 +150,26 @@ pub fn parse<'a>(
     let mut prelude = String::from(PRELUDE);
     prelude.push_str(&unicode_sets(source));
     frontend::parse_with_prelude(alloc, path, source, &prelude)
+}
+
+/// Parse a program from its entry file (T41): the modules it imports (read with `read`) are
+/// joined with it ([`frontend::link`]); an entry without module imports is [`parse`]d as is.
+/// `command`: a command even if the entry has exports.
+pub fn parse_entry<'a>(
+    alloc: &'a Allocator,
+    path: &str,
+    source: &'a str,
+    command: bool,
+    read: &mut dyn FnMut(&str) -> std::io::Result<String>,
+) -> Result<Program<'a>, Diagnostics> {
+    let linked = frontend::link(alloc, path, source, command, read)?;
+    let Some(map) = linked.map else {
+        return parse(alloc, path, source);
+    };
+    let source: &'a str = alloc.alloc_str(&linked.source);
+    let mut prelude = String::from(PRELUDE);
+    prelude.push_str(&unicode_sets(source));
+    frontend::parse_linked(alloc, path, source, Some(map), &prelude)
 }
 
 /// `$$reUnicodeSet(text)` (T27): the code point set of `\p{text}`, for the texts node accepts that
@@ -530,6 +551,11 @@ impl Prelude {
                     let Some(&item) = item_of.get(&sym) else {
                         continue;
                     };
+                    if p.is_generated(r.span.start) {
+                        // The module linker's code (T41: namespace objects).
+                        roots.push(item);
+                        continue;
+                    }
                     if !p.in_prelude(r.span.start) {
                         out.user_refs.push((r.span, r.name.to_string()));
                         continue;

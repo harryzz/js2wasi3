@@ -150,7 +150,7 @@ impl Helper {
             Helper::DefineProperty => define_property(cx),
             Helper::GetOwnPropertyDescriptor => get_own_property_descriptor(cx),
             Helper::Integrity(op) => integrity(op),
-            Helper::TestIntegrity(op) => test_integrity(op),
+            Helper::TestIntegrity(op) => test_integrity(op, cx.names("$module")),
             Helper::SuperGet => super_get(cx),
             Helper::SuperSet => super_set(cx),
             Helper::PrivateGet | Helper::PrivateSet => {
@@ -248,6 +248,15 @@ fn value(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// `(object) -> i32`: is the object on the stack of this class?
+fn is_class(s: &mut InstructionSink, class: i32) {
+    s.struct_get(T_OBJECT, object::F_CLASS)
+        .i32_const(object::CLASS_MASK)
+        .i32_and()
+        .i32_const(class)
+        .i32_eq();
+}
+
 /// Throw "Cannot assign to read only property 'k' of object '<desc>'" (locals o, k).
 fn throw_read_only(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, k: u32) {
     let concat = cx.helper(runtime::Helper::Concat);
@@ -279,6 +288,14 @@ fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u3
         cx.str(" of "),
         cx.str(" which has only a getter"),
     );
+    if cx.names("$module") {
+        // T41: a namespace's exports look like writable data properties that reject writes.
+        s.local_get(o);
+        is_class(s, object::CLASS_MODULE);
+        s.if_(BlockType::Empty);
+        throw_read_only(cx, s, o, k);
+        s.end();
+    }
     s.local_get(acc)
         .ref_cast_non_null(accessor())
         .struct_get(T_ACCESSOR, 1)
@@ -530,6 +547,15 @@ fn desc(cx: &mut dyn Cx) -> Function {
         s.global_get(b).call(concat).return_();
     }
     s.end();
+    if cx.names("$module") {
+        // T41.
+        let module = cx.str("[object Module]");
+        s.local_get(O);
+        is_class(&mut s, object::CLASS_MODULE);
+        s.if_(BlockType::Empty);
+        s.global_get(module).return_();
+        s.end();
+    }
     if cx.names("$date") {
         // T26.
         let date = cx.str("[object Date]");
@@ -1315,6 +1341,28 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
         .array_get(T_VALS)
         .local_set(X);
     s.end();
+    if cx.names("$module") {
+        // T41: a namespace's export (a getter) is a writable data property holding its value.
+        let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
+        let getter = cx.str("getter");
+        s.local_get(A).i32_const(ACCESSOR).i32_and().i32_const(0).i32_ne();
+        s.local_get(O).ref_as_non_null();
+        is_class(&mut s, object::CLASS_MODULE);
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(X)
+            .ref_cast_non_null(accessor())
+            .struct_get(T_ACCESSOR, 0);
+        s.local_get(O);
+        s.i32_const(0).array_new_default(T_VALS);
+        s.global_get(getter);
+        s.call(call_value).local_set(X);
+        s.local_get(A)
+            .i32_const(!(ACCESSOR | READONLY) & 0xff)
+            .i32_and()
+            .local_set(A);
+        s.end();
+    }
     s.local_get(A).i32_const(ACCESSOR).i32_and();
     s.if_(BlockType::Empty);
     for (key, i) in [(get, 0), (set, 1)] {
@@ -1408,7 +1456,8 @@ fn integrity(op: u8) -> Function {
     f
 }
 
-fn test_integrity(op: u8) -> Function {
+/// `module`: the program has module namespaces (T41), whose exports (getters) count as writable.
+fn test_integrity(op: u8, module: bool) -> Function {
     const V: u32 = 0;
     const O: u32 = 1;
     const E: u32 = 2;
@@ -1482,6 +1531,13 @@ fn test_integrity(op: u8) -> Function {
                 .i32_and()
                 .i32_eqz();
             s.i32_or();
+            if module {
+                s.local_get(A).i32_const(ACCESSOR).i32_and().i32_const(0).i32_ne();
+                s.local_get(O).ref_as_non_null();
+                is_class(s, object::CLASS_MODULE);
+                s.i32_and();
+                s.i32_or();
+            }
         }
         s.local_get(A).i32_const(PRIVATE).i32_and().i32_eqz();
         s.i32_and();
@@ -1789,6 +1845,13 @@ fn call_setter_on(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k:
         cx.str(" of "),
         cx.str(" which has only a getter"),
     );
+    if cx.names("$module") {
+        s.local_get(o).ref_as_non_null();
+        is_class(s, object::CLASS_MODULE);
+        s.if_(BlockType::Empty);
+        throw_read_only_nullable(cx, s, o, k);
+        s.end();
+    }
     s.local_get(acc)
         .ref_cast_non_null(accessor())
         .struct_get(T_ACCESSOR, 1)

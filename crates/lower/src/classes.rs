@@ -67,6 +67,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 .map(|i| i.name.to_string())
                 .or(name.map(str::to_string))
                 .unwrap_or_default();
+        let class_name = self.p.original_name(&class_name).to_string();
         // A new symbol per private name, a cell per instance private method or accessor (filled
         // below, read by the constructor), and a getter and a setter local per private accessor.
         let mut accessors = HashMap::new();

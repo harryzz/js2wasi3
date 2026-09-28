@@ -4,7 +4,8 @@
 #
 # Usage: scripts/diff.sh [-j jobs] [fixture.js | dir]...
 #   (default: tests/fixtures and its subdirectories, except unsupported/ which holds rejection tests)
-#   A dir means its *.js files (not subdirectories). `x.skip` next to `x.js` skips it; its
+#   A dir means its *.js files (not subdirectories); in a dir named `modules`, each `<case>/main.js`
+#   is the entry of a multi-file program (T41). `x.skip` next to `x.js` skips it; its
 #   first line is the reason. Each fixture should take under 2 s: slower ones are flagged.
 #   `x.uncaught` next to `x.js`: the program ends with an uncaught exception. node's stderr (source
 #   excerpt and stack) is first reduced to `Uncaught <message>`, as a js2wasi3 command prints it
@@ -82,6 +83,8 @@ for arg in "$@"; do
   p=$(realpath "$arg")
   if [ -d "$p" ]; then
     for f in "$p"/*.js; do [ -e "$f" ] && files+=("$f"); done
+    # A multi-file program (T41): <dir>/<case>/main.js; its other files aren't fixtures.
+    for f in "$p"/*/main.js; do [ -e "$f" ] && [ "$(basename "$p")" = modules ] && files+=("$f"); done
   elif [ -f "$p" ]; then
     files+=("$p")
   else

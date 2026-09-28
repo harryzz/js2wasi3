@@ -27,17 +27,17 @@
 //   unsupported  the build failed with `unsupported: …`
 //   crash        the compiler panicked
 //   timeout      build + run took longer than --timeout
-//   skip         not runnable here: `noStrict`/`raw` (sloppy mode), `_FIXTURE` files, module resolution
-//                (multi-file modules, F7), `$262` (host-defined test hooks), features node 24 lacks
+//   skip         not runnable here: `noStrict`/`raw` (sloppy mode), `_FIXTURE` files, `$262`
+//                (host-defined test hooks), features node 24 lacks
 //                (NODE_MISSING), script only (the build
 //                failed and node doesn't parse the test as a module either)
 // The run prints counts per directory, then every test whose status differs from the baseline
 // (or that isn't in it). Exit 1 if a test that passed in the baseline now fails (a new skip doesn't count).
 // Per-test details of the last run: out/test262/results.tsv (path, status, ms, reason).
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, existsSync, symlinkSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { join, relative, dirname } from "node:path";
+import { join, relative, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,6 +64,10 @@ const SUBSET = [
   "built-ins/Date",
   // T40.
   "built-ins/BigInt",
+  // T41.
+  "language/module-code",
+  "language/import",
+  "language/export",
 ];
 // Features node 24.21.0 (the oracle, TOOLS.md) doesn't implement: proper tail calls and proposals it
 // doesn't ship yet. Tests using them are skipped.
@@ -153,7 +157,6 @@ function skipReason(rel, src, meta) {
   if (/_FIXTURE\.js$/.test(rel)) return "fixture, not a test";
   if (meta.flags.includes("noStrict")) return "noStrict (sloppy mode only)";
   if (meta.flags.includes("raw")) return "raw (sloppy mode, no harness)";
-  if (meta.negative?.phase === "resolution") return "module resolution (F7)";
   if (/\$262\b/.test(src)) return "$262 (host-defined hooks)";
   const missing = meta.features.find((f) => NODE_MISSING.includes(f));
   if (missing) return `feature ${missing} (not in node 24)`;
@@ -161,6 +164,20 @@ function skipReason(rel, src, meta) {
 }
 
 // ---- run one test
+// `./x.js` specifiers of static imports, re-exports and `import()` with a literal.
+function relativeImports(src) {
+  return [...src.matchAll(/(?:\bfrom|\bimport|\bimport\s*\()\s*['"](\.\/[^'"]+)['"]/g)].map((m) => m[1].slice(2));
+}
+// Link the files `src` imports from `from` into `to`, and what they import (`seen`: file names).
+function linkImports(from, src, to, seen) {
+  for (const name of relativeImports(src)) {
+    if (seen.has(name) || name.includes("/") || !existsSync(join(from, name))) continue;
+    seen.add(name);
+    symlinkSync(join(from, name), join(to, name));
+    linkImports(from, readFileSync(join(from, name), "utf8"), to, seen);
+  }
+}
+
 function run(cmd, argv, timeoutMs) {
   return new Promise((resolve) => {
     const child = spawn(cmd, argv, { stdio: ["ignore", "pipe", "pipe"] });
@@ -198,13 +215,22 @@ async function one(rel, work) {
   parts.push(src);
   // Plain names: the WIT package/world name comes from the file name (F143).
   const id = `t${++fileCounter}`;
-  const js = join(work, `${id}.js`), wasm = join(work, `${id}.wasm`);
+  let js = join(work, `${id}.js`);
+  const wasm = join(work, `${id}.wasm`);
+  // A test importing modules (`./x_FIXTURE.js`, or itself) keeps its name, in a directory of its
+  // own next to the files it imports (T41).
+  if (relativeImports(src).length) {
+    const dir = join(work, id);
+    mkdirSync(dir);
+    js = join(dir, basename(rel));
+    linkImports(dirname(join(TESTS, rel)), src, dir, new Set([basename(rel)]));
+  }
   writeFileSync(js, parts.join("\n"));
 
   const deadline = Date.now() + opt.timeout * 1000;
-  const b = await run(BIN, ["build", js, "-o", wasm], deadline - Date.now());
+  const b = await run(BIN, ["build", "--command", js, "-o", wasm], deadline - Date.now());
   const phase = meta.negative?.phase;
-  const early = phase === "parse" || phase === "early";
+  const early = phase === "parse" || phase === "early" || phase === "resolution";
   if (b.timedOut) return { status: "timeout", reason: "build" };
   if (b.code !== 0) {
     if (b.code === 101 || /panicked at/.test(b.stderr)) {

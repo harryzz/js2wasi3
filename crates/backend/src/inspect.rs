@@ -1146,6 +1146,23 @@ fn format_object(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(arguments_prefix).local_set(PREFIX);
     s.end();
+    if cx.names("$module") {
+        // A module namespace (T41): `[Module: null prototype] `; empty, node prints `{  }`.
+        let (prefix, empty) = (cx.str("[Module: null prototype] "), cx.str("[Module: null prototype] {  }"));
+        s.local_get(O)
+            .struct_get(runtime::T_OBJECT, object::F_CLASS)
+            .i32_const(object::CLASS_MASK)
+            .i32_and()
+            .i32_const(object::CLASS_MODULE)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(O).call(own_keys).array_len().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.global_get(empty).return_();
+        s.end();
+        s.global_get(prefix).local_set(PREFIX);
+        s.end();
+    }
     // `Math`/`JSON` (T25): node's `Symbol.toStringTag` form.
     let namespaces = if cx.has_namespaces() {
         vec![
@@ -2172,12 +2189,29 @@ fn format_props(cx: &mut dyn Cx) -> Function {
     ]);
     let mut s = f.instructions();
     // The value part: `[Getter]`, `[Setter]`, `[Getter/Setter]` or the value one level deeper.
+    let module = cx.names("$module").then(|| oh(cx, object::Helper::Get));
     let value = |s: &mut InstructionSink| {
         s.local_get(O)
             .local_get(K)
             .ref_as_non_null()
             .call(own)
             .local_tee(R);
+        if let Some(get) = module {
+            s.drop();
+            // A module namespace's export (T41): its value, through the getter.
+            s.local_get(R).ref_test_non_null(props::accessor());
+            s.local_get(O)
+                .struct_get(runtime::T_OBJECT, object::F_CLASS)
+                .i32_const(object::CLASS_MASK)
+                .i32_and()
+                .i32_const(object::CLASS_MODULE)
+                .i32_eq()
+                .i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(O).local_get(K).ref_as_non_null().call(get).local_set(R);
+            s.end();
+            s.local_get(R);
+        }
         s.ref_test_non_null(props::accessor());
         s.if_(BlockType::Result(string_ref()));
         accessor_label(s, labels, R);

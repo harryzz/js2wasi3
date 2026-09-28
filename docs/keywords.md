@@ -19,13 +19,13 @@ table in [`tasks/README.md`](../tasks/README.md).
 
 | | ✅ | 🟡 | ❌ | ➖ |
 |---|---|---|---|---|
-| Keywords (66 entries) | 28 | 10 | 4 | 24 |
+| Keywords (66 entries) | 30 | 10 | 2 | 24 |
 | Built-in objects, properties, methods (25) | 11 | 13 | 1 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
 What's most needed, in order: the rest of the built-in library (`Intl`, BigInt typed arrays), spread into `console.log` and calls through `console.log`
-as a value, `typeof` of an undeclared name, then the language gaps below (tagged templates, regex, multi-file
-`import`).
+as a value, `typeof` of an undeclared name, then the language gaps below (tagged templates, regex, dynamic
+`import()`).
 
 ## 1. Keywords
 
@@ -45,14 +45,14 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `const` | ✅ | TDZ checks; writes throw `TypeError: Assignment to constant variable.` (fixed in T24). |
 | `continue` | ✅ | Plain and labeled, through `finally`. |
 | `debugger` | ✅ | A no-op (T24). |
-| `default` | 🟡 | ✅ in `switch` (any position). `export default` only of a named function (T20). |
+| `default` | 🟡 | ✅ in `switch` (any position). `export default` of anything between modules (T41); a library entry's WIT export only of a named function (T20). |
 | `delete` | 🟡 | Properties and array elements work. Missing: `delete o?.a`, `delete` of a private field (a SyntaxError in node anyway) (F80-adjacent, "later"). |
 | `do` | ✅ | `do … while`, with `continue`/`break`/labels. |
 | `double` | ➖ | Removed in ES5. |
 | `else` | ✅ | |
 | `enum` | ➖ | Reserved; a syntax error in node too. |
 | `eval` | ❌ | Rejected. An ahead-of-time compiler can't compile code built at run time; not planned (would need an interpreter). |
-| `export` | 🟡 | Named functions and `export default function f` become WIT exports (T07–T09). T20: `export async function` is an `async func`. Missing: exporting variables/classes, generator exports, rest parameters in exports, WIT types beyond `f64`/`string` (T20: F13, F55); library top-level code (F11). |
+| `export` | 🟡 | The entry's named functions and `export default function f` become WIT exports (T07–T09). T20: `export async function` is an `async func`. T41: between modules every form works (`export const`/`let`/`class`, `export { a as b }`, `export default <expr>`, `export … from`, `export *`, `export * as ns from`); `build --command` builds an entry with exports as a command, as node runs it. Missing: exporting variables/classes/namespaces from a library entry, generator exports, rest parameters in exports (F13, F55, F197). |
 | `extends` | ✅ | Classes and native errors (T16). |
 | `false` | ✅ | |
 | `final` | ➖ | Removed in ES5. |
@@ -63,7 +63,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
 | `implements` | ➖ | Reserved in strict mode; a syntax error in node too. |
-| `import` | ⚠️ | `import { f } from "ns:pkg/iface"` imports a user world's interface functions (T20 slice 5, `--wit`; see [user-worlds.md](user-worlds.md)). Other imports are rejected: single-file programs only (multi-file modules F7; `import.meta` and dynamic `import()` F79). |
+| `import` | 🟡 | T41: other files by relative path (`./x.js`, node's rule: the extension is required), joined into one program at build time: named, default and namespace imports (`import * as ns`, printed `[Module: null prototype] {…}`), live and read-only bindings, cycles, TDZ errors like node's, node's SyntaxError for a missing export (at build time). `import { f } from "ns:pkg/iface"` imports a user world's interface functions (T20 slice 5, `--wit`; see [user-worlds.md](user-worlds.md)). Missing: packages (`node_modules`), `node:` modules, import attributes, `import.meta`, dynamic `import()` (F79), node's order with top-level `await` in a dependency (F192). |
 | `in` | ✅ | Objects and arrays; `#x in o` (T16). |
 | `instanceof` | ✅ | Classes, functions, native errors, built-ins, `Symbol.hasInstance` (T25). |
 | `int` | ➖ | Removed in ES5. |

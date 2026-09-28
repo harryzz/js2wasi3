@@ -185,6 +185,24 @@ chunk, `[chunk, ended]`); a given one is `stream.new` plus `$$StreamPump(iterabl
 `for await` writes each chunk with `__intrinsic_stream_write` (stored as a `list<T>`; a partial write goes on from
 the pending table); each drops its end in `finally`. The pump counts as pending until it drops the writable end. User guide:
 [user-worlds.md](user-worlds.md).)
+(T41: **modules are joined at the source level** (scope hoisting, as Rollup/esbuild do): `frontend::link` loads the
+graph from the entry (relative specifiers, `.js` required as in node), resolves every import and `export … from` to
+the exporting module's binding, gives each module's top-level bindings a unique name (kept unless it clashes with
+another module's, a global another module reads, or a binding in a scope where an importer's reference would be
+captured; the entry's names first), deletes module imports and dependencies' `export` keywords (`export default
+<expr>` becomes a `const`), and concatenates the modules in evaluation order (post-order DFS, entry last) into one
+source, which goes through `parse_with_prelude` and the lowering as one program. Live bindings, cycles, function
+hoisting across modules and TDZ follow from it being one scope. `Program` keeps a segment map (joined offset → file
+and offset) for diagnostics and the original names (a renamed function's `name`; a replaced reference's text for
+TDZ messages, which node words with the importer's local name) and the references to imports (writes throw
+"Assignment to constant variable."). Only the entry's exports are WIT exports; `build --command` drops them like a
+dependency's (node runs such a file as a program). An entry without module imports is parsed exactly as before,
+so single-file programs compile to the same bytes. Slice 2: a namespace object (`import * as ns`, `export * as ns
+from`) is made before any module runs by code the linker writes at the start (`const namespace$1 =
+$$ModuleNamespace(keys, getters)`, allowed to call the prelude): a null-prototype, non-extensible object of class
+`CLASS_MODULE` with a getter per export (so it's live and throws in the TDZ); the runtime, gated on the name
+`$module`, shows the getters as writable data properties (descriptors, `console.log` as node's `[Module: null
+prototype] {…}`), and fails writes with node's messages.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

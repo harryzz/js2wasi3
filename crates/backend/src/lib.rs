@@ -1742,6 +1742,7 @@ impl Emitter<'_> {
                     Intrinsic::RegExpData => H::Obj(object::Helper::RegExpData),
                     Intrinsic::DateNew => H::Obj(object::Helper::DateNew),
                     Intrinsic::DateData => H::Obj(object::Helper::DateData),
+                    Intrinsic::ModuleNew => H::Obj(object::Helper::ModuleNew),
                     Intrinsic::ToPrimitive => H::Obj(object::Helper::ToPrimitiveValue),
                     Intrinsic::InspectAt(d) => H::Fmt(inspect::Helper::At(*d)),
                     Intrinsic::BuiltinToString => H::Obj(object::Helper::BuiltinToString),

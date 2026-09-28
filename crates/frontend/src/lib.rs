@@ -19,6 +19,9 @@
 
 use std::fmt;
 
+mod link;
+pub use link::{Linked, SourceMap, link};
+
 use oxc_ast::ast;
 use oxc_parser::Parser;
 use oxc_semantic::{Semantic, SemanticBuilder};
@@ -37,6 +40,8 @@ pub struct Program<'a> {
     pub ast: &'a ast::Program<'a>,
     pub semantic: Semantic<'a>,
     pub exports: Vec<Export>,
+    /// A program joined from several modules ([`link`]): where its parts came from.
+    pub map: Option<SourceMap>,
 }
 
 /// One entry of the module's export list.
@@ -130,6 +135,7 @@ pub fn parse<'a>(
         ast,
         semantic: sem.semantic,
         exports,
+        map: None,
     })
 }
 
@@ -142,7 +148,30 @@ pub fn parse_with_prelude<'a>(
     source: &'a str,
     prelude: &str,
 ) -> Result<Program<'a>, Diagnostics> {
-    parse(alloc, path, source)?;
+    parse_linked(alloc, path, source, None, prelude)
+}
+
+/// [`parse_with_prelude`] of a program [`link`] joined (`map`: where its parts came from).
+pub fn parse_linked<'a>(
+    alloc: &'a Allocator,
+    path: &str,
+    source: &'a str,
+    map: Option<SourceMap>,
+    prelude: &str,
+) -> Result<Program<'a>, Diagnostics> {
+    let remap = |mut d: Diagnostics| {
+        if let Some(map) = &map {
+            for d in &mut d.0 {
+                if d.path == path {
+                    let offset = offset_of(source, d.line, d.col);
+                    let (file, line, col) = map.locate(offset);
+                    (d.path, d.line, d.col) = (file.to_string(), line, col);
+                }
+            }
+        }
+        d
+    };
+    parse(alloc, path, source).map_err(remap)?;
     let user_end = source.len() as u32;
     let mut all = String::with_capacity(source.len() + 1 + prelude.len());
     all.push_str(source);
@@ -161,10 +190,18 @@ pub fn parse_with_prelude<'a>(
                 ));
             }
         }
-        d
+        remap(d)
     })?;
     program.user_end = user_end;
+    program.map = map;
     Ok(program)
+}
+
+/// The byte offset of a 1-based line and column (in chars).
+fn offset_of(source: &str, line: u32, col: u32) -> u32 {
+    let start: usize = source.split_inclusive('\n').take(line as usize - 1).map(str::len).sum();
+    let within: usize = source[start..].chars().take(col as usize - 1).map(char::len_utf8).sum();
+    (start + within) as u32
 }
 
 impl<'a> Program<'a> {
@@ -187,6 +224,50 @@ impl<'a> Program<'a> {
     /// 1-based line and column of a byte offset in this program's source.
     pub fn line_col(&self, offset: u32) -> (u32, u32) {
         line_col(self.source, offset)
+    }
+
+    /// The file, 1-based line and column of a byte offset, for diagnostics: `<builtins>` in the
+    /// prelude, the module's file in a joined program.
+    pub fn locate(&self, offset: u32) -> (String, u32, u32) {
+        if self.in_prelude(offset) {
+            let (line, col) = line_col(self.source, offset);
+            let first = line_col(self.source, self.user_end + 1).0;
+            return ("<builtins>".to_string(), line - (first - 1), col);
+        }
+        match &self.map {
+            Some(map) => {
+                let (path, line, col) = map.locate(offset);
+                (path.to_string(), line, col)
+            }
+            None => {
+                let (line, col) = line_col(self.source, offset);
+                (self.path.clone(), line, col)
+            }
+        }
+    }
+
+    /// The name a binding has in its module's source: renamed ones differ in a joined program.
+    pub fn original_name<'n>(&'n self, name: &'n str) -> &'n str {
+        self.map
+            .as_ref()
+            .and_then(|m| m.names.get(name))
+            .map_or(name, String::as_str)
+    }
+
+    /// Is this offset in code the module linker wrote (namespace objects, T41), which may use
+    /// the prelude?
+    pub fn is_generated(&self, offset: u32) -> bool {
+        self.map.as_ref().is_some_and(|m| offset < m.generated)
+    }
+
+    /// Does the reference at this offset name an import (an immutable binding, T41)?
+    pub fn is_import(&self, offset: u32) -> bool {
+        self.map.as_ref().is_some_and(|m| m.imports.contains(&offset))
+    }
+
+    /// The name written at a reference replaced by [`link`] (an import's local name), if any.
+    pub fn written_name(&self, offset: u32) -> Option<&str> {
+        self.map.as_ref()?.refs.get(&offset).map(String::as_str)
     }
 
     /// Top-level statements as `(line, col, kind)`, e.g. `(1, 1, "ExportNamedDeclaration")`.

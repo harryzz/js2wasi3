@@ -40,6 +40,10 @@ enum Cmd {
         /// one from the exports).
         #[arg(long)]
         wit: Option<String>,
+        /// Build a command (`wasi:cli/run`) even if the entry has exports, as node runs it: the
+        /// exports are dropped.
+        #[arg(long, conflicts_with = "wit")]
+        command: bool,
     },
 }
 
@@ -438,7 +442,8 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Ir { file } => {
             let source = read(&file)?;
-            let program = js2wasi3_lower::parse(&alloc, &file, &source)?;
+            let program =
+                js2wasi3_lower::parse_entry(&alloc, &file, &source, false, &mut |p| std::fs::read_to_string(p))?;
             print!("{}", js2wasi3_lower::lower(&program)?);
         }
         Cmd::Build {
@@ -447,9 +452,11 @@ fn main() -> anyhow::Result<()> {
             core,
             world,
             wit,
+            command,
         } => {
             let source = read(&entry)?;
-            let program = js2wasi3_lower::parse(&alloc, &entry, &source)?;
+            let program =
+                js2wasi3_lower::parse_entry(&alloc, &entry, &source, command, &mut |p| std::fs::read_to_string(p))?;
             if let Some(wit) = wit {
                 if program.exports.is_empty() {
                     anyhow::bail!(
