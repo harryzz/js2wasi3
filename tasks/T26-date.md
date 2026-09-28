@@ -1,6 +1,6 @@
 # T26: `Date`
 
-Status: in progress | Depends on: T21 (prelude), T25 slice 4 (built-ins as values) helps
+Status: done | Depends on: T21 (prelude), T25 slice 4 (built-ins as values) helps
 
 ## Goal
 `Date` as in ECMAScript: `new Date()`, `new Date(ms)`, `new Date(y, m, d, …)`, `Date.now`, `Date.UTC`,
@@ -18,10 +18,36 @@ UTC), `toISOString`, `toJSON` (used by `JSON.stringify`), `toString`/`toDateStri
 - `toLocale*String` (needs `Intl`): out of scope; reject or give the non-locale form (decide).
 
 ## Acceptance
-- [ ] Fixtures in `tests/fixtures/builtins/date-*.js` match node with a fixed `TZ` (`scripts/diff.sh`).
-- [ ] Programs without `Date` don't import the clock or link the date code.
+- [x] Fixtures in `tests/fixtures/builtins/date-*.js` match node with a fixed `TZ` (`scripts/diff.sh`).
+- [x] Programs without `Date` don't import the clock or link the date code.
 
 ## Notes / Result
+`Date` works: every constructor form (and subclasses), `Date()`, `Date.now`/`UTC`/`parse`, every getter and setter,
+every string form, `toJSON`, `[Symbol.toPrimitive]`, Annex B `getYear`/`setYear`/`toGMTString`, printed like node.
+test262: `built-ins/Date` joined the subset: 579 of 583 run pass (the 4 others use top-level `this` as the global
+object, F151; 11 skip: `Temporal`, which node 24 lacks). Subset: 24,738 of 27,420 run pass (90.2%, was 89.9%), 0
+regressions; 36 more tests pass elsewhere from constructor values inheriting `Object.prototype` methods.
+
+Decisions (docs/design.md, T26 note under D5):
+- **Local time is UTC.** `wasi:clocks/timezone` is `@unstable` in WASI 0.3.1 and wasmtime 49 doesn't implement it
+  (probe). `scripts/diff.sh` runs node with `TZ=UTC`.
+- **Clock**: `wasi:clocks/system-clock.now`, imported by commands only when used; its `instant` comes back in memory
+  at 16 (`abi::HEAP_BASE` 8 → 32). In a library, reading the clock throws an Error (the rest of `Date` works).
+- **`toLocale*String`**: node's `en-US` forms without arguments; other locales or options throw a RangeError.
+- **Representation**: a `$object` of class `CLASS_DATE` with `[tv]` under the private state key (intrinsics
+  `date_new`/`date_data`); all of `Date` is prelude JS (`builtins/date.js`). `new Date` → `$$Date`, `Date()` →
+  `$$DateCall` (also the value's call entry, `Module::date_call`); the construct entry passes the new target as
+  `this`. New intrinsic `to_primitive(v, hint)`; the runtime's ToPrimitive gives a Date hint string for default.
+
+Also in this task: `Math.random` reached through a value in a library dropped its statement silently (a bare
+`Err(Unsupported)` with no diagnostic); it now throws at run time like the clock (`library_throws`).
+
+Commands: `scripts/diff.sh tests/fixtures/builtins/date-*.js` (5/5), `scripts/diff.sh tests/fixtures/builtins`
+(44/44), `cargo test`, `node scripts/test262.mjs built-ins/Date`, then `subset --update` on `a-03` (Xeon Gold 6240,
+72 threads: 29,256 tests in 1,365 s at -j 36; the laptop takes ~3 h).
+
+Unsupported / left for later: F181–F185. Next smallest step: F181 (the clock in libraries: import
+`wasi:clocks/system-clock` in library worlds).
 
 ## Progress
 - 2026-09-28: started (after T39). Tools unchanged. Probe (scratchpad `tzprobe/`: a core module importing
@@ -90,3 +116,8 @@ UTC), `toISOString`, `toJSON` (used by `JSON.stringify`), `toString`/`toDateStri
   `library_throws` in lower); a direct `Math.random` in a library is still a build error. Test: `lib.js` `rand`
   in `build.rs::builtins_in_a_library`. The other bare `Err(Unsupported)` returns in lower follow a pushed
   diagnostic. `cargo test` all pass.
+- 2026-09-28: whole subset with `--update` on `a-03` (set up this session: rustup/Rust 1.98.1, wasmtime 49.0.1,
+  wasm-tools 1.259.0, node 24.21.0 in ~/.local; repo copied with rsync; 1,365 s at -j 36): 24,738 of 27,420 run
+  pass (90.2%), 0 regressions; 579 new Date passes, 36 unsupported → pass (constructor values' `Object.prototype`
+  methods, Date subclasses), 2 unsupported → fail (F172 RegExp species, F151 top-level `this`). Baseline copied
+  back. T26 done: notes, README, HISTORY.md, follow-ups F181–F185.

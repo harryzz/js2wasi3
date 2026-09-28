@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T26 `Date` (full subset run on a-03; subset + `built-ins/Date`)
+
+- Compiler: T26 (`Date` in the prelude, local time = UTC; constructor values inherit `Object.prototype` methods;
+  `Math.random` through a value in a library throws). Runner: `Temporal` added to NODE_MISSING.
+- Subset change: `built-ins/Date` added (594 files: 579 pass, 4 fail (top-level `this`, F151), 11 skip).
+- Run: the whole subset with `--update` on `a-03` (Xeon Gold 6240, 72 threads, WSL2; 29,256 tests in 1,365 s at
+  -j 36; the laptop takes ~3 h at -j 4, so timeouts may differ): 0 regressions; 36 unsupported → pass, 2
+  unsupported → fail (F172, F151). Subset: 24,738 of 27,420 run pass (90.2%).
+
 ## 2026-09-28: T39 RegExp and string-building speed (full subset run)
 
 - Compiler: T39 (linear `String.fromCodePoint`; `STAR` fast path in `u`/`v` mode; unboxed regex helpers; unanchored
