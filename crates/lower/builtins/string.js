@@ -193,8 +193,18 @@ function $$String_prototype_lastIndexOf(searchString, position) {
   return -1;
 }
 
+// A RegExp search string is a TypeError (IsRegExp, T27: `Symbol.match` or a RegExp).
+function $$noRegExp(v, name) {
+  if ($$isRegExp(v)) {
+    throw new TypeError(
+      "First argument to String.prototype." + name + " must not be a regular expression",
+    );
+  }
+}
+
 function $$String_prototype_includes(searchString, position) {
   const s = $$thisString(this, "includes");
+  $$noRegExp(searchString, "includes");
   const t = __intrinsic_to_string(searchString);
   const start = $$clamp($$toInteger(position), s.length);
   return $$indexOf(s, t, start) >= 0;
@@ -202,6 +212,7 @@ function $$String_prototype_includes(searchString, position) {
 
 function $$String_prototype_startsWith(searchString, position) {
   const s = $$thisString(this, "startsWith");
+  $$noRegExp(searchString, "startsWith");
   const t = __intrinsic_to_string(searchString);
   const start = $$clamp($$toInteger(position), s.length);
   return $$occursAt(s, t, start);
@@ -209,6 +220,7 @@ function $$String_prototype_startsWith(searchString, position) {
 
 function $$String_prototype_endsWith(searchString, endPosition) {
   const s = $$thisString(this, "endsWith");
+  $$noRegExp(searchString, "endsWith");
   const t = __intrinsic_to_string(searchString);
   const len = s.length;
   let end = len;
@@ -583,8 +595,30 @@ function $$String_prototype_toLocaleLowerCase() {
   return $$caseMap($$thisString(this, "toLocaleLowerCase"), false);
 }
 
+// GetMethod(v, @@split / @@replace) (T27): undefined/null → undefined, else a function.
+function $$symbolMethod(v, key) {
+  const m = v[key];
+  if (m === undefined || m === null) {
+    return undefined;
+  }
+  if (typeof m !== "function") {
+    throw new TypeError($$typeDescribe(m) + " is not a function");
+  }
+  return m;
+}
+
 function $$String_prototype_split(separator, limit) {
-  const s = $$thisString(this, "split");
+  if (this === undefined || this === null) {
+    throw new TypeError("String.prototype.split called on null or undefined");
+  }
+  // T27: a separator with a `Symbol.split` method (a RegExp) does the splitting.
+  if (separator !== undefined && separator !== null) {
+    const splitter = $$symbolMethod(separator, Symbol.split);
+    if (splitter !== undefined) {
+      return __intrinsic_call_list(splitter, separator, [this, limit]);
+    }
+  }
+  const s = __intrinsic_to_string(this);
   let lim = 4294967295;
   if (limit !== undefined) {
     lim = (+limit) >>> 0;
@@ -660,7 +694,17 @@ function $$substitute(matched, s, position, replacement) {
 }
 
 function $$String_prototype_replace(searchValue, replaceValue) {
-  const s = $$thisString(this, "replace");
+  if (this === undefined || this === null) {
+    throw new TypeError("String.prototype.replace called on null or undefined");
+  }
+  // T27: a search value with a `Symbol.replace` method (a RegExp) does the replacing.
+  if (searchValue !== undefined && searchValue !== null) {
+    const replacer = $$symbolMethod(searchValue, Symbol.replace);
+    if (replacer !== undefined) {
+      return __intrinsic_call_list(replacer, searchValue, [this, replaceValue]);
+    }
+  }
+  const s = __intrinsic_to_string(this);
   const t = __intrinsic_to_string(searchValue);
   const functional = typeof replaceValue === "function";
   let replacement = "";
@@ -681,7 +725,18 @@ function $$String_prototype_replace(searchValue, replaceValue) {
 }
 
 function $$String_prototype_replaceAll(searchValue, replaceValue) {
-  const s = $$thisString(this, "replaceAll");
+  if (this === undefined || this === null) {
+    throw new TypeError("String.prototype.replaceAll called on null or undefined");
+  }
+  // T27: a RegExp must be global; `Symbol.replace` does the replacing.
+  if (searchValue !== undefined && searchValue !== null) {
+    $$reRequireGlobal(searchValue, "replaceAll");
+    const replacer = $$symbolMethod(searchValue, Symbol.replace);
+    if (replacer !== undefined) {
+      return __intrinsic_call_list(replacer, searchValue, [this, replaceValue]);
+    }
+  }
+  const s = __intrinsic_to_string(this);
   const t = __intrinsic_to_string(searchValue);
   const functional = typeof replaceValue === "function";
   let replacement = "";

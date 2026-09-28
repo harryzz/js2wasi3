@@ -165,7 +165,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// A direct call of a prelude function with JS-value arguments, as a JS value (T29).
-    fn prelude_call(&mut self, name: &str, args: Vec<Expr>) -> Expr {
+    pub(crate) fn prelude_call(&mut self, name: &str, args: Vec<Expr>) -> Expr {
         let sym = self.prelude.names[name];
         let func = self.funcs[&sym];
         for p in self.func_params[&func].clone().into_iter().flatten() {

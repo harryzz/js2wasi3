@@ -1019,6 +1019,44 @@ fn format_object(cx: &mut dyn Cx) -> Function {
             .local_set(PREFIX);
         s.end();
     }
+    // A RegExp (T27): `/a+/gi`, alone unless it has keys (`/a/ { x: 1 }`).
+    if cx.names("$regexp") {
+        let own = oh(cx, object::Helper::OwnGet);
+        let slash = cx.str("/");
+        let elem = |s: &mut wasm_encoder::InstructionSink, i: i32| {
+            s.local_get(O)
+                .global_get(runtime::G_SYM_STATE)
+                .call(own)
+                .ref_cast_non_null(crate::array::array())
+                .struct_get(runtime::T_ARRAY, crate::array::F_ELEMS)
+                .i32_const(i)
+                .array_get(T_VALS)
+                .ref_cast_non_null(string());
+        };
+        s.local_get(O)
+            .struct_get(runtime::T_OBJECT, object::F_CLASS)
+            .i32_const(object::CLASS_MASK)
+            .i32_and()
+            .i32_const(object::CLASS_REGEXP)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(slash);
+        elem(&mut s, 0);
+        s.call(concat).global_get(slash).call(concat);
+        elem(&mut s, 1);
+        s.call(concat).local_set(W_BASE);
+        s.local_get(O).call(own_keys).array_len();
+        s.local_get(O).call(symbols).i32_or().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(W_BASE).ref_as_non_null().return_();
+        s.end();
+        s.local_get(W_BASE)
+            .ref_as_non_null()
+            .global_get(space)
+            .call(concat)
+            .local_set(PREFIX);
+        s.end();
+    }
     // A generator object (T18): `Object [Generator] ` (node's `Symbol.toStringTag` form).
     s.local_get(PREFIX).ref_is_null();
     s.local_get(O)

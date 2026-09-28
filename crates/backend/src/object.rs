@@ -55,6 +55,8 @@ pub const CLASS_ASYNC_GEN: i32 = 7;
 pub const CLASS_WRAPPER: i32 = 8;
 /// `Reflect` as a value (T36), like [`CLASS_MATH`].
 pub const CLASS_REFLECT: i32 = 9;
+/// A RegExp (T27): its data (`builtins/regexp.js`) is under the private `G_SYM_STATE` key.
+pub const CLASS_REGEXP: i32 = 10;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -220,8 +222,24 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         Builtin::Timeout | Builtin::Immediate | Builtin::AsyncGenerator => &[],
         // T20: from the prelude and `crate::typed`.
         Builtin::ArrayBuffer | Builtin::TypedArray | Builtin::Typed(_) => &[],
+        // T27: all from the prelude.
+        Builtin::RegExp => &[],
     }
 }
+
+/// The accessors of `RegExp.prototype` (T27, getters from the prelude).
+const REGEXP_GETTERS: &[&str] = &[
+    "source",
+    "flags",
+    "hasIndices",
+    "global",
+    "ignoreCase",
+    "multiline",
+    "dotAll",
+    "unicode",
+    "unicodeSets",
+    "sticky",
+];
 
 fn parent(b: Builtin) -> Option<Builtin> {
     match b {
@@ -330,6 +348,10 @@ pub enum Helper {
     /// `(v) -> i32`: node's `hasBuiltInToString` (T25): not an object, no `toString`, or one found
     /// on a built-in prototype (not an own one).
     BuiltinToString,
+    /// `(data) -> jsval`: a new RegExp holding `data` (T27), with an own `lastIndex` of 0.
+    RegExpNew,
+    /// `(v) -> jsval`: a RegExp's data; `null` for `RegExp.prototype`; `undefined` otherwise.
+    RegExpData,
     /// `(args: jsval (an `$array`)) -> jsval`: an unmapped `arguments` object (T25): the indices,
     /// `length` and `[Symbol.iterator]` (`Array.prototype.values`), both hidden.
     MakeArguments,
@@ -377,6 +399,7 @@ impl Helper {
                 Builtin::ArrayBuffer => "ArrayBuffer.prototype",
                 Builtin::TypedArray => "%TypedArray%.prototype",
                 Builtin::Typed(_) => "typed_array_prototype",
+                Builtin::RegExp => "RegExp.prototype",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -416,6 +439,8 @@ impl Helper {
             Helper::TagOf => "tag_of",
             Helper::BuiltinToString => "has_builtin_to_string",
             Helper::MakeArguments => "make_arguments",
+            Helper::RegExpNew => "regexp_new",
+            Helper::RegExpData => "regexp_data",
         }
     }
 
@@ -464,7 +489,7 @@ impl Helper {
             Helper::GetOwnSymbols | Helper::TagOf => (vec![v], vec![v]),
             Helper::BuiltinTag => (vec![o], vec![v]),
             Helper::BuiltinToString => (vec![v], vec![I32]),
-            Helper::MakeArguments => (vec![v], vec![v]),
+            Helper::MakeArguments | Helper::RegExpNew | Helper::RegExpData => (vec![v], vec![v]),
         }
     }
 
@@ -541,6 +566,8 @@ impl Helper {
                 f
             }
             Helper::ObjectRest => object_rest(cx),
+            Helper::RegExpNew => regexp_new(cx),
+            Helper::RegExpData => regexp_data(cx),
             Helper::CheckDestructure => check_destructure(cx),
             Helper::Keys(k) => keys(cx, k),
             Helper::SymbolKeys => symbol_keys(),
@@ -1400,14 +1427,26 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         })
         .collect();
     // Methods written in the prelude (T21). T25: `Map.prototype[Symbol.iterator]` is `entries`,
-    // `Set.prototype[Symbol.iterator]` and `keys` are `values`; `size` is a getter.
+    // `Set.prototype[Symbol.iterator]` and `keys` are `values`; `size` is a getter. T27: a key
+    // `$name` is the well-known symbol `Symbol.name` (`$$RegExp_prototype_$match`).
+    let mut sym_methods: Vec<(u32, u32, u32, i32)> = Vec::new();
     for (key, code, len) in cx.builtin_methods(b) {
         cx.declare_func(code);
+        if let Some(k) = key
+            .strip_prefix('$')
+            .and_then(js2wasi3_ir::well_known_symbol)
+        {
+            let sym = cx.helper(runtime::Helper::WellKnownSymbol(k));
+            let name = cx.str(&format!("[Symbol.{}]", &key[1..]));
+            sym_methods.push((sym, name, code, len as i32));
+            continue;
+        }
         let getter = (matches!(b, Builtin::Map | Builtin::Set) && key == "size")
             || (b == Builtin::Symbol && key == "description")
             || (b == Builtin::TypedArray
                 && ["length", "byteLength", "byteOffset", "buffer"].contains(&key.as_str()))
-            || (b == Builtin::ArrayBuffer && key == "byteLength");
+            || (b == Builtin::ArrayBuffer && key == "byteLength")
+            || (b == Builtin::RegExp && REGEXP_GETTERS.contains(&key.as_str()));
         let name = cx.str(&if getter {
             format!("get {key}")
         } else {
@@ -1473,6 +1512,20 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.i32_const(0).ref_i31();
         s.i32_const(HIDDEN).call(define);
     }
+    for (sym, name, code, len) in sym_methods {
+        s.local_get(O).ref_as_non_null();
+        s.call(sym)
+            .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
+        s.ref_func(code);
+        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.ref_null(func::vals());
+        s.global_get(name)
+            .i32_const(len)
+            .i32_const(0)
+            .call(new_function);
+        s.i32_const(HIDDEN).call(define);
+    }
+    let exec = (b == Builtin::RegExp).then(|| cx.str("exec"));
     for (keys, name, code, len, getter, flags) in real {
         s.ref_func(code);
         s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
@@ -1482,6 +1535,11 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             .i32_const(flags)
             .call(new_function)
             .local_set(M);
+        if exec == Some(name) {
+            s.local_get(M)
+                .ref_cast_non_null(object())
+                .global_set(runtime::G_REGEXP_EXEC);
+        }
         for key in keys {
             s.local_get(O)
                 .ref_as_non_null()
@@ -2694,6 +2752,57 @@ fn create(cx: &mut dyn Cx) -> Function {
     s.local_get(P).call(to_string).call(concat);
     s.call(throw);
     s.unreachable();
+    s.end();
+    f
+}
+
+/// `$regexp_new(data)` (T27), see [`Helper::RegExpNew`].
+fn regexp_new(cx: &mut dyn Cx) -> Function {
+    let alloc = h(cx, Helper::Alloc);
+    let proto = h(cx, Helper::Proto(Builtin::RegExp));
+    let define = h(cx, Helper::Define);
+    let last_index = cx.str("lastIndex");
+    const DATA: u32 = 0;
+    const O: u32 = 1;
+    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let mut s = f.instructions();
+    s.i32_const(CLASS_REGEXP).call(proto).call(alloc).local_tee(O).ref_as_non_null();
+    s.global_get(last_index).i32_const(0).ref_i31();
+    s.i32_const(HIDDEN | FIXED).call(define);
+    s.local_get(O).ref_as_non_null().global_get(runtime::G_SYM_STATE);
+    s.local_get(DATA);
+    s.i32_const(HIDDEN | READONLY | FIXED | PRIVATE).call(define);
+    s.local_get(O);
+    s.end();
+    f
+}
+
+/// `$regexp_data(v)` (T27), see [`Helper::RegExpData`].
+fn regexp_data(cx: &mut dyn Cx) -> Function {
+    let own = h(cx, Helper::OwnGet);
+    const V: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(object());
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.struct_get(T_OBJECT, F_CLASS)
+        .i32_const(CLASS_MASK)
+        .i32_and()
+        .i32_const(CLASS_REGEXP)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.global_get(runtime::G_SYM_STATE).call(own).return_();
+    s.end();
+    s.local_get(V)
+        .global_get(G_PROTOS + Builtin::RegExp.index())
+        .ref_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(G_NULL).return_();
+    s.end();
+    s.end();
+    s.global_get(G_UNDEFINED);
     s.end();
     f
 }

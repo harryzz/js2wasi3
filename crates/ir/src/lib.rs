@@ -564,6 +564,8 @@ pub enum Builtin {
     ArrayBuffer,
     TypedArray,
     Typed(u8),
+    /// T27.
+    RegExp,
 }
 
 /// The typed array constructors (T20), by kind; [`TYPED_SIZES`]: their element sizes.
@@ -582,7 +584,7 @@ pub const TYPED_SIZES: [u32; 9] = [1, 1, 1, 2, 2, 4, 4, 4, 8];
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 36] = [
+    pub const ALL: [Builtin; 37] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -619,6 +621,7 @@ impl Builtin {
         Builtin::Typed(6),
         Builtin::Typed(7),
         Builtin::Typed(8),
+        Builtin::RegExp,
     ];
 
     pub fn name(self) -> &'static str {
@@ -644,6 +647,7 @@ impl Builtin {
             Builtin::ArrayBuffer => "ArrayBuffer",
             Builtin::TypedArray => "%TypedArray%",
             Builtin::Typed(k) => TYPED_NAMES[k as usize],
+            Builtin::RegExp => "RegExp",
         }
     }
 
@@ -672,6 +676,7 @@ impl Builtin {
             Builtin::Map | Builtin::Set => Some(0),
             Builtin::ArrayBuffer => Some(1),
             Builtin::Typed(_) => Some(3),
+            Builtin::RegExp => Some(2),
             _ => None,
         }
     }
@@ -752,6 +757,12 @@ pub enum Intrinsic {
     BuiltinTag,
     /// `(v) -> jsval`: ToObject (T30): primitives wrapped, TypeError for `undefined`/`null`.
     ToObject,
+    /// `(data) -> jsval`: a new RegExp object holding `data` (T27, see `builtins/regexp.js`).
+    RegExpNew,
+    /// `(v) -> jsval`: a RegExp's data; `null` for `RegExp.prototype`, `undefined` otherwise (T27).
+    RegExpData,
+    /// `(f) -> bool`: is `f` the built-in `RegExp.prototype.exec` (T27)?
+    RegExpBuiltinExec,
     /// `(v) -> jsval`: the primitive of a wrapper object, anything else unchanged (T30).
     Unwrap,
     /// `(v) -> jsval`: `util.inspect(v)` from depth `d` (T25, `console.log` format strings;
@@ -981,6 +992,15 @@ pub enum Intrinsic {
     StrNew,
     /// Set code unit `i` of a string made by `StrNew` (args: string, i, unit: `i32`s). No result.
     StrSet,
+    /// A new `$i32s` array of `n` (`i32`) zeros (T27): prelude-internal storage (the RegExp
+    /// engine's program and backtrack stack), never given to user code.
+    I32New,
+    /// Element `i` (`i32`, in range) of an `$i32s` array (T27).
+    I32Get,
+    /// Set element `i` of an `$i32s` array (args: array, i, value: `i32`s). No result (T27).
+    I32Set,
+    /// The length of an `$i32s` array (`i32`, T27).
+    I32Len,
     /// JS `a < b` on two JS values (`bool`, IsLessThan with LeftFirst): ToPrimitive (hint number)
     /// of both, then strings compare by code units, anything else as numbers (NaN: false).
     /// `swap`: compare `b < a` (for `>`/`<=`), still converting `a` first. `or_equal`: `<=`/`>=`
@@ -1132,9 +1152,13 @@ impl Intrinsic {
             | Intrinsic::GetOwnPropertySymbols
             | Intrinsic::BuiltinTag
             | Intrinsic::ToObject
+            | Intrinsic::RegExpNew
+            | Intrinsic::RegExpData
             | Intrinsic::Unwrap
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
-            Intrinsic::BuiltinToString | Intrinsic::IsConstructor => (&[JsVal], Some(Bool)),
+            Intrinsic::BuiltinToString | Intrinsic::IsConstructor | Intrinsic::RegExpBuiltinExec => {
+                (&[JsVal], Some(Bool))
+            }
             Intrinsic::NewError(ErrorKind::AggregateError) => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
@@ -1223,6 +1247,10 @@ impl Intrinsic {
             Intrinsic::StrSub => (&[JsVal, I32, I32], Some(JsVal)),
             Intrinsic::StrNew => (&[I32], Some(JsVal)),
             Intrinsic::StrSet => (&[JsVal, I32, I32], None),
+            Intrinsic::I32New => (&[I32], Some(JsVal)),
+            Intrinsic::I32Get => (&[JsVal, I32], Some(I32)),
+            Intrinsic::I32Set => (&[JsVal, I32, I32], None),
+            Intrinsic::I32Len => (&[JsVal], Some(I32)),
             Intrinsic::JsLess { .. } => (&[JsVal, JsVal], Some(Bool)),
             Intrinsic::Trap => (&[], None),
             Intrinsic::MakeArguments => (&[JsVal], Some(JsVal)),
@@ -1287,6 +1315,9 @@ impl Intrinsic {
             Intrinsic::GetOwnPropertySymbols => "get_own_property_symbols",
             Intrinsic::BuiltinTag => "builtin_tag",
             Intrinsic::ToObject => "to_object",
+            Intrinsic::RegExpNew => "regexp_new",
+            Intrinsic::RegExpData => "regexp_data",
+            Intrinsic::RegExpBuiltinExec => "regexp_builtin_exec",
             Intrinsic::Unwrap => "unwrap",
             Intrinsic::InspectAt(_) => "inspect_at",
             Intrinsic::BuiltinToString => "builtin_to_string",
@@ -1386,6 +1417,10 @@ impl Intrinsic {
             Intrinsic::StrSub => "str_sub",
             Intrinsic::StrNew => "str_new",
             Intrinsic::StrSet => "str_set",
+            Intrinsic::I32New => "i32_new",
+            Intrinsic::I32Get => "i32_get",
+            Intrinsic::I32Set => "i32_set",
+            Intrinsic::I32Len => "i32_len",
             Intrinsic::JsLess { .. } => "js_less",
             Intrinsic::Trap => "trap",
             Intrinsic::MakeArguments => "make_arguments",

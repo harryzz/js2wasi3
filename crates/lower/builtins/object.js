@@ -255,6 +255,10 @@ function $$Object_prototype_toString() {
   if (Array.isArray(o)) {
     return "[object Array]";
   }
+  // `[[RegExpMatcher]]` (T27).
+  if (__intrinsic_regexp_data(o)) {
+    return "[object RegExp]";
+  }
   // `[[ErrorData]]`, approximated by the prototype chain.
   if (o instanceof Error) {
     return "[object Error]";

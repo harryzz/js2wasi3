@@ -311,7 +311,7 @@ fn unimplemented_object_features_trap() {
     for (name, src, trap) in [
         (
             "method",
-            "const s = \"x\";\nconsole.log(\"before\");\nconsole.log(typeof s.match);\n",
+            "const s = \"x\";\nconsole.log(\"before\");\nconsole.log(typeof s.anchor);\n",
             "builtin_not_implemented",
         ),
         (

@@ -37,7 +37,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T24](T24-switch-small-syntax.md) | `switch`, `&&=`/`\|\|=`/`??=`, `**`, `debugger` | done | T19 |
 | [T25](T25-builtins-2.md) | Built-ins, second batch (`JSON.parse`, `Map`/`Set`, `bind`/`arguments`, built-ins as values, symbols/printing, promises/timers) | done | T21 |
 | [T26](T26-date.md) | `Date` | todo (later) | T21 |
-| [T27](T27-regex.md) | `RegExp` and regex literals | todo (approved) | T21, T25 |
+| [T27](T27-regex.md) | `RegExp` and regex literals | in progress | T21, T25 |
 | [T28](T28-test262-quick-wins.md) | test262 quick wins (F139, F140, F143, F144; test262 64.1% → 76.7%) | done | T23 |
 | [T29](T29-async-yield-star.md) | `yield*` in async generators (F115; test262: 1,127 more pass, 81.2%) | done | T20 |
 | [T30](T30-wrapper-objects.md) | Wrapper objects: `new String/Number/Boolean`, `Object(prim)` (F106 part; test262: 745 more pass, 84.2%) | done | T25, T28 |

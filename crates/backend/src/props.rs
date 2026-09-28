@@ -530,6 +530,19 @@ fn desc(cx: &mut dyn Cx) -> Function {
         s.global_get(b).call(concat).return_();
     }
     s.end();
+    if cx.names("$regexp") {
+        // T27: V8's text for a RegExp.
+        let regexp = cx.str("[object RegExp]");
+        s.local_get(O)
+            .struct_get(T_OBJECT, object::F_CLASS)
+            .i32_const(object::CLASS_MASK)
+            .i32_and()
+            .i32_const(object::CLASS_REGEXP)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(regexp).return_();
+        s.end();
+    }
     s.global_get(open);
     s.local_get(O).call(ctor_name).local_tee(N);
     s.ref_is_null();

@@ -220,14 +220,15 @@ fn declarations_and_functions() {
 
 #[test]
 fn all_errors_are_reported() {
-    let e =
-        errors("export function f() {\n  let s = Proxy;\n  new WeakMap();\n  return /a/;\n}");
+    let e = errors(
+        "export function f() {\n  let s = Proxy;\n  new WeakMap();\n  return new WeakSet();\n}",
+    );
     assert_eq!(
         e,
         vec![
             "2:11 unsupported: global `Proxy` (planned: T21)",
             "3:7 unsupported: global `WeakMap` (planned: T21)",
-            "4:10 unsupported: expression `RegExpLiteral` (planned: later)",
+            "4:14 unsupported: global `WeakSet` (planned: T21)",
         ]
     );
 }

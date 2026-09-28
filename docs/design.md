@@ -213,6 +213,20 @@ sentinels like the others, so ToPrimitive calls the prelude's `toString`) and `b
 spec's algorithm writing pieces into one array joined at the end; node's circular-structure message). The intrinsic
 `define(o, k, v)` is CreateDataProperty. A static of a global the prelude has statics for but not this one
 (`JSON.rawJSON`) is rejected by name.)
+(T27: `RegExp` in `builtins/regexp.js`: a RegExp is a `$object` of class `CLASS_REGEXP` with its data `[source, flags,
+code]` under the private `G_SYM_STATE` key and an own `lastIndex` (intrinsics `regexp_new`, `regexp_data`). The
+pattern is parsed to an AST of arrays and compiled to a program of `i32`s run by a backtracking VM with an explicit
+backtrack stack (choices, undo entries for captures and loop registers, lookaround barriers), never JS recursion;
+programs are cached by flags and source. Regex literals are `$$RegExpCreate(source, flags)` per evaluation. Hot
+prelude data lives in `$i32s` arrays through the intrinsics `i32_new/get/set/len` (typed, unboxed; prelude-only).
+`G_REGEXP_EXEC` holds the installed `RegExp.prototype.exec`, so RegExpExec skips the lookup-and-call while it's
+the built-in (`regexp_builtin_exec`). `console.log` prints `/source/flags`. `RegExp.prototype[Symbol.match]` etc.
+are prelude methods named `$$RegExp_prototype_$match` (a `$name` key is installed as `Symbol.name`), linked from
+RegExp creation only when the code names the string method; `String.prototype.split/replace` look up
+`Symbol.split/replace` first. Unicode data comes from node itself (`scripts/gen-unicode.mjs`, node's Unicode
+version): the `i` flag's case tables (`builtins/unicode-case.js`, always in the prelude) and the `\p{…}` sets
+(`crates/lower/src/unicode_props.rs`), of which the prelude gets only those whose `\p{…}` text appears in the
+source (`builtins::parse`). The frontend has oxc check regex literals (early SyntaxErrors).)
 (T20: typed arrays and `ArrayBuffer`s are native `$typed`/`$buffer` objects (`crates/backend/src/typed.rs`: element
 access, printing) with their constructors and methods in `builtins/typedarray.js` on `Intrinsic::Typed` operations.)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude

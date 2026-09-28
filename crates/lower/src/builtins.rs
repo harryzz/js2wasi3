@@ -24,6 +24,8 @@ use oxc_ast::ast::{BindingPattern, Expression, Statement};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::symbol::SymbolId;
 
+use crate::unicode_props::{NAMES, TABLES};
+
 /// The JS source of the built-ins.
 /// `Array.prototype` methods that are native for arrays; the prelude's are their generic
 /// fallbacks (T35).
@@ -35,6 +37,8 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/array.js"),
     include_str!("../builtins/object.js"),
     include_str!("../builtins/reflect.js"),
+    include_str!("../builtins/regexp.js"),
+    include_str!("../builtins/unicode-case.js"),
     include_str!("../builtins/json.js"),
     include_str!("../builtins/map.js"),
     include_str!("../builtins/symbol.js"),
@@ -46,7 +50,7 @@ pub const PRELUDE: &str = concat!(
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
 /// `[Symbol.iterator]` (installed with `entries`/`values`) and its iterator's `next`, which the
-/// user's code never names.
+/// user's code never names; a RegExp converts to a string through its `toString` (T27).
 const IMPLIED: &[(&str, &[&str])] = &[
     (
         "$$Map",
@@ -60,6 +64,11 @@ const IMPLIED: &[(&str, &[&str])] = &[
         "$$Set",
         &["$$Set_prototype_values", "$$SetIterator_prototype_next"],
     ),
+    // ToPrimitive of a RegExp (T27) reaches its `toString` without the code naming it.
+    ("$$RegExpCreate", &["$$RegExp_prototype_toString"]),
+    ("$$RegExp", &["$$RegExp_prototype_toString"]),
+    // `matchAll`/`replaceAll` read `flags` through a variable key.
+    ("$$reCreate", &["$$RegExp_prototype_flags"]),
     ("$$Map_prototype_keys", &["$$MapIterator_prototype_next"]),
     ("$$Map_prototype_values", &["$$MapIterator_prototype_next"]),
     ("$$Map_prototype_entries", &["$$MapIterator_prototype_next"]),
@@ -81,6 +90,22 @@ pub(crate) const ASYNC_DELEGATE: [&str; 7] = [
     "$$asyncDelegateNoThrow",
 ];
 
+/// The prelude function a regex literal calls (T27): `$$RegExpCreate(source, flags)`.
+pub(crate) const REGEXP_CREATE: &str = "$$RegExpCreate";
+
+/// The prelude function every RegExp is made by (T27).
+const REGEXP_CREATE_ANY: &str = "$$reCreate";
+
+/// `RegExp.prototype[Symbol.x]` (`$$RegExp_prototype_$x`, T27) and the property names that can
+/// reach it.
+const REGEXP_SYMBOL_METHODS: &[(&str, &[&str])] = &[
+    ("match", &["match"]),
+    ("matchAll", &["matchAll"]),
+    ("replace", &["replace", "replaceAll"]),
+    ("search", &["search"]),
+    ("split", &["split"]),
+];
+
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
 pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
 
@@ -94,7 +119,65 @@ pub fn parse<'a>(
     path: &str,
     source: &'a str,
 ) -> Result<Program<'a>, Diagnostics> {
-    frontend::parse_with_prelude(alloc, path, source, PRELUDE)
+    let mut prelude = String::from(PRELUDE);
+    prelude.push_str(&unicode_sets(source));
+    frontend::parse_with_prelude(alloc, path, source, &prelude)
+}
+
+/// `$$reUnicodeSet(text)` (T27): the code point set of `\p{text}`, for the texts node accepts that
+/// the source names (`\p{…}`/`\P{…}` in a regex literal, `\\p{…}` in a string), or `null`. The
+/// sets are encoded like unicode-case.js's runs: ranges as (gap from the previous range, length).
+fn unicode_sets(source: &str) -> String {
+    use std::fmt::Write;
+    let mut found: std::collections::BTreeMap<&str, u16> = Default::default();
+    let b = source.as_bytes();
+    for i in 0..b.len().saturating_sub(2) {
+        if b[i] == b'\\' && (b[i + 1] == b'p' || b[i + 1] == b'P') && b[i + 2] == b'{' {
+            let rest = &source[i + 3..];
+            if let Some(end) = rest.find('}')
+                && let Ok(k) = NAMES.binary_search_by(|(n, _)| n.cmp(&&rest[..end]))
+            {
+                found.insert(&rest[..end], NAMES[k].1);
+            }
+        }
+    }
+    let mut js = String::from("function $$reUnicodeSet(text) {\n");
+    for (text, t) in found {
+        let mut nums = Vec::new();
+        let mut prev = 0;
+        for r in TABLES[t as usize].chunks(2) {
+            nums.push(r[0] - prev);
+            nums.push(r[1] - r[0]);
+            prev = r[1];
+        }
+        let _ = write!(js, "  if (text === {text:?}) {{\n    return \"{}\";\n  }}\n", encode(&nums));
+    }
+    js.push_str("  return null;\n}\n");
+    js
+}
+
+/// Non-negative numbers as unicode-case.js encodes them: zigzag (so `2 * v`), base-0x4000 digits,
+/// continuation units (0x4000–0x7FFF) first, as JS string literal text.
+fn encode(nums: &[u32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    for &v in nums {
+        let mut z = 2 * v as u64;
+        let mut digits = vec![z % 0x4000];
+        z /= 0x4000;
+        while z > 0 {
+            digits.push(0x4000 + z % 0x4000);
+            z /= 0x4000;
+        }
+        for &u in digits.iter().rev() {
+            if (0x20..0x7f).contains(&u) && u != 0x22 && u != 0x5c {
+                s.push(u as u8 as char);
+            } else {
+                let _ = write!(s, "\\u{u:04x}");
+            }
+        }
+    }
+    s
 }
 
 /// What the lowering needs to know about the prelude of one program.
@@ -182,6 +265,7 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     "Uint32Array",
     "Float32Array",
     "Float64Array",
+    "RegExp",
 ];
 
 /// Constructors whose prelude function `$$X` is what `new X(…)` runs and that throw when called
@@ -299,6 +383,12 @@ impl Prelude {
                     }
                 }
             }
+            // A regex literal (T27).
+            if let AstKind::RegExpLiteral(r) = node.kind()
+                && let Some(sym) = out.names.get(REGEXP_CREATE)
+            {
+                add(item_of[sym], r.span, &mut roots);
+            }
             // A string in the user's code may name a static read with a computed key
             // (`Math[k]`, T25)…
             if let AstKind::StringLiteral(s) = node.kind()
@@ -318,6 +408,13 @@ impl Prelude {
             }
             // A property name: the prototype methods it may read.
             let prop = match node.kind() {
+                // `Symbol.match` in the prelude is a well-known symbol, not a use of `match` (T27).
+                AstKind::StaticMemberExpression(m)
+                    if p.in_prelude(m.span.start)
+                        && matches!(&m.object, Expression::Identifier(id) if id.name == "Symbol") =>
+                {
+                    None
+                }
                 AstKind::StaticMemberExpression(m) => Some((m.property.name.as_str(), m.span)),
                 AstKind::ComputedMemberExpression(m) => match &m.expression {
                     Expression::StringLiteral(k) => Some((k.value.as_str(), m.span)),
@@ -422,6 +519,18 @@ impl Prelude {
                 && (key.is_empty() || user_props.contains(key))
             {
                 roots.push(item_of[sym]);
+            }
+        }
+        // `RegExp.prototype[Symbol.x]` (T27): reachable from every RegExp's creation when the
+        // code names a method that uses it (not from the string methods' lookups, so string
+        // `split`/`replace` don't link the engine).
+        if let Some(create) = out.names.get(REGEXP_CREATE_ANY) {
+            for (sym, props) in REGEXP_SYMBOL_METHODS {
+                if props.iter().any(|p| user_props.contains(*p))
+                    && let Some(m) = out.names.get(&format!("$$RegExp_prototype_${sym}"))
+                {
+                    deps.entry(item_of[create]).or_default().push(item_of[m]);
+                }
             }
         }
         out.user_props = user_props;

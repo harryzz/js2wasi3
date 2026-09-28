@@ -96,6 +96,7 @@ mod classes;
 mod closures;
 mod generators;
 mod patterns;
+mod unicode_props;
 
 use std::collections::{HashMap, HashSet};
 
@@ -4031,6 +4032,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Kind::Str,
             )),
             Expression::TemplateLiteral(t) => self.template(cx, t),
+            Expression::RegExpLiteral(r) => {
+                // A new RegExp per evaluation (T27); oxc checked the pattern.
+                let src = Expr::Str(utf16(r.regex.pattern.text.as_str(), false));
+                let flags = Expr::Str(utf16(&r.regex.flags.to_string(), false));
+                let e = self.prelude_call(builtins::REGEXP_CREATE, vec![src, flags]);
+                Ok(Val::js(e, Kind::Any))
+            }
             Expression::StaticMemberExpression(m) if m.property.name == "length" && !m.optional => {
                 self.hint_string(cx, &m.object);
                 let obj = self.expr(cx, &m.object)?;
@@ -5303,12 +5311,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
             "trap" => 0,
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
+            "regexp_new" | "regexp_data" | "regexp_builtin_exec" => 1,
             "to_key" | "object_desc" => 1,
             "set_proto" => 2,
             "call_list" | "construct_list" => 3,
             "inspect" => 2,
-            "unit" => 2,
-            "sub" | "str_set" | "define" => 3,
+            "unit" | "i32_get" => 2,
+            "sub" | "str_set" | "define" | "i32_set" => 3,
+            "i32_new" | "i32_len" => 1,
             _ => return Err(self.unsupported(c.span, &format!("intrinsic `{name}`"), "T21")),
         };
         if c.arguments.len() != arity {
@@ -5380,6 +5390,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ));
             return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
         }
+        if name == "regexp_builtin_exec" {
+            // T27: is it the built-in `RegExp.prototype.exec`?
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, e)?);
+            let e = jsval_of(Val::new(
+                Expr::intrinsic(Intrinsic::RegExpBuiltinExec, vec![v]),
+                Type::Bool,
+            ));
+            return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
+        }
         if name == "builtin_to_string" {
             let Some(e) = c.arguments[0].as_expression() else {
                 return Err(self.unsupported(c.span, "spread argument", "T21"));
@@ -5391,16 +5413,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ));
             return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
         }
-        if name == "to_object" || name == "unwrap" {
-            // T30: wrapper objects.
+        if matches!(name, "to_object" | "unwrap" | "regexp_new" | "regexp_data") {
+            // T30: wrapper objects; T27: RegExp objects and their data.
             let Some(e) = c.arguments[0].as_expression() else {
                 return Err(self.unsupported(c.span, "spread argument", "T21"));
             };
             let v = jsval_of(self.expr(cx, e)?);
-            let op = if name == "to_object" {
-                Intrinsic::ToObject
-            } else {
-                Intrinsic::Unwrap
+            let op = match name {
+                "to_object" => Intrinsic::ToObject,
+                "unwrap" => Intrinsic::Unwrap,
+                "regexp_new" => {
+                    // `console.log` recognizes RegExps only then.
+                    self.module.names.insert("$regexp".to_string());
+                    Intrinsic::RegExpNew
+                }
+                _ => Intrinsic::RegExpData,
             };
             return Ok((Expr::intrinsic(op, vec![v]), Call::Intrinsic(Some(Kind::Any))));
         }
@@ -5430,7 +5457,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let e = Expr::intrinsic(Intrinsic::Trap, vec![]);
             return Ok((e, Call::Intrinsic(None)));
         }
-        let strings = matches!(name, "to_string" | "unit" | "sub" | "str_set" | "str_len");
+        let strings = matches!(
+            name,
+            "to_string" | "unit" | "sub" | "str_set" | "str_len" | "i32_get" | "i32_set" | "i32_len"
+        );
         let mut args = Vec::new();
         for (i, a) in c.arguments.iter().enumerate() {
             let Some(e) = a.as_expression() else {
@@ -5462,6 +5492,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 return Ok((e, str_kind));
             }
             "str_new" => return Ok((str_op(Intrinsic::StrNew, args), str_kind)),
+            // T27: `$i32s` arrays (the first argument is one, the rest numbers).
+            "i32_new" => {
+                let e = str_op(Intrinsic::I32New, args);
+                return Ok((e, Call::Intrinsic(Some(Kind::Any))));
+            }
+            "i32_set" => return Ok((str_op(Intrinsic::I32Set, args), Call::Intrinsic(None))),
+            "i32_get" | "i32_len" => {
+                let op = if name == "i32_get" {
+                    Intrinsic::I32Get
+                } else {
+                    Intrinsic::I32Len
+                };
+                let e = from_i32(str_op(op, args));
+                return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+            }
             "sub" => return Ok((str_op(Intrinsic::StrSub, args), str_kind)),
             "str_set" => return Ok((str_op(Intrinsic::StrSet, args), Call::Intrinsic(None))),
             "str_len" => {

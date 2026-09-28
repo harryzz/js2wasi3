@@ -112,6 +112,10 @@ function $$describe(v) {
     if (kind >= 0) {
       return kind === 0 ? "#<Map>" : "#<Set>";
     }
+    // T27: V8's text for a RegExp.
+    if (__intrinsic_regexp_data(v)) {
+      return "[object RegExp]";
+    }
     // Their iterators by `Symbol.toStringTag` (node 24).
     const mode = __intrinsic_map_iter_kind(v);
     if (mode >= 0) {

@@ -100,7 +100,14 @@ pub fn parse<'a>(
     path: &str,
     source: &'a str,
 ) -> Result<Program<'a>, Diagnostics> {
-    let ret = Parser::new(alloc, source, SourceType::mjs()).parse();
+    // Regex literals are checked too (T27): an invalid pattern is an early SyntaxError.
+    let options = oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..Default::default()
+    };
+    let ret = Parser::new(alloc, source, SourceType::mjs())
+        .with_options(options)
+        .parse();
     if ret.fatal_error || ret.diagnostics.has_errors() {
         return Err(convert(path, source, ret.diagnostics.into_vec()));
     }

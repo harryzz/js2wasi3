@@ -26,7 +26,8 @@
 //!   - `$js_rem(x, y)`: JS `%` on numbers, i.e. an exact `fmod` (a port of musl's bit-level algorithm).
 //!     The shortcut `x - trunc(x/y)*y` is inexact for large quotients.
 //!   - `$to_int32(x)`: JS `ToInt32`. `i64.trunc_sat_f64_s` + wrap when |x| < 2^63, otherwise
-//!     `fmod(x, 2^32)` first. NaN and ±∞ give 0.
+//!     `fmod(x, 2^32)` first. NaN and ±∞ give 0. A conversion is inline when |x| < 2^31
+//!     (`i32.trunc_f64_s`, through each function's scratch `f64` local) and calls it otherwise (T27).
 //!
 //!   - JS value helpers (`$box_number`, `$to_number`, `$strict_eq`, …): see [`runtime`].
 //! - A module that uses `jsval` starts its type section with the runtime `rec` group and its
@@ -173,6 +174,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     let type_base = if js { runtime::TYPES } else { 0 };
     let mut e = Emitter {
+        scratch_f64: 0,
         m: module,
         imports: host::Imports {
             base: lifted.len() as u32,
@@ -745,6 +747,8 @@ enum Frame {
 
 struct Emitter<'m> {
     m: &'m ir::Module,
+    /// The current function's scratch `f64` local (the inline ToInt32 fast path).
+    scratch_f64: u32,
     imports: host::Imports,
     types: TypeSection,
     /// Runtime globals that come before the module's own (see `global_base`).
@@ -992,10 +996,12 @@ impl Emitter<'_> {
     }
 
     fn function(&mut self, f: &ir::Function) -> anyhow::Result<Function> {
-        let locals: Vec<(u32, ValType)> = f.locals[f.params as usize..]
+        let mut locals: Vec<(u32, ValType)> = f.locals[f.params as usize..]
             .iter()
             .map(|l| (1, val_type(l.ty)))
             .collect();
+        locals.push((1, ValType::F64));
+        self.scratch_f64 = f.locals.len() as u32;
         let mut func = Function::new(locals);
         let mut frames = Vec::new();
         {
@@ -1281,7 +1287,17 @@ impl Emitter<'_> {
                 let js = |h| Helper::Js(h);
                 match (from, to) {
                     (Type::F64, Type::I32) => {
-                        s.call(self.helper_index(Helper::ToInt32));
+                        // ToInt32, inline when |x| < 2^31 (then it's the truncation, T27).
+                        let t = self.scratch_f64;
+                        s.local_tee(t)
+                            .f64_abs()
+                            .f64_const(2147483648.0.into())
+                            .f64_lt();
+                        s.if_(BlockType::Result(ValType::I32));
+                        s.local_get(t).i32_trunc_f64_s();
+                        s.else_();
+                        s.local_get(t).call(self.helper_index(Helper::ToInt32));
+                        s.end();
                     }
                     (Type::I32, Type::F64) => {
                         s.f64_convert_i32_s();
@@ -1351,6 +1367,11 @@ impl Emitter<'_> {
                     ) && i == 0)
                     {
                         s.ref_cast_non_null(runtime::string());
+                    }
+                    if matches!(op, Intrinsic::I32Get | Intrinsic::I32Set | Intrinsic::I32Len)
+                        && i == 0
+                    {
+                        s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_I32S));
                     }
                     if matches!(op, Intrinsic::KeysLen | Intrinsic::KeysGet) && i == 0 {
                         s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_KEYS));
@@ -1511,6 +1532,26 @@ impl Emitter<'_> {
                         s.array_set(runtime::T_STRING);
                         return Ok(false);
                     }
+                    Intrinsic::I32New => {
+                        s.array_new_default(runtime::T_I32S);
+                        return Ok(true);
+                    }
+                    Intrinsic::I32Get => {
+                        s.array_get(runtime::T_I32S);
+                        return Ok(true);
+                    }
+                    Intrinsic::I32Set => {
+                        s.array_set(runtime::T_I32S);
+                        return Ok(false);
+                    }
+                    Intrinsic::I32Len => {
+                        s.array_len();
+                        return Ok(true);
+                    }
+                    Intrinsic::RegExpBuiltinExec => {
+                        s.global_get(runtime::G_REGEXP_EXEC).ref_eq();
+                        return Ok(true);
+                    }
                     Intrinsic::Trap => {
                         s.unreachable();
                         return Ok(false);
@@ -1545,6 +1586,11 @@ impl Emitter<'_> {
                     | Intrinsic::StrUnit
                     | Intrinsic::StrNew
                     | Intrinsic::StrSet
+                    | Intrinsic::I32New
+                    | Intrinsic::I32Get
+                    | Intrinsic::I32Set
+                    | Intrinsic::I32Len
+                    | Intrinsic::RegExpBuiltinExec
                     | Intrinsic::Trap => unreachable!("inline"),
                     Intrinsic::StrSub => H::StrSub,
                     Intrinsic::JsLess { swap, or_equal } => H::JsLess {
@@ -1593,6 +1639,8 @@ impl Emitter<'_> {
                     Intrinsic::BuiltinTag => H::Obj(object::Helper::TagOf),
                     Intrinsic::ToObject => H::Wrap(wrapper::Helper::ToObject),
                     Intrinsic::Unwrap => H::Wrap(wrapper::Helper::Unwrap),
+                    Intrinsic::RegExpNew => H::Obj(object::Helper::RegExpNew),
+                    Intrinsic::RegExpData => H::Obj(object::Helper::RegExpData),
                     Intrinsic::InspectAt(d) => H::Fmt(inspect::Helper::At(*d)),
                     Intrinsic::BuiltinToString => H::Obj(object::Helper::BuiltinToString),
                     Intrinsic::IsConstructor => H::Func(func::Helper::IsConstructor),
