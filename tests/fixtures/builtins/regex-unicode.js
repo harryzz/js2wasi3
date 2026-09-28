@@ -46,3 +46,13 @@ t(() => new RegExp("[\\p{Foo}]", "u"));
 t(() => new RegExp("\\p{Script}", "u"));
 t(() => new RegExp("\\p{L", "u"));
 t(() => /\p{L}/.test("p{L}"));
+// Greedy one-character loops in `u` mode backtrack over whole surrogate pairs.
+{
+  const astral = "a😀b😀😀c𝒳";
+  console.log(/^.+😀$/u.exec("x😀😀😀"), /(?:😀)*😀/u.exec("😀😀😀")[0].length, /.*x/u.exec("😀x😀x😀"));
+  console.log(/^(.*)(.)$/u.exec(astral), /^(.{2,3})(.*)$/u.exec(astral), /^(\S+?)(\S*)$/u.exec(astral));
+  console.log(/^[^a]*(.)$/u.exec("😀😀𝒳"), /^(\p{L}*)(.)/u.exec("abc😀"), /^(.*)\udc00/u.exec("😀\udc00"));
+  console.log(/^(.*)(\ude00)/u.exec("x😀"), /^(.*)(\ude00)/.exec("x😀"), /(k*)K/iu.exec("KkkK"), /^\P{ASCII}+$/u.test("é😀ü"));
+  console.log(/^.{3}$/u.test("😀😀😀"), /^.{3}$/.test("😀"), /^\S{1,2}(\S)$/u.exec("𝒳𝒳𝒳"));
+  const re = /.*/gu; re.lastIndex = 1; console.log(re.exec("😀a"), re.lastIndex);
+}

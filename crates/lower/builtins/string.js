@@ -937,21 +937,30 @@ function $$String_fromCharCode(...codes) {
 }
 
 function $$String_fromCodePoint(...codePoints) {
-  let r = "";
-  for (let i = 0; i < codePoints.length; i++) {
+  // Convert and check every argument first (once each, in order), counting the code units, then fill one string.
+  const n = codePoints.length;
+  let units = 0;
+  for (let i = 0; i < n; i++) {
     const next = codePoints[i];
     const cp = +next;
     if (cp !== __intrinsic_trunc(cp) || cp < 0 || cp > 0x10ffff) {
       throw new RangeError("Invalid code point " + __intrinsic_to_string(next));
     }
+    codePoints[i] = cp;
+    units = units + (cp < 0x10000 ? 1 : 2);
+  }
+  const r = __intrinsic_str_new(units);
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    const cp = +codePoints[i];
     if (cp < 0x10000) {
-      r = r + $$fromUnit(cp);
+      __intrinsic_str_set(r, j, cp);
+      j = j + 1;
     } else {
-      const u = __intrinsic_str_new(2);
       const v = cp - 0x10000;
-      __intrinsic_str_set(u, 0, 0xd800 + __intrinsic_floor(v / 1024));
-      __intrinsic_str_set(u, 1, 0xdc00 + (v % 1024));
-      r = r + u;
+      __intrinsic_str_set(r, j, 0xd800 + (v >> 10));
+      __intrinsic_str_set(r, j + 1, 0xdc00 + (v & 1023));
+      j = j + 2;
     }
   }
   return r;

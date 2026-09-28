@@ -16,6 +16,17 @@ console.log("a".concat("b", 1, null), "x".concat(), "😀".codePointAt(0), "😀
 console.log("ab\ud800".isWellFormed(), "ab".isWellFormed(), "a\udc00b".toWellFormed() === "a�b");
 console.log(String(12), String(null), String(), String(Symbol("x")), String([1, 2]), String({}), String(-0));
 console.log(String.fromCharCode(72, 105, 0x10041), String.fromCodePoint(0x1f600, 65));
+{
+  const cps = [];
+  for (let c = 0; c < 3000; c++) cps.push(c % 3 === 0 ? 0x1f600 + c : 0x41 + (c % 26));
+  const s = String.fromCodePoint.apply(null, cps);
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 1000003;
+  console.log(s.length, h, s.codePointAt(0), s.codePointAt(2), String.fromCodePoint(), String.fromCodePoint({ valueOf() { return 0x10ffff; } }).length);
+  let seen = 0;
+  try { String.fromCodePoint(65, { valueOf() { seen++; return 66; } }, 1.5, { valueOf() { seen++; return 67; } }); } catch (e) { console.log(e.name, e.message, seen); }
+  try { String.fromCodePoint(0x110000); } catch (e) { console.log(e.message); }
+}
 console.log("abc".toString(), "abc".valueOf(), String.prototype.slice.call(12345, 1, 3), "b" < "a", "a" < "b", "abc" < "abd", "ab" < "abc", "B" >= "a", "10" < "9");
 const words = ["pear", "Apple", "fig"];
 let out = [];

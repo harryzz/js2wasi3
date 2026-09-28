@@ -3,6 +3,22 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T39 RegExp and string-building speed (full subset run)
+
+- Compiler: T39 (linear `String.fromCodePoint`; `STAR` fast path in `u`/`v` mode; unboxed regex helpers; unanchored
+  searches skip positions the first instruction rejects).
+- Runs: `built-ins/RegExp` + `built-ins/String/fromCodePoint` (1,890 tests, 1,166 s at -j 4): all 447 former timeouts
+  → pass, 0 regressions; then the whole subset with `--update` (28,662 tests, 10,372 s at -j 4): the same 447, and
+  `language/statements/function/S13.2.1_A1_T1.js` pass → timeout under load (same wasm bytes as before; 4–5 s alone;
+  rerun alone: pass, F180). Subset: 24,123 of 26,837 run pass (89.9%); `built-ins/RegExp` 1,635 pass, 0 timeouts.
+
+## 2026-09-28: T27 `RegExp` (full subset run; subset + `built-ins/RegExp`)
+
+- Compiler: T27 (`RegExp` and regex literals: backtracking engine in the prelude, string methods through `Symbol.*`,
+  `\p{…}`, `v` class sets).
+- Subset change: `built-ins/RegExp` added. Subset: 23,676 of 26,837 run pass (88.2%); `built-ins/RegExp` 1,188 pass,
+  447 time out (441 `property-escapes/generated`, 6 `CharacterClassEscapes`: F170).
+
 ## 2026-09-28: T38 `new.target` in functions, `super` with a `null` base (targeted rerun)
 
 - Compiler: T38 (`new.target` in ordinary functions and arrows; `super.x` throws for a `null` home prototype and reads

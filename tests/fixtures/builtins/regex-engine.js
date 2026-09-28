@@ -105,3 +105,13 @@ console.log(r.exec("aa"), r.lastIndex);
 const nonGlobal = /a/;
 nonGlobal.lastIndex = 5;
 console.log(nonGlobal.exec("a").index, nonGlobal.lastIndex);
+// Unanchored searches whose first instruction is one character (skipped positions).
+{
+  const t = "xx😀ab12Cd😀9Zz";
+  console.log(/\d/.exec(t), /[a-c]/i.exec("XYZcB"), /c/i.exec("xxC"), /\d+z/i.exec(t), /😀a/u.exec(t), /\uDE00a/.exec(t));
+  console.log(/[^x]/u.exec(t)[0], /[^x]/.exec(t)[0].length, /\P{L}/u.exec("ab😀c")[0], /\d/.exec("abc"), /q/.exec(""), /[z]+/i.exec(t));
+  const g = /\d/g; const got = []; let m; while ((m = g.exec(t)) !== null) got.push(m[0] + "@" + m.index);
+  console.log(got.join(","), "a1b2c3".replace(/\d/g, "#"), "a1b2".split(/\d/), [..."😀1😀2".matchAll(/\d/gu)].map((x) => x.index));
+  const y = /\d/y; y.lastIndex = 1; console.log(y.test("a1"), y.lastIndex, y.test("a1"), y.lastIndex);
+  const u = /\uDE00/gu; u.lastIndex = 3; console.log(u.exec("a😀😀"), u.lastIndex, /\uDE00/u.exec("😀\uDE00").index);
+}

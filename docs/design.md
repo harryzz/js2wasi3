@@ -226,7 +226,10 @@ RegExp creation only when the code names the string method; `String.prototype.sp
 `Symbol.split/replace` first. Unicode data comes from node itself (`scripts/gen-unicode.mjs`, node's Unicode
 version): the `i` flag's case tables (`builtins/unicode-case.js`, always in the prelude) and the `\p{…}` sets
 (`crates/lower/src/unicode_props.rs`), of which the prelude gets only those whose `\p{…}` text appears in the
-source (`builtins::parse`). The frontend has oxc check regex literals (early SyntaxErrors).)
+source (`builtins::parse`). The frontend has oxc check regex literals (early SyntaxErrors).
+T39: `STAR` (a greedy loop over one CHAR/ANY/CLASS, forwards) also runs in `u`/`v` mode, a code point per step, and
+gives back whole surrogate pairs; `$$reSearch` skips start positions the first instruction rejects; hot helpers take
+and return numbers, not booleans (F14).)
 (T20: typed arrays and `ArrayBuffer`s are native `$typed`/`$buffer` objects (`crates/backend/src/typed.rs`: element
 access, printing) with their constructors and methods in `builtins/typedarray.js` on `Intrinsic::Typed` operations.)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude

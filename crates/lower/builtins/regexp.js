@@ -1213,7 +1213,7 @@ function $$reAddAtom(r, a, set) {
 // 0 MATCH
 // 1 CHAR c dir              one character equal to `c` (canonicalized with `i`)
 // 2 ANY dir                 `.`
-// 3 CLASS set dir           a character in class `set` (`sets[2 * set]`: negate, `+ 1`: ranges)
+// 3 CLASS set dir           a character in class `set` (`sets[2 * set]`: negate (1 or 0), `+ 1`: ranges)
 // 4 SPLIT alt               push a choice at `alt`, go on
 // 5 GOTO to
 // 6 SAVE slot               capture slot = position
@@ -1227,8 +1227,9 @@ function $$reAddAtom(r, a, set) {
 // 16 REPEAT_START reg       iteration start = position
 // 17 REPEAT_END reg min loop
 // 18 STAR min max next      a greedy loop over the one-character instruction that follows (CHAR,
-//                           ANY or CLASS, forwards, without `u`): consume all it can, then give
-//                           back one character per backtrack (entry `[-16 - next, pos, lowest]`)
+//                           ANY or CLASS, forwards): consume all it can, then give back one
+//                           character per backtrack (entry `[-16 - next, pos, lowest]`; with `u`
+//                           a character is a code point, and the run never splits a pair)
 
 let $$reProg = null;
 let $$reSets = null;
@@ -1251,7 +1252,7 @@ function $$reEmit(node, dir) {
   } else if (t === 3) {
     $$reOp(3);
     $$reOp($$reSets.length >> 1);
-    $$append($$reSets, node[1]);
+    $$append($$reSets, node[1] ? 1 : 0);
     // (With `v`, the parser already folded the sets.)
     const closed = $$reIcase && !$$reVMode;
     $$append($$reSets, $$reI32(closed ? $$reCaseClose(node[2], $$reUnicode) : node[2]));
@@ -1352,7 +1353,7 @@ function $$reEmitRepeat(node, dir) {
     return;
   }
   const t = body[0];
-  if (node[3] && dir === 0 && !$$reUnicode && (t === 1 || t === 2 || t === 3)) {
+  if (node[3] && dir === 0 && (t === 1 || t === 2 || t === 3)) {
     $$reOp(18);
     $$reOp(min);
     $$reOp(max);
@@ -1583,6 +1584,7 @@ function $$reDecode(s) {
   return $$reI32(out);
 }
 
+// 1 if `c` is in the sorted ranges `r`, else 0 (a number: booleans are boxed, F14).
 function $$reInRanges(r, c) {
   let lo = 0;
   let hi = __intrinsic_i32_len(r) >> 1;
@@ -1593,10 +1595,10 @@ function $$reInRanges(r, c) {
     } else if (c > __intrinsic_i32_get(r, 2 * mid + 1)) {
       lo = mid + 1;
     } else {
-      return true;
+      return 1;
     }
   }
-  return false;
+  return 0;
 }
 
 
@@ -1610,6 +1612,7 @@ function $$reIsLineTerminator(c) {
 }
 
 // Read the character after (dir 0) or before (dir 1) `pos`; sets `$$reWidth` (0: none).
+// `unicode`: a number (0: read one unit).
 let $$reWidth = 0;
 
 function $$reRead(s, pos, len, dir, unicode) {
@@ -1619,9 +1622,9 @@ function $$reRead(s, pos, len, dir, unicode) {
       return -1;
     }
     const c = __intrinsic_unit(s, pos);
-    if (unicode && $$reIsLead(c) && pos + 1 < len) {
+    if (unicode !== 0 && c >= 0xd800 && c <= 0xdbff && pos + 1 < len) {
       const d = __intrinsic_unit(s, pos + 1);
-      if ($$reIsTrail(d)) {
+      if (d >= 0xdc00 && d <= 0xdfff) {
         $$reWidth = 2;
         return (c - 0xd800) * 0x400 + (d - 0xdc00) + 0x10000;
       }
@@ -1634,9 +1637,9 @@ function $$reRead(s, pos, len, dir, unicode) {
     return -1;
   }
   const c = __intrinsic_unit(s, pos - 1);
-  if (unicode && $$reIsTrail(c) && pos >= 2) {
+  if (unicode !== 0 && c >= 0xdc00 && c <= 0xdfff && pos >= 2) {
     const d = __intrinsic_unit(s, pos - 2);
-    if ($$reIsLead(d)) {
+    if (d >= 0xd800 && d <= 0xdbff) {
       $$reWidth = 2;
       return (d - 0xd800) * 0x400 + (c - 0xdc00) + 0x10000;
     }
@@ -1705,14 +1708,14 @@ function $$reRun(code, s, start) {
           c = __intrinsic_unit(s, dir === 0 ? pos : pos - 1);
         }
       } else {
-        c = $$reRead(s, pos, len, dir, unicode !== 0);
+        c = $$reRead(s, pos, len, dir, unicode);
         w = $$reWidth;
       }
       if (w === 0) {
         ok = 0;
       } else {
         if (icase !== 0) {
-          c = c < 128 && unicode === 0 ? (c >= 97 && c <= 122 ? c - 32 : c) : $$reCanon(c, unicode !== 0);
+          c = c < 128 && unicode === 0 ? (c >= 97 && c <= 122 ? c - 32 : c) : +$$reCanon(c, unicode !== 0);
         }
         if (c !== __intrinsic_i32_get(prog, pc + 1)) {
           ok = 0;
@@ -1730,32 +1733,76 @@ function $$reRun(code, s, start) {
       if (max >= 0 && max < limit) {
         limit = max;
       }
-      let n = 0;
-      while (n < limit && $$reOne(prog, apc, sets, __intrinsic_unit(s, pos + n), icase, dotAll) !== 0) {
-        n++;
+      // A class atom's ranges, read once.
+      const aop = __intrinsic_i32_get(prog, apc);
+      let r = null;
+      let neg = 0;
+      if (aop === 3) {
+        const k = __intrinsic_i32_get(prog, apc + 1);
+        r = sets[2 * k + 1];
+        neg = +sets[2 * k];
       }
-      if (n < min) {
-        ok = 0;
-      } else {
-        if (n > min) {
-          __intrinsic_i32_set(stack, sp, -16 - next);
-          __intrinsic_i32_set(stack, sp + 1, pos + n);
-          __intrinsic_i32_set(stack, sp + 2, pos + min);
-          sp += 3;
+      if (unicode === 0) {
+        let n = 0;
+        while (n < limit) {
+          const c = __intrinsic_unit(s, pos + n);
+          if ((aop === 3 ? $$reClassHas(r, neg, c, icase, 0) : $$reOne(prog, apc, sets, c, icase, dotAll, 0)) === 0) {
+            break;
+          }
+          n++;
         }
-        pos += n;
-        pc = next;
+        if (n < min) {
+          ok = 0;
+        } else {
+          if (n > min) {
+            __intrinsic_i32_set(stack, sp, -16 - next);
+            __intrinsic_i32_set(stack, sp + 1, pos + n);
+            __intrinsic_i32_set(stack, sp + 2, pos + min);
+            sp += 3;
+          }
+          pos += n;
+          pc = next;
+        }
+      } else {
+        // Code points: `limit` bounds the count (a code point is at least one unit).
+        let n = 0;
+        let p = pos;
+        let lowest = pos;
+        while (n < limit) {
+          const c = $$reRead(s, p, len, 0, 1);
+          if ($$reWidth === 0 ||
+            (aop === 3 ? $$reClassHas(r, neg, c, icase, unicode) : $$reOne(prog, apc, sets, c, icase, dotAll, unicode)) === 0) {
+            break;
+          }
+          p += $$reWidth;
+          n++;
+          if (n === min) {
+            lowest = p;
+          }
+        }
+        if (n < min) {
+          ok = 0;
+        } else {
+          if (n > min) {
+            __intrinsic_i32_set(stack, sp, -16 - next);
+            __intrinsic_i32_set(stack, sp + 1, p);
+            __intrinsic_i32_set(stack, sp + 2, lowest);
+            sp += 3;
+          }
+          pos = p;
+          pc = next;
+        }
       }
     } else if (op === 3) {
       const dir = __intrinsic_i32_get(prog, pc + 2);
-      const c = $$reRead(s, pos, len, dir, unicode !== 0);
+      const c = $$reRead(s, pos, len, dir, unicode);
       if ($$reWidth === 0) {
         ok = 0;
       } else {
         const k = __intrinsic_i32_get(prog, pc + 1);
         const r = sets[2 * k + 1];
-        const found = $$reInRanges(r, icase !== 0 ? $$reCanon(c, unicode !== 0) : c);
-        if (found === sets[2 * k]) {
+        const found = $$reInRanges(r, icase !== 0 ? +$$reCanon(c, unicode !== 0) : c);
+        if (found === +sets[2 * k]) {
           ok = 0;
         } else {
           pos = dir === 0 ? pos + $$reWidth : pos - $$reWidth;
@@ -1764,7 +1811,7 @@ function $$reRun(code, s, start) {
       }
     } else if (op === 2) {
       const dir = __intrinsic_i32_get(prog, pc + 1);
-      const c = $$reRead(s, pos, len, dir, unicode !== 0);
+      const c = $$reRead(s, pos, len, dir, unicode);
       if ($$reWidth === 0 || (dotAll === 0 && $$reIsLineTerminator(c))) {
         ok = 0;
       } else {
@@ -1942,9 +1989,17 @@ function $$reRun(code, s, start) {
           break;
         }
         if (k <= -16) {
-          // A STAR loop gives back one character.
+          // A STAR loop gives back one character (with `u`, a whole pair when the run holds one).
+          const lowest = __intrinsic_i32_get(stack, sp + 2);
           pos = __intrinsic_i32_get(stack, sp + 1) - 1;
-          if (pos > __intrinsic_i32_get(stack, sp + 2)) {
+          if (unicode !== 0 && pos > lowest) {
+            const t = __intrinsic_unit(s, pos);
+            const l = __intrinsic_unit(s, pos - 1);
+            if (t >= 0xdc00 && t <= 0xdfff && l >= 0xd800 && l <= 0xdbff) {
+              pos--;
+            }
+          }
+          if (pos > lowest) {
             __intrinsic_i32_set(stack, sp + 1, pos);
             sp += 3;
           }
@@ -1966,13 +2021,13 @@ function $$reRun(code, s, start) {
   }
 }
 
-// Does the one-character instruction at `apc` (CHAR, ANY or CLASS; no `u`) match the unit `c`
-// (1 or 0; `icase`, `dotAll`: numbers)?
-function $$reOne(prog, apc, sets, c, icase, dotAll) {
+// Does the one-character instruction at `apc` (CHAR, ANY or CLASS) match the character `c`
+// (1 or 0; `icase`, `dotAll`, `unicode`: numbers)?
+function $$reOne(prog, apc, sets, c, icase, dotAll, unicode) {
   const op = __intrinsic_i32_get(prog, apc);
   if (op === 1) {
     if (icase !== 0) {
-      c = c < 128 ? (c >= 97 && c <= 122 ? c - 32 : c) : $$reCanon(c, false);
+      c = c < 128 && unicode === 0 ? (c >= 97 && c <= 122 ? c - 32 : c) : +$$reCanon(c, unicode !== 0);
     }
     return c === __intrinsic_i32_get(prog, apc + 1) ? 1 : 0;
   }
@@ -1980,9 +2035,12 @@ function $$reOne(prog, apc, sets, c, icase, dotAll) {
     return dotAll !== 0 || !$$reIsLineTerminator(c) ? 1 : 0;
   }
   const k = __intrinsic_i32_get(prog, apc + 1);
-  const r = sets[2 * k + 1];
-  const found = $$reInRanges(r, icase !== 0 ? $$reCanon(c, false) : c);
-  return found !== sets[2 * k] ? 1 : 0;
+  return $$reClassHas(sets[2 * k + 1], +sets[2 * k], c, icase, unicode);
+}
+
+// Is `c` in a class (ranges `r`, `neg`: 1 if negated; 1 or 0)? Loops over one class read `r` and `neg` once.
+function $$reClassHas(r, neg, c, icase, unicode) {
+  return $$reInRanges(r, icase !== 0 ? +$$reCanon(c, unicode !== 0) : c) !== neg ? 1 : 0;
 }
 
 function $$reIsWordAt(s, i, icase, unicode) {
@@ -2062,29 +2120,73 @@ function $$reWhat(v) {
 // `lastIndex` updated.
 function $$reSearch(r, data, s) {
   const code = data[2];
+  const prog = code[0];
   const bits = +code[4];
   const global = (bits & 130) !== 0;
   const sticky = (bits & 128) !== 0;
-  const unicode = (bits & 96) !== 0;
+  // Flags as numbers, not booleans (F14).
+  const unicode = bits & 96;
   let lastIndex = $$reToLength(r.lastIndex);
   if (!global) {
     lastIndex = 0;
   }
   const len = s.length;
   // In Unicode mode V8 starts at the lead of a surrogate pair that `lastIndex` points into.
-  if (unicode && lastIndex > 0 && lastIndex < len && $$reIsTrail(__intrinsic_unit(s, lastIndex)) &&
-    $$reIsLead(__intrinsic_unit(s, lastIndex - 1))) {
-    lastIndex--;
+  if (unicode !== 0 && lastIndex > 0 && lastIndex < len) {
+    const t = __intrinsic_unit(s, lastIndex);
+    const l = __intrinsic_unit(s, lastIndex - 1);
+    if (t >= 0xdc00 && t <= 0xdfff && l >= 0xd800 && l <= 0xdbff) {
+      lastIndex--;
+    }
+  }
+  // A one-character instruction (CHAR or CLASS, forwards) every match starts with: positions whose
+  // character it rejects are skipped without starting the VM. -1: none.
+  let first = -1;
+  if (!sticky) {
+    const op = __intrinsic_i32_get(prog, 0);
+    if ((op === 1 || op === 3) && __intrinsic_i32_get(prog, 2) === 0) {
+      first = 0;
+    } else if (op === 18 && __intrinsic_i32_get(prog, 1) > 0) {
+      const a = __intrinsic_i32_get(prog, 4);
+      if (a === 1 || a === 3) {
+        first = 4;
+      }
+    }
+  }
+  const sets = code[1];
+  const icase = bits & 4;
+  const dotAll = bits & 16;
+  const fop = first >= 0 ? __intrinsic_i32_get(prog, first) : 0;
+  let fr = null;
+  let fneg = 0;
+  if (fop === 3) {
+    const k = __intrinsic_i32_get(prog, first + 1);
+    fr = sets[2 * k + 1];
+    fneg = +sets[2 * k];
   }
   let end = -1;
   while (lastIndex <= len) {
+    if (first >= 0) {
+      while (lastIndex < len) {
+        const c = $$reRead(s, lastIndex, len, 0, unicode);
+        if ((fop === 3 ? $$reClassHas(fr, fneg, c, icase, unicode) : $$reOne(prog, first, sets, c, icase, dotAll, unicode)) !== 0) {
+          break;
+        }
+        lastIndex += $$reWidth;
+      }
+      if (lastIndex >= len) {
+        // The first instruction needs a character.
+        break;
+      }
+    }
     end = $$reRun(code, s, lastIndex);
     if (end >= 0 || sticky) {
       break;
     }
-    if (unicode && lastIndex + 1 < len && $$reIsLead(__intrinsic_unit(s, lastIndex)) &&
-      $$reIsTrail(__intrinsic_unit(s, lastIndex + 1))) {
-      lastIndex += 2;
+    if (unicode !== 0 && lastIndex + 1 < len) {
+      const l = __intrinsic_unit(s, lastIndex);
+      const t = __intrinsic_unit(s, lastIndex + 1);
+      lastIndex += l >= 0xd800 && l <= 0xdbff && t >= 0xdc00 && t <= 0xdfff ? 2 : 1;
     } else {
       lastIndex++;
     }
