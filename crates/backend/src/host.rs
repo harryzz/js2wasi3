@@ -60,6 +60,9 @@ pub enum Import {
     /// `wasi:random/insecure.get-insecure-random-u64` (T21, `Math.random`): not in [`IMPORTS`],
     /// imported after them only by modules that use it.
     InsecureRandom,
+    /// `wasi:clocks/system-clock.now` (T26, `Date`): like [`Import::InsecureRandom`], only by modules
+    /// that use it; the `instant` comes back at [`SYSTEM_CLOCK_RESULT`].
+    SystemClockNow,
     /// `backpressure.inc` / `.dec` (T20: a library's async call holds off other calls while it
     /// waits for timers). Not in [`IMPORTS`].
     BackpressureInc,
@@ -143,6 +146,7 @@ impl Import {
                 "wasi:random/insecure@0.3.1",
                 "get-insecure-random-u64".into(),
             ),
+            Import::SystemClockNow => ("wasi:clocks/system-clock@0.3.1", "now".into()),
             Import::BackpressureInc => ("$root", "[backpressure-inc]".into()),
             Import::BackpressureDec => ("$root", "[backpressure-dec]".into()),
         }
@@ -165,16 +169,21 @@ impl Import {
             Import::SubtaskDrop => (vec![I32], vec![]),
             Import::SubtaskCancel => (vec![I32], vec![I32]),
             Import::InsecureRandom => (vec![], vec![I64]),
+            Import::SystemClockNow => (vec![I32], vec![]),
             Import::BackpressureInc | Import::BackpressureDec => (vec![], vec![]),
         }
     }
 }
 
-/// The imports of a command: [`IMPORTS`], then `extra` ([`Import::InsecureRandom`]).
-pub fn import_list(random: bool) -> Vec<Import> {
+/// The imports of a command: [`IMPORTS`], then those it uses of [`Import::InsecureRandom`] and
+/// [`Import::SystemClockNow`].
+pub fn import_list(random: bool, clock: bool) -> Vec<Import> {
     let mut list = IMPORTS.to_vec();
     if random {
         list.push(Import::InsecureRandom);
+    }
+    if clock {
+        list.push(Import::SystemClockNow);
     }
     list
 }
@@ -251,6 +260,9 @@ const SUBTASK_RETURNED: i32 = 2;
 const EVENT_FUTURE_READ: i32 = 4;
 const CALLBACK_EXIT: i32 = 0;
 const CALLBACK_WAIT: i32 = 2;
+
+/// Where `wasi:clocks/system-clock.now` writes its `instant` (T26; 16 bytes below `abi::HEAP_BASE`).
+pub const SYSTEM_CLOCK_RESULT: i32 = 16;
 
 /// Where a future's `result<_, error-code>` is read to (2 bytes per stream, below `abi::HEAP_BASE`).
 fn result_addr(stream: u32) -> i32 {

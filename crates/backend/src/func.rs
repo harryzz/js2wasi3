@@ -1278,6 +1278,8 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         Builtin::Map | Builtin::Set | Builtin::ArrayBuffer | Builtin::Typed(_) => {
             fh(cx, Helper::RequiresNew(b))
         }
+        // `Date()` gives a string (T26).
+        Builtin::Date if linked => cx.date_call().expect("`$$DateCall` with `$$Date`"),
         _ => code,
     };
     let construct = match b {

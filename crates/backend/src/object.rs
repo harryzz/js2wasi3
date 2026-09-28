@@ -57,6 +57,8 @@ pub const CLASS_WRAPPER: i32 = 8;
 pub const CLASS_REFLECT: i32 = 9;
 /// A RegExp (T27): its data (`builtins/regexp.js`) is under the private `G_SYM_STATE` key.
 pub const CLASS_REGEXP: i32 = 10;
+/// A Date (T26): its data `[time value]` (`builtins/date.js`) is under the private `G_SYM_STATE` key.
+pub const CLASS_DATE: i32 = 11;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -222,8 +224,8 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         Builtin::Timeout | Builtin::Immediate | Builtin::AsyncGenerator => &[],
         // T20: from the prelude and `crate::typed`.
         Builtin::ArrayBuffer | Builtin::TypedArray | Builtin::Typed(_) => &[],
-        // T27: all from the prelude.
-        Builtin::RegExp => &[],
+        // T27, T26: all from the prelude.
+        Builtin::RegExp | Builtin::Date => &[],
     }
 }
 
@@ -352,6 +354,12 @@ pub enum Helper {
     RegExpNew,
     /// `(v) -> jsval`: a RegExp's data; `null` for `RegExp.prototype`; `undefined` otherwise.
     RegExpData,
+    /// `(data) -> jsval`: a new Date holding `data` (T26).
+    DateNew,
+    /// `(v) -> jsval`: a Date's data; `undefined` otherwise (T26).
+    DateData,
+    /// `(v, hint: i32) -> jsval`: ToPrimitive of any value (T26): objects through [`Helper::ToPrimitive`].
+    ToPrimitiveValue,
     /// `(args: jsval (an `$array`)) -> jsval`: an unmapped `arguments` object (T25): the indices,
     /// `length` and `[Symbol.iterator]` (`Array.prototype.values`), both hidden.
     MakeArguments,
@@ -400,6 +408,7 @@ impl Helper {
                 Builtin::TypedArray => "%TypedArray%.prototype",
                 Builtin::Typed(_) => "typed_array_prototype",
                 Builtin::RegExp => "RegExp.prototype",
+                Builtin::Date => "Date.prototype",
             },
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
@@ -441,6 +450,9 @@ impl Helper {
             Helper::MakeArguments => "make_arguments",
             Helper::RegExpNew => "regexp_new",
             Helper::RegExpData => "regexp_data",
+            Helper::DateNew => "date_new",
+            Helper::DateData => "date_data",
+            Helper::ToPrimitiveValue => "to_primitive_value",
         }
     }
 
@@ -489,7 +501,12 @@ impl Helper {
             Helper::GetOwnSymbols | Helper::TagOf => (vec![v], vec![v]),
             Helper::BuiltinTag => (vec![o], vec![v]),
             Helper::BuiltinToString => (vec![v], vec![I32]),
-            Helper::MakeArguments | Helper::RegExpNew | Helper::RegExpData => (vec![v], vec![v]),
+            Helper::MakeArguments
+            | Helper::RegExpNew
+            | Helper::RegExpData
+            | Helper::DateNew
+            | Helper::DateData => (vec![v], vec![v]),
+            Helper::ToPrimitiveValue => (vec![v, I32], vec![v]),
         }
     }
 
@@ -568,6 +585,9 @@ impl Helper {
             Helper::ObjectRest => object_rest(cx),
             Helper::RegExpNew => regexp_new(cx),
             Helper::RegExpData => regexp_data(cx),
+            Helper::DateNew => date_new(cx),
+            Helper::DateData => date_data(cx),
+            Helper::ToPrimitiveValue => to_primitive_value(cx),
             Helper::CheckDestructure => check_destructure(cx),
             Helper::Keys(k) => keys(cx, k),
             Helper::SymbolKeys => symbol_keys(),
@@ -1429,7 +1449,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     // Methods written in the prelude (T21). T25: `Map.prototype[Symbol.iterator]` is `entries`,
     // `Set.prototype[Symbol.iterator]` and `keys` are `values`; `size` is a getter. T27: a key
     // `$name` is the well-known symbol `Symbol.name` (`$$RegExp_prototype_$match`).
-    let mut sym_methods: Vec<(u32, u32, u32, i32)> = Vec::new();
+    // (symbol, name, code, length, attributes)
+    let mut sym_methods: Vec<(u32, u32, u32, i32, i32)> = Vec::new();
     for (key, code, len) in cx.builtin_methods(b) {
         cx.declare_func(code);
         if let Some(k) = key
@@ -1438,7 +1459,9 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         {
             let sym = cx.helper(runtime::Helper::WellKnownSymbol(k));
             let name = cx.str(&format!("[Symbol.{}]", &key[1..]));
-            sym_methods.push((sym, name, code, len as i32));
+            // `Date.prototype[Symbol.toPrimitive]` is read-only (T26).
+            let attrs = if key == "$toPrimitive" { HIDDEN | READONLY } else { HIDDEN };
+            sym_methods.push((sym, name, code, len as i32, attrs));
             continue;
         }
         let getter = (matches!(b, Builtin::Map | Builtin::Set) && key == "size")
@@ -1456,6 +1479,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         match (b, key.as_str()) {
             (Builtin::Map, "entries") => keys.push(runtime::G_SYM_ITERATOR),
             (Builtin::Set, "values") => keys.extend([cx.str("keys"), runtime::G_SYM_ITERATOR]),
+            // Annex B (T26): the same function.
+            (Builtin::Date, "toUTCString") => keys.push(cx.str("toGMTString")),
             _ => {}
         }
         real.push((keys, name, code, len as i32, getter, 0));
@@ -1512,7 +1537,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.i32_const(0).ref_i31();
         s.i32_const(HIDDEN).call(define);
     }
-    for (sym, name, code, len) in sym_methods {
+    for (sym, name, code, len, attrs) in sym_methods {
         s.local_get(O).ref_as_non_null();
         s.call(sym)
             .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
@@ -1523,7 +1548,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             .i32_const(len)
             .i32_const(0)
             .call(new_function);
-        s.i32_const(HIDDEN).call(define);
+        s.i32_const(attrs).call(define);
     }
     let exec = (b == Builtin::RegExp).then(|| cx.str("exec"));
     for (keys, name, code, len, getter, flags) in real {
@@ -2807,6 +2832,64 @@ fn regexp_data(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// `$date_new(data)` (T26), see [`Helper::DateNew`].
+fn date_new(cx: &mut dyn Cx) -> Function {
+    let alloc = h(cx, Helper::Alloc);
+    let proto = h(cx, Helper::Proto(Builtin::Date));
+    let define = h(cx, Helper::Define);
+    const DATA: u32 = 0;
+    const O: u32 = 1;
+    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let mut s = f.instructions();
+    s.i32_const(CLASS_DATE).call(proto).call(alloc).local_tee(O).ref_as_non_null();
+    s.global_get(runtime::G_SYM_STATE).local_get(DATA);
+    s.i32_const(HIDDEN | READONLY | FIXED | PRIVATE).call(define);
+    s.local_get(O);
+    s.end();
+    f
+}
+
+/// `$date_data(v)` (T26), see [`Helper::DateData`].
+fn date_data(cx: &mut dyn Cx) -> Function {
+    let own = h(cx, Helper::OwnGet);
+    const V: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(object());
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.struct_get(T_OBJECT, F_CLASS)
+        .i32_const(CLASS_MASK)
+        .i32_and()
+        .i32_const(CLASS_DATE)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.global_get(runtime::G_SYM_STATE).call(own).return_();
+    s.end();
+    s.end();
+    s.global_get(G_UNDEFINED);
+    s.end();
+    f
+}
+
+/// `$to_primitive_value(v, hint)` (T26), see [`Helper::ToPrimitiveValue`].
+fn to_primitive_value(cx: &mut dyn Cx) -> Function {
+    let to_primitive = h(cx, Helper::ToPrimitive);
+    const V: u32 = 0;
+    const HINT: u32 = 1;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(object());
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.local_get(HINT).call(to_primitive).return_();
+    s.end();
+    s.local_get(V);
+    s.end();
+    f
+}
+
 fn get_prototype_of(cx: &mut dyn Cx) -> Function {
     let is_nullish = rh(cx, runtime::Helper::IsNullish);
     let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
@@ -3039,6 +3122,20 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
     s.local_get(T).return_();
     s.end();
     s.end();
+    if cx.names("$date") {
+        // A Date's hint default is string (T26: `Date.prototype[Symbol.toPrimitive]`).
+        s.local_get(HINT).i32_eqz();
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_CLASS)
+            .i32_const(CLASS_MASK)
+            .i32_and()
+            .i32_const(CLASS_DATE)
+            .i32_eq()
+            .i32_and();
+        s.if_(BlockType::Empty);
+        s.i32_const(2).local_set(HINT);
+        s.end();
+    }
     // Two rounds: I = 0, 1. The key of round I: toString when (I == 0) == (hint == string).
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(I).i32_const(2).i32_ge_u().br_if(1);

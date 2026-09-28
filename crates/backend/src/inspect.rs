@@ -1019,6 +1019,30 @@ fn format_object(cx: &mut dyn Cx) -> Function {
             .local_set(PREFIX);
         s.end();
     }
+    // A Date (T26): its ISO text (or `Invalid Date`) from the prelude, alone unless it has keys.
+    if cx.names("$date")
+        && let Some(text) = cx.date_inspect()
+    {
+        s.local_get(O)
+            .struct_get(runtime::T_OBJECT, object::F_CLASS)
+            .i32_const(object::CLASS_MASK)
+            .i32_and()
+            .i32_const(object::CLASS_DATE)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(O).call(text).ref_cast_non_null(string()).local_set(W_BASE);
+        s.local_get(O).call(own_keys).array_len();
+        s.local_get(O).call(symbols).i32_or().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(W_BASE).ref_as_non_null().return_();
+        s.end();
+        s.local_get(W_BASE)
+            .ref_as_non_null()
+            .global_get(space)
+            .call(concat)
+            .local_set(PREFIX);
+        s.end();
+    }
     // A RegExp (T27): `/a+/gi`, alone unless it has keys (`/a/ { x: 1 }`).
     if cx.names("$regexp") {
         let own = oh(cx, object::Helper::OwnGet);

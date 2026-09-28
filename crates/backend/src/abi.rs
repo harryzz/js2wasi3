@@ -23,8 +23,9 @@ use crate::host::{self, Import};
 use crate::runtime::{self, Cx, G_LOOP_NOW, G_WAIT, G_WAIT_AT, T_STRING};
 use crate::{array, object, promise, timers, wit};
 
-/// First address the allocator hands out (keeps 0 an invalid pointer).
-pub const HEAP_BASE: i32 = 8;
+/// First address the allocator hands out (keeps 0 an invalid pointer; below it: the streams'
+/// results at 0, the system clock's at 16, see `host`).
+pub const HEAP_BASE: i32 = 32;
 
 /// Canonical ABI: more flat parameters than this are passed in memory instead.
 pub const MAX_FLAT_PARAMS: usize = 16;

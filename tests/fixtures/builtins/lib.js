@@ -51,3 +51,13 @@ export function distinct(s) {
   }
   return new Set(s).size * 100 + counts.get("l");
 }
+
+// T26: `Date` in a library: everything but the clock.
+/** @returns {string} */
+export function isoDay(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+export function now() {
+  return Date.now();
+}

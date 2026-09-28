@@ -137,6 +137,11 @@ pub struct Module {
     /// The prelude's StringToNumber `(JsVal) -> F64` (T21), called by the runtime's ToNumber on a
     /// string; without it, that traps.
     pub string_to_number: Option<FuncId>,
+    /// The prelude's `$$DateCall` adapter (T26): the call entry of `Date` as a value (`Date()` gives a
+    /// string; `new Date` runs `$$Date`).
+    pub date_call: Option<FuncId>,
+    /// The prelude's `$$dateInspect(d) -> string` (T26): `console.log`'s text of a Date.
+    pub date_inspect: Option<FuncId>,
     /// The module can make a `Map`/`Set` (T25): `console.log` links their formatting.
     pub maps: bool,
     /// The prelude's `$$StreamReader(h, id)` and `$$StreamPump(iterable, w, id)` (T20 slice 6b,
@@ -566,6 +571,8 @@ pub enum Builtin {
     Typed(u8),
     /// T27.
     RegExp,
+    /// T26.
+    Date,
 }
 
 /// The typed array constructors (T20), by kind; [`TYPED_SIZES`]: their element sizes.
@@ -584,7 +591,7 @@ pub const TYPED_SIZES: [u32; 9] = [1, 1, 1, 2, 2, 4, 4, 4, 8];
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
-    pub const ALL: [Builtin; 37] = [
+    pub const ALL: [Builtin; 38] = [
         Builtin::Object,
         Builtin::String,
         Builtin::Number,
@@ -622,6 +629,7 @@ impl Builtin {
         Builtin::Typed(7),
         Builtin::Typed(8),
         Builtin::RegExp,
+        Builtin::Date,
     ];
 
     pub fn name(self) -> &'static str {
@@ -648,6 +656,7 @@ impl Builtin {
             Builtin::TypedArray => "%TypedArray%",
             Builtin::Typed(k) => TYPED_NAMES[k as usize],
             Builtin::RegExp => "RegExp",
+            Builtin::Date => "Date",
         }
     }
 
@@ -677,6 +686,7 @@ impl Builtin {
             Builtin::ArrayBuffer => Some(1),
             Builtin::Typed(_) => Some(3),
             Builtin::RegExp => Some(2),
+            Builtin::Date => Some(7),
             _ => None,
         }
     }
@@ -763,6 +773,15 @@ pub enum Intrinsic {
     RegExpData,
     /// `(f) -> bool`: is `f` the built-in `RegExp.prototype.exec` (T27)?
     RegExpBuiltinExec,
+    /// `(data) -> jsval`: a new Date object holding `data` (T26, see `builtins/date.js`).
+    DateNew,
+    /// `(v) -> jsval`: a Date's data; `undefined` for anything else (T26).
+    DateData,
+    /// `() -> f64`: the system clock in ms since the epoch (T26, `wasi:clocks/system-clock`, commands
+    /// only).
+    DateNow,
+    /// `(v, hint) -> jsval`: ToPrimitive (T26); hint 0 default, 1 number, 2 string.
+    ToPrimitive,
     /// `(v) -> jsval`: the primitive of a wrapper object, anything else unchanged (T30).
     Unwrap,
     /// `(v) -> jsval`: `util.inspect(v)` from depth `d` (T25, `console.log` format strings;
@@ -1154,6 +1173,8 @@ impl Intrinsic {
             | Intrinsic::ToObject
             | Intrinsic::RegExpNew
             | Intrinsic::RegExpData
+            | Intrinsic::DateNew
+            | Intrinsic::DateData
             | Intrinsic::Unwrap
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::BuiltinToString | Intrinsic::IsConstructor | Intrinsic::RegExpBuiltinExec => {
@@ -1242,6 +1263,8 @@ impl Intrinsic {
             Intrinsic::F64Hi | Intrinsic::F64Lo => (&[F64], Some(I32)),
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
+            Intrinsic::DateNow => (&[], Some(F64)),
+            Intrinsic::ToPrimitive => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::CallImport(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::StrUnit => (&[JsVal, I32], Some(I32)),
             Intrinsic::StrSub => (&[JsVal, I32, I32], Some(JsVal)),
@@ -1317,6 +1340,9 @@ impl Intrinsic {
             Intrinsic::ToObject => "to_object",
             Intrinsic::RegExpNew => "regexp_new",
             Intrinsic::RegExpData => "regexp_data",
+            Intrinsic::DateNew => "date_new",
+            Intrinsic::DateData => "date_data",
+            Intrinsic::ToPrimitive => "to_primitive",
             Intrinsic::RegExpBuiltinExec => "regexp_builtin_exec",
             Intrinsic::Unwrap => "unwrap",
             Intrinsic::InspectAt(_) => "inspect_at",
@@ -1412,6 +1438,7 @@ impl Intrinsic {
             Intrinsic::F64Lo => "f64_lo",
             Intrinsic::F64FromWords => "f64_from_words",
             Intrinsic::RandomSeed => "random_seed",
+            Intrinsic::DateNow => "date_now",
             Intrinsic::CallImport(_) => "call_import",
             Intrinsic::StrUnit => "str_unit",
             Intrinsic::StrSub => "str_sub",

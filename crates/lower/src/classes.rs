@@ -774,7 +774,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// `new f(…)` for any value `f` (the native errors are handled before).
     pub(crate) fn new_expr(&mut self, cx: &mut FnCx, n: &'a NewExpression<'a>) -> R<Val> {
         let what = self.callee_text(&n.callee);
-        if ["Array", "Object", "RegExp"]
+        if ["Array", "Object", "RegExp", "Date"]
             .iter()
             .chain(super::builtins::NEW_ONLY)
             .any(|b| self.is_global(&n.callee, b))
@@ -782,7 +782,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && let Some(func) = self.builtin_global(&n.callee)
         {
             // `new Array(…)` is `Array(…)` (T21); `new Map(…)` calls `$$Map`, `new Object(…)` `$$Object` (T25),
-            // `new RegExp(…)` `$$RegExp` (T27).
+            // `new RegExp(…)` `$$RegExp` (T27), `new Date(…)` `$$Date` (T26).
+            let func = if self.is_global(&n.callee, "Date") {
+                let sym = self.prelude.names[super::builtins::DATE_NEW];
+                self.funcs[&sym]
+            } else {
+                func
+            };
+            self.check_builtin(n.callee.span(), func)?;
             let (e, kind) = self.direct_call(cx, func, None, &n.arguments)?;
             return self.call_result(e, kind);
         }

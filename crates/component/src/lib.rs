@@ -639,6 +639,7 @@ pub fn command_world(name: WorldName) -> World {
          import wasi:cli/stderr@0.3.1;\n  \
          import wasi:clocks/monotonic-clock@0.3.1;\n  \
          import wasi:random/insecure@0.3.1;\n  \
+         import wasi:clocks/system-clock@0.3.1;\n  \
          export wasi:cli/run@0.3.1;\n}}\n",
         name.namespace, name.package, name.world
     );

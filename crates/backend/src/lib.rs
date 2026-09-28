@@ -85,6 +85,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             bail!("internal error: the prelude's StringToNumber must be (jsval) -> f64");
         }
     }
+    if let Some(f) = module.date_inspect {
+        let f = module.function(f);
+        if f.params != 1 || f.locals[0].ty != Type::JsVal || f.result != Some(Type::JsVal) {
+            bail!("internal error: the prelude's $$dateInspect must be (jsval) -> jsval");
+        }
+    }
 
     // A command (`wasi:cli/run`) always has the JS runtime and memory (for output buffers), a
     // library with `init` the runtime (its globals come after the runtime's, T20).
@@ -113,20 +119,17 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     let n = module.functions.len() as u32;
     // Imported functions come first in the function index space.
-    let mut random = false;
+    let (mut random, mut clock) = (false, false);
     for f in &module.functions {
         visit_exprs(&f.body, &mut |x| {
-            random |= matches!(
-                x,
-                Expr::Intrinsic {
-                    op: Intrinsic::RandomSeed,
-                    ..
-                }
-            );
+            if let Expr::Intrinsic { op, .. } = x {
+                random |= *op == Intrinsic::RandomSeed;
+                clock |= *op == Intrinsic::DateNow;
+            }
         });
     }
     let import_list = if command.is_some() {
-        host::import_list(random)
+        host::import_list(random, clock)
     } else {
         Vec::new()
     };
@@ -829,6 +832,14 @@ impl runtime::Cx for Emitter<'_> {
         self.m.string_to_number.map(|f| self.func_base + f.0)
     }
 
+    fn date_call(&mut self) -> Option<u32> {
+        self.m.date_call.map(|f| self.func_base + f.0)
+    }
+
+    fn date_inspect(&mut self) -> Option<u32> {
+        self.m.date_inspect.map(|f| self.func_base + f.0)
+    }
+
     fn has_maps(&mut self) -> bool {
         self.m.maps
     }
@@ -1513,6 +1524,26 @@ impl Emitter<'_> {
                             .i32_wrap_i64();
                         return Ok(true);
                     }
+                    Intrinsic::DateNow => {
+                        // `now() -> instant { seconds: s64, nanoseconds: u32 }`, in memory (T26):
+                        // seconds * 1000 + floor(nanoseconds / 1e6).
+                        let at = host::SYSTEM_CLOCK_RESULT;
+                        s.i32_const(at)
+                            .call(self.imports.get(host::Import::SystemClockNow));
+                        s.i32_const(at).i64_load(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 3,
+                            memory_index: 0,
+                        });
+                        s.f64_convert_i64_s().f64_const(1000.0.into()).f64_mul();
+                        s.i32_const(at).i32_load(wasm_encoder::MemArg {
+                            offset: 8,
+                            align: 2,
+                            memory_index: 0,
+                        });
+                        s.i32_const(1_000_000).i32_div_u().f64_convert_i32_u().f64_add();
+                        return Ok(true);
+                    }
                     Intrinsic::CallImport(i) => {
                         let h = self.helper_index(Helper::Js(runtime::Helper::Abi(
                             abi::Helper::Import(*i),
@@ -1582,6 +1613,7 @@ impl Emitter<'_> {
                     | Intrinsic::F64Lo
                     | Intrinsic::F64FromWords
                     | Intrinsic::RandomSeed
+                    | Intrinsic::DateNow
                     | Intrinsic::CallImport(_)
                     | Intrinsic::StrUnit
                     | Intrinsic::StrNew
@@ -1641,6 +1673,9 @@ impl Emitter<'_> {
                     Intrinsic::Unwrap => H::Wrap(wrapper::Helper::Unwrap),
                     Intrinsic::RegExpNew => H::Obj(object::Helper::RegExpNew),
                     Intrinsic::RegExpData => H::Obj(object::Helper::RegExpData),
+                    Intrinsic::DateNew => H::Obj(object::Helper::DateNew),
+                    Intrinsic::DateData => H::Obj(object::Helper::DateData),
+                    Intrinsic::ToPrimitive => H::Obj(object::Helper::ToPrimitiveValue),
                     Intrinsic::InspectAt(d) => H::Fmt(inspect::Helper::At(*d)),
                     Intrinsic::BuiltinToString => H::Obj(object::Helper::BuiltinToString),
                     Intrinsic::IsConstructor => H::Func(func::Helper::IsConstructor),

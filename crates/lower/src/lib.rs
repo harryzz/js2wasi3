@@ -1104,6 +1104,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
                 continue;
             }
+            if name == builtins::DATE_CALL {
+                // `Date` as a value: its call entry (T26).
+                for p in self.func_params[&func].clone().into_iter().flatten() {
+                    self.observe(Slot::Var(p), Kind::Any);
+                }
+                self.module.date_call = Some(self.adapter(func));
+                continue;
+            }
+            if name == builtins::DATE_INSPECT {
+                // Called by `console.log` with a Date (T26).
+                for p in self.func_params[&func].clone().into_iter().flatten() {
+                    self.observe(Slot::Var(p), Kind::Any);
+                }
+                self.module.date_inspect = Some(func);
+                continue;
+            }
             if name == builtins::STRING_TO_NUMBER {
                 // Called by the runtime with a string.
                 self.module.string_to_number = Some(func);
@@ -5207,7 +5223,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         {
             return None;
         }
-        let sym = self.prelude.names.get(&format!("$${}", id.name))?;
+        // `Date(…)` without `new` gives a string (T26): `$$DateCall`.
+        let name = if id.name == "Date" { "$$DateCall".to_string() } else { format!("$${}", id.name) };
+        let sym = self.prelude.names.get(&name)?;
         self.funcs.get(sym).copied()
     }
 
@@ -5222,8 +5240,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// Reject a built-in the module can't use (reported where the user's code names it).
-    fn check_builtin(&mut self, span: Span, func: FuncId) -> R<()> {
-        if self.module.function(func).name == "$$Math_random" && !self.command {
+    pub(crate) fn check_builtin(&mut self, span: Span, func: FuncId) -> R<()> {
+        let name = &self.module.function(func).name;
+        if name == "$$Math_random" && !self.command {
             // It imports `wasi:random`: commands only, like the timers.
             return Err(self.unsupported(span, "`Math.random` in a module with exports", "T20"));
         }
@@ -5312,6 +5331,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "trap" => 0,
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
             "regexp_new" | "regexp_data" | "regexp_builtin_exec" => 1,
+            "date_new" | "date_data" => 1,
+            "date_now" => 0,
+            "to_primitive" => 2,
             "to_key" | "object_desc" => 1,
             "set_proto" => 2,
             "call_list" | "construct_list" => 3,
@@ -5332,6 +5354,35 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             let e = from_i32(Expr::intrinsic(Intrinsic::RandomSeed, vec![]));
             return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+        }
+        if name == "date_now" {
+            // An import (`wasi:clocks/system-clock`, T26): commands only; in a library, reading the
+            // clock throws (the rest of `Date` works).
+            let e = if self.command {
+                Expr::intrinsic(Intrinsic::DateNow, vec![])
+            } else {
+                let msg = "the current time (the system clock) isn't available in a module with exports yet (js2wasi3)";
+                Expr::Seq {
+                    body: vec![Stmt::Throw(Expr::intrinsic(
+                        Intrinsic::NewError(ErrorKind::Error),
+                        vec![Expr::str(msg), Expr::undefined()],
+                    ))],
+                    value: Box::new(Expr::f64(f64::NAN)),
+                }
+            };
+            return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+        }
+        if name == "to_primitive" {
+            // ToPrimitive(v, hint) (T26): hint 0 default, 1 number, 2 string.
+            let (Some(v), Some(h)) = (c.arguments[0].as_expression(), c.arguments[1].as_expression())
+            else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, v)?);
+            let hv = self.expr(cx, h)?;
+            let h = to_i32(self.num(hv, h.span())?);
+            let e = Expr::intrinsic(Intrinsic::ToPrimitive, vec![v, h]);
+            return Ok((e, Call::Intrinsic(Some(Kind::Any))));
         }
         if name == "inspect" {
             // `util.inspect(v)` from a literal depth (T25; -1: `console.log`'s own).
@@ -5413,7 +5464,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ));
             return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
         }
-        if matches!(name, "to_object" | "unwrap" | "regexp_new" | "regexp_data") {
+        if matches!(
+            name,
+            "to_object" | "unwrap" | "regexp_new" | "regexp_data" | "date_new" | "date_data"
+        ) {
             // T30: wrapper objects; T27: RegExp objects and their data.
             let Some(e) = c.arguments[0].as_expression() else {
                 return Err(self.unsupported(c.span, "spread argument", "T21"));
@@ -5427,6 +5481,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     self.module.names.insert("$regexp".to_string());
                     Intrinsic::RegExpNew
                 }
+                "date_new" => {
+                    // T26: `console.log`, ToPrimitive and `Object.prototype.toString` recognize Dates
+                    // only then.
+                    self.module.names.insert("$date".to_string());
+                    Intrinsic::DateNew
+                }
+                "date_data" => Intrinsic::DateData,
                 _ => Intrinsic::RegExpData,
             };
             return Ok((Expr::intrinsic(op, vec![v]), Call::Intrinsic(Some(Kind::Any))));

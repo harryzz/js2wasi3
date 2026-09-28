@@ -36,7 +36,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T23](T23-test262-subset.md) | test262 subset runner (slice 1: runner; slice 2: baseline; slice 3: causes → F144–F153) | done | T12+ |
 | [T24](T24-switch-small-syntax.md) | `switch`, `&&=`/`\|\|=`/`??=`, `**`, `debugger` | done | T19 |
 | [T25](T25-builtins-2.md) | Built-ins, second batch (`JSON.parse`, `Map`/`Set`, `bind`/`arguments`, built-ins as values, symbols/printing, promises/timers) | done | T21 |
-| [T26](T26-date.md) | `Date` | todo (later) | T21 |
+| [T26](T26-date.md) | `Date` | in progress | T21 |
 | [T27](T27-regex.md) | `RegExp` and regex literals (backtracking engine in the prelude, string methods, `\p{…}`, `v` sets; test262: `built-ins/RegExp` joined, 88.2% overall) | done | T21, T25 |
 | [T28](T28-test262-quick-wins.md) | test262 quick wins (F139, F140, F143, F144; test262 64.1% → 76.7%) | done | T23 |
 | [T29](T29-async-yield-star.md) | `yield*` in async generators (F115; test262: 1,127 more pass, 81.2%) | done | T20 |

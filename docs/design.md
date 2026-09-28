@@ -230,6 +230,18 @@ source (`builtins::parse`). The frontend has oxc check regex literals (early Syn
 T39: `STAR` (a greedy loop over one CHAR/ANY/CLASS, forwards) also runs in `u`/`v` mode, a code point per step, and
 gives back whole surrogate pairs; `$$reSearch` skips start positions the first instruction rejects; hot helpers take
 and return numbers, not booleans (F14).)
+(T26: `Date` in `builtins/date.js`: a Date is a `$object` of class `CLASS_DATE` with its data `[time value]` under the
+private `G_SYM_STATE` key (intrinsics `date_new`, `date_data`); the setters mutate that array. All of `Date` is
+prelude code on `f64`s (the spec's MakeDay/MakeTime/TimeClip, Hinnant's days <-> civil dates); `Date.parse` is the
+Date Time String Format, then a subset of V8's legacy parser. `new Date(…)` calls `$$Date`; `Date(…)` calls
+`$$DateCall` (a string), which is also the call entry of `Date` as a value (`Module::date_call`); the construct entry
+passes the new target as `$$Date`'s `this` (subclasses, `Reflect.construct`). The runtime's ToPrimitive turns hint
+default into string for a Date; `console.log` gets a Date's text from `$$dateInspect` (`Module::date_inspect`).
+**Local time is UTC**: WASI 0.3.1's `wasi:clocks/timezone` is `@unstable` and wasmtime 49 doesn't implement it (a probe
+fails to instantiate), so the local offset is 0, like node with `TZ=UTC` (`scripts/diff.sh` runs node with `TZ=UTC`).
+The clock is `wasi:clocks/system-clock.now`, imported by commands only when used (its `instant` comes back in memory
+at 16, below `abi::HEAP_BASE`); a library using `Date` is rejected. `toLocale*String` give node's `en-US` forms and
+throw for other locales or options (no `Intl`).)
 (T20: typed arrays and `ArrayBuffer`s are native `$typed`/`$buffer` objects (`crates/backend/src/typed.rs`: element
 access, printing) with their constructors and methods in `builtins/typedarray.js` on `Intrinsic::Typed` operations.)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude

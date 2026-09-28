@@ -38,6 +38,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/object.js"),
     include_str!("../builtins/reflect.js"),
     include_str!("../builtins/regexp.js"),
+    include_str!("../builtins/date.js"),
     include_str!("../builtins/unicode-case.js"),
     include_str!("../builtins/json.js"),
     include_str!("../builtins/map.js"),
@@ -69,6 +70,19 @@ const IMPLIED: &[(&str, &[&str])] = &[
     ("$$RegExp", &["$$RegExp_prototype_toString"]),
     // `matchAll`/`replaceAll` read `flags` through a variable key.
     ("$$reCreate", &["$$RegExp_prototype_flags"]),
+    // `Date()` and `Date` as a value (T26); ToPrimitive of a Date reaches `toString`/`valueOf`,
+    // `JSON.stringify` its `toJSON`, `console.log` `$$dateInspect`.
+    (
+        "$$Date",
+        &[
+            "$$DateCall",
+            "$$dateInspect",
+            "$$Date_prototype_toString",
+            "$$Date_prototype_valueOf",
+            "$$Date_prototype_toJSON",
+            "$$Date_prototype_toISOString",
+        ],
+    ),
     ("$$Map_prototype_keys", &["$$MapIterator_prototype_next"]),
     ("$$Map_prototype_values", &["$$MapIterator_prototype_next"]),
     ("$$Map_prototype_entries", &["$$MapIterator_prototype_next"]),
@@ -76,8 +90,12 @@ const IMPLIED: &[(&str, &[&str])] = &[
     ("$$Set_prototype_entries", &["$$SetIterator_prototype_next"]),
 ];
 
-/// Prototype methods installed under another name too (T25): `Set.prototype.keys` is `values`.
-const ALIASES: &[(&str, &str)] = &[("keys", "$$Set_prototype_values")];
+/// Prototype methods installed under another name too (T25): `Set.prototype.keys` is `values`;
+/// (T26) `Date.prototype.toGMTString` is `toUTCString`.
+const ALIASES: &[(&str, &str)] = &[
+    ("keys", "$$Set_prototype_values"),
+    ("toGMTString", "$$Date_prototype_toUTCString"),
+];
 
 /// The prelude functions `yield*` in an async generator calls (T29, `builtins/asyncgen.js`).
 pub(crate) const ASYNC_DELEGATE: [&str; 7] = [
@@ -105,6 +123,11 @@ const REGEXP_SYMBOL_METHODS: &[(&str, &[&str])] = &[
     ("search", &["search"]),
     ("split", &["split"]),
 ];
+
+/// `new Date(…)` (T26); [`DATE_CALL`]: `Date(…)` (a string); [`DATE_INSPECT`]: `console.log`'s text.
+pub(crate) const DATE_NEW: &str = "$$Date";
+pub(crate) const DATE_CALL: &str = "$$DateCall";
+pub(crate) const DATE_INSPECT: &str = "$$dateInspect";
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
 pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
@@ -225,10 +248,12 @@ pub(crate) const OBJECT_PROTO_PROPS: &[&str] = &[
 ];
 
 /// Is `global.prop` inherited rather than a static of the prelude: `Function.prototype`'s
-/// properties of a constructor value, `Object.prototype`'s methods of a namespace?
+/// properties of a constructor value, `Object.prototype`'s methods of a namespace or (T26) of a
+/// constructor value (`Date.hasOwnProperty(…)`)?
 pub(crate) fn inherited_prop(global: &str, prop: &str) -> bool {
     FUNCTION_PROPS.contains(&prop)
-        || (js2wasi3_ir::Namespace::parse(global).is_some() && OBJECT_PROTO_PROPS.contains(&prop))
+        || ((js2wasi3_ir::Namespace::parse(global).is_some() || CTOR_VALUES.contains(&global))
+            && OBJECT_PROTO_PROPS.contains(&prop))
 }
 
 /// Names that gate native built-in code (T25): `keys`/`entries` are linked only when the user's
@@ -266,6 +291,7 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     "Float32Array",
     "Float64Array",
     "RegExp",
+    "Date",
 ];
 
 /// Constructors whose prelude function `$$X` is what `new X(…)` runs and that throw when called
@@ -329,6 +355,8 @@ impl Prelude {
         let mut methods: HashMap<String, Vec<usize>> = HashMap::new();
         for (name, sym) in &out.names {
             if let Some((_, m)) = name.split_once("_prototype_") {
+                // `Date.prototype[Symbol.toPrimitive]` (T26) is reached by naming `toPrimitive`.
+                let m = if m == "$toPrimitive" { "toPrimitive" } else { m };
                 methods.entry(m.to_string()).or_default().push(item_of[sym]);
             }
         }
@@ -621,6 +649,10 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$Array_prototype_splice"
         | "$$Array_prototype_toSpliced" => Some(2),
         "$$Array_prototype_flat" | "$$Map" | "$$Set" => Some(0),
+        "$$Date" | "$$Date_UTC" => Some(7),
+        "$$Date_prototype_toLocaleString"
+        | "$$Date_prototype_toLocaleDateString"
+        | "$$Date_prototype_toLocaleTimeString" => Some(0),
         _ => None,
     }
 }

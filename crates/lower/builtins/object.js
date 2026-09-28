@@ -259,6 +259,10 @@ function $$Object_prototype_toString() {
   if (__intrinsic_regexp_data(o)) {
     return "[object RegExp]";
   }
+  // `[[DateValue]]` (T26).
+  if (__intrinsic_date_data(o) !== undefined) {
+    return "[object Date]";
+  }
   // `[[ErrorData]]`, approximated by the prototype chain.
   if (o instanceof Error) {
     return "[object Error]";

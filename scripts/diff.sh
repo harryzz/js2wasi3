@@ -31,7 +31,8 @@ one() {
   fi
   local t0; t0=$(now_ms)
   # --no-warnings: process warnings (node 24: TimeoutNegativeWarning, …) carry the pid.
-  timeout "$TIMEOUT" node --no-warnings "$f" >"$d/node.out" 2>"$d/node.err"
+  # TZ=UTC: js2wasi3's local time is UTC (T26: WASI 0.3.1 has no stable time zone interface).
+  TZ=UTC timeout "$TIMEOUT" node --no-warnings "$f" >"$d/node.out" 2>"$d/node.err"
   echo $? >"$d/node.status"
   if [ -f "${f%.js}.uncaught" ]; then
     mv "$d/node.err" "$d/node.err.raw"

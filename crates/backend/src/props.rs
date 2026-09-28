@@ -530,6 +530,19 @@ fn desc(cx: &mut dyn Cx) -> Function {
         s.global_get(b).call(concat).return_();
     }
     s.end();
+    if cx.names("$date") {
+        // T26.
+        let date = cx.str("[object Date]");
+        s.local_get(O)
+            .struct_get(T_OBJECT, object::F_CLASS)
+            .i32_const(object::CLASS_MASK)
+            .i32_and()
+            .i32_const(object::CLASS_DATE)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.global_get(date).return_();
+        s.end();
+    }
     if cx.names("$regexp") {
         // T27: V8's text for a RegExp.
         let regexp = cx.str("[object RegExp]");

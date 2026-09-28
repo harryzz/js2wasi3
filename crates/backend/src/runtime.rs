@@ -233,6 +233,10 @@ pub trait Cx {
     fn declare_func(&mut self, index: u32);
     /// Function index of the prelude's StringToNumber `(jsval) -> f64`, if the module has it (T21).
     fn string_to_number(&mut self) -> Option<u32>;
+    /// The prelude's `$$DateCall` `$code` function index (T26): `Date` as a value's call entry.
+    fn date_call(&mut self) -> Option<u32>;
+    /// The prelude's `$$dateInspect` `(jsval) -> jsval` (T26): `console.log`'s text of a Date.
+    fn date_inspect(&mut self) -> Option<u32>;
     /// The prelude's generic fallback of a native `Array.prototype` method (T35): its `$code`
     /// function index.
     fn array_generic(&mut self, key: &str) -> Option<u32>;

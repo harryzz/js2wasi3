@@ -20,6 +20,6 @@ git -C "$DIR" sparse-checkout set --cone harness \
   test/language/expressions test/language/statements \
   test/built-ins/Array test/built-ins/String test/built-ins/Math test/built-ins/JSON \
   test/built-ins/Promise test/built-ins/Map test/built-ins/Set test/built-ins/Reflect \
-  test/built-ins/RegExp
+  test/built-ins/RegExp test/built-ins/Date
 git -C "$DIR" checkout -q "$COMMIT"
 echo "test262 at $COMMIT"
