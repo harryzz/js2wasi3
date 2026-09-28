@@ -226,6 +226,7 @@ pub fn lower_with(
             jsdoc: HashMap::new(),
             command: program.exports.is_empty(),
             main: None,
+            module_bodies: Vec::new(),
             lexical_end: HashMap::new(),
             tdz_flags: HashMap::new(),
             an: &an,
@@ -369,6 +370,9 @@ struct Lowerer<'p, 'a> {
     /// No ES exports: a `wasi:cli/run` command whose top-level code runs in `main`.
     command: bool,
     main: Option<FuncId>,
+    /// T41 slice 3: each module's top-level code, when a dependency has top-level `await`
+    /// (`SourceMap::modules`); `main` runs them through the prelude's `$$EvaluateModules`.
+    module_bodies: Vec<FuncId>,
     /// Top-level `let`/`const` of a command: where the declaration ends. `main` reading one
     /// before that is a TDZ error.
     lexical_end: HashMap<SymbolId, u32>,
@@ -913,6 +917,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.module.init = self.main;
             }
             self.func_params.insert(self.main.unwrap(), Vec::new());
+            if self.command {
+                let ranges = self.p.map.as_ref().map(|m| m.modules.clone()).unwrap_or_default();
+                for k in 0..ranges.len() {
+                    let mut f = ir::Function::new(format!("module${k}"), &[], None);
+                    f.pos = Some(Pos { line: 1, col: 1 });
+                    let id = self.module.add_function(f);
+                    self.func_params.insert(id, Vec::new());
+                    self.hidden.insert(id, Hidden::default());
+                    self.module_bodies.push(id);
+                }
+            }
         }
         self.declare_nested();
         self.declare_builtin_methods();
@@ -1885,8 +1900,37 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
+    /// Is `id` top-level code (`main`, or a module's body): it runs top to bottom.
+    pub(crate) fn is_top_code(&self, id: FuncId) -> bool {
+        Some(id) == self.main || self.module_bodies.contains(&id)
+    }
+
     /// `main`: a command's top-level code. Top-level variables are globals set in place.
+    /// With [`Self::module_bodies`], each module's statements go to its own function (lowered
+    /// first: `main` makes their function objects).
     fn lower_main(&mut self, id: FuncId, top: &[&'a Statement<'a>]) {
+        if !self.module_bodies.is_empty() {
+            let ranges = self.p.map.as_ref().expect("joined program").modules.clone();
+            for (k, (start, end)) in ranges.into_iter().enumerate() {
+                let stmts: Vec<_> = top
+                    .iter()
+                    .copied()
+                    .filter(|s| start <= s.span().start && s.span().start < end)
+                    .collect();
+                self.lower_top(self.module_bodies[k], &stmts);
+            }
+            let rest: Vec<_> = top
+                .iter()
+                .copied()
+                .filter(|s| !self.p.map.as_ref().unwrap().modules.iter().any(|(a, b)| *a <= s.span().start && s.span().start < *b))
+                .collect();
+            return self.lower_top(id, &rest);
+        }
+        self.lower_top(id, top);
+    }
+
+    /// Top-level statements into function `id` (`main`, or a module's body).
+    fn lower_top(&mut self, id: FuncId, top: &[&'a Statement<'a>]) {
         let func = self.module.functions[id.0 as usize].clone();
         let mut cx = FnCx::new(id, func);
         let mut stmts = Vec::new();
@@ -4609,7 +4653,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let callee = c.callee.without_parentheses();
         if let Expression::Identifier(id) = callee
             && id.name.starts_with("__intrinsic_")
-            && self.p.in_prelude(span.start)
+            && (self.p.in_prelude(span.start) || self.p.is_generated(span.start))
             && self
                 .scoping
                 .get_reference(id.reference_id())
@@ -5474,7 +5518,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
             "regexp_new" | "regexp_data" | "regexp_builtin_exec" => 1,
             "date_new" | "date_data" => 1,
-            "date_now" | "module_new" => 0,
+            "date_now" | "module_new" | "module_bodies" => 0,
             "to_primitive" => 2,
             "to_key" | "object_desc" => 1,
             "set_proto" => 2,
@@ -5499,6 +5543,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 library_throws("random numbers (`Math.random`) aren't available in a module with exports yet (js2wasi3)")
             };
             return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+        }
+        if name == "module_bodies" {
+            // T41 slice 3: the modules' functions (lowered before `main`), as function objects.
+            let bodies = self.module_bodies.clone();
+            let items = bodies
+                .into_iter()
+                .map(|f| {
+                    let code = self.adapter(f);
+                    let kind = if self.module.function(f).flags.is_async {
+                        ir::FnKind::Async
+                    } else {
+                        ir::FnKind::Plain
+                    };
+                    Some(Expr::Closure(Box::new(ir::Closure {
+                        code,
+                        name: String::new(),
+                        length: 0,
+                        kind,
+                        env: Vec::new(),
+                        shared: false,
+                        source: None,
+                    })))
+                })
+                .collect();
+            return Ok((Expr::Array(items), Call::Intrinsic(Some(Kind::Any))));
         }
         if name == "module_new" {
             // T41: `console.log`, descriptors and writes recognize namespaces only then.
@@ -6696,7 +6765,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 .get(&sym)
                 .map(|g| (Place::Global(*g), self.module.globals[g.0 as usize].ty))
         };
-        let in_main = cx.id == self.main.unwrap_or(FuncId(u32::MAX));
+        let in_main = self.is_top_code(cx.id);
         let guard = if in_main {
             // `main` runs top to bottom: before the declaration it's always in the TDZ.
             self.lexical_end

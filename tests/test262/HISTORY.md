@@ -3,6 +3,19 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-28: T41 multi-file modules, slice 3 (targeted run)
+
+- Compiler: top-level `await` in dependencies in the spec's order (module functions + `$$EvaluateModules`),
+  `import.meta`, JSON modules. Single-file programs and multi-file ones without an async dependency build
+  byte-identical modules (checked on every fixture).
+- Runner: `import-text` and `import-bytes` skipped (node 24 lacks them: 10 tests).
+- Run: `language/module-code`, `language/import`, `language/export` and the 402 other subset tests with
+  `import`/`export`/`import.meta`/attributes, with `--update` (1,351 tests, ~4.5 min at -j 4): 0 regressions, 25
+  unsupported → pass (JSON modules 11, attribute syntax 9, `import.meta` 5), 10 → skip, `import.meta/syntax/goal-script.js`
+  unsupported → fail (it wants a script-goal SyntaxError; every file is a module here). test262's TLA-order tests
+  still need `globalThis`/`import()`; three checked by hand match node. Subset: 25,581 of 28,108 run pass (91.0%);
+  module-code 539 of 593 (90.9%).
+
 ## 2026-09-28: T41 multi-file modules, slices 1–2 (targeted run; subset + `language/module-code`, `language/import`, `language/export`)
 
 - Compiler: T41 slices 1–2 (modules joined at the source level: static imports and exports, re-exports, `export *`,

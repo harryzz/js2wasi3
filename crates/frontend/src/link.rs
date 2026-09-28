@@ -11,6 +11,11 @@
 //! come first), a global some module reads, or a name bound in a nested scope of a module that
 //! imports it (a replaced reference there would be captured). A new name is `<name>$<k>`, unused
 //! anywhere in the program.
+//!
+//! The linker also writes code at the start (slice 2–3): namespace objects, each module's
+//! `import.meta` object, and, when a command's dependency has top-level `await`, the call that runs
+//! the modules as separate functions in the spec's async order ([`SourceMap::modules`]). A JSON
+//! module (`with { type: "json" }`) is checked and loaded as `export default <the JSON>;`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,6 +43,10 @@ pub struct SourceMap {
     /// The joined source starts with this much code the linker wrote (the namespace objects),
     /// which may call the prelude.
     pub generated: u32,
+    /// With a dependency that has top-level `await` (slice 3): each module's joined range, in
+    /// evaluation order. Each is its own function; the generated code runs them with
+    /// `$$EvaluateModules` (the spec's async module evaluation). Empty otherwise.
+    pub modules: Vec<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,13 +96,219 @@ pub fn link(
     if !g.diags.is_empty() {
         return Err(sorted(g.diags));
     }
-    if g.modules.iter().all(|m| m.requests.is_empty()) && !(command && !g.modules[0].p.exports.is_empty()) {
+    if g.modules.iter().all(|m| m.requests.is_empty() && m.meta.is_empty())
+        && !(command && !g.modules[0].p.exports.is_empty())
+    {
         return Ok(Linked {
             source: source.to_string(),
             map: None,
         });
     }
     g.join()
+}
+
+/// A JSON module's source (slice 3): `export default <the JSON>;` (JSON is JS syntax), with each
+/// `"__proto__"` key made computed so it stays an own property, as `JSON.parse` makes it. Or where
+/// the text isn't JSON, and why.
+fn json_module(text: &str) -> Result<String, (usize, String)> {
+    struct P<'s> {
+        s: &'s [u8],
+        at: usize,
+        proto: Vec<(usize, usize)>,
+    }
+    impl P<'_> {
+        fn ws(&mut self) {
+            while self.at < self.s.len() && matches!(self.s[self.at], b' ' | b'\t' | b'\n' | b'\r') {
+                self.at += 1;
+            }
+        }
+        fn fail<T>(&self, what: &str) -> Result<T, (usize, String)> {
+            let found = match self.s.get(self.at) {
+                None => "the end of the text".to_string(),
+                Some(_) => {
+                    let c = std::str::from_utf8(&self.s[self.at..]).ok().and_then(|t| t.chars().next());
+                    format!("`{}`", c.unwrap_or('?'))
+                }
+            };
+            Err((self.at, format!("expected {what}, found {found}")))
+        }
+        fn eat(&mut self, c: u8) -> bool {
+            let ok = self.s.get(self.at) == Some(&c);
+            self.at += ok as usize;
+            ok
+        }
+        fn digits(&mut self) -> usize {
+            let start = self.at;
+            while self.s.get(self.at).is_some_and(u8::is_ascii_digit) {
+                self.at += 1;
+            }
+            self.at - start
+        }
+        /// A string; its value when it's a key.
+        fn string(&mut self) -> Result<String, (usize, String)> {
+            let mut value = Vec::new();
+            self.at += 1;
+            loop {
+                match self.s.get(self.at) {
+                    None => return self.fail("`\"`"),
+                    Some(b'"') => break,
+                    Some(c) if *c < 0x20 => return self.fail("a character (control characters must be escaped)"),
+                    Some(b'\\') => {
+                        self.at += 1;
+                        match self.s.get(self.at) {
+                            Some(b'u') => {
+                                let hex = self.s.get(self.at + 1..self.at + 5).and_then(|h| std::str::from_utf8(h).ok());
+                                let Some(u) = hex.and_then(|h| u16::from_str_radix(h, 16).ok()).filter(|_| hex.unwrap().bytes().all(|b| b.is_ascii_hexdigit())) else {
+                                    self.at += 1;
+                                    return self.fail("four hex digits");
+                                };
+                                value.push(u);
+                                self.at += 5;
+                            }
+                            Some(c) if b"\"\\/bfnrt".contains(c) => {
+                                value.push(*c as u16);
+                                self.at += 1;
+                            }
+                            _ => return self.fail("an escape (`\\\"`, `\\n`, `\\u0041`, …)"),
+                        }
+                    }
+                    Some(_) => {
+                        let rest = std::str::from_utf8(&self.s[self.at..]).unwrap_or("");
+                        let c = rest.chars().next().unwrap_or('\u{fffd}');
+                        let mut buf = [0u16; 2];
+                        value.extend_from_slice(c.encode_utf16(&mut buf));
+                        self.at += c.len_utf8().max(1);
+                    }
+                }
+            }
+            self.at += 1;
+            Ok(String::from_utf16_lossy(&value))
+        }
+        fn value(&mut self) -> Result<(), (usize, String)> {
+            self.ws();
+            match self.s.get(self.at) {
+                Some(b'{') => {
+                    self.at += 1;
+                    self.ws();
+                    if self.eat(b'}') {
+                        return Ok(());
+                    }
+                    loop {
+                        self.ws();
+                        if self.s.get(self.at) != Some(&b'"') {
+                            return self.fail("a property name in double quotes");
+                        }
+                        let start = self.at;
+                        if self.string()? == "__proto__" {
+                            self.proto.push((start, self.at));
+                        }
+                        self.ws();
+                        if !self.eat(b':') {
+                            return self.fail("`:`");
+                        }
+                        self.value()?;
+                        self.ws();
+                        if self.eat(b'}') {
+                            return Ok(());
+                        }
+                        if !self.eat(b',') {
+                            return self.fail("`,` or `}`");
+                        }
+                    }
+                }
+                Some(b'[') => {
+                    self.at += 1;
+                    self.ws();
+                    if self.eat(b']') {
+                        return Ok(());
+                    }
+                    loop {
+                        self.value()?;
+                        self.ws();
+                        if self.eat(b']') {
+                            return Ok(());
+                        }
+                        if !self.eat(b',') {
+                            return self.fail("`,` or `]`");
+                        }
+                    }
+                }
+                Some(b'"') => self.string().map(|_| ()),
+                Some(b'-' | b'0'..=b'9') => {
+                    self.eat(b'-');
+                    if !self.eat(b'0') && self.digits() == 0 {
+                        return self.fail("a digit");
+                    }
+                    if self.eat(b'.') && self.digits() == 0 {
+                        return self.fail("a digit");
+                    }
+                    if self.eat(b'e') || self.eat(b'E') {
+                        let _ = self.eat(b'+') || self.eat(b'-');
+                        if self.digits() == 0 {
+                            return self.fail("a digit");
+                        }
+                    }
+                    Ok(())
+                }
+                _ => {
+                    for word in ["true", "false", "null"] {
+                        if self.s[self.at..].starts_with(word.as_bytes()) {
+                            self.at += word.len();
+                            return Ok(());
+                        }
+                    }
+                    self.fail("a JSON value")
+                }
+            }
+        }
+    }
+    let mut p = P { s: text.as_bytes(), at: 0, proto: Vec::new() };
+    p.value()?;
+    p.ws();
+    if p.at < text.len() {
+        return p.fail("the end of the text");
+    }
+    let mut out = String::from("export default ");
+    let mut pos = 0;
+    for (start, end) in p.proto {
+        out.push_str(&text[pos..start]);
+        out.push('[');
+        out.push_str(&text[start..end]);
+        out.push(']');
+        pos = end;
+    }
+    out.push_str(&text[pos..]);
+    out.push_str(";\n");
+    Ok(out)
+}
+
+/// node's `url.pathToFileURL(path)` for an absolute POSIX path.
+fn file_url(path: &str) -> String {
+    let mut out = String::from("file://");
+    for b in path.bytes() {
+        if b <= b' ' || b >= 0x7e || b"\"#%<>?`{}^|[]\\".contains(&b) {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
+/// Does the module have top-level `await` (outside any function)?
+fn has_tla(p: &Program) -> bool {
+    let nodes = p.semantic.nodes();
+    nodes.iter().any(|node| {
+        let top = match node.kind() {
+            AstKind::AwaitExpression(_) => true,
+            AstKind::ForOfStatement(f) => f.r#await,
+            AstKind::VariableDeclaration(d) => d.kind == VariableDeclarationKind::AwaitUsing,
+            _ => false,
+        };
+        top && !nodes.ancestors(node.id()).any(|a| {
+            matches!(a.kind(), AstKind::Function(_) | AstKind::ArrowFunctionExpression(_))
+        })
+    })
 }
 
 fn sorted(mut d: Vec<Diagnostic>) -> Diagnostics {
@@ -110,6 +325,8 @@ enum Binding {
     Default(usize),
     /// A module's namespace object (slice 2).
     Namespace(usize),
+    /// A module's `import.meta` object (slice 3).
+    Meta(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +357,10 @@ struct Module<'a> {
     stars: Vec<usize>,
     /// The request of each `import`/`export … from` statement (by its start).
     targets: HashMap<u32, usize>,
+    /// Has top-level `await` (or `for await`).
+    tla: bool,
+    /// Where it uses `import.meta`.
+    meta: Vec<Span>,
 }
 
 struct Graph<'a, 'r> {
@@ -177,6 +398,16 @@ impl<'a> Graph<'a, '_> {
         let m = self.modules.len();
         self.index.insert(path, m);
         let ast = p.ast;
+        let tla = has_tla(&p);
+        let meta = p
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|n| match n.kind() {
+                AstKind::ImportMeta(m) => Some(m.span),
+                _ => None,
+            })
+            .collect();
         self.modules.push(Module {
             p,
             requests: Vec::new(),
@@ -185,6 +416,8 @@ impl<'a> Graph<'a, '_> {
             indirect: Vec::new(),
             stars: Vec::new(),
             targets: HashMap::new(),
+            tla,
+            meta,
         });
         for stmt in &ast.body {
             let (span, source, with) = match stmt {
@@ -192,18 +425,32 @@ impl<'a> Graph<'a, '_> {
                     if i.phase.is_some() {
                         self.diag(m, i.span, "unsupported: import phases (`import defer`, `import source`) (planned: not scheduled)".into(), None);
                     }
-                    (i.span, &i.source, i.with_clause.is_some())
+                    (i.span, &i.source, &i.with_clause)
                 }
-                Statement::ExportFromDeclaration(e) => (e.span, &e.source, e.with_clause.is_some()),
-                Statement::ExportAllDeclaration(e) => (e.span, &e.source, e.with_clause.is_some()),
+                Statement::ExportFromDeclaration(e) => (e.span, &e.source, &e.with_clause),
+                Statement::ExportAllDeclaration(e) => (e.span, &e.source, &e.with_clause),
                 _ => continue,
             };
-            if with {
-                // The file may not be JS (`with { type: "json" }`): not loaded.
-                self.diag(m, span, "unsupported: import attributes (`with { type: \"json\" }`) (planned: T41 slice 3)".into(), None);
+            // Import attributes: node knows only `type: "json"` (slice 3: JSON modules).
+            let mut json = false;
+            let mut bad = false;
+            for a in with.iter().flat_map(|w| w.with_entries.iter()) {
+                let key = match &a.key {
+                    ImportAttributeKey::Identifier(k) => k.name.as_str(),
+                    ImportAttributeKey::StringLiteral(k) => k.value.as_str(),
+                };
+                if key == "type" && a.value.value == "json" {
+                    json = true;
+                } else {
+                    let message = format!("import attribute `{key}: {:?}` isn't supported (node knows only `type: \"json\"`)", a.value.value.as_str());
+                    self.diag(m, a.span, message, None);
+                    bad = true;
+                }
+            }
+            if bad {
                 continue;
             }
-            let Some(target) = self.request(m, source)? else {
+            let Some(target) = self.request(m, source, json)? else {
                 continue;
             };
             self.modules[m].requests.push(target);
@@ -214,16 +461,45 @@ impl<'a> Graph<'a, '_> {
     }
 
     /// Resolve and load `source`, requested by module `m`: `None` for a WIT interface or an error.
-    fn request(&mut self, m: usize, source: &StringLiteral) -> Result<Option<usize>, Diagnostics> {
+    /// `json`: imported `with { type: "json" }` (a JSON module).
+    fn request(&mut self, m: usize, source: &StringLiteral, json: bool) -> Result<Option<usize>, Diagnostics> {
         let spec = source.value.as_str();
         let path = match self.resolve(m, spec, source.span) {
             Some(Request::File(path)) => path,
             _ => return Ok(None),
         };
+        // node decides by the extension (`.json`), and wants the attribute to agree.
+        if json != path.ends_with(".json") {
+            let message = if json {
+                format!("module `{spec}` is not of type \"json\" (node's ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE)")
+            } else {
+                format!("module `{spec}` needs an import attribute of \"type: json\" (node's ERR_IMPORT_ATTRIBUTE_MISSING)")
+            };
+            let help = (!json).then(|| format!("`import … from \"{spec}\" with {{ type: \"json\" }}`"));
+            self.diag(m, source.span, message, help);
+            return Ok(None);
+        }
         if let Some(&k) = self.index.get(&path) {
             return Ok(Some(k));
         }
         match (self.read)(&path) {
+            Ok(text) if json => {
+                let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+                match json_module(text) {
+                    Ok(source) => self.load(path, &source).map(Some),
+                    Err((at, what)) => {
+                        let (line, col) = line_col(text, at as u32);
+                        self.diags.push(Diagnostic {
+                            path,
+                            line,
+                            col,
+                            message: format!("invalid JSON: {what}"),
+                            help: None,
+                        });
+                        Ok(None)
+                    }
+                }
+            }
             Ok(text) => self.load(path, &text).map(Some),
             Err(e) => {
                 let help = (!spec.ends_with(".js") && !spec.ends_with(".mjs"))
@@ -502,6 +778,27 @@ impl<'a> Graph<'a, '_> {
         let order = self.order();
         let mut map = SourceMap::default();
         let mut out = String::new();
+        // Each module's `import.meta` (slice 3): node's properties, from the file's absolute path.
+        for m in 0..self.modules.len() {
+            if let Some(name) = names.get(&Binding::Meta(m)) {
+                let path = &self.modules[m].p.path;
+                let abs = std::fs::canonicalize(path)
+                    .or_else(|_| std::path::absolute(path))
+                    .map_or_else(|_| path.clone(), |p| p.to_string_lossy().into_owned());
+                let dir = match abs.rfind('/') {
+                    Some(0) => "/",
+                    Some(k) => &abs[..k],
+                    None => ".",
+                };
+                out.push_str(&format!(
+                    "const {name} = $$ImportMeta({}, {}, {}, {});\n",
+                    js_string(&file_url(&abs)),
+                    js_string(&abs),
+                    js_string(dir),
+                    m == 0
+                ));
+            }
+        }
         // The namespace objects, made before any module runs (their getters read the bindings).
         for (t, exports) in &namespaces {
             let keys: Vec<String> = exports.iter().map(|(k, _)| js_string(k)).collect();
@@ -511,6 +808,32 @@ impl<'a> Graph<'a, '_> {
                 names[&Binding::Namespace(*t)],
                 keys.join(", "),
                 getters.join(", ")
+            ));
+        }
+        // A dependency with top-level `await` (slice 3, commands only: a library's `init` can't
+        // wait): every module becomes a function, run by the spec's algorithm.
+        let evaluate = (self.command || self.modules[0].p.exports.is_empty())
+            && self.modules[1..].iter().any(|m| m.tla);
+        if evaluate {
+            let at: HashMap<usize, usize> = order.iter().enumerate().map(|(k, m)| (*m, k)).collect();
+            let tla: Vec<&str> = order.iter().map(|m| if self.modules[*m].tla { "true" } else { "false" }).collect();
+            let requests: Vec<String> = order
+                .iter()
+                .map(|m| {
+                    let mut r: Vec<usize> = Vec::new();
+                    for t in &self.modules[*m].requests {
+                        if !r.contains(&at[t]) {
+                            r.push(at[t]);
+                        }
+                    }
+                    let r: Vec<String> = r.iter().map(|k| k.to_string()).collect();
+                    format!("[{}]", r.join(", "))
+                })
+                .collect();
+            out.push_str(&format!(
+                "await $$EvaluateModules(__intrinsic_module_bodies(), [{}], [{}]);\n",
+                tla.join(", "),
+                requests.join(", ")
             ));
         }
         map.generated = out.len() as u32;
@@ -534,6 +857,7 @@ impl<'a> Graph<'a, '_> {
                 });
                 out.push_str("\n;\n");
             }
+            let start = out.len() as u32;
             let source = self.modules[m].p.source;
             let mut pos = 0;
             for e in edits {
@@ -570,12 +894,15 @@ impl<'a> Graph<'a, '_> {
                 copied: true,
             });
             out.push_str(&source[pos as usize..]);
+            if evaluate {
+                map.modules.push((start, out.len() as u32));
+            }
         }
         for (b, name) in &names {
             let original = match *b {
                 Binding::Sym(m, s) => self.modules[m].p.semantic.scoping().symbol_name(s),
                 Binding::Default(_) => "default",
-                Binding::Namespace(_) => continue,
+                Binding::Namespace(_) | Binding::Meta(_) => continue,
             };
             if original != name {
                 map.names.insert(name.clone(), original.to_string());
@@ -714,6 +1041,17 @@ impl<'a> Graph<'a, '_> {
                 .expect("a free name");
             used.insert(name.clone());
             names.insert(Binding::Namespace(*t), name);
+        }
+        for m in 0..self.modules.len() {
+            if self.modules[m].meta.is_empty() {
+                continue;
+            }
+            let name = (1..)
+                .map(|k| format!("meta${k}"))
+                .find(|c| !used.contains(c) && !taken.contains(c) && !globals.contains(c))
+                .expect("a free name");
+            used.insert(name.clone());
+            names.insert(Binding::Meta(m), name);
         }
         names
     }
@@ -932,6 +1270,9 @@ impl<'a> Graph<'a, '_> {
                 }
             }
         }
+        for span in &module.meta {
+            edits.push(Edit::new(span.start, span.end, names[&Binding::Meta(m)].clone()));
+        }
         edits.sort_by_key(|e| (e.start, e.end));
         edits
     }
@@ -1078,5 +1419,68 @@ mod tests {
         let err = join(&[("main.js", "import './b';\n")]).err().unwrap().to_string();
         assert!(err.starts_with("main.js:1:8: error: cannot find module `./b`"), "{err}");
         assert!(err.contains("help: node needs the file's extension: `./b.js`?"), "{err}");
+    }
+
+    #[test]
+    fn async_dependency_makes_module_functions() {
+        let l = join(&[
+            ("main.js", "import './a.js';\nimport './b.js';\nconsole.log(1);\n"),
+            ("a.js", "await 0;\n"),
+            ("b.js", "import './a.js';\nasync function f() { await 1; }\n"),
+        ])
+        .unwrap();
+        assert!(
+            l.source.starts_with("await $$EvaluateModules(__intrinsic_module_bodies(), [true, false, false], [[], [0], [0, 1]]);\n"),
+            "{}",
+            l.source
+        );
+        let map = l.map.unwrap();
+        let texts: Vec<&str> = map.modules.iter().map(|(a, b)| &l.source[*a as usize..*b as usize]).collect();
+        assert_eq!(texts, ["await 0;\n", "\nasync function f() { await 1; }\n", "\n\nconsole.log(1);\n"]);
+        // `await` only inside a function: no module functions.
+        let l = join(&[("main.js", "import './b.js';\n"), ("b.js", "async function f() { await 1; }\n")]).unwrap();
+        assert!(l.map.unwrap().modules.is_empty());
+    }
+
+    #[test]
+    fn import_meta_is_a_generated_binding() {
+        let l = join(&[("main.js", "const meta$1 = 0;\nconsole.log(import.meta.url, meta$1);\n")]).unwrap();
+        let first = l.source.lines().next().unwrap();
+        assert!(first.starts_with("const meta$2 = $$ImportMeta(\"file:///"), "{first}");
+        assert!(first.contains("/main.js\", \"/") && first.ends_with(", true);"), "{first}");
+        assert!(l.source.ends_with("console.log(meta$2.url, meta$1);\n"), "{}", l.source);
+        assert_eq!(file_url("/a b/é#?.js"), "file:///a%20b/%C3%A9%23%3F.js");
+    }
+
+    #[test]
+    fn json_modules() {
+        let l = join(&[
+            ("main.js", "import d from './d.json' with { type: 'json' };\nconsole.log(d);\n"),
+            ("d.json", "{\"__proto__\": [1, 2.5e-3, \"\\u0041\"], \"\\u005f_proto__\": null}"),
+        ])
+        .unwrap();
+        assert!(
+            l.source.starts_with("const default$1 = {[\"__proto__\"]: [1, 2.5e-3, \"\\u0041\"], [\"\\u005f_proto__\"]: null};"),
+            "{}",
+            l.source
+        );
+        for (text, at, what) in [
+            ("{\"a\": 1,}", 8, "expected a property name in double quotes, found `}`"),
+            ("[01]", 2, "expected `,` or `]`, found `1`"),
+            ("'x'", 0, "expected a JSON value, found `'`"),
+            ("\"a\tb\"", 2, "expected a character (control characters must be escaped), found `\t`"),
+            ("1 2", 2, "expected the end of the text, found `2`"),
+        ] {
+            assert_eq!(json_module(text), Err((at, what.to_string())), "{text}");
+        }
+        let err = |files: &[(&str, &str)]| join(files).err().unwrap().to_string();
+        let e = err(&[("main.js", "import d from './d.json';\n"), ("d.json", "1")]);
+        assert!(e.contains("needs an import attribute of \"type: json\""), "{e}");
+        let e = err(&[("main.js", "import d from './a.js' with { type: 'json' };\n"), ("a.js", "")]);
+        assert!(e.contains("is not of type \"json\""), "{e}");
+        let e = err(&[("main.js", "import d from './d.json' with { type: 'css' };\n"), ("d.json", "1")]);
+        assert!(e.contains("import attribute `type: \"css\"` isn't supported"), "{e}");
+        let e = err(&[("main.js", "import d from './d.json' with { type: 'json' };\n"), ("d.json", "\n [1,]")]);
+        assert!(e.starts_with("d.json:2:5: error: invalid JSON: expected a JSON value, found `]`"), "{e}");
     }
 }

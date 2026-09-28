@@ -34,7 +34,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `abstract` | ➖ | Removed in ES5 (Java-era reserved word). |
 | `arguments` | 🟡 | T25: in ordinary functions, methods, generators and async functions (unmapped, as in strict mode; iterable, printed `[Arguments] {…}`). Rejected in arrow functions, class constructors, with a rest parameter and in exported functions (F103). |
 | `async` | 🟡 | T19: `async function`, async arrows, methods, static methods. T20: async generators (`async function*`, methods), except `yield*` in them (F115). T20 slice 3: exported async functions are WIT `async func`s. |
-| `await` | 🟡 | T19: in async functions and at top level; T20: `for await` (async and sync iterables, node's microtask ticks). Missing: an unsettled top-level `await` exits 0 instead of node's 13 (F76). |
+| `await` | 🟡 | T19: in async functions and at top level; T20: `for await` (async and sync iterables, node's microtask ticks); T41: top-level `await` in an imported module (node's evaluation order; commands only). Missing: an unsettled top-level `await` exits 0 instead of node's 13 (F76). |
 | `boolean` | ➖ | Removed in ES5. |
 | `break` | ✅ | Loops, `switch`, labeled statements and blocks; through `finally`. |
 | `byte` | ➖ | Removed in ES5. |
@@ -63,7 +63,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
 | `implements` | ➖ | Reserved in strict mode; a syntax error in node too. |
-| `import` | 🟡 | T41: other files by relative path (`./x.js`, node's rule: the extension is required), joined into one program at build time: named, default and namespace imports (`import * as ns`, printed `[Module: null prototype] {…}`), live and read-only bindings, cycles, TDZ errors like node's, node's SyntaxError for a missing export (at build time). `import { f } from "ns:pkg/iface"` imports a user world's interface functions (T20 slice 5, `--wit`; see [user-worlds.md](user-worlds.md)). Missing: packages (`node_modules`), `node:` modules, import attributes, `import.meta`, dynamic `import()` (F79), node's order with top-level `await` in a dependency (F192). |
+| `import` | 🟡 | T41: other files by relative path (`./x.js`, node's rule: the extension is required), joined into one program at build time: named, default and namespace imports (`import * as ns`, printed `[Module: null prototype] {…}`), live and read-only bindings, cycles, TDZ errors like node's, node's SyntaxError for a missing export (at build time). `import { f } from "ns:pkg/iface"` imports a user world's interface functions (T20 slice 5, `--wit`; see [user-worlds.md](user-worlds.md)). T41 slice 3: top-level `await` in a dependency runs in node's order (async module evaluation), `import.meta` (`url`, `filename`, `dirname`, `main`, `resolve`; the source's paths at build time), JSON modules (`import x from "./x.json" with { type: "json" }`, checked at build time; node's other attribute errors too). Missing: packages (`node_modules`), `node:` modules, dynamic `import()` (F79). |
 | `in` | ✅ | Objects and arrays; `#x in o` (T16). |
 | `instanceof` | ✅ | Classes, functions, native errors, built-ins, `Symbol.hasInstance` (T25). |
 | `int` | ➖ | Removed in ES5. |

@@ -1,0 +1,7 @@
+{
+  "name": "js2wasi3",
+  "count": 1,
+  "list": [1, -2.5e3, 0.125, true, false, null, "é\n\"q\""],
+  "nested": { "deep": { "deeper": [[], {}] } },
+  "odd": { "__proto__": { "p": 1 }, "2": "two", "1": "one" }
+}

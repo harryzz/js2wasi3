@@ -44,7 +44,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// `await arg` (also `for await`'s): a top-level one makes `main` an async function.
     pub(crate) fn await_value(&mut self, cx: &mut FnCx, arg: Expr) -> Expr {
-        if Some(cx.id) == self.main {
+        if self.is_top_code(cx.id) {
             cx.func.flags.is_async = true;
             cx.func.result = Some(Type::JsVal);
         }

@@ -1033,6 +1033,8 @@ fn library_from_several_modules() {
     assert_eq!(invoke(&out, "area(2)"), "ok(12)");
     assert_eq!(invoke(&out, "double(21)"), "ok(42)");
     assert_eq!(invoke(&out, "square(3)"), "ok(9)");
+    // A JSON module and `import.meta` (slice 3).
+    assert_eq!(invoke(&out, "describe()"), "ok(\"shapes 2 from lib.js\")");
 }
 
 #[test]
@@ -1063,9 +1065,15 @@ fn module_errors_are_diagnostics() {
         "{err}"
     );
     // A diagnostic of the lowering points into the module it's in.
-    write("a.js", "// a\nexport function f() {\n  return import.meta;\n}\n");
+    write("a.js", "// a\nexport function f() {\n  return eval;\n}\n");
     write("main.js", "import { f } from './a.js';\nf();\n");
     let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
     let err = String::from_utf8_lossy(&b.stderr);
     assert!(err.contains("a.js:3:10: error: unsupported:"), "{err}");
+    // A library can't wait for a dependency's top-level `await` (its `init` is synchronous).
+    write("a.js", "await 0;\nexport const x = 1;\n");
+    write("main.js", "import { x } from './a.js';\nexport function f() { return x; }\n");
+    let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
+    let err = String::from_utf8_lossy(&b.stderr);
+    assert!(err.contains("a.js:1:1: error: unsupported: top-level `await` in a module with exports"), "{err}");
 }

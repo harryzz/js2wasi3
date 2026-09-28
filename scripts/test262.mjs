@@ -80,6 +80,9 @@ const NODE_MISSING = [
   "source-phase-imports",
   "source-phase-imports-module-source",
   "import-defer",
+  // T41: `with { type: "text" }` / `"bytes" }` (node 24: ERR_UNKNOWN_FILE_EXTENSION).
+  "import-text",
+  "import-bytes",
   "nonextensible-applies-to-private",
   // T26: `Date.prototype.toTemporalInstant`.
   "Temporal",

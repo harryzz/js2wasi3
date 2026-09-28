@@ -202,7 +202,14 @@ from`) is made before any module runs by code the linker writes at the start (`c
 $$ModuleNamespace(keys, getters)`, allowed to call the prelude): a null-prototype, non-extensible object of class
 `CLASS_MODULE` with a getter per export (so it's live and throws in the TDZ); the runtime, gated on the name
 `$module`, shows the getters as writable data properties (descriptors, `console.log` as node's `[Module: null
-prototype] {…}`), and fails writes with node's messages.)
+prototype] {…}`), and fails writes with node's messages. Slice 3: when a command's dependency has top-level `await`,
+the linker records each module's joined range (`SourceMap::modules`) and starts the generated code with `await
+$$EvaluateModules(__intrinsic_module_bodies(), tla, requests)`; the lowering makes each module's top-level statements
+its own function (`module$k`; globals stay shared, TDZ checks as in `main`) and the intrinsic gives their function
+objects; `builtins/module.js` runs the spec's InnerModuleEvaluation / ExecuteAsyncModule /
+AsyncModuleExecutionFulfilled (the ticks match node's). Other programs keep one `main`. `import.meta` is a generated
+per-module `const` made by `$$ImportMeta` with the source's absolute path at build time; a JSON module (`with { type:
+"json" }`) is checked at build time and loaded as `export default <the JSON>;` (`"__proto__"` keys made computed).)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

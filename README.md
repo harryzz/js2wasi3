@@ -79,8 +79,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   [docs/user-worlds.md](docs/user-worlds.md).
 - `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
 - Programs of several files: `import`/`export` between ES modules (relative paths), joined into one component at
-  build time (namespaces, re-exports, live bindings, cycles); `build --command` makes an entry with exports a
-  command, as node runs it.
+  build time (namespaces, re-exports, live bindings, cycles, top-level `await` in node's order, `import.meta`, JSON
+  modules); `build --command` makes an entry with exports a command, as node runs it.
 
 Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, dynamic `import()`, packages from
 `node_modules`, and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in

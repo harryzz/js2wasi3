@@ -155,17 +155,54 @@ committing the baseline.
   0 regressions.
 - Unsupported / follow-ups: F192 (TLA order), F193 (namespace internals), F194 (CommonJS detection), F195
   (`toString` text, positions), F196 (runner harness), F197 (namespace exports from a library).
-- **Next smallest step (slice 3)**: F192. Idea: keep declarations shared, but let the lowering build `main` from
+- (Slice 3's plan, as written at the end of slice 2) F192. Idea: keep declarations shared, but let the lowering build `main` from
   per-module segments (the linker can record each module's statement range): a module with top-level `await`,
   or one waiting on such a dependency, becomes an async step started when its dependencies' promises settle, the
   others run in order at once (the spec's async module evaluation). Then `import.meta` (`url` as `file://` of the
   source path?) and JSON modules (`with { type: "json" }`: a module whose default export is the parsed value).
 
+**Slice 3 (2026-09-28).** Top-level `await` in dependencies, `import.meta`, JSON modules.
+- F192: when a command's dependency (not the entry) has top-level `await`, `link` records each module's joined range
+  in evaluation order (`SourceMap::modules`) and the generated prefix ends with `await
+  $$EvaluateModules(__intrinsic_module_bodies(), [tla…], [[requests…]…])`. The lowering (`Lowerer::module_bodies`,
+  `lower_top`, `is_top_code`) makes each module's top-level statements a function `module$k` (globals shared, TDZ as
+  in `main`, an `await` makes it async); the intrinsic `module_bodies` (allowed in generated code) is an array of
+  their function objects. `builtins/module.js` `$$EvaluateModules`: the spec's Evaluate / InnerModuleEvaluation
+  (Tarjan over cycles) / ExecuteAsyncModule (an async wrapper awaiting the body, no observable `then`) /
+  AsyncModuleExecutionFulfilled + GatherAvailableAncestors / Rejected. Ticks match node against promise chains.
+  Libraries keep one synchronous `init` (a TLA dependency is rejected, as before); programs without an async
+  dependency keep one `main` (same bytes).
+- `import.meta`: `Binding::Meta`; each use is replaced by a generated `const meta$k = $$ImportMeta(url, filename,
+  dirname, main)` (canonical absolute path at build time; `url` as `pathToFileURL`), an extensible null-prototype
+  object with node's keys in node's order; `resolve` (prelude) handles `./`, `../`, `/` (URL-encoded, dot segments),
+  URLs as they are, bare specifiers → `ERR_MODULE_NOT_FOUND` like node without the package. A one-file program using
+  `import.meta` now goes through the linker.
+- JSON modules: attributes checked in `load` (only `type: "json"`); `.json` without it, it on a non-`.json` file and
+  other attributes are build errors (node's ERR_IMPORT_ATTRIBUTE_* wording); `json_module` validates (RFC 8259, BOM
+  stripped, errors at the file's line/col) and gives `export default <text>;` with `"__proto__"` keys (also escaped
+  ones) computed, so they stay own properties.
+- Tests: fixtures `modules/{tla,tla-error,tla-cycle,meta,json}` (all 13 module fixtures match node), frontend tests
+  `async_dependency_makes_module_functions`, `import_meta_is_a_generated_binding`, `json_modules`, build tests
+  (`library_from_several_modules`: JSON + `import.meta` in a library; `module_errors_are_diagnostics`: a TLA dependency
+  of a library). `cargo test --no-fail-fast`: all pass. Gating: every fixture the old compiler builds is
+  byte-identical except the 3 TLA fixtures and F186's 3 (new output among the old variants).
+- test262: targeted `--update` (1,351 tests): 0 regressions, 25 unsupported → pass; `import-text`/`import-bytes`
+  skipped (node 24 lacks them); `import.meta/syntax/goal-script.js` fails (a script-goal early error; every file is
+  a module here). The TLA-order tests need `globalThis`/`import()`; three checked by hand with a stand-in module
+  match node. Subset 25,581 of 28,108 run (91.0%), module-code 90.9%.
+- Unsupported / follow-ups: F198 (`console.log` of an own `__proto__` key). Commands only for TLA dependencies
+  (a library's `init` is synchronous: would need async `init` with async exports).
+- **Next smallest step (slice 4)**: dynamic `import()` with a string-literal specifier: the linker collects the
+  literals, loads those modules into the graph (not evaluated up front), and the lowering turns `import("./x.js")`
+  into a call of a prelude `$$DynamicImport(k)` that evaluates module `k` once through `$$EvaluateModules`' machinery
+  (module functions are already there when a module is async; for dynamic ones every module in the graph becomes a
+  function) and returns a promise of its namespace. Then constants, conditionals, template patterns, `--include`.
+
 ## Checklist
 - [x] design questions decided and recorded
 - [x] slice 1: static imports
 - [x] slice 2: namespaces and re-exports
-- [ ] slice 3: top-level `await` in dependencies, `import.meta`
+- [x] slice 3: top-level `await` in dependencies, `import.meta` (and JSON modules)
 - [ ] slice 4: dynamic `import()`
 - [ ] slice 5 (or a new task): bare specifiers
 - [ ] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md, README)
@@ -220,3 +257,10 @@ committing the baseline.
 - 2026-09-28: checkpoint after slices 1–2: targeted test262 `--update` (module dirs + 1,032 import/export tests,
   1,981 tests): 0 regressions; subset 25,556 of 28,118 run (90.9%). Docs: HISTORY.md, keywords.md (`import`,
   `export`, `default`), design.md D4, README, follow-ups F192–F197, F7 ticked. Notes / Result written for slices 1–2.
+- 2026-09-28: slice 3 started. node probe: `a.js` awaits, sibling `b.js` runs meanwhile, `c.js` (imports a) and the entry run one job after a's body settles (spec async module evaluation, exact ticks visible against a promise chain); js2wasi3 today runs a, b, c in sequence. Design: when a command's dependency has top-level `await`, the linker records each module's joined range, TLA flag and requests (`SourceMap::modules`) and writes `await $$EvaluateModules(__intrinsic_module_bodies(), tla, requests)` in the generated prefix; the lowering makes each module's top-level statements its own function (globals shared, main-like TDZ), and `builtins/module.js` runs the spec's InnerModuleEvaluation / ExecuteAsyncModule / AsyncModuleExecutionFulfilled/Rejected over them. Other programs: unchanged.
+- 2026-09-28: `$$EvaluateModules` (prelude), `SourceMap::modules`, per-module functions (`Lowerer::module_bodies`, `lower_top`, `is_top_code`), intrinsic `module_bodies` (allowed in generated code). Probe matches node exactly; fixtures `modules/{tla,tla-error,tla-cycle}` pass. Gating: 173 fixture builds old vs new, all byte-identical except the 3 new ones and the 2 F186 fixtures (new output among old variants).
+- 2026-09-28: test262's TLA ordering tests need `globalThis` or `import()`; checked by hand with a module standing in for `globalThis`: `async-module-does-not-block-sibling-modules`, `dfs-invariant`, `pending-async-dep-from-cycle` match node. F192 done.
+- 2026-09-28: `import.meta` (decided: node's properties with build-time values, so output matches node where it was built): the linker replaces each `import.meta` by a generated `const meta$k = $$ImportMeta(url, filename, dirname, main)` (`Binding::Meta`; a one-file program using it now goes through the linker); `url` like `pathToFileURL` of the canonical path; `resolve` in the prelude (relative/absolute paths against the URL, URLs as they are, bare → ERR_MODULE_NOT_FOUND). Fixture `modules/meta` passes (first version pulled the regex engine: 2.6 s; char tests instead).
+- 2026-09-28: JSON modules: the linker checks import attributes (only `type: "json"`; others, a missing one on `.json`, one on a non-JSON file: build errors worded after node's ERR_IMPORT_ATTRIBUTE_*), validates the file with a small JSON checker (`json_module`: errors at the JSON file's line/col; BOM stripped) and loads `export default <text>;` with `"__proto__"` keys made computed (own properties, as JSON.parse). Fixture `modules/json` passes (default, namespace, `export { default as x } from … with`, one object shared, mutation). Found: `console.log` prints an own `__proto__` key bare, node `['__proto__']` (F198; changing inspect would touch every program's bytes).
+- 2026-09-28: frontend tests `async_dependency_makes_module_functions`, `import_meta_is_a_generated_binding`, `json_modules`; build test: library with a JSON module + `import.meta` (`modules/library/config.json`, `describe()`), a library with a TLA dependency is rejected at the dependency; the old `import.meta` rejection case now uses `eval`. test262 (import, module-code, export, import.meta): 36 changed, 0 regressions; runner skips `import-text`/`import-bytes` (node 24 lacks them); `import.meta/syntax/goal-script.js` unsupported → fail (expects a script-goal SyntaxError; every file is a module here, as node's ESM detection also runs it).
+- 2026-09-28: targeted test262 `--update` (module dirs + 402 tests with imports/exports/`import.meta`/attributes, 1,351 tests): 37 changed, 0 regressions (2 load timeouts pass alone); subset 25,581 of 28,108 run (91.0%), module-code 90.9%. Gating re-checked with the final code: 163 fixtures built by the old compiler, all byte-identical except the 3 TLA fixtures (now split into module functions) and the 3 F186 fixtures (new output among old variants).
