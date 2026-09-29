@@ -161,33 +161,23 @@ function frontmatter(src) {
 let fileCounter = 0;
 // Harness files adapted for js2wasi3 (T47), each replacement required to match:
 // - resizableArrayBufferUtils.js builds its subclasses with `new Function` of code made at run time
-//   (F191); the same classes are written out. `Float16Array` and `BigInt64Array`/`BigUint64Array`
-//   aren't implemented (F116): the harness's own "does this global exist" checks say no.
+//   (F191); the same classes are written out. `Float16Array` isn't implemented (F116): the
+//   harness's own "does this global exist" checks say no (T48: the BigInt arrays exist).
 const HARNESS_ADAPT = {
   "resizableArrayBufferUtils.js": [
     [
       "return new Function('return class My' + type + ' extends ' + type + ' {}')();",
       "if (type === 'Uint8Array') return class MyUint8Array extends Uint8Array {};\n" +
-        "    if (type === 'Float32Array') return class MyFloat32Array extends Float32Array {};",
+        "    if (type === 'Float32Array') return class MyFloat32Array extends Float32Array {};\n" +
+        "    if (type === 'BigInt64Array') return class MyBigInt64Array extends BigInt64Array {};",
     ],
     ["typeof Float16Array !== 'undefined'", "false", "all"],
-    ["typeof BigUint64Array !== 'undefined'", "false"],
-    ["typeof BigInt64Array !== 'undefined'", "false"],
     // (Names of unimplemented globals are build errors even in dead code.)
     ["builtinCtors.push(Float16Array);", ""],
     ["floatCtors.push(Float16Array);", ""],
-    ["builtinCtors.push(BigUint64Array);", ""],
-    ["builtinCtors.push(BigInt64Array);", ""],
-    [
-      "(BigInt64Array !== 'undefined' && ta instanceof BigInt64Array)\n      || (BigUint64Array !== 'undefined' && ta instanceof BigUint64Array)",
-      "false",
-    ],
   ],
   "testTypedArray.js": [
     ['if (typeof Float16Array !== "undefined") {\n  floatArrayConstructors.push(Float16Array);\n}', ""],
-    ['if (typeof BigInt64Array !== "undefined") {\n  bigIntArrayConstructors.push(BigInt64Array);\n}', ""],
-    ['if (typeof BigUint64Array !== "undefined") {\n  bigIntArrayConstructors.push(BigUint64Array);\n}', ""],
-    ["constructors || [BigInt64Array, BigUint64Array]", "constructors || []"],
     ['typeof Float16Array !== "undefined" && FA === Float16Array', "false"],
   ],
 };

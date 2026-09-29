@@ -138,6 +138,8 @@ pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
 
 /// The prelude's StringToBigInt (T40): the runtime's comparisons of strings with BigInts call it.
 pub(crate) const STRING_TO_BIGINT: &str = "$$StringToBigInt";
+/// The prelude's ToBigInt (T48): the runtime's element writes of the BigInt arrays call it.
+pub(crate) const TO_BIGINT: &str = "$$toBigInt";
 
 /// The prelude's stream reader and pump (T20 slice 6b): the backend lifts and lowers a user
 /// world's streams with them.
@@ -272,6 +274,9 @@ pub(crate) struct Prelude {
     /// Does the user's code have a class with `extends`, or name `construct` (T47, see
     /// `ir::Module::subclassing`)?
     pub subclassing: bool,
+    /// Does the user's code name `BigInt64Array` or `BigUint64Array` (T48)? Then [`Prelude::bigint`]
+    /// too.
+    pub big_typed: bool,
     /// Does the user's code name `globalThis` or `global` (T42: the global object exists)?
     pub global_object: bool,
     /// The global object's built-in properties (T42): the [`GLOBAL_NAMES`] the code names.
@@ -294,7 +299,7 @@ pub(crate) const GLOBAL_NAMES: &[&str] = &[
     "Int32Array", "Float32Array", "Float64Array", "Uint8ClampedArray", "BigInt", "Map", "Set",
     "Reflect", "isFinite", "isNaN", "global", "clearImmediate", "setImmediate", "clearInterval",
     "clearTimeout", "setInterval", "setTimeout", "queueMicrotask", "eval", "SuppressedError",
-    "DisposableStack", "AsyncDisposableStack",
+    "DisposableStack", "AsyncDisposableStack", "BigInt64Array", "BigUint64Array",
 ];
 
 /// Properties a built-in constructor has as a function (`Array.apply`, `String.name`): reading
@@ -367,6 +372,9 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     // T45.
     "DisposableStack",
     "AsyncDisposableStack",
+    // T48.
+    "BigInt64Array",
+    "BigUint64Array",
 ];
 
 /// The `ArrayBuffer` constructor taking `options` (T47): `$$ArrayBuffer` in a module with
@@ -391,6 +399,9 @@ pub(crate) const NEW_ONLY: &[&str] = &[
     // T45.
     "DisposableStack",
     "AsyncDisposableStack",
+    // T48.
+    "BigInt64Array",
+    "BigUint64Array",
 ];
 
 impl Prelude {
@@ -451,15 +462,29 @@ impl Prelude {
             }
             _ => false,
         });
+        // The BigInt arrays (T48): they make BigInts.
+        out.big_typed = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::IdentifierReference(r) => {
+                matches!(r.name.as_str(), "BigInt64Array" | "BigUint64Array")
+                    && !p.in_prelude(r.span.start)
+                    && scoping.get_reference(r.reference_id()).symbol_id().is_none()
+            }
+            _ => false,
+        });
+        out.bigint |= out.big_typed;
         // A RegExp modifier group anywhere in the user's source (T46).
         out.regexp_mods = p.source[..p.user_end as usize]
             .as_bytes()
             .windows(3)
             .any(|w| w[0] == b'(' && w[1] == b'?' && matches!(w[2], b'i' | b'm' | b's' | b'-'));
         // Prelude code in `if (__intrinsic_regexp_mods()) { … }` blocks, when they're dropped.
-        // T47: the same for `if (__intrinsic_rab_mode()) { … }`.
+        // T47/T48: the same for `if (__intrinsic_rab_mode()) { … }`, `__intrinsic_big_typed_mode()`.
         let mut dropped: Vec<Span> = Vec::new();
-        let gates: Vec<&str> = [("__intrinsic_regexp_mods", out.regexp_mods), ("__intrinsic_rab_mode", out.rab)]
+        let gates: Vec<&str> = [
+            ("__intrinsic_regexp_mods", out.regexp_mods),
+            ("__intrinsic_rab_mode", out.rab),
+            ("__intrinsic_big_typed_mode", out.big_typed),
+        ]
             .into_iter()
             .filter(|(_, keep)| !keep)
             .map(|(name, _)| name)
@@ -713,6 +738,12 @@ impl Prelude {
         }
         // The runtime compares strings with BigInts through the prelude's StringToBigInt, and
         // ToPrimitive of a BigInt wrapper reaches `valueOf`/`toString` (T40).
+        // T48: element writes of the BigInt arrays call ToBigInt.
+        if out.big_typed
+            && let Some(sym) = out.names.get(TO_BIGINT)
+        {
+            roots.push(item_of[sym]);
+        }
         if out.bigint {
             for name in [
                 STRING_TO_BIGINT,

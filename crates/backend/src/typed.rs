@@ -63,6 +63,8 @@ pub enum Helper {
     Get,
     /// `(t: (ref $typed), i: i32, x: f64)`: store `x` converted (in range).
     Set,
+    /// `(t: (ref $typed), i: i32, b: jsval (a BigInt))`: store `b` modulo 2^64 (in range; T48).
+    SetBig,
     /// `(t: (ref $typed), depth, indent) -> (ref $string)`: `Uint8Array(3) [ 1, 2, 3 ]`.
     Format,
     /// `(b: (ref $buffer), depth, indent) -> (ref $string)`: `ArrayBuffer { [Uint8Contents]:
@@ -104,6 +106,7 @@ impl Helper {
             Helper::Op(op) => js2wasi3_ir::Intrinsic::Typed(op).name(),
             Helper::Get => "typed_get",
             Helper::Set => "typed_set",
+            Helper::SetBig => "typed_set_bigint",
             Helper::Format => "inspect_typed_array",
             Helper::FormatBuffer => "inspect_array_buffer",
             Helper::Name => "typed_array_name",
@@ -129,6 +132,7 @@ impl Helper {
             }
             Helper::Get => (vec![t, I32], vec![v]),
             Helper::Set => (vec![t, I32, ValType::F64], vec![]),
+            Helper::SetBig => (vec![t, I32, v], vec![]),
             Helper::Format => (vec![t, I32, I32], vec![string_ref()]),
             Helper::FormatBuffer => (vec![rt(false, T_BUFFER), I32, I32], vec![string_ref()]),
             Helper::Name => (vec![I32], vec![string_ref()]),
@@ -141,11 +145,13 @@ impl Helper {
             Helper::Op(op) => op_body(cx, op),
             Helper::Get => get(cx),
             Helper::Set => set(),
+            Helper::SetBig => set_big(cx),
             Helper::Format => format(cx),
             Helper::FormatBuffer => format_buffer(cx),
             Helper::Len => current_length(),
             Helper::Name => {
-                let names: Vec<u32> = TYPED_NAMES.iter().map(|n| cx.str(n)).collect();
+                let kinds = cx.typed_kinds() as usize;
+                let names: Vec<u32> = TYPED_NAMES[..kinds].iter().map(|n| cx.str(n)).collect();
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
                 for (k, g) in names.iter().enumerate() {
@@ -220,7 +226,12 @@ fn get(cx: &mut dyn Cx) -> Function {
     const KIND: u32 = 2;
     const DATA: u32 = 3;
     const BASE: u32 = 4;
-    let mut f = Function::new([(1, ValType::I32), (1, rt(true, T_BYTES)), (1, ValType::I32)]);
+    const W: u32 = 5;
+    let mut locals = vec![(1, ValType::I32), (1, rt(true, T_BYTES)), (1, ValType::I32)];
+    if cx.big_typed() {
+        locals.push((1, ValType::I64));
+    }
+    let mut f = Function::new(locals);
     let mut s = f.instructions();
     s.local_get(T).struct_get(T_TYPED, F_KIND).local_set(KIND);
     s.local_get(T)
@@ -231,6 +242,29 @@ fn get(cx: &mut dyn Cx) -> Function {
     s.local_get(I);
     size_of(&mut s, KIND);
     s.i32_mul().i32_add().local_set(BASE);
+    if cx.big_typed() {
+        // T48: BigInt64Array / BigUint64Array: a `$bigint` of the 8 bytes (sign, magnitude).
+        let norm = cx.helper(runtime::Helper::Big(crate::bigint::Helper::Norm));
+        s.local_get(KIND).i32_const(js2wasi3_ir::TYPED_BIGINT64 as i32).i32_ge_u();
+        s.if_(BlockType::Empty);
+        load(&mut s, DATA, BASE, 4);
+        s.i64_extend_i32_u();
+        s.local_get(BASE).i32_const(4).i32_add().local_set(BASE);
+        load(&mut s, DATA, BASE, 4);
+        s.i64_extend_i32_u().i64_const(32).i64_shl().i64_or().local_set(W);
+        // Negative (BigInt64Array only): sign 1, magnitude -w.
+        s.local_get(KIND).i32_const(js2wasi3_ir::TYPED_BIGINT64 as i32).i32_eq();
+        s.local_get(W).i64_const(0).i64_lt_s().i32_and().local_tee(BASE);
+        s.if_(BlockType::Empty);
+        s.i64_const(0).local_get(W).i64_sub().local_set(W);
+        s.end();
+        s.local_get(BASE);
+        s.local_get(W).i32_wrap_i64();
+        s.local_get(W).i64_const(32).i64_shr_u().i32_wrap_i64();
+        s.array_new_fixed(runtime::T_BIGINT, 3);
+        s.call(norm).return_();
+        s.end();
+    }
     s.block(BlockType::Result(ValType::F64));
     // Int8, Uint8, Uint8Clamped, Int16, Uint16, Int32, Uint32, Float32, Float64.
     for kind in 0..9 {
@@ -390,6 +424,42 @@ fn set() -> Function {
     f
 }
 
+/// [`Helper::SetBig`]: the low 64 bits of the two's complement.
+fn set_big(cx: &mut dyn Cx) -> Function {
+    let to_tc = cx.helper(runtime::Helper::Big(crate::bigint::Helper::ToTc));
+    const T: u32 = 0;
+    const I: u32 = 1;
+    const B: u32 = 2;
+    const DATA: u32 = 3;
+    const BASE: u32 = 4;
+    const TC: u32 = 5;
+    const V: u32 = 6;
+    let mut f = Function::new([
+        (1, rt(true, T_BYTES)),
+        (1, ValType::I32),
+        (1, rt(true, T_I32S)),
+        (1, ValType::I32),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(T)
+        .struct_get(T_TYPED, F_BUF)
+        .struct_get(T_BUFFER, F_DATA)
+        .local_set(DATA);
+    s.local_get(T).struct_get(T_TYPED, F_OFFSET);
+    s.local_get(I).i32_const(8).i32_mul().i32_add().local_set(BASE);
+    s.local_get(B).ref_cast_non_null(crate::bigint::bigint());
+    s.i32_const(2).call(to_tc).local_set(TC);
+    for half in 0..2 {
+        s.local_get(TC).ref_as_non_null().i32_const(half).array_get(T_I32S).local_set(V);
+        store(&mut s, DATA, BASE, V, 4);
+        if half == 0 {
+            s.local_get(BASE).i32_const(4).i32_add().local_set(BASE);
+        }
+    }
+    s.end();
+    f
+}
+
 /// Push a new `$buffer` of `len` (local) zeroed bytes.
 fn new_buffer(cx: &mut dyn Cx, s: &mut InstructionSink, len: u32) {
     let proto = cx.helper(runtime::Helper::Obj(object::Helper::Proto(
@@ -476,7 +546,7 @@ fn new_typed(
     off: u32,
     len: Option<u32>,
 ) {
-    let protos: Vec<u32> = (0..9)
+    let protos: Vec<u32> = (0..cx.typed_kinds())
         .map(|k| {
             cx.helper(runtime::Helper::Obj(object::Helper::Proto(Builtin::Typed(
                 k,

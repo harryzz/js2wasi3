@@ -2045,6 +2045,29 @@ fn set(cx: &mut dyn Cx) -> Function {
                     .ref_cast_non_null(wasm_encoder::HeapType::I31)
                     .i31_get_s();
             };
+            if cx.big_typed() {
+                // T48: a BigInt array: ToBigInt (the prelude's), then the store.
+                let to_bigint = cx.to_bigint().expect("`$$toBigInt` with the BigInt arrays");
+                let set_big = rh(cx, runtime::Helper::Typed(crate::typed::Helper::SetBig));
+                s.local_get(V)
+                    .ref_cast_non_null(crate::typed::typed())
+                    .struct_get(runtime::T_TYPED, crate::typed::F_KIND)
+                    .i32_const(js2wasi3_ir::TYPED_BIGINT64 as i32)
+                    .i32_ge_u();
+                s.if_(BlockType::Empty);
+                s.local_get(VAL).call(to_bigint).local_set(VAL);
+                key(&mut s);
+                s.local_get(V).ref_cast_non_null(crate::typed::typed());
+                length.emit(&mut s);
+                s.i32_lt_u();
+                s.if_(BlockType::Empty);
+                s.local_get(V).ref_cast_non_null(crate::typed::typed());
+                key(&mut s);
+                s.local_get(VAL).call(set_big);
+                s.end();
+                s.return_();
+                s.end();
+            }
             s.local_get(VAL).call(to_number).local_set(X);
             key(&mut s);
             s.local_get(V).ref_cast_non_null(crate::typed::typed());

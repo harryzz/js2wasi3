@@ -311,6 +311,13 @@ then their own functions (ValidateTypedArray), and the array iterators throw for
 Subclassing `Map`/`Set`/`ArrayBuffer`/typed arrays: their constructor values' construct entry
 (`func::Helper::ConstructFrom`) runs the prelude code, then gives the result `newTarget.prototype` if it's an object;
 only in a module with `extends` or the name `construct` (`ir::Module::subclassing`).)
+(T48: **`BigInt64Array`/`BigUint64Array`** are kinds 9–10, only in a module whose code names one (`ir::Module::
+big_typed`, which implies `bigint`): `Builtin::Typed(9|10)` are outside `Builtin::ALL`, their prototype and constructor
+globals come after the stacks' (each group brings the ones before it), and the backend's loops over kinds go to 11
+only then (`Cx::typed_kinds`). A read builds a `$bigint` from the 8 bytes; a write from user code calls the prelude's
+`$$toBigInt` (`Module::to_bigint`) and stores the low 64 bits of its two's complement (`typed::Helper::SetBig`).
+The prelude's BigInt paths (`fill`, `with`, content-type checks of `set` and the constructors) are in
+`if (__intrinsic_big_typed_mode()) { … }` blocks.)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude
 globals (no user code runs while parsing), members stored with `define` (`__proto__` is an own key), numbers other
 than short integers through `$$StringToNumber`, then the reviver walk; node's SyntaxError messages (with node 24's line/column) and context

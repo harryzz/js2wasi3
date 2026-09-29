@@ -173,6 +173,12 @@ pub struct Module {
     /// constructor value be called with another new target, so only then do the constructor values
     /// of `Map`/`Set`/`ArrayBuffer`/typed arrays take its prototype (`func::Helper::ConstructFrom`).
     pub subclassing: bool,
+    /// The code names `BigInt64Array` or `BigUint64Array` (T48; implies [`Module::bigint`]): typed
+    /// array kinds 9–10 and their prototype and constructor globals exist only then.
+    pub big_typed: bool,
+    /// The prelude's ToBigInt `(JsVal) -> JsVal` (T48): element writes of the BigInt arrays. Set with
+    /// [`Module::big_typed`].
+    pub to_bigint: Option<FuncId>,
     /// The prelude's StringToBigInt `(JsVal) -> JsVal` (T40): a BigInt, or `undefined` if the
     /// string isn't a StringIntegerLiteral. Set with [`Module::bigint`].
     pub string_to_bigint: Option<FuncId>,
@@ -608,12 +614,15 @@ pub enum Builtin {
     /// constructor globals exist only in a module that can make a BigInt.
     BigInt,
     /// T45. Not in [`Builtin::ALL`] either: their globals exist only when [`Module::stacks`].
+    /// (T48: nor are `Typed(9)`/`Typed(10)`, the BigInt arrays: only with [`Module::big_typed`].)
     DisposableStack,
     AsyncDisposableStack,
 }
 
-/// The typed array constructors (T20), by kind; [`TYPED_SIZES`]: their element sizes.
-pub const TYPED_NAMES: [&str; 9] = [
+/// The typed array constructors (T20), by kind; [`TYPED_SIZES`]: their element sizes. T48: kinds
+/// 9 and 10, the BigInt arrays, exist only in a module with [`Module::big_typed`] ([`TYPED_KINDS`]
+/// kinds otherwise).
+pub const TYPED_NAMES: [&str; 11] = [
     "Int8Array",
     "Uint8Array",
     "Uint8ClampedArray",
@@ -623,8 +632,14 @@ pub const TYPED_NAMES: [&str; 9] = [
     "Uint32Array",
     "Float32Array",
     "Float64Array",
+    "BigInt64Array",
+    "BigUint64Array",
 ];
-pub const TYPED_SIZES: [u32; 9] = [1, 1, 1, 2, 2, 4, 4, 4, 8];
+pub const TYPED_SIZES: [u32; 11] = [1, 1, 1, 2, 2, 4, 4, 4, 8, 8, 8];
+/// The typed array kinds without the BigInt ones (T48).
+pub const TYPED_KINDS: u8 = 9;
+/// The first BigInt kind (`BigInt64Array`; `BigUint64Array` is the next).
+pub const TYPED_BIGINT64: u8 = 9;
 
 impl Builtin {
     /// All of them; a builtin's index here is its prototype's runtime slot.
@@ -722,6 +737,9 @@ impl Builtin {
         }
         if s == "AsyncDisposableStack" {
             return Some(Builtin::AsyncDisposableStack);
+        }
+        if s == "BigInt64Array" || s == "BigUint64Array" {
+            return Some(Builtin::Typed(if s == "BigInt64Array" { 9 } else { 10 }));
         }
         Builtin::ALL.into_iter().find(|b| b.name() == s)
     }

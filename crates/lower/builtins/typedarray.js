@@ -5,7 +5,8 @@
 // the nine kinds, whose prototypes inherit from it). `values`/`keys`/`entries` and
 // `[Symbol.iterator]` are the native array iterators.
 // Kinds: 0 Int8, 1 Uint8, 2 Uint8Clamped, 3 Int16, 4 Uint16, 5 Int32, 6 Uint32, 7 Float32,
-// 8 Float64. Not implemented: Float16Array, BigInt64Array/BigUint64Array, species and
+// 8 Float64; T48: 9 BigInt64, 10 BigUint64 (only in a module naming them: their code is in
+// `if (__intrinsic_big_typed_mode()) { … }` blocks). Not implemented: Float16Array, species and
 // subclassing (results have the receiver's kind), `Object.keys` and `for-in` over the elements,
 // `DataView`.
 // T47: resizable and detached buffers exist only in a module whose source has `maxByteLength` or
@@ -43,7 +44,23 @@ function $$typedName(kind) {
   if (kind === 7) {
     return "Float32Array";
   }
+  if (__intrinsic_big_typed_mode()) {
+    if (kind === 9) {
+      return "BigInt64Array";
+    }
+    if (kind === 10) {
+      return "BigUint64Array";
+    }
+  }
   return "Float64Array";
+}
+
+// T48: throw unless typed arrays of kinds `a` and `b` have the same content type (Number or
+// BigInt). Called only in `__intrinsic_big_typed_mode()` blocks.
+function $$typedSameContent(a, b) {
+  if ((a >= 9) !== (b >= 9)) {
+    throw new TypeError("Cannot mix BigInt and other types, use explicit conversions");
+  }
 }
 
 function $$typedSize(kind) {
@@ -150,6 +167,9 @@ function $$typedCreate(kind, a, b, c) {
     return __intrinsic_typed_view(kind, a, offset, length);
   }
   if (__intrinsic_typed_kind(a) >= 0) {
+    if (__intrinsic_big_typed_mode()) {
+      $$typedSameContent(kind, __intrinsic_typed_kind(a));
+    }
     if (__intrinsic_rab_mode()) {
       if (__intrinsic_typed_out_of_bounds(a)) {
         throw new TypeError("Cannot perform Construct on a detached ArrayBuffer");
@@ -202,6 +222,12 @@ function $$Float32Array(a, b, c) {
 }
 function $$Float64Array(a, b, c) {
   return $$typedCreate(8, a, b, c);
+}
+function $$BigInt64Array(a, b, c) {
+  return $$typedCreate(9, a, b, c);
+}
+function $$BigUint64Array(a, b, c) {
+  return $$typedCreate(10, a, b, c);
 }
 
 // %TypedArray%.from(source, mapfn, thisArg) for one kind.
@@ -260,6 +286,12 @@ function $$Float32Array_from(source, ...rest) {
 function $$Float64Array_from(source, ...rest) {
   return $$typedFrom(8, source, rest);
 }
+function $$BigInt64Array_from(source, ...rest) {
+  return $$typedFrom(9, source, rest);
+}
+function $$BigUint64Array_from(source, ...rest) {
+  return $$typedFrom(10, source, rest);
+}
 function $$Int8Array_of(...items) {
   return $$typedOf(0, items);
 }
@@ -286,6 +318,12 @@ function $$Float32Array_of(...items) {
 }
 function $$Float64Array_of(...items) {
   return $$typedOf(8, items);
+}
+function $$BigInt64Array_of(...items) {
+  return $$typedOf(9, items);
+}
+function $$BigUint64Array_of(...items) {
+  return $$typedOf(10, items);
 }
 
 // ---- %TypedArray%.prototype getters ------------------------------------------------------
@@ -575,6 +613,17 @@ function $$TypedArray_prototype_fill(value, start, end) {
     $$typedLive(this, "fill");
   }
   const len = __intrinsic_typed_length(this);
+  if (__intrinsic_big_typed_mode()) {
+    if (__intrinsic_typed_kind(this) >= 9) {
+      const big = $$toBigInt(value);
+      const bfrom = $$relative($$toInteger(start), len);
+      const bto = end === undefined ? len : $$relative($$toInteger(end), len);
+      for (let k = bfrom; k < bto; k++) {
+        this[k] = big;
+      }
+      return this;
+    }
+  }
   const v = +value;
   const from = $$relative($$toInteger(start), len);
   const to = end === undefined ? len : $$relative($$toInteger(end), len);
@@ -630,6 +679,9 @@ function $$TypedArray_prototype_set(source, offset) {
   const len = __intrinsic_typed_length(this);
   const skind = __intrinsic_typed_kind(source);
   if (skind >= 0) {
+    if (__intrinsic_big_typed_mode()) {
+      $$typedSameContent(kind, skind);
+    }
     const n = __intrinsic_typed_length(source);
     if (n + off > len) {
       throw new RangeError("offset is out of bounds");
@@ -773,6 +825,18 @@ function $$TypedArray_prototype_with(index, value) {
   const len = __intrinsic_typed_length(this);
   const rel = $$toInteger(index);
   const k = rel >= 0 ? rel : len + rel;
+  if (__intrinsic_big_typed_mode()) {
+    if (kind >= 9) {
+      const big = $$toBigInt(value);
+      if (k < 0 || k >= len) {
+        throw new RangeError("Invalid typed array index");
+      }
+      const copy = __intrinsic_typed_new(kind, len);
+      __intrinsic_typed_copy(copy, 0, this, 0, len);
+      copy[k] = big;
+      return copy;
+    }
+  }
   const v = +value;
   if (k < 0 || k >= len) {
     throw new RangeError("Invalid typed array index");

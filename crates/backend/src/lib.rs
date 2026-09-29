@@ -156,7 +156,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let payload_base = user_imports + module.imports.len() as u32;
     let func_base = payload_base + abi::PAYLOAD_OPS * payloads.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
-    let runtime_globals = runtime::runtime_globals(module.bigint, module.suppressed, module.stacks);
+    let runtime_globals = runtime::runtime_globals(
+        module.bigint,
+        module.suppressed,
+        module.stacks,
+        module.big_typed,
+    );
     let host_base = runtime_globals + abi as u32;
     let host_globals = if command.is_some() {
         host::GLOBALS
@@ -331,7 +336,13 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
 
     let mut globals = GlobalSection::new();
     if js {
-        runtime::globals(&mut globals, module.bigint, module.suppressed, module.stacks);
+        runtime::globals(
+            &mut globals,
+            module.bigint,
+            module.suppressed,
+            module.stacks,
+            module.big_typed,
+        );
     }
     if abi {
         globals.global(
@@ -856,6 +867,14 @@ impl runtime::Cx for Emitter<'_> {
 
     fn subclassing(&mut self) -> bool {
         self.m.subclassing
+    }
+
+    fn big_typed(&mut self) -> bool {
+        self.m.big_typed
+    }
+
+    fn to_bigint(&mut self) -> Option<u32> {
+        self.m.to_bigint.map(|f| self.func_base + f.0)
     }
 
     fn string_to_bigint(&mut self) -> Option<u32> {

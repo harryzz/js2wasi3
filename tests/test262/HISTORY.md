@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T48 `BigInt64Array`/`BigUint64Array` (targeted run)
+
+- Compiler: the BigInt arrays (kinds 9–10, only in programs naming them). Runner: `HARNESS_ADAPT` no longer hides
+  them (`MyBigInt64Array` written out); only `Float16Array` is still reported absent.
+- Run: the 96 subset tests naming them or including `testTypedArray.js`/`resizableArrayBufferUtils.js`, with
+  `--update` (-j 4): 7 unsupported → pass, 0 regressions; `resizable-arraybuffer` 78 of 89 (11: `typeof Symbol`,
+  F218). Subset: 27,159 of 28,512 run pass (95.3%).
+
 ## 2026-09-29: T47 resizable `ArrayBuffer` (targeted run)
 
 - Compiler: resizable buffers, length-tracking/out-of-bounds typed arrays, `transfer`/`transferToFixedLength`/

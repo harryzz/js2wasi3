@@ -211,6 +211,7 @@ pub fn lower_with(
                 stacks: prelude.stacks,
                 rab: prelude.rab,
                 subclassing: prelude.subclassing,
+                big_typed: prelude.big_typed,
                 names: builtins::GATED
                     .iter()
                     .filter(|n| prelude.user_props.contains(**n))
@@ -815,7 +816,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40), `__intrinsic_regexp_mods()`
-    /// (T46) or `__intrinsic_rab_mode()` (T47)? Which one.
+    /// (T46), `__intrinsic_rab_mode()` (T47) or `__intrinsic_big_typed_mode()` (T48)? Which one.
     fn bigint_mode_test(&self, test: &Expression<'a>) -> Option<&'static str> {
         let Expression::CallExpression(c) = test else {
             return None;
@@ -826,7 +827,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if !self.p.in_prelude(c.span.start) {
             return None;
         }
-        ["__intrinsic_bigint_mode", "__intrinsic_regexp_mods", "__intrinsic_rab_mode"]
+        [
+            "__intrinsic_bigint_mode",
+            "__intrinsic_regexp_mods",
+            "__intrinsic_rab_mode",
+            "__intrinsic_big_typed_mode",
+        ]
             .into_iter()
             .find(|n| id.name == *n)
     }
@@ -1169,6 +1175,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     self.observe(Slot::Var(p), Kind::Any);
                 }
                 self.module.date_inspect = Some(func);
+                continue;
+            }
+            if name == builtins::TO_BIGINT && self.module.big_typed {
+                // Called by the runtime with any value (T48: BigInt array element writes).
+                self.module.to_bigint = Some(func);
+                if let Some(Some(p)) = self.func_params[&func].first() {
+                    self.observe(Slot::Var(*p), Kind::Any);
+                }
                 continue;
             }
             if name == builtins::STRING_TO_BIGINT {
@@ -3330,6 +3344,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let keep = match self.bigint_mode_test(&i.test) {
                     Some("__intrinsic_bigint_mode") => self.module.bigint,
                     Some("__intrinsic_rab_mode") => self.module.rab,
+                    Some("__intrinsic_big_typed_mode") => self.module.big_typed,
                     _ => self.prelude.regexp_mods,
                 };
                 if keep {

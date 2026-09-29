@@ -194,13 +194,20 @@ pub const G_SUPPRESSED_CTOR: u32 = G_SUPPRESSED_PROTO + 1;
 /// [`js2wasi3_ir::Module::stacks`].
 pub const G_STACK_PROTOS: u32 = G_SUPPRESSED_CTOR + 1;
 pub const G_STACK_CTORS: u32 = G_STACK_PROTOS + 2;
-/// How many runtime globals come before the user's: the BigInt ones, `SuppressedError`'s and the
-/// stacks' when used (each group brings the ones before it).
-pub fn runtime_globals(bigint: bool, suppressed: bool, stacks: bool) -> u32 {
+/// `(mut (ref null $object))` (T48): the prototypes and constructors of `BigInt64Array` and
+/// `BigUint64Array`, after the stacks' (present too then), only when
+/// [`js2wasi3_ir::Module::big_typed`].
+pub const G_BIG_TYPED_PROTOS: u32 = G_STACK_CTORS + 2;
+pub const G_BIG_TYPED_CTORS: u32 = G_BIG_TYPED_PROTOS + 2;
+/// How many runtime globals come before the user's: the BigInt ones, `SuppressedError`'s, the
+/// stacks' and the BigInt arrays' when used (each group brings the ones before it).
+pub fn runtime_globals(bigint: bool, suppressed: bool, stacks: bool, big_typed: bool) -> u32 {
+    let stacks = stacks || big_typed;
     GLOBALS
         + (bigint || suppressed || stacks) as u32 * BIGINT_GLOBALS
         + (suppressed || stacks) as u32 * 2
         + stacks as u32 * 4
+        + big_typed as u32 * 4
 }
 
 /// The global holding built-in `b`'s prototype.
@@ -210,6 +217,9 @@ pub fn proto_global(b: js2wasi3_ir::Builtin) -> u32 {
         js2wasi3_ir::Builtin::Error(js2wasi3_ir::ErrorKind::SuppressedError) => G_SUPPRESSED_PROTO,
         js2wasi3_ir::Builtin::DisposableStack => G_STACK_PROTOS,
         js2wasi3_ir::Builtin::AsyncDisposableStack => G_STACK_PROTOS + 1,
+        js2wasi3_ir::Builtin::Typed(k) if k >= js2wasi3_ir::TYPED_BIGINT64 => {
+            G_BIG_TYPED_PROTOS + (k - js2wasi3_ir::TYPED_BIGINT64) as u32
+        }
         _ => G_PROTOS + b.index(),
     }
 }
@@ -220,6 +230,9 @@ pub fn ctor_global(b: js2wasi3_ir::Builtin) -> u32 {
         js2wasi3_ir::Builtin::BigInt => G_BIGINT_CTOR,
         js2wasi3_ir::Builtin::DisposableStack => G_STACK_CTORS,
         js2wasi3_ir::Builtin::AsyncDisposableStack => G_STACK_CTORS + 1,
+        js2wasi3_ir::Builtin::Typed(k) if k >= js2wasi3_ir::TYPED_BIGINT64 => {
+            G_BIG_TYPED_CTORS + (k - js2wasi3_ir::TYPED_BIGINT64) as u32
+        }
         _ => G_CTORS + b.index(),
     }
 }
@@ -325,6 +338,18 @@ pub trait Cx {
     /// Can the module make a resizable `ArrayBuffer` or detach one (T47)?
     fn rab(&mut self) -> bool {
         false
+    }
+    /// Does the module have `BigInt64Array`/`BigUint64Array` (T48, `Module::big_typed`)?
+    fn big_typed(&mut self) -> bool {
+        false
+    }
+    /// The typed array kinds in this module: 9, or 11 with the BigInt arrays (T48).
+    fn typed_kinds(&mut self) -> u8 {
+        if self.big_typed() { 11 } else { js2wasi3_ir::TYPED_KINDS }
+    }
+    /// Function index of the prelude's ToBigInt `(jsval) -> jsval` (T48).
+    fn to_bigint(&mut self) -> Option<u32> {
+        None
     }
     /// Can a constructor value be called with another new target (T47, `Module::subclassing`)?
     fn subclassing(&mut self) -> bool {
@@ -661,7 +686,13 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
 
 /// Emit the runtime globals. Must be the first entries of the global section. With `bigint`
 /// (T40), [`G_BIGINT_PROTO`] and [`G_BIGINT_CTOR`] follow.
-pub fn globals(globals: &mut GlobalSection, bigint: bool, suppressed: bool, stacks: bool) {
+pub fn globals(
+    globals: &mut GlobalSection,
+    bigint: bool,
+    suppressed: bool,
+    stacks: bool,
+    big_typed: bool,
+) {
     for kind in [K_UNDEFINED, K_NULL, K_FALSE, K_TRUE] {
         globals.global(
             GlobalType {
@@ -808,7 +839,8 @@ pub fn globals(globals: &mut GlobalSection, bigint: bool, suppressed: bool, stac
     globals.global(int, &ConstExpr::i32_const(0));
     // T27: `RegExp.prototype.exec`; T40: `BigInt.prototype`, `BigInt`.
     // T45: `SuppressedError.prototype` and its constructor.
-    let extra = runtime_globals(bigint, suppressed, stacks) - GLOBALS;
+    // T48: the BigInt arrays' prototypes and constructors.
+    let extra = runtime_globals(bigint, suppressed, stacks, big_typed) - GLOBALS;
     for _ in 0..1 + extra {
         globals.global(
             GlobalType {
