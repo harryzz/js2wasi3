@@ -365,6 +365,23 @@ properties), so the global object is only observable through `globalThis`/`globa
   non-strings, both throw an `EvalError` for code), and `Function` is a constructor value
   (`f instanceof Function`).
 
+### D7. Explicit resource management (T45)
+- **`using` is a source rewrite** (`frontend::using`, after the eval splicing, one more `EvalMap` layer), as
+  TypeScript's downlevel emit: each statement list (block, function body, static block, `switch`, the module's top
+  level) or loop with a `using` declaration gets `const env = { stack, error, has }; try { … } catch (e) { record }
+  finally { dispose }`, so `break`/`continue`/`return`/`yield` leave through the existing `finally` lowering. A
+  declaration becomes `const x = v, r = add(env, x, async)` (names still inferred); `for (using x of it)` binds
+  `const x` and its body gets the environment (per iteration). The helpers are plain JS generated once per module;
+  with an `await using` the `finally` holds the disposal loop itself, so its `await`s are the spec's
+  (DisposeResources, tick order checked against node). A top-level `using` in a module with imports/exports is
+  rejected (the `try` can't hold them).
+- **`SuppressedError`** is a native error kind outside `ErrorKind::ALL`, and **`DisposableStack`/
+  `AsyncDisposableStack`** are `Builtin`s outside `Builtin::ALL`: their prototype and constructor globals come after
+  the BigInt ones only when the code names them (`Module::suppressed`/`stacks`; each group brings the ones before it,
+  `runtime::runtime_globals`), so other programs keep their bytes. `Symbol.dispose`/`asyncDispose` are well-known
+  symbols 12–13 (the array has their slots only then). A stack is an object of class 14/15 with its data under the
+  private `G_SYM_STATE` key (like a Date); its methods are in `builtins/dispose.js`.
+
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 

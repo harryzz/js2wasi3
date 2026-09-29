@@ -29,7 +29,7 @@ use crate::{Allocator, Diagnostic, Diagnostics, Program, line_col, offset_of, pa
 
 /// A replaced span: `[at, at + len)` in the new text was `[orig, orig + orig_len)` in the old.
 #[derive(Debug, Clone, Copy)]
-struct Region {
+pub(crate) struct Region {
     at: u32,
     len: u32,
     orig: u32,
@@ -42,6 +42,17 @@ struct Region {
 pub struct EvalMap {
     /// One per round, in order.
     layers: Vec<Vec<Region>>,
+}
+
+impl Region {
+    pub(crate) fn new(at: u32, len: u32, orig: u32, orig_len: u32) -> Region {
+        Region {
+            at,
+            len,
+            orig,
+            orig_len,
+        }
+    }
 }
 
 impl EvalMap {
@@ -149,6 +160,17 @@ pub(crate) fn parse_spliced<'a>(
             return Err(diags(&map, errors));
         }
         p = next;
+    }
+    // `using` declarations (T45): one more round.
+    if crate::using::has_using(&p) {
+        match crate::using::rewrite(alloc, path, &p) {
+            Ok((next, layer)) => {
+                map.layers.push(layer);
+                p = next;
+            }
+            Err(Ok(errors)) => return Err(diags(&map, errors)),
+            Err(Err(d)) => return Err(d),
+        }
     }
     p.original = source;
     Ok((p, (!map.layers.is_empty()).then_some(map)))
@@ -593,6 +615,15 @@ fn compile(
     };
     if statements.iter().any(has_return) {
         return Ok(Err("Illegal return statement".to_string()));
+    }
+    // T45: eval code is a Script, where `using` can't be at the top level.
+    if statements
+        .iter()
+        .any(|s| matches!(s, Statement::VariableDeclaration(d) if d.kind.is_using()))
+    {
+        return Ok(Err(
+            "Using declarations are not allowed at the top level of a script".to_string(),
+        ));
     }
     // Indirect eval code (T44): its `var` and function declarations are global-object properties.
     let mut edits: Vec<(u32, u32, i64, String)> = Vec::new();

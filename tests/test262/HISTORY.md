@@ -3,6 +3,16 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T45 explicit resource management (targeted runs)
+
+- Compiler: `using`/`await using` (source rewrite), `Symbol.dispose`/`asyncDispose`, `SuppressedError`,
+  `DisposableStack`, `AsyncDisposableStack`. Subset += `built-ins/DisposableStack`, `built-ins/AsyncDisposableStack`,
+  `built-ins/SuppressedError`.
+- Runs (`--update`): `language/statements/{using,await-using,for-of}` (100 unsupported → pass), then every subset
+  test naming `using`/`SuppressedError`/`DisposableStack`/`Symbol.dispose` plus the new directories (2,760 tests,
+  ~11 min at -j 8): 205 new → pass, 0 regressions (one RegExp load timeout passes alone). `using` 69 of 77 run,
+  `await-using` 84 of 96, the three built-ins directories 205 of 219 run. Subset: 26,983 of 28,512 run pass (94.6%).
+
 ## 2026-09-29: T44 indirect eval declarations (targeted run)
 
 - Compiler: non-strict indirect eval code's `var`/function declarations are global-object properties.

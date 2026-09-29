@@ -87,6 +87,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   it). Code that doesn't exist at build time can't be loaded.
 - Packages: bare specifiers (`import x from "pkg"`) resolved from `node_modules` at build time as node does
   (`exports` conditions and patterns, `imports`, `main`); ES module packages only.
+- Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
+  `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
   `Function("…")` and indirect eval of code known at build time (string literals) are compiled ahead of time
   (completion values, the caller's scope, SyntaxErrors at the call); code built at run time can't be (`eval(x)` is

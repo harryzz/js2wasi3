@@ -19,7 +19,7 @@ table in [`tasks/README.md`](../tasks/README.md).
 
 | | ✅ | 🟡 | ❌ | ➖ |
 |---|---|---|---|---|
-| Keywords (66 entries) | 30 | 11 | 1 | 24 |
+| Keywords (66 entries) | 30 | 12 | 0 | 24 |
 | Built-in objects, properties, methods (25) | 11 | 14 | 0 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
@@ -90,7 +90,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `true` | ✅ | |
 | `try` | ✅ | |
 | `typeof` | 🟡 | All value kinds. Missing: `typeof` of an undeclared name (node: `"undefined"`; js2wasi3 rejects the unknown global). |
-| `using` | ❌ | Explicit resource management (`using x = …`): rejected (F80). |
+| `using` | 🟡 | T45: `using` and `await using` in blocks, functions, static blocks, `switch` blocks, `for`/`for-of` heads and the module's top level (disposal in reverse order at scope exit, `SuppressedError` chains, the spec's awaits), `Symbol.dispose`/`asyncDispose`, `DisposableStack`, `AsyncDisposableStack`, `SuppressedError`. Missing: top-level `using` in a module with imports/exports (rejected); `DisposableStack.prototype[Symbol.dispose]` is a separate function from `dispose` (node: the same). |
 | `var` | ✅ | Hoisting, function scope, nested top-level blocks (F28). |
 | `void` | ✅ | |
 | `volatile` | ➖ | Removed in ES5. |

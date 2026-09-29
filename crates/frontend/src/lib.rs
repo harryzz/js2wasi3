@@ -22,6 +22,7 @@ use std::fmt;
 mod eval;
 mod link;
 mod packages;
+mod using;
 pub use eval::EvalMap;
 pub use link::{Fs, Host, Linked, Options, SourceMap, link};
 

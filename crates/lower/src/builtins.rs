@@ -50,6 +50,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/bigint.js"),
     include_str!("../builtins/module.js"),
     include_str!("../builtins/global.js"),
+    include_str!("../builtins/dispose.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -257,6 +258,10 @@ pub(crate) struct Prelude {
     pub user_props: HashSet<String>,
     /// Can the user's code make a BigInt (T40: a literal, or it names the global `BigInt`)?
     pub bigint: bool,
+    /// Does the user's code name `SuppressedError` (T45; `using` code does)?
+    pub suppressed: bool,
+    /// Does it name `DisposableStack` or `AsyncDisposableStack` (T45)?
+    pub stacks: bool,
     /// Does the user's code name `globalThis` or `global` (T42: the global object exists)?
     pub global_object: bool,
     /// The global object's built-in properties (T42): the [`GLOBAL_NAMES`] the code names.
@@ -278,7 +283,8 @@ pub(crate) const GLOBAL_NAMES: &[&str] = &[
     "ArrayBuffer", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array",
     "Int32Array", "Float32Array", "Float64Array", "Uint8ClampedArray", "BigInt", "Map", "Set",
     "Reflect", "isFinite", "isNaN", "global", "clearImmediate", "setImmediate", "clearInterval",
-    "clearTimeout", "setInterval", "setTimeout", "queueMicrotask", "eval",
+    "clearTimeout", "setInterval", "setTimeout", "queueMicrotask", "eval", "SuppressedError",
+    "DisposableStack", "AsyncDisposableStack",
 ];
 
 /// Properties a built-in constructor has as a function (`Array.apply`, `String.name`): reading
@@ -318,6 +324,9 @@ pub(crate) const GATED: &[&str] = &[
     "toStringTag",
     "any",
     "withResolvers",
+    // T45: `Symbol.dispose`/`asyncDispose` (the well-known symbols' array has their slots then).
+    "dispose",
+    "asyncDispose",
 ];
 
 /// The built-in constructors that can be values (T25): their prelude function (`$$Array`) is what
@@ -345,6 +354,9 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     "BigInt",
     // T42: calling it throws (code known at build time is compiled where `Function` is called).
     "Function",
+    // T45.
+    "DisposableStack",
+    "AsyncDisposableStack",
 ];
 
 /// Constructors whose prelude function `$$X` is what `new X(…)` runs and that throw when called
@@ -362,6 +374,9 @@ pub(crate) const NEW_ONLY: &[&str] = &[
     "Uint32Array",
     "Float32Array",
     "Float64Array",
+    // T45.
+    "DisposableStack",
+    "AsyncDisposableStack",
 ];
 
 impl Prelude {
@@ -414,6 +429,23 @@ impl Prelude {
             }
             _ => false,
         });
+        // Can the user's code make a SuppressedError (T45)?
+        out.suppressed = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::IdentifierReference(r) => {
+                r.name == "SuppressedError"
+                    && !p.in_prelude(r.span.start)
+                    && scoping.get_reference(r.reference_id()).symbol_id().is_none()
+            }
+            _ => false,
+        });
+        out.stacks = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::IdentifierReference(r) => {
+                matches!(r.name.as_str(), "DisposableStack" | "AsyncDisposableStack")
+                    && !p.in_prelude(r.span.start)
+                    && scoping.get_reference(r.reference_id()).symbol_id().is_none()
+            }
+            _ => false,
+        });
         // Does the user's code name the global object (T42)?
         out.global_object = p.semantic.nodes().iter().any(|node| match node.kind() {
             AstKind::IdentifierReference(r) => {
@@ -435,7 +467,11 @@ impl Prelude {
                     continue;
                 }
                 // `Date.prototype[Symbol.toPrimitive]` (T26) is reached by naming `toPrimitive`.
-                let m = if m == "$toPrimitive" { "toPrimitive" } else { m };
+                // T45: `[Symbol.dispose]`/`[Symbol.asyncDispose]` by naming `dispose`/`asyncDispose`.
+                let m = match m {
+                    "$toPrimitive" | "$dispose" | "$asyncDispose" => &m[1..],
+                    _ => m,
+                };
                 methods.entry(m.to_string()).or_default().push(item_of[sym]);
             }
         }

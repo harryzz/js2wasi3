@@ -207,6 +207,8 @@ pub fn lower_with(
                 to_string: prelude.to_string,
                 ctor_stubs: prelude.constructor,
                 bigint: prelude.bigint,
+                suppressed: prelude.suppressed,
+                stacks: prelude.stacks,
                 names: builtins::GATED
                     .iter()
                     .filter(|n| prelude.user_props.contains(**n))
@@ -5212,7 +5214,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     ) -> R<Val> {
         let _ = span;
         self.note_error_kind(k);
-        let n = if k == ErrorKind::AggregateError { 3 } else { 2 };
+        let n = if matches!(k, ErrorKind::AggregateError | ErrorKind::SuppressedError) { 3 } else { 2 };
         let args = self.args(cx, args, n)?;
         Ok(Val::js(
             Expr::intrinsic(Intrinsic::NewError(k), args),
@@ -5561,6 +5563,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
             "regexp_new" | "regexp_data" | "regexp_builtin_exec" => 1,
             "date_new" | "date_data" => 1,
+            "stack_new" | "async_stack_new" | "stack_data" => 1,
             "date_now" | "module_new" | "module_bodies" => 0,
             "to_primitive" => 2,
             "to_key" | "object_desc" => 1,
@@ -5722,7 +5725,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if matches!(
             name,
-            "to_object" | "unwrap" | "regexp_new" | "regexp_data" | "date_new" | "date_data"
+            "to_object"
+                | "unwrap"
+                | "regexp_new"
+                | "regexp_data"
+                | "date_new"
+                | "date_data"
+                | "stack_new"
+                | "async_stack_new"
+                | "stack_data"
         ) {
             // T30: wrapper objects; T27: RegExp objects and their data.
             let Some(e) = c.arguments[0].as_expression() else {
@@ -5744,6 +5755,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Intrinsic::DateNew
                 }
                 "date_data" => Intrinsic::DateData,
+                // T45: `DisposableStack`/`AsyncDisposableStack` objects.
+                "stack_new" => Intrinsic::StackNew(false),
+                "async_stack_new" => Intrinsic::StackNew(true),
+                "stack_data" => Intrinsic::StackData,
                 _ => Intrinsic::RegExpData,
             };
             return Ok((Expr::intrinsic(op, vec![v]), Call::Intrinsic(Some(Kind::Any))));

@@ -62,6 +62,10 @@ pub const CLASS_DATE: i32 = 11;
 /// A module namespace object (T41, `builtins/module.js`): its getters are shown as data
 /// properties, writes fail with node's messages.
 pub const CLASS_MODULE: i32 = 12;
+/// A `DisposableStack` (14) or `AsyncDisposableStack` (15) (T45): its data (`builtins/dispose.js`) is
+/// under the private `G_SYM_STATE` key.
+pub const CLASS_STACK: i32 = 14;
+pub const CLASS_ASYNC_STACK: i32 = 15;
 /// The bits of `class` that hold the class (the others are flags, T16).
 pub const CLASS_MASK: i32 = 0xff;
 /// `class` flag: not extensible (`Object.preventExtensions`, `seal`, `freeze`).
@@ -229,6 +233,8 @@ fn methods(b: Builtin) -> &'static [&'static str] {
         Builtin::ArrayBuffer | Builtin::TypedArray | Builtin::Typed(_) => &[],
         // T27, T26: all from the prelude.
         Builtin::RegExp | Builtin::Date => &[],
+        // T45: all from the prelude.
+        Builtin::DisposableStack | Builtin::AsyncDisposableStack => &[],
         // T40: the prelude's methods replace them.
         Builtin::BigInt => &["toString", "toLocaleString", "valueOf"],
     }
@@ -363,6 +369,10 @@ pub enum Helper {
     DateNew,
     /// `(v) -> jsval`: a Date's data; `undefined` otherwise (T26).
     DateData,
+    /// `(data) -> jsval` (T45): a new `DisposableStack` (`false`) or `AsyncDisposableStack`.
+    StackNew(bool),
+    /// `(v) -> jsval` (T45): a stack's data, `undefined` for anything else.
+    StackData,
     /// `() -> jsval`: a new module namespace object (T41): empty, null prototype.
     ModuleNew,
     /// `(v, hint: i32) -> jsval`: ToPrimitive of any value (T26): objects through [`Helper::ToPrimitive`].
@@ -398,6 +408,7 @@ impl Helper {
                 Builtin::Error(ErrorKind::EvalError) => "EvalError.prototype",
                 Builtin::Error(ErrorKind::UriError) => "URIError.prototype",
                 Builtin::Error(ErrorKind::AggregateError) => "AggregateError.prototype",
+                Builtin::Error(ErrorKind::SuppressedError) => "SuppressedError.prototype",
                 Builtin::Function => "Function.prototype",
                 Builtin::Array => "Array.prototype",
                 Builtin::Symbol => "Symbol.prototype",
@@ -416,6 +427,8 @@ impl Helper {
                 Builtin::Typed(_) => "typed_array_prototype",
                 Builtin::RegExp => "RegExp.prototype",
                 Builtin::Date => "Date.prototype",
+                Builtin::DisposableStack => "DisposableStack.prototype",
+                Builtin::AsyncDisposableStack => "AsyncDisposableStack.prototype",
                 Builtin::BigInt => "BigInt.prototype",
             },
             Helper::ArrayIndex => "array_index",
@@ -461,6 +474,9 @@ impl Helper {
             Helper::DateNew => "date_new",
             Helper::ModuleNew => "module_new",
             Helper::DateData => "date_data",
+            Helper::StackNew(false) => "stack_new",
+            Helper::StackNew(true) => "async_stack_new",
+            Helper::StackData => "stack_data",
             Helper::ToPrimitiveValue => "to_primitive_value",
         }
     }
@@ -493,7 +509,9 @@ impl Helper {
             Helper::OwnKeys | Helper::OwnNames => (vec![o], vec![rt(false, T_KEYS)]),
             Helper::ForInKeys | Helper::Create | Helper::GetPrototypeOf => (vec![v], vec![v]),
             Helper::InstanceOf(_) => (vec![v], vec![I32]),
-            Helper::NewError(ErrorKind::AggregateError) => (vec![v, v, v], vec![v]),
+            Helper::NewError(ErrorKind::AggregateError | ErrorKind::SuppressedError) => {
+                (vec![v, v, v], vec![v])
+            }
             Helper::NewError(_) => (vec![v, v], vec![v]),
             Helper::ToPrimitive => (vec![o, I32], vec![v]),
             Helper::ObjectToNumber => (vec![o], vec![F64]),
@@ -514,7 +532,9 @@ impl Helper {
             | Helper::RegExpNew
             | Helper::RegExpData
             | Helper::DateNew
-            | Helper::DateData => (vec![v], vec![v]),
+            | Helper::DateData
+            | Helper::StackNew(_)
+            | Helper::StackData => (vec![v], vec![v]),
             Helper::ModuleNew => (vec![], vec![v]),
             Helper::ToPrimitiveValue => (vec![v, I32], vec![v]),
         }
@@ -595,9 +615,13 @@ impl Helper {
             Helper::ObjectRest => object_rest(cx),
             Helper::RegExpNew => regexp_new(cx),
             Helper::RegExpData => regexp_data(cx),
-            Helper::DateNew => date_new(cx),
+            Helper::DateNew => state_new(cx, CLASS_DATE, Builtin::Date),
+            Helper::StackNew(false) => state_new(cx, CLASS_STACK, Builtin::DisposableStack),
+            Helper::StackNew(true) => state_new(cx, CLASS_ASYNC_STACK, Builtin::AsyncDisposableStack),
+            // Either class (`class | 1`).
+            Helper::StackData => state_data(cx, CLASS_ASYNC_STACK),
             Helper::ModuleNew => module_new(cx),
-            Helper::DateData => date_data(cx),
+            Helper::DateData => state_data(cx, CLASS_DATE),
             Helper::ToPrimitiveValue => to_primitive_value(cx),
             Helper::CheckDestructure => check_destructure(cx),
             Helper::Keys(k) => keys(cx, k),
@@ -1480,7 +1504,9 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             || (b == Builtin::TypedArray
                 && ["length", "byteLength", "byteOffset", "buffer"].contains(&key.as_str()))
             || (b == Builtin::ArrayBuffer && key == "byteLength")
-            || (b == Builtin::RegExp && REGEXP_GETTERS.contains(&key.as_str()));
+            || (b == Builtin::RegExp && REGEXP_GETTERS.contains(&key.as_str()))
+            || (matches!(b, Builtin::DisposableStack | Builtin::AsyncDisposableStack)
+                && key == "disposed");
         let name = cx.str(&if getter {
             format!("get {key}")
         } else {
@@ -2855,16 +2881,16 @@ fn regexp_data(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$date_new(data)` (T26), see [`Helper::DateNew`].
-fn date_new(cx: &mut dyn Cx) -> Function {
+/// `$date_new(data)` (T26), see [`Helper::DateNew`]; T45: also a stack's (`class`, `b`).
+fn state_new(cx: &mut dyn Cx, class: i32, b: Builtin) -> Function {
     let alloc = h(cx, Helper::Alloc);
-    let proto = h(cx, Helper::Proto(Builtin::Date));
+    let proto = h(cx, Helper::Proto(b));
     let define = h(cx, Helper::Define);
     const DATA: u32 = 0;
     const O: u32 = 1;
     let mut f = Function::new([(1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
-    s.i32_const(CLASS_DATE).call(proto).call(alloc).local_tee(O).ref_as_non_null();
+    s.i32_const(class).call(proto).call(alloc).local_tee(O).ref_as_non_null();
     s.global_get(runtime::G_SYM_STATE).local_get(DATA);
     s.i32_const(HIDDEN | READONLY | FIXED | PRIVATE).call(define);
     s.local_get(O);
@@ -2882,8 +2908,8 @@ fn module_new(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$date_data(v)` (T26), see [`Helper::DateData`].
-fn date_data(cx: &mut dyn Cx) -> Function {
+/// `$date_data(v)` (T26), see [`Helper::DateData`]; T45: also a stack's (`class`).
+fn state_data(cx: &mut dyn Cx, class: i32) -> Function {
     let own = h(cx, Helper::OwnGet);
     const V: u32 = 0;
     let mut f = Function::new([]);
@@ -2891,11 +2917,11 @@ fn date_data(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
-    s.struct_get(T_OBJECT, F_CLASS)
-        .i32_const(CLASS_MASK)
-        .i32_and()
-        .i32_const(CLASS_DATE)
-        .i32_eq();
+    s.struct_get(T_OBJECT, F_CLASS).i32_const(CLASS_MASK).i32_and();
+    if class == CLASS_ASYNC_STACK {
+        s.i32_const(1).i32_or();
+    }
+    s.i32_const(class).i32_eq();
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
     s.global_get(runtime::G_SYM_STATE).call(own).return_();
@@ -2992,9 +3018,11 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     let to_string = rh(cx, runtime::Helper::ToString);
     let (stack, message, cause) = (cx.str("stack"), cx.str("message"), cx.str("cause"));
     let aggregate = k == ErrorKind::AggregateError;
+    // T45: `(error, suppressed, message)`, no options.
+    let suppressed = k == ErrorKind::SuppressedError;
     const ERRS: u32 = 0;
     let first = aggregate as u32;
-    let (m, opt, o) = (first, first + 1, first + 2);
+    let (m, opt, o) = if suppressed { (2, 2, 3) } else { (first, first + 1, first + 2) };
     let mut f = Function::new([(1, rt(true, T_OBJECT)), (2, jsval())]);
     let mut s = f.instructions();
     s.i32_const(CLASS_ERROR)
@@ -3012,6 +3040,16 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     s.local_get(m).call(to_string);
     s.i32_const(HIDDEN).call(define);
     s.end();
+    if suppressed {
+        for (i, key) in [(0, "error"), (1, "suppressed")] {
+            let key = cx.str(key);
+            s.local_get(o).ref_as_non_null().global_get(key);
+            s.local_get(i).i32_const(HIDDEN).call(define);
+        }
+        s.local_get(o).ref_as_non_null();
+        s.end();
+        return f;
+    }
     s.local_get(opt).ref_test_non_null(object());
     s.if_(BlockType::Empty);
     as_obj(&mut s, opt);
@@ -3677,6 +3715,8 @@ pub fn builtin_tag_name(b: Builtin) -> Option<&'static str> {
         Builtin::AsyncGenerator => "AsyncGenerator",
         Builtin::Symbol => "Symbol",
         Builtin::BigInt => "BigInt",
+        Builtin::DisposableStack => "DisposableStack",
+        Builtin::AsyncDisposableStack => "AsyncDisposableStack",
         Builtin::ArrayIterator => "Array Iterator",
         Builtin::MapIterator => "Map Iterator",
         Builtin::SetIterator => "Set Iterator",
@@ -3725,6 +3765,13 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
             .i32_const(c)
             .i32_eq();
     };
+    if cx.stacks() {
+        // T45.
+        class(&mut s, CLASS_STACK);
+        tag(cx, &mut s, "DisposableStack");
+        class(&mut s, CLASS_ASYNC_STACK);
+        tag(cx, &mut s, "AsyncDisposableStack");
+    }
     if cx.names("$module") {
         // T41: a module namespace's `Symbol.toStringTag`.
         class(&mut s, CLASS_MODULE);

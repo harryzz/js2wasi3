@@ -279,7 +279,7 @@ impl Helper {
                 const P: u32 = 4;
                 let mut f = Function::new([(2, jsval())]);
                 let mut s = f.instructions();
-                let n = if k == ErrorKind::AggregateError { 3 } else { 2 };
+                let n = if matches!(k, ErrorKind::AggregateError | ErrorKind::SuppressedError) { 3 } else { 2 };
                 for i in 0..n {
                     s.local_get(ARGS).i32_const(i).call(arg_get);
                 }
@@ -790,7 +790,10 @@ fn error_ctor(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     cx.declare_func(construct);
     let (name, prototype, constructor) =
         (cx.str(k.name()), cx.str("prototype"), cx.str("constructor"));
-    let g = runtime::G_ERROR_CTORS + ErrorKind::ALL.iter().position(|x| *x == k).unwrap() as u32;
+    let g = match ErrorKind::ALL.iter().position(|x| *x == k) {
+        Some(i) => runtime::G_ERROR_CTORS + i as u32,
+        None => runtime::G_SUPPRESSED_CTOR, // T45
+    };
     const F: u32 = 0;
     const P: u32 = 1;
     let mut f = Function::new([(1, jsval()), (1, rt(true, T_OBJECT))]);
@@ -801,7 +804,11 @@ fn error_ctor(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     s.end();
     s.ref_func(call).ref_func(construct);
     s.ref_null(HeapType::Concrete(T_VALS));
-    let length = if k == ErrorKind::AggregateError { 2 } else { 1 };
+    let length = match k {
+        ErrorKind::AggregateError => 2,
+        ErrorKind::SuppressedError => 3,
+        _ => 1,
+    };
     s.global_get(name).i32_const(length).i32_const(0);
     s.call(new).local_tee(F);
     s.ref_cast_non_null(runtime::object()).global_set(g);
@@ -1283,9 +1290,12 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     let define = oh(cx, object::Helper::Define);
     cx.declare_func(code);
     let call = match b {
-        Builtin::Map | Builtin::Set | Builtin::ArrayBuffer | Builtin::Typed(_) => {
-            fh(cx, Helper::RequiresNew(b))
-        }
+        Builtin::Map
+        | Builtin::Set
+        | Builtin::ArrayBuffer
+        | Builtin::Typed(_)
+        | Builtin::DisposableStack
+        | Builtin::AsyncDisposableStack => fh(cx, Helper::RequiresNew(b)),
         // `Date()` gives a string (T26).
         Builtin::Date if linked => cx.date_call().expect("`$$DateCall` with `$$Date`"),
         _ => code,

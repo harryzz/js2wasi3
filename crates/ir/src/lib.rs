@@ -159,6 +159,12 @@ pub struct Module {
     /// The code can make a BigInt (T40: a BigInt literal, or it names the global `BigInt`): the
     /// runtime's `$bigint` type and its cases in the generic helpers exist only then.
     pub bigint: bool,
+    /// The code can make a `SuppressedError` (T45: it names it, or uses `using`): its prototype and
+    /// constructor globals exist only then (after the BigInt ones, which are then there too).
+    pub suppressed: bool,
+    /// The code names `DisposableStack` or `AsyncDisposableStack` (T45): their prototype and
+    /// constructor globals exist only then (after `SuppressedError`'s, which are then there too).
+    pub stacks: bool,
     /// The prelude's StringToBigInt `(JsVal) -> JsVal` (T40): a BigInt, or `undefined` if the
     /// string isn't a StringIntegerLiteral. Set with [`Module::bigint`].
     pub string_to_bigint: Option<FuncId>,
@@ -434,6 +440,9 @@ pub enum ErrorKind {
     UriError,
     /// T25: `new AggregateError(errors, message, options)`.
     AggregateError,
+    /// T45: `new SuppressedError(error, suppressed, message)`. Not in [`ErrorKind::ALL`] (the runtime's
+    /// global layout): its prototype and constructor globals exist only when [`Module::suppressed`].
+    SuppressedError,
 }
 
 impl ErrorKind {
@@ -458,10 +467,14 @@ impl ErrorKind {
             ErrorKind::EvalError => "EvalError",
             ErrorKind::UriError => "URIError",
             ErrorKind::AggregateError => "AggregateError",
+            ErrorKind::SuppressedError => "SuppressedError",
         }
     }
 
     pub fn parse(s: &str) -> Option<ErrorKind> {
+        if s == "SuppressedError" {
+            return Some(ErrorKind::SuppressedError);
+        }
         ErrorKind::ALL.into_iter().find(|k| k.name() == s)
     }
 }
@@ -495,7 +508,7 @@ impl Namespace {
 }
 
 /// The well-known symbols other than `Symbol.iterator` (T25), by index.
-pub const WELL_KNOWN_SYMBOLS: [&str; 12] = [
+pub const WELL_KNOWN_SYMBOLS: [&str; 14] = [
     "asyncIterator",
     "hasInstance",
     "isConcatSpreadable",
@@ -508,6 +521,10 @@ pub const WELL_KNOWN_SYMBOLS: [&str; 12] = [
     "toPrimitive",
     "toStringTag",
     "unscopables",
+    // T45: the array holding them has these two slots only when the code names them (so other
+    // programs keep their bytes).
+    "dispose",
+    "asyncDispose",
 ];
 
 /// The index of well-known symbol `Symbol.<name>` in [`WELL_KNOWN_SYMBOLS`].
@@ -582,6 +599,9 @@ pub enum Builtin {
     /// T40. Not in [`Builtin::ALL`] (whose order is the runtime's global layout): its prototype and
     /// constructor globals exist only in a module that can make a BigInt.
     BigInt,
+    /// T45. Not in [`Builtin::ALL`] either: their globals exist only when [`Module::stacks`].
+    DisposableStack,
+    AsyncDisposableStack,
 }
 
 /// The typed array constructors (T20), by kind; [`TYPED_SIZES`]: their element sizes.
@@ -667,6 +687,8 @@ impl Builtin {
             Builtin::RegExp => "RegExp",
             Builtin::Date => "Date",
             Builtin::BigInt => "BigInt",
+            Builtin::DisposableStack => "DisposableStack",
+            Builtin::AsyncDisposableStack => "AsyncDisposableStack",
         }
     }
 
@@ -683,6 +705,15 @@ impl Builtin {
     pub fn parse(s: &str) -> Option<Builtin> {
         if s == "BigInt" {
             return Some(Builtin::BigInt);
+        }
+        if s == "SuppressedError" {
+            return Some(Builtin::Error(ErrorKind::SuppressedError));
+        }
+        if s == "DisposableStack" {
+            return Some(Builtin::DisposableStack);
+        }
+        if s == "AsyncDisposableStack" {
+            return Some(Builtin::AsyncDisposableStack);
         }
         Builtin::ALL.into_iter().find(|b| b.name() == s)
     }
@@ -701,6 +732,7 @@ impl Builtin {
             Builtin::RegExp => Some(2),
             Builtin::Date => Some(7),
             Builtin::BigInt => Some(1),
+            Builtin::DisposableStack | Builtin::AsyncDisposableStack => Some(0),
             _ => None,
         }
     }
@@ -808,6 +840,12 @@ pub enum Intrinsic {
     DateNew,
     /// `(v) -> jsval`: a Date's data; `undefined` for anything else (T26).
     DateData,
+    /// `(data) -> jsval`: a new `DisposableStack` (`false`) or `AsyncDisposableStack` holding `data`
+    /// (T45, see `builtins/dispose.js`).
+    StackNew(bool),
+    /// `(v) -> jsval`: the data of a plain object with private state (a stack's); `undefined` for
+    /// anything else (T45).
+    StackData,
     /// `() -> jsval`: a new module namespace object (T41, see `builtins/module.js`): empty, with a
     /// null prototype.
     ModuleNew,
@@ -1209,6 +1247,8 @@ impl Intrinsic {
             | Intrinsic::RegExpData
             | Intrinsic::DateNew
             | Intrinsic::DateData
+            | Intrinsic::StackNew(_)
+            | Intrinsic::StackData
             | Intrinsic::Unwrap
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::BuiltinToString | Intrinsic::IsConstructor | Intrinsic::RegExpBuiltinExec => {
@@ -1220,7 +1260,9 @@ impl Intrinsic {
             Intrinsic::BigIntFromNumber => (&[F64], Some(JsVal)),
             Intrinsic::BigIntToNumber => (&[JsVal], Some(F64)),
             Intrinsic::BigIntToString => (&[JsVal, I32], Some(JsVal)),
-            Intrinsic::NewError(ErrorKind::AggregateError) => (&[JsVal, JsVal, JsVal], Some(JsVal)),
+            Intrinsic::NewError(ErrorKind::AggregateError | ErrorKind::SuppressedError) => {
+                (&[JsVal, JsVal, JsVal], Some(JsVal))
+            }
             Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
             Intrinsic::SetProp | Intrinsic::DefineProp => (&[JsVal, JsVal, JsVal], None),
@@ -1383,6 +1425,9 @@ impl Intrinsic {
             Intrinsic::RegExpData => "regexp_data",
             Intrinsic::DateNew => "date_new",
             Intrinsic::DateData => "date_data",
+            Intrinsic::StackNew(false) => "stack_new",
+            Intrinsic::StackNew(true) => "async_stack_new",
+            Intrinsic::StackData => "stack_data",
             Intrinsic::ModuleNew => "module_new",
             Intrinsic::ToPrimitive => "to_primitive",
             Intrinsic::RegExpBuiltinExec => "regexp_builtin_exec",

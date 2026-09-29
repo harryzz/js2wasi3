@@ -156,7 +156,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let payload_base = user_imports + module.imports.len() as u32;
     let func_base = payload_base + abi::PAYLOAD_OPS * payloads.len() as u32;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
-    let runtime_globals = runtime::GLOBALS + module.bigint as u32 * runtime::BIGINT_GLOBALS;
+    let runtime_globals = runtime::runtime_globals(module.bigint, module.suppressed, module.stacks);
     let host_base = runtime_globals + abi as u32;
     let host_globals = if command.is_some() {
         host::GLOBALS
@@ -331,7 +331,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
 
     let mut globals = GlobalSection::new();
     if js {
-        runtime::globals(&mut globals, module.bigint);
+        runtime::globals(&mut globals, module.bigint, module.suppressed, module.stacks);
     }
     if abi {
         globals.global(
@@ -844,6 +844,10 @@ impl runtime::Cx for Emitter<'_> {
 
     fn bigint(&mut self) -> bool {
         self.m.bigint
+    }
+
+    fn stacks(&mut self) -> bool {
+        self.m.stacks
     }
 
     fn string_to_bigint(&mut self) -> Option<u32> {
@@ -1740,6 +1744,8 @@ impl Emitter<'_> {
                     Intrinsic::Unwrap => H::Wrap(wrapper::Helper::Unwrap),
                     Intrinsic::RegExpNew => H::Obj(object::Helper::RegExpNew),
                     Intrinsic::RegExpData => H::Obj(object::Helper::RegExpData),
+                    Intrinsic::StackNew(a) => H::Obj(object::Helper::StackNew(*a)),
+                    Intrinsic::StackData => H::Obj(object::Helper::StackData),
                     Intrinsic::DateNew => H::Obj(object::Helper::DateNew),
                     Intrinsic::DateData => H::Obj(object::Helper::DateData),
                     Intrinsic::ModuleNew => H::Obj(object::Helper::ModuleNew),

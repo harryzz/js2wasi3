@@ -185,11 +185,31 @@ pub const G_BIGINT_PROTO: u32 = GLOBALS;
 pub const G_BIGINT_CTOR: u32 = GLOBALS + 1;
 /// How many globals the BigInt support adds.
 pub const BIGINT_GLOBALS: u32 = 2;
+/// `(mut (ref null $object))` (T45): `SuppressedError.prototype` and `SuppressedError` as a value,
+/// after the BigInt ones (present too then), only when [`js2wasi3_ir::Module::suppressed`].
+pub const G_SUPPRESSED_PROTO: u32 = GLOBALS + BIGINT_GLOBALS;
+pub const G_SUPPRESSED_CTOR: u32 = G_SUPPRESSED_PROTO + 1;
+/// `(mut (ref null $object))` (T45): the prototypes and constructors of `DisposableStack` and
+/// `AsyncDisposableStack`, after `SuppressedError`'s (present too then), only when
+/// [`js2wasi3_ir::Module::stacks`].
+pub const G_STACK_PROTOS: u32 = G_SUPPRESSED_CTOR + 1;
+pub const G_STACK_CTORS: u32 = G_STACK_PROTOS + 2;
+/// How many runtime globals come before the user's: the BigInt ones, `SuppressedError`'s and the
+/// stacks' when used (each group brings the ones before it).
+pub fn runtime_globals(bigint: bool, suppressed: bool, stacks: bool) -> u32 {
+    GLOBALS
+        + (bigint || suppressed || stacks) as u32 * BIGINT_GLOBALS
+        + (suppressed || stacks) as u32 * 2
+        + stacks as u32 * 4
+}
 
 /// The global holding built-in `b`'s prototype.
 pub fn proto_global(b: js2wasi3_ir::Builtin) -> u32 {
     match b {
         js2wasi3_ir::Builtin::BigInt => G_BIGINT_PROTO,
+        js2wasi3_ir::Builtin::Error(js2wasi3_ir::ErrorKind::SuppressedError) => G_SUPPRESSED_PROTO,
+        js2wasi3_ir::Builtin::DisposableStack => G_STACK_PROTOS,
+        js2wasi3_ir::Builtin::AsyncDisposableStack => G_STACK_PROTOS + 1,
         _ => G_PROTOS + b.index(),
     }
 }
@@ -198,6 +218,8 @@ pub fn proto_global(b: js2wasi3_ir::Builtin) -> u32 {
 pub fn ctor_global(b: js2wasi3_ir::Builtin) -> u32 {
     match b {
         js2wasi3_ir::Builtin::BigInt => G_BIGINT_CTOR,
+        js2wasi3_ir::Builtin::DisposableStack => G_STACK_CTORS,
+        js2wasi3_ir::Builtin::AsyncDisposableStack => G_STACK_CTORS + 1,
         _ => G_CTORS + b.index(),
     }
 }
@@ -296,6 +318,10 @@ pub trait Cx {
 
     /// Can the module make a BigInt (T40)? The helpers handle them only then.
     fn bigint(&mut self) -> bool;
+    /// Does the module have `DisposableStack`/`AsyncDisposableStack` (T45)?
+    fn stacks(&mut self) -> bool {
+        false
+    }
     /// Function index of the prelude's StringToBigInt `(jsval) -> jsval` (T40).
     fn string_to_bigint(&mut self) -> Option<u32>;
     /// Function indices of the backend's `f64` `%` and `**` helpers (T40).
@@ -617,7 +643,7 @@ pub fn types(types: &mut TypeSection, bigint: bool) {
 
 /// Emit the runtime globals. Must be the first entries of the global section. With `bigint`
 /// (T40), [`G_BIGINT_PROTO`] and [`G_BIGINT_CTOR`] follow.
-pub fn globals(globals: &mut GlobalSection, bigint: bool) {
+pub fn globals(globals: &mut GlobalSection, bigint: bool, suppressed: bool, stacks: bool) {
     for kind in [K_UNDEFINED, K_NULL, K_FALSE, K_TRUE] {
         globals.global(
             GlobalType {
@@ -763,7 +789,9 @@ pub fn globals(globals: &mut GlobalSection, bigint: bool) {
     // T34: index keys on the arrays' prototype chain.
     globals.global(int, &ConstExpr::i32_const(0));
     // T27: `RegExp.prototype.exec`; T40: `BigInt.prototype`, `BigInt`.
-    for _ in 0..1 + if bigint { BIGINT_GLOBALS } else { 0 } {
+    // T45: `SuppressedError.prototype` and its constructor.
+    let extra = runtime_globals(bigint, suppressed, stacks) - GLOBALS;
+    for _ in 0..1 + extra {
         globals.global(
             GlobalType {
                 val_type: rt(true, T_OBJECT),
@@ -2058,7 +2086,8 @@ mod tests {
 
 /// `$well_known_symbol<k>()` (T25): `Symbol.<name>`, one per program, described `Symbol.<name>`.
 fn well_known_symbol(cx: &mut dyn Cx, k: u8) -> Function {
-    let n = js2wasi3_ir::WELL_KNOWN_SYMBOLS.len() as i32;
+    // T45: `dispose`/`asyncDispose` have slots only when the code names them.
+    let n = if cx.names("dispose") || cx.names("asyncDispose") || cx.stacks() { 14 } else { 12 };
     let desc: Vec<u16> = format!("Symbol.{}", js2wasi3_ir::WELL_KNOWN_SYMBOLS[k as usize])
         .encode_utf16()
         .collect();
