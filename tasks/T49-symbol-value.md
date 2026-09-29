@@ -85,7 +85,7 @@ fixture byte-identical except those using `Symbol` as a value (scratchpad `cmp.s
   `async-generator/default-proto.js` (F222). Symbol's 10 left: `description` of `Symbol("")` (3, F110), species
   getters (2, F172), `Proxy` (F152), ordinary ToPrimitive of wrappers (2, F220), `$$describe` trap (F221),
   `symbol.js` checks the global `this` (a module's is `undefined`). Subset 27,243 of 28,591 run pass (95.3%),
-  0 regressions (targeted `--update`; no full run on `a-03` yet).
+  0 regressions (targeted `--update`, confirmed by a full run on `a-03`).
 - **Commands**: `scripts/diff.sh tests/fixtures/builtins/symbol-value.js` (+ the changed fixtures), `cargo test`,
   `wasm-tools validate`, `node scripts/test262.mjs --update built-ins/Symbol <26 tests>`, and a check of
   `built-ins/{,Async}DisposableStack`, `SuppressedError`, `statements/{using,await-using,class/subclass}`,
@@ -116,3 +116,4 @@ fixture byte-identical except those using `Symbol` as a value (scratchpad `cmp.s
 - 2026-09-29: `built-ins/Symbol` added to the subset: first run 61/79; fixed `Symbol(x);` statements, `new Symbol`,
   `Symbol.for` ToString, and the `dispose`-without-stacks build failure (pre-existing): 69/79. Targeted `--update`:
   0 regressions, 15 unsupported → pass. Docs, follow-ups F220–F223; task done.
+- 2026-09-29: full subset run on `a-03`: 27,243 of 28,591 run pass (95.3%), baseline unchanged (one flaky timeout, F185).
