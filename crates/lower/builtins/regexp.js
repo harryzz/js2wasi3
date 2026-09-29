@@ -393,6 +393,13 @@ function $$reGroup() {
   let group = 0;
   if ($$rePeek(0) === 63) {
     const d = $$rePeek(1);
+    // T46: only when the source has a `(?i`/`(?m`/`(?s`/`(?-` (a pattern built at run time without
+    // one: "Invalid group").
+    if (__intrinsic_regexp_mods()) {
+      if (d === 105 || d === 109 || d === 115 || d === 45) {
+        return $$reModifiers();
+      }
+    }
     if (d === 58) {
       $$reAt += 2;
     } else if (d === 60) {
@@ -427,6 +434,56 @@ function $$reGroup() {
 
 function $$reIdStart(c) {
   return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 36 || c === 95 || c >= 128;
+}
+
+// A modifiers group (T46) `(?ims-ims:body)` after its `(`: `[13, add, remove, body]` (flag bits
+// i 4, m 8, s 16). `i` applies while the body parses (a `v` class folds then).
+function $$reModifiers() {
+  $$reAt++;
+  let add = 0;
+  let remove = 0;
+  let dash = false;
+  while (true) {
+    const c = $$rePeek(0);
+    const bit = c === 105 ? 4 : c === 109 ? 8 : c === 115 ? 16 : 0;
+    if (bit !== 0) {
+      if (((add | remove) & bit) !== 0) {
+        $$reError("Repeated flag in flag group");
+      }
+      if (dash) {
+        remove |= bit;
+      } else {
+        add |= bit;
+      }
+    } else if (c === 45) {
+      if (dash) {
+        $$reError("Multiple dashes in flag group");
+      }
+      dash = true;
+    } else if (c === 58) {
+      break;
+    } else {
+      $$reError("Invalid group");
+    }
+    $$reAt++;
+  }
+  if (dash && add === 0 && remove === 0) {
+    $$reError("Invalid flag group");
+  }
+  $$reAt++;
+  const icase = $$reIcase;
+  if ((add & 4) !== 0) {
+    $$reIcase = true;
+  } else if ((remove & 4) !== 0) {
+    $$reIcase = false;
+  }
+  const body = $$reDisjunction();
+  $$reIcase = icase;
+  if ($$rePeek(0) !== 41) {
+    $$reError("Unterminated group");
+  }
+  $$reAt++;
+  return [13, add, remove, body];
 }
 
 // `name>` after `(?<` or `\k<`: the name, consumed.
@@ -1235,6 +1292,8 @@ let $$reProg = null;
 let $$reSets = null;
 let $$reRegs = 0;
 let $$reIcase = false;
+// The `i`/`m`/`s` bits in effect while emitting (T46: modifier groups change them).
+let $$reModBits = 0;
 
 function $$reOp(v) {
   $$append($$reProg, v);
@@ -1242,6 +1301,24 @@ function $$reOp(v) {
 
 function $$reEmit(node, dir) {
   const t = node[0];
+  if (__intrinsic_regexp_mods()) {
+    if (t === 13) {
+      // T46: MODS (19) sets the VM's `i`/`m`/`s` bits (undo-logged) for the body, then back.
+      const outer = $$reModBits;
+      const icase = $$reIcase;
+      const inner = (outer | node[1]) & ~node[2];
+      $$reOp(19);
+      $$reOp(inner);
+      $$reModBits = inner;
+      $$reIcase = (inner & 4) !== 0;
+      $$reEmit(node[3], dir);
+      $$reModBits = outer;
+      $$reIcase = icase;
+      $$reOp(19);
+      $$reOp(outer);
+      return;
+    }
+  }
   if (t === 1) {
     $$reOp(1);
     $$reOp($$reIcase ? $$reCanon(node[1], $$reUnicode) : node[1]);
@@ -1456,6 +1533,9 @@ function $$reCompile(src, flagText, bits) {
   $$reSets = [];
   $$reRegs = 0;
   $$reIcase = (bits & 4) !== 0;
+  if (__intrinsic_regexp_mods()) {
+    $$reModBits = bits & 28;
+  }
   $$reEmit(ast, 0);
   $$reOp(0);
   const names = [];
@@ -1669,9 +1749,10 @@ function $$reRun(code, s, start) {
   const caps = code[8];
   const regs = code[9];
   // Flags as numbers, not booleans (boolean locals are boxed, F14).
-  const icase = bits & 4;
-  const multiline = bits & 8;
-  const dotAll = bits & 16;
+  // (`let`: T46's MODS changes them; the same code as `const` without it.)
+  let icase = bits & 4;
+  let multiline = bits & 8;
+  let dotAll = bits & 16;
   const unicode = bits & 96;
   const len = s.length;
   const ncaps = __intrinsic_i32_len(caps);
@@ -1696,6 +1777,21 @@ function $$reRun(code, s, start) {
       stack = $$reGrow(stack);
       $$reStack = stack;
       cap = __intrinsic_i32_len(stack);
+    }
+    if (__intrinsic_regexp_mods()) {
+      if (op === 19) {
+        // MODS (T46): the `i`/`m`/`s` bits for a modifier group's body, undo-logged `[-5, old, 0]`.
+        __intrinsic_i32_set(stack, sp, -5);
+        __intrinsic_i32_set(stack, sp + 1, icase | multiline | dotAll);
+        __intrinsic_i32_set(stack, sp + 2, 0);
+        sp += 3;
+        const m = __intrinsic_i32_get(prog, pc + 1);
+        icase = m & 4;
+        multiline = m & 8;
+        dotAll = m & 16;
+        pc += 2;
+        continue;
+      }
     }
     if (op === 1) {
       const dir = __intrinsic_i32_get(prog, pc + 2);
@@ -1987,6 +2083,15 @@ function $$reRun(code, s, start) {
           pc = k;
           pos = __intrinsic_i32_get(stack, sp + 1);
           break;
+        }
+        if (__intrinsic_regexp_mods()) {
+          if (k === -5) {
+            const m = __intrinsic_i32_get(stack, sp + 1);
+            icase = m & 4;
+            multiline = m & 8;
+            dotAll = m & 16;
+            continue;
+          }
         }
         if (k <= -16) {
           // A STAR loop gives back one character (with `u`, a whole pair when the run holds one).

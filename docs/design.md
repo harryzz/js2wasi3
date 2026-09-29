@@ -272,6 +272,9 @@ RegExp creation only when the code names the string method; `String.prototype.sp
 version): the `i` flag's case tables (`builtins/unicode-case.js`, always in the prelude) and the `\p{…}` sets
 (`crates/lower/src/unicode_props.rs`), of which the prelude gets only those whose `\p{…}` text appears in the
 source (`builtins::parse`). The frontend has oxc check regex literals (early SyntaxErrors).
+T46: modifier groups `(?ims-ims:…)` are an AST node whose body is compiled between two `MODS` instructions setting
+the VM's `i`/`m`/`s` bits (undo-logged on the backtrack stack); the parser and emitter track `i` too. All of it is in
+`if (__intrinsic_regexp_mods()) { … }` blocks, kept only when the user's source contains `(?i`/`(?m`/`(?s`/`(?-`.
 T39: `STAR` (a greedy loop over one CHAR/ANY/CLASS, forwards) also runs in `u`/`v` mode, a code point per step, and
 gives back whole surrogate pairs; `$$reSearch` skips start positions the first instruction rejects; hot helpers take
 and return numbers, not booleans (F14).)

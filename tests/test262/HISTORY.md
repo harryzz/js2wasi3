@@ -3,6 +3,12 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T46 RegExp modifiers (targeted run)
+
+- Compiler: modifier groups `(?ims-ims:…)`; programs without one build the same bytes.
+- Run: the 122 subset tests whose source contains `(?i`/`(?m`/`(?s`/`(?-`, with `--update`: 67 fail → pass, all 122
+  pass (6 timed out under load at -j 8, up to ~4 s each alone). Subset: 27,053 of 28,512 run pass (94.9%).
+
 ## 2026-09-29: T45 explicit resource management (targeted runs)
 
 - Compiler: `using`/`await using` (source rewrite), `Symbol.dispose`/`asyncDispose`, `SuppressedError`,

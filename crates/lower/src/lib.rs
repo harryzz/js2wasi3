@@ -812,11 +812,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
-    /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40)?
-    fn bigint_mode_test(&self, test: &Expression<'a>) -> bool {
-        matches!(test, Expression::CallExpression(c)
-            if matches!(&c.callee, Expression::Identifier(id) if id.name == "__intrinsic_bigint_mode")
-                && self.p.in_prelude(c.span.start))
+    /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40) or `__intrinsic_regexp_mods()`
+    /// (T46)? Which one.
+    fn bigint_mode_test(&self, test: &Expression<'a>) -> Option<&'static str> {
+        let Expression::CallExpression(c) = test else {
+            return None;
+        };
+        let Expression::Identifier(id) = &c.callee else {
+            return None;
+        };
+        if !self.p.in_prelude(c.span.start) {
+            return None;
+        }
+        ["__intrinsic_bigint_mode", "__intrinsic_regexp_mods"]
+            .into_iter()
+            .find(|n| id.name == *n)
     }
 
     /// Can `v` be a BigInt (T40)? Only in a module that can make one, and only a JS value of
@@ -3310,10 +3320,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.extend(self.jump(cx, Jump::Return, v));
                 Ok(())
             }
-            Statement::IfStatement(i) if self.bigint_mode_test(&i.test) => {
+            Statement::IfStatement(i) if self.bigint_mode_test(&i.test).is_some() => {
                 // `if (__intrinsic_bigint_mode()) { … }` in the prelude (T40): the block only in a
-                // module that can make a BigInt, else nothing (the IR stays as without it).
-                if self.module.bigint {
+                // module that can make a BigInt, else nothing (the IR stays as without it). T46:
+                // `__intrinsic_regexp_mods()`, the same for RegExp modifier groups.
+                let keep = match self.bigint_mode_test(&i.test) {
+                    Some("__intrinsic_bigint_mode") => self.module.bigint,
+                    _ => self.prelude.regexp_mods,
+                };
+                if keep {
                     out.extend(self.stmt_body(cx, &i.consequent));
                 }
                 Ok(())

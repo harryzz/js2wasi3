@@ -262,6 +262,9 @@ pub(crate) struct Prelude {
     pub suppressed: bool,
     /// Does it name `DisposableStack` or `AsyncDisposableStack` (T45)?
     pub stacks: bool,
+    /// Does the user's source hold a RegExp modifier group, `(?i`/`(?m`/`(?s`/`(?-` (T46)? The
+    /// prelude's `if (__intrinsic_regexp_mods()) { … }` blocks are kept only then.
+    pub regexp_mods: bool,
     /// Does the user's code name `globalThis` or `global` (T42: the global object exists)?
     pub global_object: bool,
     /// The global object's built-in properties (T42): the [`GLOBAL_NAMES`] the code names.
@@ -429,6 +432,24 @@ impl Prelude {
             }
             _ => false,
         });
+        // A RegExp modifier group anywhere in the user's source (T46).
+        out.regexp_mods = p.source[..p.user_end as usize]
+            .as_bytes()
+            .windows(3)
+            .any(|w| w[0] == b'(' && w[1] == b'?' && matches!(w[2], b'i' | b'm' | b's' | b'-'));
+        // Prelude code in `if (__intrinsic_regexp_mods()) { … }` blocks, when they're dropped.
+        let mut dropped: Vec<Span> = Vec::new();
+        if !out.regexp_mods {
+            for node in p.semantic.nodes().iter() {
+                if let AstKind::IfStatement(i) = node.kind()
+                    && p.in_prelude(i.span.start)
+                    && matches!(&i.test, Expression::CallExpression(c)
+                        if matches!(&c.callee, Expression::Identifier(id) if id.name == "__intrinsic_regexp_mods"))
+                {
+                    dropped.push(i.span);
+                }
+            }
+        }
         // Can the user's code make a SuppressedError (T45)?
         out.suppressed = p.semantic.nodes().iter().any(|node| match node.kind() {
             AstKind::IdentifierReference(r) => {
@@ -507,6 +528,9 @@ impl Prelude {
             }
         };
         for node in p.semantic.nodes().iter() {
+            if dropped.iter().any(|d| d.start <= node.kind().span().start && node.kind().span().end <= d.end) {
+                continue;
+            }
             // `yield*` in an async generator (T29): the lowering calls the delegation helpers.
             if let AstKind::YieldExpression(y) = node.kind()
                 && y.delegate
