@@ -3,6 +3,20 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T47 resizable `ArrayBuffer` (targeted run)
+
+- Compiler: resizable buffers, length-tracking/out-of-bounds typed arrays, `transfer`/`transferToFixedLength`/
+  `detached` (programs without `maxByteLength`/`transfer` in their source build the same bytes); subclasses of
+  `Map`/`Set`/`ArrayBuffer`/typed arrays get their prototype. Runner: `HARNESS_ADAPT` rewrites
+  `resizableArrayBufferUtils.js` (literal subclasses for `new Function`, Float16/BigInt64 arrays absent) and
+  `testTypedArray.js`.
+- Run: the 917 subset tests naming `ArrayBuffer`/a typed array/`maxByteLength`/`transfer`/`Reflect.construct`/
+  `extends Map|Set`, including those harness files or `isConstructor.js`, or with `class … extends`, with
+  `--update` (-j 6): 74 unsupported → pass, 25 fail → pass (`class/subclass-builtins`), 0 regressions; the 89
+  `resizable-arraybuffer` tests: 75 pass, 11 blocked by `typeof Symbol` (F218), 3 name `BigInt64Array` (F217).
+  (17 `built-ins/Function` tests the list pulled in were left out of the baseline: not in the subset.) Subset:
+  27,152 of 28,512 run pass (95.2%).
+
 ## 2026-09-29: T46 RegExp modifiers (targeted run)
 
 - Compiler: modifier groups `(?ims-ims:…)`; programs without one build the same bytes.

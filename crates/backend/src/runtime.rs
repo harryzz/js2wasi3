@@ -322,6 +322,14 @@ pub trait Cx {
     fn stacks(&mut self) -> bool {
         false
     }
+    /// Can the module make a resizable `ArrayBuffer` or detach one (T47)?
+    fn rab(&mut self) -> bool {
+        false
+    }
+    /// Can a constructor value be called with another new target (T47, `Module::subclassing`)?
+    fn subclassing(&mut self) -> bool {
+        false
+    }
     /// Function index of the prelude's StringToBigInt `(jsval) -> jsval` (T40).
     fn string_to_bigint(&mut self) -> Option<u32>;
     /// Function indices of the backend's `f64` `%` and `**` helpers (T40).
@@ -390,8 +398,9 @@ pub fn typeof_code(tag: TypeofTag) -> i32 {
 }
 
 /// Emit the `rec` group. Must be the first entries of the type section. With `bigint` (T40) it
-/// ends with `$bigint`.
-pub fn types(types: &mut TypeSection, bigint: bool) {
+/// ends with `$bigint`. With `rab` (T47) `$buffer` and `$typed` have the fields of resizable and
+/// detached buffers (see `typed.rs`).
+pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
     let sub_of = |inner, is_final, supertype_idx| SubType {
         is_final,
         supertype_idx,
@@ -451,12 +460,21 @@ pub fn types(types: &mut TypeSection, bigint: bool) {
     let mut map_fields = object_fields.clone();
     map_fields.push(field(StorageType::Val(rt(false, T_MTABLE)), true));
     let mut buffer_fields = object_fields.clone();
-    buffer_fields.push(field(StorageType::Val(rt(false, T_BYTES)), false));
+    buffer_fields.push(field(StorageType::Val(rt(false, T_BYTES)), rab));
+    if rab {
+        // T47: `max` (a number; null: fixed-length), `detached`.
+        buffer_fields.push(field(StorageType::Val(jsval()), false));
+        buffer_fields.push(field(StorageType::Val(ValType::I32), true));
+    }
     let mut typed_fields = object_fields.clone();
     typed_fields.push(field(StorageType::Val(ValType::I32), false));
     typed_fields.push(field(StorageType::Val(rt(false, T_BUFFER)), false));
     typed_fields.push(field(StorageType::Val(ValType::I32), false));
     typed_fields.push(field(StorageType::Val(ValType::I32), false));
+    if rab {
+        // T47: `tracking` (1: the length follows the buffer's).
+        typed_fields.push(field(StorageType::Val(ValType::I32), false));
+    }
     let mut mapiter_fields = object_fields.clone();
     mapiter_fields.push(field(StorageType::Val(rt(true, T_MTABLE)), true));
     mapiter_fields.push(field(StorageType::Val(ValType::I32), true));

@@ -63,6 +63,10 @@ pub enum Helper {
     /// `Array.prototype.keys` / `entries` (T25): the same iterator objects.
     ProtoKeys,
     ProtoEntries,
+    /// `%TypedArray%.prototype.values` / `keys` / `entries` in a module with resizable buffers
+    /// (T47; the kind: [`ARRAY_LIKE`], [`ARRAY_KEYS`], [`ARRAY_ENTRIES`]): the same, after
+    /// ValidateTypedArray (elsewhere they're the `Array.prototype` functions).
+    TypedProto(i32),
     /// `%ArrayIteratorPrototype%.next`: `{ value, done }`.
     Next,
     /// `%ArrayIteratorPrototype%[Symbol.iterator]`: `this`.
@@ -88,6 +92,9 @@ impl Helper {
             Helper::ProtoValues => "Array.prototype.values",
             Helper::ProtoKeys => "Array.prototype.keys",
             Helper::ProtoEntries => "Array.prototype.entries",
+            Helper::TypedProto(ARRAY_KEYS) => "%TypedArray%.prototype.keys",
+            Helper::TypedProto(ARRAY_ENTRIES) => "%TypedArray%.prototype.entries",
+            Helper::TypedProto(_) => "%TypedArray%.prototype.values",
             Helper::Next => "%ArrayIteratorPrototype%.next",
             Helper::This => "%ArrayIteratorPrototype%[Symbol.iterator]",
             Helper::AsyncOpen => "async_iter_open",
@@ -110,6 +117,7 @@ impl Helper {
             Helper::ProtoValues
             | Helper::ProtoKeys
             | Helper::ProtoEntries
+            | Helper::TypedProto(_)
             | Helper::Next
             | Helper::This => (vec![v, v, v], vec![v]),
             Helper::AsyncOpen => (vec![v, v], vec![v]),
@@ -126,9 +134,10 @@ impl Helper {
             Helper::Close => close(cx),
             Helper::Rest => rest(cx),
             Helper::Spread => spread(cx),
-            Helper::ProtoValues => proto_values(cx, ARRAY_LIKE),
-            Helper::ProtoKeys => proto_values(cx, ARRAY_KEYS),
-            Helper::ProtoEntries => proto_values(cx, ARRAY_ENTRIES),
+            Helper::ProtoValues => proto_values(cx, ARRAY_LIKE, false),
+            Helper::ProtoKeys => proto_values(cx, ARRAY_KEYS, false),
+            Helper::ProtoEntries => proto_values(cx, ARRAY_ENTRIES, false),
+            Helper::TypedProto(kind) => proto_values(cx, kind, true),
             Helper::Next => next(cx),
             Helper::This => {
                 let mut f = Function::new([]);
@@ -496,6 +505,22 @@ fn step(cx: &mut dyn Cx) -> Function {
     }
     s.if_(BlockType::Empty);
     {
+        if cx.rab() {
+            // T47: a typed array out of bounds (or on a detached buffer) throws.
+            let oob = cx.helper(runtime::Helper::Typed(crate::typed::Helper::Op(
+                js2wasi3_ir::TypedOp::OutOfBounds,
+            )));
+            let msg = cx.str("Cannot perform Array Iterator.prototype.next on a detached ArrayBuffer");
+            it(&mut s, IT);
+            s.struct_get(T_ITER, F_OBJ).ref_test_non_null(crate::typed::typed());
+            s.if_(BlockType::Empty);
+            it(&mut s, IT);
+            s.struct_get(T_ITER, F_OBJ).call(oob);
+            s.if_(BlockType::Empty);
+            s.global_get(msg).call(throw);
+            s.end();
+            s.end();
+        }
         s.local_get(I).f64_convert_i32_u();
         it(&mut s, IT);
         s.struct_get(T_ITER, F_OBJ).global_get(length).call(get);
@@ -749,8 +774,8 @@ fn spread(cx: &mut dyn Cx) -> Function {
 }
 
 /// `kind`: [`ARRAY_LIKE`] (`values`: arrays and strings take `Open`'s fast paths), [`ARRAY_KEYS`]
-/// or [`ARRAY_ENTRIES`] (any object).
-fn proto_values(cx: &mut dyn Cx, kind: i32) -> Function {
+/// or [`ARRAY_ENTRIES`] (any object). `typed`: `%TypedArray%.prototype`'s (T47).
+fn proto_values(cx: &mut dyn Cx, kind: i32, typed: bool) -> Function {
     let alloc = oh(cx, object::Helper::Alloc);
     let define = oh(cx, object::Helper::Define);
     let proto = oh(
@@ -769,6 +794,29 @@ fn proto_values(cx: &mut dyn Cx, kind: i32) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(msg).call(throw);
     s.end();
+    if typed {
+        // T47: ValidateTypedArray.
+        let this_typed = cx.str("this is not a typed array.");
+        let oob = cx.helper(runtime::Helper::Typed(crate::typed::Helper::Op(
+            js2wasi3_ir::TypedOp::OutOfBounds,
+        )));
+        let name = match kind {
+            ARRAY_KEYS => "keys",
+            ARRAY_ENTRIES => "entries",
+            _ => "values",
+        };
+        let msg = cx.str(&format!(
+            "Cannot perform %TypedArray%.prototype.{name} on a detached ArrayBuffer"
+        ));
+        s.local_get(THIS).ref_test_non_null(crate::typed::typed()).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.global_get(this_typed).call(throw);
+        s.end();
+        s.local_get(THIS).call(oob);
+        s.if_(BlockType::Empty);
+        s.global_get(msg).call(throw);
+        s.end();
+    }
     s.i32_const(object::CLASS_PLAIN)
         .call(proto)
         .call(alloc)

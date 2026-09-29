@@ -209,6 +209,8 @@ pub fn lower_with(
                 bigint: prelude.bigint,
                 suppressed: prelude.suppressed,
                 stacks: prelude.stacks,
+                rab: prelude.rab,
+                subclassing: prelude.subclassing,
                 names: builtins::GATED
                     .iter()
                     .filter(|n| prelude.user_props.contains(**n))
@@ -812,8 +814,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
     }
 
-    /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40) or `__intrinsic_regexp_mods()`
-    /// (T46)? Which one.
+    /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40), `__intrinsic_regexp_mods()`
+    /// (T46) or `__intrinsic_rab_mode()` (T47)? Which one.
     fn bigint_mode_test(&self, test: &Expression<'a>) -> Option<&'static str> {
         let Expression::CallExpression(c) = test else {
             return None;
@@ -824,7 +826,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if !self.p.in_prelude(c.span.start) {
             return None;
         }
-        ["__intrinsic_bigint_mode", "__intrinsic_regexp_mods"]
+        ["__intrinsic_bigint_mode", "__intrinsic_regexp_mods", "__intrinsic_rab_mode"]
             .into_iter()
             .find(|n| id.name == *n)
     }
@@ -3323,9 +3325,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Statement::IfStatement(i) if self.bigint_mode_test(&i.test).is_some() => {
                 // `if (__intrinsic_bigint_mode()) { … }` in the prelude (T40): the block only in a
                 // module that can make a BigInt, else nothing (the IR stays as without it). T46:
-                // `__intrinsic_regexp_mods()`, the same for RegExp modifier groups.
+                // `__intrinsic_regexp_mods()`, the same for RegExp modifier groups; T47:
+                // `__intrinsic_rab_mode()` for resizable/detached buffers.
                 let keep = match self.bigint_mode_test(&i.test) {
                     Some("__intrinsic_bigint_mode") => self.module.bigint,
+                    Some("__intrinsic_rab_mode") => self.module.rab,
                     _ => self.prelude.regexp_mods,
                 };
                 if keep {
@@ -7804,6 +7808,14 @@ fn typed_op(name: &str) -> Option<ir::TypedOp> {
         "buffer_length" => T::BufferLength,
         "buffer_slice" => T::BufferSlice,
         "typed_copy" => T::Copy,
+        "typed_view_tracking" => T::ViewTracking,
+        "typed_out_of_bounds" => T::OutOfBounds,
+        "typed_tracking" => T::Tracking,
+        "buffer_new_resizable" => T::BufferNewResizable,
+        "buffer_max" => T::BufferMax,
+        "buffer_detached" => T::BufferDetached,
+        "buffer_resize" => T::BufferResize,
+        "buffer_transfer" => T::BufferTransfer,
         _ => return None,
     })
 }

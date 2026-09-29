@@ -699,6 +699,7 @@ pub fn lower_mem(
             s.block(BlockType::Empty);
             if let Some(kind) = elem.typed_kind() {
                 // A typed array of this kind: copy its bytes.
+                let length = typed::Length::new(cx);
                 let (tv, data, base, n) = (
                     g.local(runtime::rt(false, T_TYPED)),
                     g.local(runtime::rt(false, T_BYTES)),
@@ -714,9 +715,9 @@ pub fn lower_mem(
                     .i32_const(kind as i32)
                     .i32_eq();
                 s.if_(BlockType::Empty);
-                s.local_get(tv)
-                    .struct_get(T_TYPED, typed::F_LENGTH)
-                    .local_set(len);
+                s.local_get(tv);
+                length.emit(s);
+                s.local_set(len);
                 s.local_get(tv)
                     .struct_get(T_TYPED, typed::F_BUF)
                     .struct_get(T_BUFFER, typed::F_DATA)

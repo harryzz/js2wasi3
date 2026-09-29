@@ -297,6 +297,20 @@ that needs a BigInt case in shared built-ins (`Number(1n)`, `JSON.stringify` of 
 whole `if` otherwise, so the IR of other programs doesn't change.)
 (T20: typed arrays and `ArrayBuffer`s are native `$typed`/`$buffer` objects (`crates/backend/src/typed.rs`: element
 access, printing) with their constructors and methods in `builtins/typedarray.js` on `Intrinsic::Typed` operations.)
+(T47: **resizable and detached buffers** exist only in a module whose user source contains `maxByteLength` or
+`transfer` (`ir::Module::rab`, decided on the text like T46's modifiers); other programs keep their bytes. Then
+`$buffer`'s `data` is mutable (`resize` allocates a new byte array and copies: node reserves `maxByteLength` up front,
+but it can be 2^33 and more, and element access already reads `data` on every access, so moving it costs nothing
+there; the byte length stays `array.len(data)`), plus `max` (a JS number, null: fixed-length) and `detached` (a detached
+buffer's `data` is empty); `$typed` gets `tracking`. Every native reader of a typed array's length goes through
+`typed::Length` (`Helper::Len`: IsTypedArrayOutOfBounds → 0, tracking → (bytes − offset) / size) instead of the
+field; the prelude's checks are in `if (__intrinsic_rab_mode()) { … }` blocks (kept only then, like
+`__intrinsic_bigint_mode`), and `new ArrayBuffer(n, options)` is `$$ArrayBuffer$resizable` (the name `$$ArrayBuffer` is
+aliased to it, so other programs keep the one-parameter function). `%TypedArray%.prototype.values/keys/entries` are
+then their own functions (ValidateTypedArray), and the array iterators throw for a view out of bounds.
+Subclassing `Map`/`Set`/`ArrayBuffer`/typed arrays: their constructor values' construct entry
+(`func::Helper::ConstructFrom`) runs the prelude code, then gives the result `newTarget.prototype` if it's an object;
+only in a module with `extends` or the name `construct` (`ir::Module::subclassing`).)
 (T25 slice 1: `JSON.parse` in `builtins/json.js`: recursive descent over code units with the parser state in prelude
 globals (no user code runs while parsing), members stored with `define` (`__proto__` is an own key), numbers other
 than short integers through `$$StringToNumber`, then the reviver walk; node's SyntaxError messages (with node 24's line/column) and context

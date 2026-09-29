@@ -6,8 +6,13 @@
 // `[Symbol.iterator]` are the native array iterators.
 // Kinds: 0 Int8, 1 Uint8, 2 Uint8Clamped, 3 Int16, 4 Uint16, 5 Int32, 6 Uint32, 7 Float32,
 // 8 Float64. Not implemented: Float16Array, BigInt64Array/BigUint64Array, species and
-// subclassing (results have the receiver's kind), resizable/transferable buffers, `Object.keys`
-// and `for-in` over the elements, `DataView`.
+// subclassing (results have the receiver's kind), `Object.keys` and `for-in` over the elements,
+// `DataView`.
+// T47: resizable and detached buffers exist only in a module whose source has `maxByteLength` or
+// `transfer`: their code is in `if (__intrinsic_rab_mode()) { … }` blocks (dropped elsewhere) and
+// `new ArrayBuffer` is `$$ArrayBuffer$resizable` there. `__intrinsic_typed_length` is then the
+// current length (0 when out of bounds); methods check IsTypedArrayOutOfBounds with
+// `$$typedLive`.
 // Uses string.js's `$$toInteger`, `$$relative`, array.js's `$$lengthOf`, `$$callable`,
 // `$$call3`, `$$sameValueZero`, `$$mergeSort`, `$$describe`.
 
@@ -63,6 +68,14 @@ function $$typedThis(v) {
   return kind;
 }
 
+// T47: ValidateTypedArray's IsTypedArrayOutOfBounds check for `%TypedArray%.prototype.<name>`
+// (node's message). Called only in `__intrinsic_rab_mode()` blocks.
+function $$typedLive(v, name) {
+  if (__intrinsic_typed_out_of_bounds(v)) {
+    throw new TypeError("Cannot perform %TypedArray%.prototype." + name + " on a detached ArrayBuffer");
+  }
+}
+
 // A new typed array of `kind` and `length` (a checked integer), zeroed.
 function $$typedAlloc(kind, length) {
   if (length < 0 || length > 9007199254740991) {
@@ -105,6 +118,21 @@ function $$typedCreate(kind, a, b, c) {
       throw new RangeError("start offset of " + name + " should be a multiple of " + size);
     }
     let length;
+    if (__intrinsic_rab_mode()) {
+      if (c !== undefined) {
+        length = $$typedLength(c);
+      }
+      if (__intrinsic_buffer_detached(a)) {
+        throw new TypeError("Cannot perform Construct on a detached ArrayBuffer");
+      }
+      if (c === undefined && __intrinsic_buffer_max(a) !== undefined) {
+        // A length-tracking view.
+        if (offset > __intrinsic_buffer_length(a)) {
+          throw new RangeError("Start offset " + offset + " is outside the bounds of the buffer");
+        }
+        return __intrinsic_typed_view_tracking(kind, a, offset);
+      }
+    }
     if (c === undefined) {
       if (bytes % size !== 0) {
         throw new RangeError("byte length of " + name + " should be a multiple of " + size);
@@ -122,6 +150,11 @@ function $$typedCreate(kind, a, b, c) {
     return __intrinsic_typed_view(kind, a, offset, length);
   }
   if (__intrinsic_typed_kind(a) >= 0) {
+    if (__intrinsic_rab_mode()) {
+      if (__intrinsic_typed_out_of_bounds(a)) {
+        throw new TypeError("Cannot perform Construct on a detached ArrayBuffer");
+      }
+    }
     const n = __intrinsic_typed_length(a);
     const r = $$typedAlloc(kind, n);
     for (let i = 0; i < n; i++) {
@@ -269,6 +302,11 @@ function $$TypedArray_prototype_byteLength() {
 
 function $$TypedArray_prototype_byteOffset() {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    if (__intrinsic_typed_out_of_bounds(this)) {
+      return 0;
+    }
+  }
   return __intrinsic_typed_byte_offset(this);
 }
 
@@ -281,6 +319,9 @@ function $$TypedArray_prototype_buffer() {
 
 function $$TypedArray_prototype_at(index) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "at");
+  }
   const len = __intrinsic_typed_length(this);
   const rel = $$toInteger(index);
   const k = rel >= 0 ? rel : len + rel;
@@ -292,6 +333,9 @@ function $$TypedArray_prototype_at(index) {
 
 function $$TypedArray_prototype_forEach(callbackfn, thisArg) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "forEach");
+  }
   $$callable(callbackfn);
   const len = __intrinsic_typed_length(this);
   for (let k = 0; k < len; k++) {
@@ -302,6 +346,9 @@ function $$TypedArray_prototype_forEach(callbackfn, thisArg) {
 
 function $$TypedArray_prototype_map(callbackfn, thisArg) {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "map");
+  }
   $$callable(callbackfn);
   const len = __intrinsic_typed_length(this);
   const r = __intrinsic_typed_new(kind, len);
@@ -313,6 +360,9 @@ function $$TypedArray_prototype_map(callbackfn, thisArg) {
 
 function $$TypedArray_prototype_filter(callbackfn, thisArg) {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "filter");
+  }
   $$callable(callbackfn);
   const len = __intrinsic_typed_length(this);
   const kept = [];
@@ -333,6 +383,9 @@ function $$TypedArray_prototype_filter(callbackfn, thisArg) {
 
 function $$TypedArray_prototype_some(callbackfn, thisArg) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "some");
+  }
   $$callable(callbackfn);
   const len = __intrinsic_typed_length(this);
   for (let k = 0; k < len; k++) {
@@ -345,6 +398,9 @@ function $$TypedArray_prototype_some(callbackfn, thisArg) {
 
 function $$TypedArray_prototype_every(callbackfn, thisArg) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "every");
+  }
   $$callable(callbackfn);
   const len = __intrinsic_typed_length(this);
   for (let k = 0; k < len; k++) {
@@ -378,11 +434,17 @@ function $$typedReduce(o, callbackfn, args, right) {
 
 function $$TypedArray_prototype_reduce(callbackfn, ...initialValue) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "reduce");
+  }
   return $$typedReduce(this, callbackfn, initialValue, false);
 }
 
 function $$TypedArray_prototype_reduceRight(callbackfn, ...initialValue) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "reduceRight");
+  }
   return $$typedReduce(this, callbackfn, initialValue, true);
 }
 
@@ -401,26 +463,41 @@ function $$typedFind(o, predicate, thisArg, fromEnd, wantIndex) {
 
 function $$TypedArray_prototype_find(predicate, thisArg) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "find");
+  }
   return $$typedFind(this, predicate, thisArg, false, false);
 }
 
 function $$TypedArray_prototype_findIndex(predicate, thisArg) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "findIndex");
+  }
   return $$typedFind(this, predicate, thisArg, false, true);
 }
 
 function $$TypedArray_prototype_findLast(predicate, thisArg) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "findLast");
+  }
   return $$typedFind(this, predicate, thisArg, true, false);
 }
 
 function $$TypedArray_prototype_findLastIndex(predicate, thisArg) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "findIndexLast");
+  }
   return $$typedFind(this, predicate, thisArg, true, true);
 }
 
 function $$TypedArray_prototype_indexOf(searchElement, fromIndex) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "indexOf");
+  }
   const len = __intrinsic_typed_length(this);
   for (let k = $$relative($$toInteger(fromIndex), len); k < len; k++) {
     if (this[k] === searchElement) {
@@ -432,6 +509,9 @@ function $$TypedArray_prototype_indexOf(searchElement, fromIndex) {
 
 function $$TypedArray_prototype_lastIndexOf(searchElement, ...fromIndex) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "lastIndexOf");
+  }
   const len = __intrinsic_typed_length(this);
   let k = len - 1;
   if (+fromIndex.length > 0) {
@@ -448,6 +528,9 @@ function $$TypedArray_prototype_lastIndexOf(searchElement, ...fromIndex) {
 
 function $$TypedArray_prototype_includes(searchElement, fromIndex) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "includes");
+  }
   const len = __intrinsic_typed_length(this);
   for (let k = $$relative($$toInteger(fromIndex), len); k < len; k++) {
     if ($$sameValueZero(this[k], searchElement)) {
@@ -472,16 +555,25 @@ function $$typedJoin(o, separator) {
 
 function $$TypedArray_prototype_join(separator) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "join");
+  }
   return $$typedJoin(this, separator);
 }
 
 function $$TypedArray_prototype_toString() {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "join");
+  }
   return $$typedJoin(this, undefined);
 }
 
 function $$TypedArray_prototype_fill(value, start, end) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "fill");
+  }
   const len = __intrinsic_typed_length(this);
   const v = +value;
   const from = $$relative($$toInteger(start), len);
@@ -494,6 +586,9 @@ function $$TypedArray_prototype_fill(value, start, end) {
 
 function $$TypedArray_prototype_reverse() {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "reverse");
+  }
   const len = __intrinsic_typed_length(this);
   for (let lo = 0, hi = len - 1; lo < hi; lo++, hi--) {
     const t = this[lo];
@@ -505,6 +600,9 @@ function $$TypedArray_prototype_reverse() {
 
 function $$TypedArray_prototype_copyWithin(target, start, end) {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "copyWithin");
+  }
   const len = __intrinsic_typed_length(this);
   const to = $$relative($$toInteger(target), len);
   const from = $$relative($$toInteger(start), len);
@@ -522,6 +620,9 @@ function $$TypedArray_prototype_copyWithin(target, start, end) {
 // `set(source, offset)`: a typed array (the same kind: bytes copied) or an array-like.
 function $$TypedArray_prototype_set(source, offset) {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "set");
+  }
   const off = $$toInteger(offset);
   if (off < 0) {
     throw new RangeError("offset is out of bounds");
@@ -558,6 +659,9 @@ function $$TypedArray_prototype_set(source, offset) {
 
 function $$TypedArray_prototype_slice(start, end) {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "slice");
+  }
   const len = __intrinsic_typed_length(this);
   const from = $$relative($$toInteger(start), len);
   const to = end === undefined ? len : $$relative($$toInteger(end), len);
@@ -576,6 +680,12 @@ function $$TypedArray_prototype_subarray(start, end) {
   const to = end === undefined ? len : $$relative($$toInteger(end), len);
   const n = to > from ? to - from : 0;
   const offset = __intrinsic_typed_byte_offset(this) + from * $$typedSize(kind);
+  if (__intrinsic_rab_mode()) {
+    // The constructor's checks (a detached or shrunk buffer); a length-tracking source and no
+    // `end`: the result tracks too.
+    const tracks = end === undefined && __intrinsic_typed_tracking(this);
+    return $$typedCreate(kind, __intrinsic_typed_buffer(this), offset, tracks ? undefined : n);
+  }
   return __intrinsic_typed_view(kind, __intrinsic_typed_buffer(this), offset, n);
 }
 
@@ -617,6 +727,9 @@ function $$typedSorted(o, comparefn) {
 
 function $$TypedArray_prototype_sort(comparefn) {
   $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "sort");
+  }
   const sorted = $$typedSorted(this, comparefn);
   const len = +sorted.length;
   for (let k = 0; k < len; k++) {
@@ -627,6 +740,9 @@ function $$TypedArray_prototype_sort(comparefn) {
 
 function $$TypedArray_prototype_toSorted(comparefn) {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "toSorted");
+  }
   const sorted = $$typedSorted(this, comparefn);
   const len = +sorted.length;
   const r = __intrinsic_typed_new(kind, len);
@@ -638,6 +754,9 @@ function $$TypedArray_prototype_toSorted(comparefn) {
 
 function $$TypedArray_prototype_toReversed() {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "toReversed");
+  }
   const len = __intrinsic_typed_length(this);
   const r = __intrinsic_typed_new(kind, len);
   for (let k = 0; k < len; k++) {
@@ -648,6 +767,9 @@ function $$TypedArray_prototype_toReversed() {
 
 function $$TypedArray_prototype_with(index, value) {
   const kind = $$typedThis(this);
+  if (__intrinsic_rab_mode()) {
+    $$typedLive(this, "with");
+  }
   const len = __intrinsic_typed_length(this);
   const rel = $$toInteger(index);
   const k = rel >= 0 ? rel : len + rel;
@@ -674,6 +796,34 @@ function $$ArrayBuffer(length) {
   return __intrinsic_buffer_new(n);
 }
 
+// `new ArrayBuffer(length, options)` (T47): `$$ArrayBuffer` in a module with resizable buffers.
+function $$ArrayBuffer$resizable(length, options) {
+  const n = $$toInteger(length);
+  if (n < 0 || n > 9007199254740991) {
+    throw new RangeError("Invalid array buffer length");
+  }
+  let max = undefined;
+  const t = typeof options;
+  if (options !== null && (t === "object" || t === "function")) {
+    const m = options.maxByteLength;
+    if (m !== undefined) {
+      max = $$toInteger(m);
+      if (max < 0 || max > 9007199254740991 || n > max) {
+        throw new RangeError("Invalid array buffer max length");
+      }
+    }
+  }
+  if (n > 2147483647) {
+    throw new RangeError("Array buffer allocation failed");
+  }
+  if (__intrinsic_rab_mode()) {
+    if (max !== undefined) {
+      return __intrinsic_buffer_new_resizable(n, max);
+    }
+  }
+  return __intrinsic_buffer_new(n);
+}
+
 function $$ArrayBuffer_isView(arg) {
   return __intrinsic_typed_kind(arg) >= 0;
 }
@@ -693,8 +843,105 @@ function $$ArrayBuffer_prototype_byteLength() {
 
 function $$ArrayBuffer_prototype_slice(start, end) {
   $$bufferThis(this, "slice");
+  if (__intrinsic_rab_mode()) {
+    if (__intrinsic_buffer_detached(this)) {
+      throw new TypeError("Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer");
+    }
+  }
   const len = __intrinsic_buffer_length(this);
   const from = $$relative($$toInteger(start), len);
   const to = end === undefined ? len : $$relative($$toInteger(end), len);
   return __intrinsic_buffer_slice(this, from, to > from ? to : from);
+}
+
+// ---- resizable and detached buffers (T47) ------------------------------------------------
+
+function $$bufferGetThis(v, name) {
+  if (!__intrinsic_is_array_buffer(v)) {
+    throw new TypeError(
+      "Method get ArrayBuffer.prototype." + name + " called on incompatible receiver " + $$describe(v),
+    );
+  }
+}
+
+function $$ArrayBuffer_prototype_resizable() {
+  $$bufferGetThis(this, "resizable");
+  if (__intrinsic_rab_mode()) {
+    return __intrinsic_buffer_max(this) !== undefined;
+  }
+  return false;
+}
+
+function $$ArrayBuffer_prototype_maxByteLength() {
+  $$bufferGetThis(this, "maxByteLength");
+  if (__intrinsic_rab_mode()) {
+    const max = __intrinsic_buffer_max(this);
+    if (max !== undefined && !__intrinsic_buffer_detached(this)) {
+      return max;
+    }
+  }
+  return __intrinsic_buffer_length(this);
+}
+
+function $$ArrayBuffer_prototype_detached() {
+  $$bufferGetThis(this, "detached");
+  if (__intrinsic_rab_mode()) {
+    return __intrinsic_buffer_detached(this);
+  }
+  return false;
+}
+
+function $$ArrayBuffer_prototype_resize(newLength) {
+  $$bufferThis(this, "resize");
+  if (__intrinsic_rab_mode()) {
+    const max = __intrinsic_buffer_max(this);
+    if (max !== undefined) {
+      const n = $$toInteger(newLength);
+      if (__intrinsic_buffer_detached(this)) {
+        throw new TypeError("Cannot perform ArrayBuffer.prototype.resize on a detached ArrayBuffer");
+      }
+      if (n < 0 || n > max) {
+        throw new RangeError("ArrayBuffer.prototype.resize: Invalid length parameter");
+      }
+      if (n > 2147483647) {
+        throw new RangeError("Array buffer allocation failed");
+      }
+      __intrinsic_buffer_resize(this, n);
+      return undefined;
+    }
+  }
+  throw new TypeError(
+    "Method ArrayBuffer.prototype.resize called on incompatible receiver " + $$describe(this),
+  );
+}
+
+// ArrayBufferCopyAndDetach(o, newLength, preserve-resizability or fixed-length).
+function $$bufferTransfer(o, newLength, keep, name) {
+  $$bufferThis(o, name);
+  if (__intrinsic_rab_mode()) {
+    const n = newLength === undefined ? __intrinsic_buffer_length(o) : $$toInteger(newLength);
+    if (n < 0 || n > 9007199254740991) {
+      throw new RangeError("Invalid array buffer length");
+    }
+    if (__intrinsic_buffer_detached(o)) {
+      throw new TypeError("Cannot perform ArrayBuffer.prototype." + name + " on a detached ArrayBuffer");
+    }
+    const max = __intrinsic_buffer_max(o);
+    if (keep && max !== undefined && n > max) {
+      throw new RangeError("Invalid array buffer length");
+    }
+    if (n > 2147483647) {
+      throw new RangeError("Array buffer allocation failed");
+    }
+    return __intrinsic_buffer_transfer(o, n, keep ? 1 : 0);
+  }
+  return undefined;
+}
+
+function $$ArrayBuffer_prototype_transfer(newLength) {
+  return $$bufferTransfer(this, newLength, true, "transfer");
+}
+
+function $$ArrayBuffer_prototype_transferToFixedLength(newLength) {
+  return $$bufferTransfer(this, newLength, false, "transferToFixedLength");
 }

@@ -165,6 +165,14 @@ pub struct Module {
     /// The code names `DisposableStack` or `AsyncDisposableStack` (T45): their prototype and
     /// constructor globals exist only then (after `SuppressedError`'s, which are then there too).
     pub stacks: bool,
+    /// The code can make a resizable `ArrayBuffer` or detach one (T47: its source has
+    /// `maxByteLength` or `transfer`): `$buffer` and `$typed` have the fields for it, and every
+    /// native reader of a typed array's length checks IsTypedArrayOutOfBounds, only then.
+    pub rab: bool,
+    /// The code has a class with `extends`, or names `construct` (T47): only then can a
+    /// constructor value be called with another new target, so only then do the constructor values
+    /// of `Map`/`Set`/`ArrayBuffer`/typed arrays take its prototype (`func::Helper::ConstructFrom`).
+    pub subclassing: bool,
     /// The prelude's StringToBigInt `(JsVal) -> JsVal` (T40): a BigInt, or `undefined` if the
     /// string isn't a StringIntegerLiteral. Set with [`Module::bigint`].
     pub string_to_bigint: Option<FuncId>,
@@ -1194,6 +1202,25 @@ pub enum TypedOp {
     /// `(dst, dst_index, src, src_index, count)`: copy elements between typed arrays of the same
     /// kind (overlap allowed).
     Copy,
+    // T47, only in a module with [`Module::rab`] (the backend's `$buffer`/`$typed` have the
+    // fields they use only then).
+    /// `(kind, b, byte_offset) -> jsval`: a length-tracking typed array on `b`.
+    ViewTracking,
+    /// `(t) -> bool`: is it length-tracking?
+    Tracking,
+    /// `(t) -> i32`: IsTypedArrayOutOfBounds (its buffer is detached, or doesn't reach its end).
+    OutOfBounds,
+    /// `(byte_length, max) -> jsval`: a new zeroed resizable `ArrayBuffer`; `max` is a number.
+    BufferNewResizable,
+    /// `(b) -> jsval`: its `maxByteLength`, `undefined` if it isn't resizable.
+    BufferMax,
+    /// `(b) -> bool`: is it detached?
+    BufferDetached,
+    /// `(b, byte_length)`: resize it in place (new bytes are zero).
+    BufferResize,
+    /// `(b, byte_length, resizable) -> jsval`: a new buffer with `b`'s bytes (cut or zero-filled to
+    /// `byte_length`; resizable with `b`'s max if `resizable` and `b` is), then `b` is detached.
+    BufferTransfer,
 }
 
 pub const MAP_KIND_MAP: u8 = 0;
@@ -1388,6 +1415,14 @@ impl Intrinsic {
                 TypedOp::BufferNew => (&[I32], Some(JsVal)),
                 TypedOp::BufferSlice => (&[JsVal, I32, I32], Some(JsVal)),
                 TypedOp::Copy => (&[JsVal, I32, JsVal, I32, I32], None),
+                TypedOp::ViewTracking => (&[I32, JsVal, I32], Some(JsVal)),
+                TypedOp::OutOfBounds => (&[JsVal], Some(I32)),
+                TypedOp::Tracking => (&[JsVal], Some(Bool)),
+                TypedOp::BufferNewResizable => (&[I32, JsVal], Some(JsVal)),
+                TypedOp::BufferMax => (&[JsVal], Some(JsVal)),
+                TypedOp::BufferDetached => (&[JsVal], Some(Bool)),
+                TypedOp::BufferResize => (&[JsVal, I32], None),
+                TypedOp::BufferTransfer => (&[JsVal, I32, I32], Some(JsVal)),
             },
         }
     }
@@ -1580,6 +1615,14 @@ impl Intrinsic {
                 TypedOp::BufferLength => "buffer_length",
                 TypedOp::BufferSlice => "buffer_slice",
                 TypedOp::Copy => "typed_copy",
+                TypedOp::ViewTracking => "typed_view_tracking",
+                TypedOp::OutOfBounds => "typed_out_of_bounds",
+                TypedOp::Tracking => "typed_tracking",
+                TypedOp::BufferNewResizable => "buffer_new_resizable",
+                TypedOp::BufferMax => "buffer_max",
+                TypedOp::BufferDetached => "buffer_detached",
+                TypedOp::BufferResize => "buffer_resize",
+                TypedOp::BufferTransfer => "buffer_transfer",
             },
         }
     }

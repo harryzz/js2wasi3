@@ -265,6 +265,13 @@ pub(crate) struct Prelude {
     /// Does the user's source hold a RegExp modifier group, `(?i`/`(?m`/`(?s`/`(?-` (T46)? The
     /// prelude's `if (__intrinsic_regexp_mods()) { … }` blocks are kept only then.
     pub regexp_mods: bool,
+    /// Does the user's source hold `maxByteLength` or `transfer` (T47: it can make a resizable
+    /// `ArrayBuffer` or detach one)? Then `new ArrayBuffer` is `$$ArrayBuffer$resizable` and the
+    /// prelude's `if (__intrinsic_rab_mode()) { … }` blocks are kept.
+    pub rab: bool,
+    /// Does the user's code have a class with `extends`, or name `construct` (T47, see
+    /// `ir::Module::subclassing`)?
+    pub subclassing: bool,
     /// Does the user's code name `globalThis` or `global` (T42: the global object exists)?
     pub global_object: bool,
     /// The global object's built-in properties (T42): the [`GLOBAL_NAMES`] the code names.
@@ -362,6 +369,10 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     "AsyncDisposableStack",
 ];
 
+/// The `ArrayBuffer` constructor taking `options` (T47): `$$ArrayBuffer` in a module with
+/// [`Prelude::rab`], so other programs keep the one-parameter function.
+pub(crate) const RESIZABLE_BUFFER: &str = "$$ArrayBuffer$resizable";
+
 /// Constructors whose prelude function `$$X` is what `new X(…)` runs and that throw when called
 /// without `new` (T25: `Map`, `Set`; T20: `ArrayBuffer` and the typed arrays).
 pub(crate) const NEW_ONLY: &[&str] = &[
@@ -416,6 +427,14 @@ impl Prelude {
             }
             items.push(stmt.span());
         }
+        // Resizable or detached buffers (T47): decided on the source text, like T46's modifiers.
+        let user = &p.source[..p.user_end as usize];
+        out.rab = user.contains("maxByteLength") || user.contains("transfer");
+        if out.rab
+            && let Some(&sym) = out.names.get(RESIZABLE_BUFFER)
+        {
+            out.names.insert("$$ArrayBuffer".to_string(), sym);
+        }
         let scoping = p.semantic.scoping();
         let mut roots: Vec<usize> = extra
             .iter()
@@ -438,18 +457,31 @@ impl Prelude {
             .windows(3)
             .any(|w| w[0] == b'(' && w[1] == b'?' && matches!(w[2], b'i' | b'm' | b's' | b'-'));
         // Prelude code in `if (__intrinsic_regexp_mods()) { … }` blocks, when they're dropped.
+        // T47: the same for `if (__intrinsic_rab_mode()) { … }`.
         let mut dropped: Vec<Span> = Vec::new();
-        if !out.regexp_mods {
+        let gates: Vec<&str> = [("__intrinsic_regexp_mods", out.regexp_mods), ("__intrinsic_rab_mode", out.rab)]
+            .into_iter()
+            .filter(|(_, keep)| !keep)
+            .map(|(name, _)| name)
+            .collect();
+        if !gates.is_empty() {
             for node in p.semantic.nodes().iter() {
                 if let AstKind::IfStatement(i) = node.kind()
                     && p.in_prelude(i.span.start)
                     && matches!(&i.test, Expression::CallExpression(c)
-                        if matches!(&c.callee, Expression::Identifier(id) if id.name == "__intrinsic_regexp_mods"))
+                        if matches!(&c.callee, Expression::Identifier(id) if gates.contains(&id.name.as_str())))
                 {
                     dropped.push(i.span);
                 }
             }
         }
+        // Subclasses of built-ins, `Reflect.construct` (T47).
+        out.subclassing = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::Class(c) => c.heritage.is_some() && !p.in_prelude(c.span.start),
+            AstKind::IdentifierName(n) => n.name == "construct" && !p.in_prelude(n.span.start),
+            AstKind::StringLiteral(l) => l.value == "construct" && !p.in_prelude(l.span.start),
+            _ => false,
+        });
         // Can the user's code make a SuppressedError (T45)?
         out.suppressed = p.semantic.nodes().iter().any(|node| match node.kind() {
             AstKind::IdentifierReference(r) => {
@@ -827,6 +859,7 @@ impl Prelude {
 pub(crate) fn length(name: &str) -> Option<u32> {
     match name {
         "$$Math_max" | "$$Math_min" | "$$Math_hypot" => Some(2),
+        "$$ArrayBuffer" | "$$ArrayBuffer$resizable" => Some(1),
         "$$Object_defineProperty$value" => Some(3),
         "$$Object_getOwnPropertyDescriptor$value" | "$$Object_hasOwn$value" => Some(2),
         "$$String"

@@ -1364,6 +1364,19 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             .collect(),
         Builtin::String => vec![(values, None, "[Symbol.iterator]", 0)],
         // T20: the array iterators work on any array-like.
+        // T47: with resizable buffers, their own (ValidateTypedArray).
+        Builtin::TypedArray if cx.rab() => [
+            (crate::iter::ARRAY_LIKE, "values"),
+            (crate::iter::ARRAY_KEYS, "keys"),
+            (crate::iter::ARRAY_ENTRIES, "entries"),
+        ]
+        .into_iter()
+        .filter(|(_, k)| *k == "values" || named.contains(k))
+        .map(|(kind, k)| {
+            let h = runtime::Helper::Iter(crate::iter::Helper::TypedProto(kind));
+            (h, Some(k), k, 0)
+        })
+        .collect(),
         Builtin::TypedArray => [(values, "values")]
             .into_iter()
             .chain(
@@ -1474,7 +1487,10 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             let code = cx.helper(h);
             cx.declare_func(code);
             let mut keys = vec![key.map_or(runtime::G_SYM_ITERATOR, |k| cx.str(k))];
-            if h == values && matches!(b, Builtin::Array | Builtin::TypedArray) {
+            let typed_values = runtime::Helper::Iter(crate::iter::Helper::TypedProto(
+                crate::iter::ARRAY_LIKE,
+            ));
+            if (h == values && matches!(b, Builtin::Array | Builtin::TypedArray)) || h == typed_values {
                 keys.push(runtime::G_SYM_ITERATOR);
             }
             let flags = if h == values { func::NEW_VALUES } else { 0 };
@@ -1503,7 +1519,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             || (b == Builtin::Symbol && key == "description")
             || (b == Builtin::TypedArray
                 && ["length", "byteLength", "byteOffset", "buffer"].contains(&key.as_str()))
-            || (b == Builtin::ArrayBuffer && key == "byteLength")
+            || (b == Builtin::ArrayBuffer
+                && ["byteLength", "maxByteLength", "resizable", "detached"].contains(&key.as_str()))
             || (b == Builtin::RegExp && REGEXP_GETTERS.contains(&key.as_str()))
             || (matches!(b, Builtin::DisposableStack | Builtin::AsyncDisposableStack)
                 && key == "disposed");
@@ -1880,6 +1897,7 @@ fn get(cx: &mut dyn Cx) -> Function {
         // A typed array (T20): an index key (an `i31` or an array-index string) reads the
         // element, or `undefined` out of range; never the prototype chain.
         let elem = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Get));
+        let length = crate::typed::Length::new(cx);
         let t = |s: &mut InstructionSink| {
             s.local_get(V).ref_cast_non_null(crate::typed::typed());
         };
@@ -1906,8 +1924,8 @@ fn get(cx: &mut dyn Cx) -> Function {
             s.if_(BlockType::Empty);
             s.local_get(I).i64_const(0).i64_ge_s();
             t(&mut s);
-            s.struct_get(runtime::T_TYPED, crate::typed::F_LENGTH)
-                .i64_extend_i32_u()
+            length.emit(&mut s);
+            s.i64_extend_i32_u()
                 .local_get(I)
                 .i64_gt_s();
             s.i32_and();
@@ -2015,6 +2033,7 @@ fn set(cx: &mut dyn Cx) -> Function {
         // A typed array element (T20): the value is converted first; out of range, dropped.
         let elem = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Set));
         let to_number = rh(cx, runtime::Helper::ToNumber);
+        let length = crate::typed::Length::new(cx);
         s.local_get(V).ref_test_non_null(crate::typed::typed());
         s.local_get(KEY)
             .ref_test_non_null(wasm_encoder::HeapType::I31);
@@ -2028,9 +2047,8 @@ fn set(cx: &mut dyn Cx) -> Function {
             };
             s.local_get(VAL).call(to_number).local_set(X);
             key(&mut s);
-            s.local_get(V)
-                .ref_cast_non_null(crate::typed::typed())
-                .struct_get(runtime::T_TYPED, crate::typed::F_LENGTH);
+            s.local_get(V).ref_cast_non_null(crate::typed::typed());
+            length.emit(&mut s);
             s.i32_lt_u();
             s.if_(BlockType::Empty);
             s.local_get(V).ref_cast_non_null(crate::typed::typed());
@@ -2246,6 +2264,7 @@ fn has(cx: &mut dyn Cx) -> Function {
     if cx.names("$typed") {
         // A typed array (T20): an index key is there iff it's in range.
         let index = h(cx, Helper::ArrayIndex);
+        let length = crate::typed::Length::new(cx);
         const IDX: u32 = 3;
         s.local_get(V).ref_test_non_null(crate::typed::typed());
         s.if_(BlockType::Empty);
@@ -2263,10 +2282,9 @@ fn has(cx: &mut dyn Cx) -> Function {
             s.local_tee(IDX).i64_const(-1).i64_ne();
             s.if_(BlockType::Empty);
             s.local_get(IDX).i64_const(0).i64_ge_s();
-            s.local_get(V)
-                .ref_cast_non_null(crate::typed::typed())
-                .struct_get(runtime::T_TYPED, crate::typed::F_LENGTH)
-                .i64_extend_i32_u()
+            s.local_get(V).ref_cast_non_null(crate::typed::typed());
+            length.emit(&mut s);
+            s.i64_extend_i32_u()
                 .local_get(IDX)
                 .i64_gt_s();
             s.i32_and();
@@ -2596,16 +2614,16 @@ fn own_keys(cx: &mut dyn Cx, all: bool) -> Function {
     });
     if cx.names("$typed") {
         // A typed array (T20): its indices, "0" to "length - 1", come first.
+        let length = crate::typed::Length::new(cx);
         let number_to_string = rh(
             cx,
             runtime::Helper::Num(crate::numstr::Helper::NumberToString),
         );
         s.local_get(O).ref_test_non_null(crate::typed::typed());
         s.if_(BlockType::Empty);
-        s.local_get(O)
-            .ref_cast_non_null(crate::typed::typed())
-            .struct_get(runtime::T_TYPED, crate::typed::F_LENGTH)
-            .local_tee(M)
+        s.local_get(O).ref_cast_non_null(crate::typed::typed());
+        length.emit(&mut s);
+        s.local_tee(M)
             .array_new_default(T_KEYS)
             .local_set(ELEMS);
         s.i32_const(0).local_set(P);

@@ -159,6 +159,46 @@ function frontmatter(src) {
 }
 
 let fileCounter = 0;
+// Harness files adapted for js2wasi3 (T47), each replacement required to match:
+// - resizableArrayBufferUtils.js builds its subclasses with `new Function` of code made at run time
+//   (F191); the same classes are written out. `Float16Array` and `BigInt64Array`/`BigUint64Array`
+//   aren't implemented (F116): the harness's own "does this global exist" checks say no.
+const HARNESS_ADAPT = {
+  "resizableArrayBufferUtils.js": [
+    [
+      "return new Function('return class My' + type + ' extends ' + type + ' {}')();",
+      "if (type === 'Uint8Array') return class MyUint8Array extends Uint8Array {};\n" +
+        "    if (type === 'Float32Array') return class MyFloat32Array extends Float32Array {};",
+    ],
+    ["typeof Float16Array !== 'undefined'", "false", "all"],
+    ["typeof BigUint64Array !== 'undefined'", "false"],
+    ["typeof BigInt64Array !== 'undefined'", "false"],
+    // (Names of unimplemented globals are build errors even in dead code.)
+    ["builtinCtors.push(Float16Array);", ""],
+    ["floatCtors.push(Float16Array);", ""],
+    ["builtinCtors.push(BigUint64Array);", ""],
+    ["builtinCtors.push(BigInt64Array);", ""],
+    [
+      "(BigInt64Array !== 'undefined' && ta instanceof BigInt64Array)\n      || (BigUint64Array !== 'undefined' && ta instanceof BigUint64Array)",
+      "false",
+    ],
+  ],
+  "testTypedArray.js": [
+    ['if (typeof Float16Array !== "undefined") {\n  floatArrayConstructors.push(Float16Array);\n}', ""],
+    ['if (typeof BigInt64Array !== "undefined") {\n  bigIntArrayConstructors.push(BigInt64Array);\n}', ""],
+    ['if (typeof BigUint64Array !== "undefined") {\n  bigIntArrayConstructors.push(BigUint64Array);\n}', ""],
+    ["constructors || [BigInt64Array, BigUint64Array]", "constructors || []"],
+    ['typeof Float16Array !== "undefined" && FA === Float16Array', "false"],
+  ],
+};
+function adaptHarness(name, text) {
+  for (const [from, to, all] of HARNESS_ADAPT[name] ?? []) {
+    if (!text.includes(from)) throw new Error(`harness ${name}: no \`${from}\` to adapt`);
+    text = all ? text.split(from).join(to) : text.replace(from, to);
+  }
+  return text;
+}
+
 const harnessCache = new Map();
 function harness(name) {
   if (!harnessCache.has(name)) harnessCache.set(name, readFileSync(join(HARNESS, name), "utf8"));
@@ -231,7 +271,7 @@ async function one(rel, work) {
   // A script's function declarations are global-object properties, a module's aren't: asyncHelpers.js
   // checks `globalThis.$DONE` (T42).
   if (meta.flags.includes("async") && meta.includes.includes("asyncHelpers.js")) parts.push("globalThis.$DONE = $DONE;\n");
-  for (const inc of meta.includes) parts.push(harness(inc));
+  for (const inc of meta.includes) parts.push(adaptHarness(inc, harness(inc)));
   parts.push(src);
   // Plain names: the WIT package/world name comes from the file name (F143).
   const id = `t${++fileCounter}`;

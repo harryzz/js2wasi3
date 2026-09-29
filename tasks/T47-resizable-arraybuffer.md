@@ -1,6 +1,6 @@
 # T47: Resizable `ArrayBuffer` and length-tracking typed arrays (part of F116)
 
-Status: todo (handoff written 2026-09-29, not started) | Depends on: T20 slice 1 (typed arrays, `ArrayBuffer`), T40 (BigInt), T45 (built-ins gated outside `Builtin::ALL`)
+Status: done (2026-09-29) | Depends on: T20 slice 1 (typed arrays, `ArrayBuffer`), T40 (BigInt), T45 (built-ins gated outside `Builtin::ALL`)
 
 ## Goal
 `new ArrayBuffer(n, { maxByteLength })`, `resize`, `resizable`, `maxByteLength`, plus `transfer`,
@@ -83,21 +83,94 @@ scratchpad script `cmp.sh` from T42–T46 does this: build `old-js2wasi3` from t
 typed-array loop before and after. test262: targeted `--update` runs; ask before a full run on `a-03`.
 
 ## Acceptance
-- [ ] Resizable buffers and length-tracking/out-of-bounds typed arrays behave like node's (fixtures).
-- [ ] `transfer`/`transferToFixedLength`/`detached` (or a follow-up with the reason).
-- [ ] The 88 subset tests pass or have a named follow-up; 0 regressions; baseline updated.
-- [ ] Programs without resizable buffers compile to the same bytes; typed-array speed unchanged.
+- [x] Resizable buffers and length-tracking/out-of-bounds typed arrays behave like node's (fixtures).
+- [x] `transfer`/`transferToFixedLength`/`detached` (or a follow-up with the reason).
+- [x] The 88 subset tests pass or have a named follow-up; 0 regressions; baseline updated.
+- [x] Programs without resizable buffers compile to the same bytes; typed-array speed unchanged.
 
 ## Notes / Result
-(to be written)
+**What changed**
+- Design (docs/design.md, D5's T47 note): gated by `ir::Module::rab` (the user source contains `maxByteLength` or
+  `transfer`); buffers reallocate on `resize` (not reserved: `maxByteLength` can be huge); in rab mode `$buffer` has a
+  mutable `data`, `max`, `detached`, `$typed` has `tracking`, and every native length read goes through
+  `typed::Length` / `Helper::Len`. New `TypedOp`s: `ViewTracking`, `Tracking`, `OutOfBounds`, `BufferNewResizable`,
+  `BufferMax`, `BufferDetached`, `BufferResize`, `BufferTransfer`.
+- Prelude (`builtins/typedarray.js`): `$$ArrayBuffer$resizable(length, options)` (aliased to `$$ArrayBuffer` in rab
+  mode), getters `resizable`/`maxByteLength`/`detached`, `resize`, `transfer`, `transferToFixedLength`; constructors
+  make length-tracking views and reject detached buffers; every `%TypedArray%.prototype` method but `subarray` and the
+  getters checks IsTypedArrayOutOfBounds with node's message (`$$typedLive`); `byteOffset` 0 out of bounds;
+  `subarray` through the constructor (tracking without `end`). All in `if (__intrinsic_rab_mode()) { … }` blocks
+  (new gate next to `__intrinsic_bigint_mode`/`__intrinsic_regexp_mods`; dropped blocks leave the reachability scan).
+- Backend: array iterators throw for out-of-bounds views; `%TypedArray%.prototype.values/keys/entries` are their own
+  functions in rab mode; a detached buffer prints `ArrayBuffer { (detached), [byteLength]: 0 }`.
+- Subclassing `Map`/`Set`/`ArrayBuffer`/typed arrays (F116/F106 part): `func::Helper::ConstructFrom`, gated on
+  `ir::Module::subclassing` (`extends` or the name `construct` in the user's code).
+- Runner: `HARNESS_ADAPT` in `scripts/test262.mjs` (see HISTORY.md).
+- Fixtures: `tests/fixtures/builtins/{resizable-buffers,buffer-transfer,subclass-collections}.js` (node is the oracle).
+
+**Commands run**: `scripts/diff.sh` on the new fixtures and `typed-arrays*.js`, `reflect.js`; `cargo test`;
+`wasm-tools validate` + `wasmtime run -Sp3`; scratchpad `cmp.sh` old vs new over all 240 fixtures (identical except
+the three new ones and `reflect.js`, which does `Reflect.construct(Map, …)`: the subclassing gate); a 1M-element
+`Float64Array` read loop (3.1–3.5 s in every mode: noise); test262 targeted `--update` over 917 tests: +99 pass,
+0 regressions, subset 27,152 of 28,512 run (95.2%).
+
+**Unsupported / follow-ups**: F216 (subclass instances print with the built-in's name), F217 (`BigInt64Array`/
+`BigUint64Array`/`Float16Array`; 3 tests), F218 (`typeof Symbol`; 13 tests), F219 (re-validation after resizing
+callbacks in `%TypedArray%` methods, `maxByteLength` limit, `byteLength` getter message, shared `values` without rab).
+
+**Next smallest step**: F217's `BigInt64Array`/`BigUint64Array` (kinds 9–10 in bigint mode: element get/set with
+ToBigInt, printing `1n`, the prelude methods' `+value` conversions), then drop their `HARNESS_ADAPT` entries.
 
 ## Checklist
-- [ ] design questions decided and recorded
-- [ ] slice 1: resizable buffers, length-tracking views
-- [ ] slice 2: transfer / detached
-- [ ] slice 3: test262 harness, subclassing / BigInt64 arrays
-- [ ] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md, README)
+- [x] design questions decided and recorded
+- [x] slice 1: resizable buffers, length-tracking views
+- [x] slice 2: transfer / detached
+- [x] slice 3: test262 harness, subclassing (BigInt64 arrays: F217)
+- [x] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md; README's status unchanged)
 
 ## Progress
 - 2026-09-29: handoff written after T46 (the user chose resizable `ArrayBuffer` next). State at handoff: `main` at
   `3aee035`, pushed; test262 subset 27,053 of 28,512 run pass (94.9%).
+- 2026-09-29: started. Tools unchanged (`check-tools.sh` all ok). Probed node 24.21.0: `maxByteLength` up to
+  2^33−1 is accepted (virtual reservation), `resize` beyond max / negative: `RangeError: ArrayBuffer.prototype.resize:
+  Invalid length parameter`; on a fixed buffer: `TypeError: Method ArrayBuffer.prototype.resize called on incompatible
+  receiver #<ArrayBuffer>`; `new Uint32Array(rab6)` is length-tracking with no multiple-of-size check; every
+  `%TypedArray%.prototype` method but `subarray` and the getters throws `TypeError: Cannot perform
+  %TypedArray%.prototype.<m> on a detached ArrayBuffer` when out of bounds (V8 quirks: `findLastIndex` says
+  `findIndexLast`, `toString` says `join`); getters give 0; a detached buffer prints `ArrayBuffer { (detached),
+  [byteLength]: 0 }`.
+- 2026-09-29: design decided. (1) Storage: **reallocate on resize**, not reserve: `maxByteLength` can be 2^33−1 and
+  a GC byte array is real memory; element access already reads `buffer.data` on every access, so a moved array costs
+  nothing there. Byte length stays `array.len(data)`. (2) Gated by `ir::Module::rab` (the user's code names property
+  `maxByteLength`, `transfer` or `transferToFixedLength`): then `$buffer` gets a mutable `data` plus `max: i32` (−1:
+  fixed) and `detached: mut i32`, `$typed` gets `tracking: i32`, and every native reader of a typed array's length
+  calls `typed::Helper::Len` (IsTypedArrayOutOfBounds → 0; length-tracking: (bytes − offset) / size); without it the
+  types and code are today's (no speed change for fixed buffers). The prelude's checks go in
+  `if (__intrinsic_rab_mode()) { … }` blocks (like `__intrinsic_bigint_mode`). (3) `transfer`/detach are in this
+  task (slice 2; the same Len helper covers detached buffers: length 0).
+- 2026-09-29: slice 1 implemented: IR `Module::rab` + `TypedOp::{ViewTracking, Tracking, OutOfBounds,
+  BufferNewResizable, BufferMax, BufferDetached, BufferResize, BufferTransfer}`; `Prelude::rab` (source has
+  `maxByteLength`/`transfer`) aliases `$$ArrayBuffer` to `$$ArrayBuffer$resizable(length, options)` and keeps the
+  `__intrinsic_rab_mode()` blocks (dropped blocks are also left out of the reachability scan, like T46's);
+  backend `typed::Length` (field or `Helper::Len`) used by `object.rs` (get/set/has/own keys), `wit.rs`, printing;
+  the array iterators throw node's TypeErrors for out-of-bounds typed arrays; getters `resizable`/`maxByteLength`/
+  `detached`. node's `maxByteLength` limit is machine-dependent (68,753,477,599,232 here): only ToIndex's range is
+  checked. Fixture `tests/fixtures/builtins/resizable-buffers.js` passes `scripts/diff.sh` (1.5 s debug build);
+  output validates.
+- 2026-09-29: slice 2 (`transfer`, `transferToFixedLength`, `detached`) done in the same prelude/backend pieces;
+  fixture `tests/fixtures/builtins/buffer-transfer.js` passes. `subarray` goes through `$$typedCreate` in rab mode
+  (the constructor's checks). Gating check (scratchpad `cmp.sh`, old vs new build of every fixture): identical except
+  the new fixture.
+- 2026-09-29: slice 3: subclassing `Map`/`Set`/`ArrayBuffer`/typed arrays (F116 part): the constructor values'
+  construct entry is `func::Helper::ConstructFrom(b)` (the prelude code, then `newTarget.prototype`), gated on
+  `ir::Module::subclassing` (user code has `extends` or names `construct`), so `typed-arrays.js` (ctor values, no
+  classes) keeps its bytes. Separate `%TypedArray%.prototype.values/keys/entries` in rab mode
+  (`iter::Helper::TypedProto`: ValidateTypedArray; `Array.prototype.values` on an out-of-bounds view doesn't throw).
+  Runner: `HARNESS_ADAPT` in `scripts/test262.mjs` rewrites `resizableArrayBufferUtils.js` (literal subclasses
+  instead of `new Function`, Float16/BigInt64 arrays reported absent). The 89 `resizable-arraybuffer` tests: 73 pass
+  (5 "timeouts" at `-j 8` pass at `-j 2`), 11 name `Float16Array` and 3 `BigInt64Array` themselves.
+- 2026-09-29: `ConstructFrom` keeps the built-in's prototype when `newTarget.prototype` isn't an object (fixture
+  `tests/fixtures/builtins/subclass-collections.js` passes). `testTypedArray.js` also adapted in the runner; its 13
+  tests are then blocked by `typeof Symbol` (F106 → F218). Benchmark (1M `Float64Array` reads, release build): fixed
+  buffer 3.1–3.2 s (bytes identical to before), same program in rab mode 3.35 s, a tracking view 3.2–3.5 s: within
+  noise. `cargo test` passes. Docs (design.md T47 note, keywords.md rows) and follow-ups F216–F219 written.

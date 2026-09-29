@@ -10,6 +10,13 @@
 //!   `object::set` use for a typed array and an index: out of range reads `undefined`, writes are
 //!   dropped. Writing converts like the spec: ToInt32 modulo the element width, clamping (round
 //!   half to even) for `Uint8ClampedArray`, rounding to `f32` for `Float32Array`.
+//! - T47, only in a module with `ir::Module::rab`: `$buffer`'s `data` is mutable (`resize`
+//!   replaces it: the byte length is always `array.len(data)`; a detached buffer's is empty) and
+//!   it has `max` (the `maxByteLength` as a JS number, null for a fixed-length buffer) and
+//!   `detached`; `$typed` has `tracking` (1: a length-tracking view, `length` unused). Every
+//!   native reader of a typed array's length then goes through [`Helper::Len`] ([`Length`]):
+//!   0 when out of bounds, (byte length − offset) / size when tracking. Other modules keep the
+//!   fixed layout and read the `length` field.
 
 use js2wasi3_ir::{Builtin, TYPED_NAMES, TypedOp};
 use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
@@ -26,10 +33,19 @@ pub const F_KIND: u32 = 7;
 pub const F_BUF: u32 = 8;
 pub const F_OFFSET: u32 = 9;
 pub const F_LENGTH: u32 = 10;
+/// T47 (`Cx::rab`).
+pub const F_MAX: u32 = 8;
+pub const F_DETACHED: u32 = 9;
+pub const F_TRACKING: u32 = 11;
 
 const UINT8_CLAMPED: i32 = 2;
 const FLOAT32: i32 = 7;
 const FLOAT64: i32 = 8;
+
+const EQ_HEAP: HeapType = HeapType::Abstract {
+    shared: false,
+    ty: wasm_encoder::AbstractHeapType::Eq,
+};
 
 pub fn typed() -> HeapType {
     HeapType::Concrete(T_TYPED)
@@ -54,6 +70,32 @@ pub enum Helper {
     FormatBuffer,
     /// `(kind: i32) -> (ref $string)`: the constructor name.
     Name,
+    /// `(t: (ref $typed)) -> i32`: its current length (T47: TypedArrayLength, 0 when out of
+    /// bounds). Only with `Cx::rab`; see [`Length`].
+    Len,
+}
+
+/// How to read a typed array's length (T47): the field, or [`Helper::Len`] in a module with
+/// resizable buffers.
+#[derive(Clone, Copy)]
+pub struct Length(Option<u32>);
+
+impl Length {
+    pub fn new(cx: &mut dyn Cx) -> Length {
+        Length(if cx.rab() { Some(th(cx, Helper::Len)) } else { None })
+    }
+
+    /// `(ref $typed)` on the stack → its length.
+    pub fn emit(self, s: &mut InstructionSink) {
+        match self.0 {
+            Some(f) => {
+                s.call(f);
+            }
+            None => {
+                s.struct_get(T_TYPED, F_LENGTH);
+            }
+        }
+    }
 }
 
 impl Helper {
@@ -65,6 +107,7 @@ impl Helper {
             Helper::Format => "inspect_typed_array",
             Helper::FormatBuffer => "inspect_array_buffer",
             Helper::Name => "typed_array_name",
+            Helper::Len => "typed_current_length",
         }
     }
 
@@ -89,6 +132,7 @@ impl Helper {
             Helper::Format => (vec![t, I32, I32], vec![string_ref()]),
             Helper::FormatBuffer => (vec![rt(false, T_BUFFER), I32, I32], vec![string_ref()]),
             Helper::Name => (vec![I32], vec![string_ref()]),
+            Helper::Len => (vec![t], vec![I32]),
         }
     }
 
@@ -99,6 +143,7 @@ impl Helper {
             Helper::Set => set(),
             Helper::Format => format(cx),
             Helper::FormatBuffer => format_buffer(cx),
+            Helper::Len => current_length(),
             Helper::Name => {
                 let names: Vec<u32> = TYPED_NAMES.iter().map(|n| cx.str(n)).collect();
                 let mut f = Function::new([]);
@@ -352,7 +397,63 @@ fn new_buffer(cx: &mut dyn Cx, s: &mut InstructionSink, len: u32) {
     )));
     object_fields(s, proto);
     s.local_get(len).array_new_default(T_BYTES);
+    if cx.rab() {
+        s.ref_null(EQ_HEAP).i32_const(0);
+    }
     s.struct_new(T_BUFFER);
+}
+
+/// Push the byte length of the `(ref $buffer)` on the stack.
+fn buffer_length(s: &mut InstructionSink) {
+    s.struct_get(T_BUFFER, F_DATA).array_len();
+}
+
+/// Push the element size of the `$typed` in local `t` (local `kind` is set to its kind).
+fn elem_size(s: &mut InstructionSink, t: u32, kind: u32) {
+    s.local_get(t).struct_get(T_TYPED, F_KIND).local_set(kind);
+    size_of(s, kind);
+}
+
+/// Push IsTypedArrayOutOfBounds of the `$typed` in local `t` (T47), without the detached check;
+/// locals `kind` and `blen` are scratch.
+fn out_of_bounds(s: &mut InstructionSink, t: u32, kind: u32, blen: u32) {
+    s.local_get(t).struct_get(T_TYPED, F_BUF);
+    buffer_length(s);
+    s.local_set(blen);
+    s.local_get(t).struct_get(T_TYPED, F_TRACKING);
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(t).struct_get(T_TYPED, F_OFFSET).local_get(blen).i32_gt_u();
+    s.else_();
+    // offset + length × size > byte length (both terms < 2^31: no unsigned overflow).
+    s.local_get(t).struct_get(T_TYPED, F_OFFSET);
+    s.local_get(t).struct_get(T_TYPED, F_LENGTH);
+    elem_size(s, t, kind);
+    s.i32_mul().i32_add();
+    s.local_get(blen).i32_gt_u();
+    s.end();
+}
+
+/// [`Helper::Len`]. A detached buffer's bytes are empty, so it needs no check of its own.
+fn current_length() -> Function {
+    const T: u32 = 0;
+    const KIND: u32 = 1;
+    const BLEN: u32 = 2;
+    let mut f = Function::new([(2, ValType::I32)]);
+    let mut s = f.instructions();
+    out_of_bounds(&mut s, T, KIND, BLEN);
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(T).struct_get(T_TYPED, F_TRACKING);
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(BLEN).local_get(T).struct_get(T_TYPED, F_OFFSET).i32_sub();
+    elem_size(&mut s, T, KIND);
+    s.i32_div_u();
+    s.else_();
+    s.local_get(T).struct_get(T_TYPED, F_LENGTH);
+    s.end();
+    s.end();
+    f
 }
 
 /// Push the object fields of a new plain-class object with the prototype `proto` gives.
@@ -365,8 +466,16 @@ fn object_fields(s: &mut InstructionSink, proto: u32) {
     s.ref_null(HeapType::Concrete(T_I32S));
 }
 
-/// Push a new `$typed` of the kind in local `kind` on the `$buffer` in local `buf`.
-fn new_typed(cx: &mut dyn Cx, s: &mut InstructionSink, kind: u32, buf: u32, off: u32, len: u32) {
+/// Push a new `$typed` of the kind in local `kind` on the `$buffer` in local `buf`; `len: None`
+/// makes a length-tracking one (T47, `Cx::rab` only).
+fn new_typed(
+    cx: &mut dyn Cx,
+    s: &mut InstructionSink,
+    kind: u32,
+    buf: u32,
+    off: u32,
+    len: Option<u32>,
+) {
     let protos: Vec<u32> = (0..9)
         .map(|k| {
             cx.helper(runtime::Helper::Obj(object::Helper::Proto(Builtin::Typed(
@@ -391,7 +500,18 @@ fn new_typed(cx: &mut dyn Cx, s: &mut InstructionSink, kind: u32, buf: u32, off:
     s.ref_null(HeapType::Concrete(T_I32S));
     s.local_get(kind);
     s.local_get(buf).ref_cast_non_null(buffer());
-    s.local_get(off).local_get(len);
+    match len {
+        Some(len) => {
+            s.local_get(off).local_get(len);
+            if cx.rab() {
+                s.i32_const(0);
+            }
+        }
+        None => {
+            // T47: length-tracking.
+            s.local_get(off).i32_const(0).i32_const(1);
+        }
+    }
     s.struct_new(T_TYPED);
 }
 
@@ -417,7 +537,7 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             s.i32_mul().local_set(BYTES);
             new_buffer(cx, &mut s, BYTES);
             s.local_set(BUF);
-            new_typed(cx, &mut s, KIND, BUF, ZERO, LEN);
+            new_typed(cx, &mut s, KIND, BUF, ZERO, Some(LEN));
             s.end();
             f
         }
@@ -425,7 +545,7 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             // (kind, b, offset, length)
             let mut f = Function::new([]);
             let mut s = f.instructions();
-            new_typed(cx, &mut s, 0, 1, 2, 3);
+            new_typed(cx, &mut s, 0, 1, 2, Some(3));
             s.end();
             f
         }
@@ -442,12 +562,17 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             s.end();
             f
         }
-        TypedOp::Length | TypedOp::ByteOffset | TypedOp::Buffer => {
-            let field = match op {
-                TypedOp::Length => F_LENGTH,
-                TypedOp::ByteOffset => F_OFFSET,
-                _ => F_BUF,
-            };
+        TypedOp::Length => {
+            let length = Length::new(cx);
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            t(&mut s, 0);
+            length.emit(&mut s);
+            s.end();
+            f
+        }
+        TypedOp::ByteOffset | TypedOp::Buffer => {
+            let field = if op == TypedOp::ByteOffset { F_OFFSET } else { F_BUF };
             let mut f = Function::new([]);
             let mut s = f.instructions();
             t(&mut s, 0);
@@ -499,6 +624,115 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             s.end();
             f
         }
+        TypedOp::ViewTracking => {
+            // (kind, b, offset)
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            new_typed(cx, &mut s, 0, 1, 2, None);
+            s.end();
+            f
+        }
+        TypedOp::OutOfBounds => {
+            const T: u32 = 1;
+            const KIND: u32 = 2;
+            const BLEN: u32 = 3;
+            let mut f = Function::new([(1, rt(false, T_TYPED)), (2, ValType::I32)]);
+            let mut s = f.instructions();
+            t(&mut s, 0);
+            s.local_set(T);
+            s.local_get(T)
+                .struct_get(T_TYPED, F_BUF)
+                .struct_get(T_BUFFER, F_DETACHED);
+            s.if_(BlockType::Result(ValType::I32));
+            s.i32_const(1);
+            s.else_();
+            out_of_bounds(&mut s, T, KIND, BLEN);
+            s.end();
+            s.end();
+            f
+        }
+        TypedOp::BufferNewResizable => {
+            // (len, max)
+            let proto = cx.helper(runtime::Helper::Obj(object::Helper::Proto(
+                Builtin::ArrayBuffer,
+            )));
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            object_fields(&mut s, proto);
+            s.local_get(0).array_new_default(T_BYTES);
+            s.local_get(1).i32_const(0);
+            s.struct_new(T_BUFFER);
+            s.end();
+            f
+        }
+        TypedOp::BufferMax => {
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            s.block(BlockType::Result(jsval()));
+            b(&mut s, 0);
+            s.struct_get(T_BUFFER, F_MAX).br_on_non_null(0);
+            s.global_get(runtime::G_UNDEFINED);
+            s.end();
+            s.end();
+            f
+        }
+        TypedOp::Tracking => {
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            t(&mut s, 0);
+            s.struct_get(T_TYPED, F_TRACKING);
+            s.end();
+            f
+        }
+        TypedOp::BufferDetached => {
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            b(&mut s, 0);
+            s.struct_get(T_BUFFER, F_DETACHED);
+            s.end();
+            f
+        }
+        TypedOp::BufferResize => {
+            // (b, len): new bytes, the old ones copied (as many as fit).
+            const NEW: u32 = 2;
+            let mut f = Function::new([(1, rt(false, T_BYTES))]);
+            let mut s = f.instructions();
+            s.local_get(1).array_new_default(T_BYTES).local_set(NEW);
+            copy_prefix(&mut s, NEW, 0, 1);
+            b(&mut s, 0);
+            s.local_get(NEW).struct_set(T_BUFFER, F_DATA);
+            s.end();
+            f
+        }
+        TypedOp::BufferTransfer => {
+            // (b, len, resizable): ArrayBufferCopyAndDetach.
+            const NEW: u32 = 3;
+            let proto = cx.helper(runtime::Helper::Obj(object::Helper::Proto(
+                Builtin::ArrayBuffer,
+            )));
+            let mut f = Function::new([(1, rt(false, T_BYTES))]);
+            let mut s = f.instructions();
+            s.local_get(1).array_new_default(T_BYTES).local_set(NEW);
+            copy_prefix(&mut s, NEW, 0, 1);
+            object_fields(&mut s, proto);
+            s.local_get(NEW);
+            s.local_get(2);
+            s.if_(BlockType::Result(jsval()));
+            b(&mut s, 0);
+            s.struct_get(T_BUFFER, F_MAX);
+            s.else_();
+            s.ref_null(EQ_HEAP);
+            s.end();
+            s.i32_const(0);
+            s.struct_new(T_BUFFER);
+            b(&mut s, 0);
+            s.i32_const(0).array_new_default(T_BYTES);
+            s.struct_set(T_BUFFER, F_DATA);
+            b(&mut s, 0);
+            s.i32_const(1).struct_set(T_BUFFER, F_DETACHED);
+            s.end();
+            f
+        }
         TypedOp::Copy => {
             // (dst, dst_index, src, src_index, count)
             const KIND: u32 = 5;
@@ -530,6 +764,23 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
     }
 }
 
+/// Copy the first min(len, old length) bytes of the `$buffer` in local `b` (a jsval) into the
+/// `$bytes` in local `new` (`len`: a local, the new length).
+fn copy_prefix(s: &mut InstructionSink, new: u32, b: u32, len: u32) {
+    s.local_get(new).i32_const(0);
+    s.local_get(b).ref_cast_non_null(buffer()).struct_get(T_BUFFER, F_DATA);
+    s.i32_const(0);
+    s.local_get(len);
+    s.local_get(b).ref_cast_non_null(buffer());
+    buffer_length(s);
+    s.local_get(len);
+    s.local_get(b).ref_cast_non_null(buffer());
+    buffer_length(s);
+    s.i32_lt_u();
+    s.select();
+    s.array_copy(T_BYTES, T_BYTES);
+}
+
 /// node's `Uint8Array(n) [ … ]`: at most 100 elements, then `... n more items`; grouped in
 /// columns like an array of numbers.
 fn format(cx: &mut dyn Cx) -> Function {
@@ -550,9 +801,12 @@ fn format(cx: &mut dyn Cx) -> Function {
     const N: u32 = 4;
     const I: u32 = 5;
     const OUT: u32 = 6;
+    let length = Length::new(cx);
     let mut f = Function::new([(3, ValType::I32), (1, rt(true, T_KEYS))]);
     let mut s = f.instructions();
-    s.local_get(T).struct_get(T_TYPED, F_LENGTH).local_set(LEN);
+    s.local_get(T);
+    length.emit(&mut s);
+    s.local_set(LEN);
     // Too deep: `[Uint8Array]` (node: only when there is something to show).
     s.local_get(DEPTH).i32_const(2).i32_gt_s();
     s.local_get(LEN).i32_const(0).i32_ne();
@@ -663,6 +917,14 @@ fn format_buffer(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(deep).return_();
     s.end();
+    if cx.rab() {
+        // T47.
+        let detached = cx.str("ArrayBuffer { (detached), [byteLength]: 0 }");
+        s.local_get(B).struct_get(T_BUFFER, F_DETACHED);
+        s.if_(BlockType::Empty);
+        s.global_get(detached).return_();
+        s.end();
+    }
     s.local_get(B)
         .struct_get(T_BUFFER, F_DATA)
         .array_len()

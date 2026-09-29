@@ -154,6 +154,10 @@ pub enum Helper {
     RequiresNew(Builtin),
     /// The construct code of `BigInt` (T40): node's TypeError, "X is not a constructor".
     NotConstructor(Builtin),
+    /// The construct code of `Map`/`Set`/`ArrayBuffer`/a typed array (T47, F116): the prelude
+    /// code, then OrdinaryCreateFromConstructor's prototype, `newTarget.prototype` if it's an
+    /// object (subclasses, `Reflect.construct`). Their prelude functions don't read `this`.
+    ConstructFrom(Builtin),
     /// The code of a constructor stub (see `ir::Module::ctor_stubs`): traps.
     StubTrap,
     /// The code of `Function.prototype.toString` (T25): the source text, or
@@ -195,6 +199,7 @@ impl Helper {
             Helper::Namespace(_) => "namespace",
             Helper::RequiresNew(_) => "requires_new",
             Helper::NotConstructor(_) => "not_a_constructor",
+            Helper::ConstructFrom(_) => "construct_from_constructor",
             Helper::StubTrap => "constructor_stub_not_implemented",
             Helper::ToString => "Function.prototype.toString",
         }
@@ -236,6 +241,7 @@ impl Helper {
             | Helper::ToString
             | Helper::RequiresNew(_)
             | Helper::NotConstructor(_)
+            | Helper::ConstructFrom(_)
             | Helper::StubTrap => (vec![v, v, v], vec![v]),
             Helper::BuiltinCtor(_) | Helper::Namespace(_) => (vec![], vec![v]),
             Helper::SetSource => (vec![v, s], vec![v]),
@@ -341,6 +347,30 @@ impl Helper {
                 f
             }
             Helper::BuiltinCtor(b) => builtin_ctor(cx, b),
+            Helper::ConstructFrom(b) => {
+                let (code, _) = cx.builtin_ctor(b).expect("a linked constructor");
+                let get = oh(cx, object::Helper::Get);
+                let set_proto = oh(cx, object::Helper::SetProto);
+                let prototype = cx.str("prototype");
+                const NT: u32 = 1;
+                const R: u32 = 3;
+                const P: u32 = 4;
+                let mut f = Function::new([(2, jsval())]);
+                let mut s = f.instructions();
+                s.local_get(0).local_get(NT).local_get(2).call(code).local_set(R);
+                s.local_get(NT).ref_test_non_null(runtime::object());
+                s.if_(BlockType::Empty);
+                s.local_get(NT).global_get(prototype).call(get).local_set(P);
+                // Not an object (`null` too): the built-in's own prototype stays.
+                s.local_get(P).ref_test_non_null(runtime::object());
+                s.if_(BlockType::Empty);
+                s.local_get(R).local_get(P).call(set_proto);
+                s.end();
+                s.end();
+                s.local_get(R);
+                s.end();
+                f
+            }
             Helper::Namespace(ns) => namespace(cx, ns),
             Helper::RequiresNew(b) | Helper::NotConstructor(b) => {
                 let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
@@ -1306,6 +1336,11 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         )),
         // `new BigInt` throws (T40; it has [[Construct]]: `Reflect.construct(f, [], BigInt)`).
         Builtin::BigInt => Some(fh(cx, Helper::NotConstructor(b))),
+        Builtin::Map | Builtin::Set | Builtin::ArrayBuffer | Builtin::Typed(_)
+            if linked && cx.subclassing() =>
+        {
+            Some(fh(cx, Helper::ConstructFrom(b)))
+        }
         _ => Some(code),
     };
     cx.declare_func(call);

@@ -116,7 +116,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         || !module.imports.is_empty();
     let mut types = TypeSection::new();
     if js {
-        runtime::types(&mut types, module.bigint);
+        runtime::types(&mut types, module.bigint, module.rab);
     }
     let n = module.functions.len() as u32;
     // Imported functions come first in the function index space.
@@ -848,6 +848,14 @@ impl runtime::Cx for Emitter<'_> {
 
     fn stacks(&mut self) -> bool {
         self.m.stacks
+    }
+
+    fn rab(&mut self) -> bool {
+        self.m.rab
+    }
+
+    fn subclassing(&mut self) -> bool {
+        self.m.subclassing
     }
 
     fn string_to_bigint(&mut self) -> Option<u32> {
