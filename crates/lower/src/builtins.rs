@@ -375,6 +375,8 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     // T48.
     "BigInt64Array",
     "BigUint64Array",
+    // T49: calls by name are `Intrinsic::NewSymbol`; the value's call entry is `$$Symbol`.
+    "Symbol",
 ];
 
 /// The `ArrayBuffer` constructor taking `options` (T47): `$$ArrayBuffer` in a module with
@@ -544,6 +546,11 @@ impl Prelude {
                 if b == "$$BigInt" && !out.bigint {
                     continue;
                 }
+                // The stacks' only where there are stacks (T49: their prototypes don't exist
+                // otherwise, so naming `dispose` alone failed to build).
+                if matches!(b, "$$DisposableStack" | "$$AsyncDisposableStack") && !out.stacks {
+                    continue;
+                }
                 // `Date.prototype[Symbol.toPrimitive]` (T26) is reached by naming `toPrimitive`.
                 // T45: `[Symbol.dispose]`/`[Symbol.asyncDispose]` by naming `dispose`/`asyncDispose`.
                 let m = match m {
@@ -684,7 +691,8 @@ impl Prelude {
                             }
                             // `new String(…)`: through the value (wrapper objects trap, F88).
                             AstKind::NewExpression(n) if n.callee.span() == r.span => {
-                                matches!(r.name.as_str(), "String" | "Number" | "Boolean")
+                                // T49: `new Symbol()` throws through the value's construct entry.
+                                matches!(r.name.as_str(), "String" | "Number" | "Boolean" | "Symbol")
                             }
                             _ => !called(),
                         };
@@ -695,7 +703,9 @@ impl Prelude {
                         {
                             out.ctor_values.insert(r.name.to_string());
                         }
-                        if (js2wasi3_ir::Builtin::parse(&r.name).is_none() || called())
+                        // `Symbol(…)` is `Intrinsic::NewSymbol` (T49: `$$Symbol` is its value's).
+                        if (js2wasi3_ir::Builtin::parse(&r.name).is_none()
+                            || (called() && r.name != "Symbol"))
                             && let Some(sym) = out.names.get(&format!("$${}", r.name))
                         {
                             add(item_of[sym], r.span, &mut roots);
@@ -931,7 +941,7 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$Array_prototype_copyWithin"
         | "$$Array_prototype_splice"
         | "$$Array_prototype_toSpliced" => Some(2),
-        "$$Array_prototype_flat" | "$$Map" | "$$Set" => Some(0),
+        "$$Array_prototype_flat" | "$$Map" | "$$Set" | "$$Symbol" => Some(0),
         "$$Function" => Some(1),
         "$$Date" | "$$Date_UTC" => Some(7),
         "$$Date_prototype_toLocaleString"

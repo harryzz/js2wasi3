@@ -24,6 +24,7 @@ git -C "$DIR" sparse-checkout set --cone harness \
   test/language/module-code test/language/import test/language/export \
   test/built-ins/global test/language/global-code \
   test/built-ins/eval test/language/eval-code test/built-ins/Function \
-  test/built-ins/DisposableStack test/built-ins/AsyncDisposableStack test/built-ins/SuppressedError
+  test/built-ins/DisposableStack test/built-ins/AsyncDisposableStack test/built-ins/SuppressedError \
+  test/built-ins/Symbol
 git -C "$DIR" checkout -q "$COMMIT"
 echo "test262 at $COMMIT"

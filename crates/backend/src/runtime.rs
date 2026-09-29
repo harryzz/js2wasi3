@@ -355,6 +355,11 @@ pub trait Cx {
     fn subclassing(&mut self) -> bool {
         false
     }
+    /// The well-known symbols that are own properties of `Symbol` as a value (T49,
+    /// `Module::symbol_statics`).
+    fn symbol_statics(&mut self) -> Vec<String> {
+        Vec::new()
+    }
     /// Function index of the prelude's StringToBigInt `(jsval) -> jsval` (T40).
     fn string_to_bigint(&mut self) -> Option<u32>;
     /// Function indices of the backend's `f64` `%` and `**` helpers (T40).

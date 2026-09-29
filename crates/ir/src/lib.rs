@@ -176,6 +176,9 @@ pub struct Module {
     /// The code names `BigInt64Array` or `BigUint64Array` (T48; implies [`Module::bigint`]): typed
     /// array kinds 9–10 and their prototype and constructor globals exist only then.
     pub big_typed: bool,
+    /// `Symbol` is a value (T49): the well-known symbols (`iterator` and [`WELL_KNOWN_SYMBOLS`])
+    /// the code names, which are its own properties (constants).
+    pub symbol_statics: Vec<String>,
     /// The prelude's ToBigInt `(JsVal) -> JsVal` (T48): element writes of the BigInt arrays. Set with
     /// [`Module::big_typed`].
     pub to_bigint: Option<FuncId>,

@@ -212,6 +212,15 @@ pub fn lower_with(
                 rab: prelude.rab,
                 subclassing: prelude.subclassing,
                 big_typed: prelude.big_typed,
+                symbol_statics: if prelude.ctor_values.contains("Symbol") {
+                    std::iter::once("iterator")
+                        .chain(ir::WELL_KNOWN_SYMBOLS)
+                        .filter(|n| prelude.user_props.contains(*n))
+                        .map(str::to_string)
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 names: builtins::GATED
                     .iter()
                     .filter(|n| prelude.user_props.contains(**n))
@@ -3853,7 +3862,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             Expression::CallExpression(c)
                 if self.error_ctor(&c.callee).is_none()
-                    && self.object_static(&c.callee).is_none() =>
+                    && self.object_static(&c.callee).is_none()
+                    // `Symbol(…);` (T49): `Intrinsic::NewSymbol`, for its ToString.
+                    && self.builtin_ident(&c.callee) != Some(Builtin::Symbol) =>
             {
                 let (call, _) = self.call(cx, c)?;
                 out.push(Stmt::Expr(call));
@@ -4345,7 +4356,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Ok(Val::num(Expr::f64(v)))
             }
             Expression::StaticMemberExpression(sm)
-                if !sm.optional && self.builtin_ident(&sm.object) == Some(Builtin::Symbol) =>
+                if !sm.optional
+                    && self.builtin_ident(&sm.object) == Some(Builtin::Symbol)
+                    && (matches!(sm.property.name.as_str(), "iterator" | "prototype")
+                        || ir::well_known_symbol(&sm.property.name).is_some()
+                        // T49: other properties are read from `Symbol` as a value.
+                        || !self.prelude.ctor_values.contains("Symbol")) =>
             {
                 if sm.property.name == "iterator" {
                     return Ok(Val::js(

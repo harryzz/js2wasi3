@@ -345,6 +345,11 @@ not always needed are gated the same way (`ir::Module::names`). A name built at 
 node's `formatWithOptions` in `builtins/console.js`, linked when a string in the code has a `%`. The formatter
 (`inspect.rs`) now matches node's `util.inspect` for cycles (a stack of the objects being formatted), symbol keys,
 escapes, > 100 entries and Map/Set iterators; it is linked into every command through the uncaught-exception path.)
+(T49: `Symbol` is a constructor value like `BigInt`: linked only when used as a value (`typeof Symbol` counts; calls
+by name stay `Intrinsic::NewSymbol` and don't link it), its call entry is the prelude's `$$Symbol` and its construct
+entry throws (`new Symbol`, `extends Symbol` + `super()`, `Reflect.construct`). Its well-known symbols are own
+constants only for the names the code uses (`ir::Module::symbol_statics`, like T25's statics by name).
+`Symbol.prototype[Symbol.toPrimitive]` is `$$Symbol_prototype_$toPrimitive`, linked by naming `toPrimitive`.)
 
 ### D6. The global object, `eval` and `Function` (T42)
 Every file is an ES module (strict, top-level `this` is `undefined`, top-level declarations aren't global-object

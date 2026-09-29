@@ -98,10 +98,8 @@ fn builtins_prelude() {
     lowers("export function f(a) { return a.map((x) => x + 1).indexOf(2) + Array(3).length; }");
     lowers("export function f(n) { return new Array(n).fill(0).concat(Array.of(1)).length; }");
     lowers("export function f(xs) { const A = Array; return new A(...xs).length; }");
-    assert_eq!(
-        one("export function f() { const s = Symbol; return 1; }"),
-        "1:33 unsupported: global `Symbol` (planned: T21)"
-    );
+    // `Symbol` as a value since T49.
+    lowers("export function f() { const s = Symbol; return typeof s('x'); }");
     // Slice 4: JSON.stringify, Object statics and Object.prototype methods.
     lowers("export function f(o) { return JSON.stringify(o, null, 2).length; }");
     lowers(

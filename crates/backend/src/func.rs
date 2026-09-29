@@ -1335,7 +1335,8 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
             runtime::Helper::Wrap(crate::wrapper::Helper::Construct(b)),
         )),
         // `new BigInt` throws (T40; it has [[Construct]]: `Reflect.construct(f, [], BigInt)`).
-        Builtin::BigInt => Some(fh(cx, Helper::NotConstructor(b))),
+        // T49: `new Symbol` too.
+        Builtin::BigInt | Builtin::Symbol => Some(fh(cx, Helper::NotConstructor(b))),
         Builtin::Map | Builtin::Set | Builtin::ArrayBuffer | Builtin::Typed(_)
             if linked && cx.subclassing() =>
         {
@@ -1389,6 +1390,25 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         // T20.
         let size = js2wasi3_ir::TYPED_SIZES[k as usize] as f64;
         define_constants(cx, &mut s, F, &[("BYTES_PER_ELEMENT", size)]);
+    }
+    if b == Builtin::Symbol {
+        // T49: the well-known symbols the code names; read-only, non-enumerable, fixed.
+        for name in cx.symbol_statics() {
+            let key = cx.str(&name);
+            let value = match js2wasi3_ir::well_known_symbol(&name) {
+                Some(k) => Some(cx.helper(runtime::Helper::WellKnownSymbol(k))),
+                None => None,
+            };
+            s.local_get(F)
+                .ref_cast_non_null(runtime::object())
+                .global_get(key);
+            match value {
+                Some(h) => s.call(h),
+                None => s.global_get(runtime::G_SYM_ITERATOR),
+            };
+            s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+                .call(define);
+        }
     }
     for (key, code, len) in statics {
         s.local_get(F)

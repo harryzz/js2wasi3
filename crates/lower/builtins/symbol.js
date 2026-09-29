@@ -16,8 +16,14 @@ function $$thisSymbol(v, name) {
   return v;
 }
 
+// `Symbol` as a value (T49): its call entry (`new Symbol()` throws natively). Calls of `Symbol(…)` by
+// name don't come here: they are `Intrinsic::NewSymbol`.
+function $$Symbol(description) {
+  return Symbol(description);
+}
+
 function $$Symbol_for(key) {
-  const k = $$String(key);
+  const k = __intrinsic_to_string(key);
   if ($$symbolFor === null) {
     $$symbolFor = __intrinsic_map_new_map();
     $$symbolKey = __intrinsic_map_new_map();
@@ -58,4 +64,13 @@ function $$Symbol_prototype_description() {
     return undefined;
   }
   return __intrinsic_sub(s, 0, n);
+}
+
+// `Symbol.prototype[Symbol.toPrimitive](hint)` (T49), linked by naming `toPrimitive`.
+function $$Symbol_prototype_$toPrimitive(hint) {
+  const v = __intrinsic_unwrap(this);
+  if (typeof v !== "symbol") {
+    throw new TypeError("Symbol.prototype [ @@toPrimitive ] requires that 'this' be a Symbol");
+  }
+  return v;
 }

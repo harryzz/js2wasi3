@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T49 `Symbol` as a value (targeted run)
+
+- Compiler: `Symbol` as a value (constructor value, statics, `@@toPrimitive`); `Symbol(x);` as a statement, `new Symbol`,
+  `Symbol.for` of a symbol throws; naming `dispose` without a `DisposableStack` no longer fails to build. Runner:
+  `built-ins/Symbol` joined the subset (and the sparse clone).
+- Run: `built-ins/Symbol` (98: 69 pass, 19 skip; 10 not: F110, F152, F172, F220, F221, module `this`) and the 26 non-passing subset tests using `Symbol` as a value or
+  including `testTypedArray.js`, with `--update` (-j 4): 15 unsupported → pass (the 13 `testTypedArray.js` tests,
+  2 `class/subclass/builtin-objects/Symbol`), 0 regressions. Subset: 27,243 of 28,591 run pass (95.3%).
+
 ## 2026-09-29: T48 `BigInt64Array`/`BigUint64Array` (targeted run)
 
 - Compiler: the BigInt arrays (kinds 9–10, only in programs naming them). Runner: `HARNESS_ADAPT` no longer hides

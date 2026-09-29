@@ -869,6 +869,10 @@ impl runtime::Cx for Emitter<'_> {
         self.m.subclassing
     }
 
+    fn symbol_statics(&mut self) -> Vec<String> {
+        self.m.symbol_statics.clone()
+    }
+
     fn big_typed(&mut self) -> bool {
         self.m.big_typed
     }

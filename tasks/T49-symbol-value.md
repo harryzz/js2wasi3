@@ -1,6 +1,6 @@
 # T49: `Symbol` as a value (F218, part of F106)
 
-Status: todo (handoff written 2026-09-29, not started) | Depends on: T15 (symbols), T25 (constructor values,
+Status: done (2026-09-29) | Depends on: T15 (symbols), T25 (constructor values,
 well-known symbols, `builtins/symbol.js`), T45 (gating new built-in globals), T47/T48 (test262 harness adaptation)
 
 ## Goal
@@ -59,20 +59,60 @@ fixture byte-identical except those using `Symbol` as a value (scratchpad `cmp.s
 `old-js2wasi3` from the stashed tree). test262: targeted `--update`; ask before a full run on `a-03`.
 
 ## Acceptance
-- [ ] `Symbol` as a value behaves like node's (fixture).
-- [ ] The 13 `testTypedArray.js` tests and the 7 others pass or have a named follow-up; 0 regressions; baseline
+- [x] `Symbol` as a value behaves like node's (fixture).
+- [x] The 13 `testTypedArray.js` tests and the 7 others pass or have a named follow-up; 0 regressions; baseline
       updated.
-- [ ] Programs not using `Symbol` as a value compile to the same bytes.
+- [x] Programs not using `Symbol` as a value compile to the same bytes.
 
 ## Notes / Result
-(to be written)
+- **What changed**: `Symbol` is in `CTOR_VALUES` (`crates/lower/src/builtins.rs`); its call entry is `$$Symbol`
+  (`builtins/symbol.js`, length 0), its construct entry `func::Helper::NotConstructor` (like `BigInt`). The value's own
+  well-known symbols are those the code names (`ir::Module::symbol_statics`, installed in `func::builtin_ctor`:
+  read-only, hidden, fixed). `Symbol.x` for a non-well-known `x` (`name`, `length`, `call`, …) reads the value.
+  `Symbol(x);` as a statement and `new Symbol()` no longer "unsupported"; `Symbol(…)` calls don't link `$$Symbol`.
+  `Symbol.prototype[Symbol.toPrimitive]` added (linked by naming `toPrimitive`). `Symbol.for` uses ToString
+  (a symbol key throws). Found and fixed: a program naming `dispose` without a `DisposableStack` failed to build
+  (the stacks' prototype methods were linked by name while their prototypes don't exist; T45 bug).
+- **Design**: recorded in `docs/design.md` D5 (T49 paragraph): constructor value gated like the others (`typeof Symbol`
+  links it, no folding); statics by name; `@@toPrimitive` added.
+- **Gating**: every fixture builds to the same bytes except `symbol-value.js` (new), the 3 naming `toPrimitive`
+  (`timers-more`, `date-convert`, `symbols`: `Symbol.prototype` gets `@@toPrimitive`) and the 2 `using` fixtures
+  (they name `dispose`: the unreachable stack methods are gone); all pass `diff.sh`.
+- **test262**: `built-ins/Symbol` joined the subset (`scripts/fetch-test262.sh`, `SUBSET`): 69 of 79 run pass.
+  The 13 `testTypedArray.js` tests and the 2 `class/subclass/builtin-objects/Symbol` tests pass; the other 5 of the
+  handoff's 20 have other causes: `Array.fromAsync/asyncitems-uses-intrinsic-iterator-symbols.js` replaces the global
+  `Symbol` (F201), 2 `Symbol.matchAll` species tests (F172), `RegExp/from-regexp-like-flag-override.js` (F223),
+  `async-generator/default-proto.js` (F222). Symbol's 10 left: `description` of `Symbol("")` (3, F110), species
+  getters (2, F172), `Proxy` (F152), ordinary ToPrimitive of wrappers (2, F220), `$$describe` trap (F221),
+  `symbol.js` checks the global `this` (a module's is `undefined`). Subset 27,243 of 28,591 run pass (95.3%),
+  0 regressions (targeted `--update`; no full run on `a-03` yet).
+- **Commands**: `scripts/diff.sh tests/fixtures/builtins/symbol-value.js` (+ the changed fixtures), `cargo test`,
+  `wasm-tools validate`, `node scripts/test262.mjs --update built-ins/Symbol <26 tests>`, and a check of
+  `built-ins/{,Async}DisposableStack`, `SuppressedError`, `statements/{using,await-using,class/subclass}`,
+  `Array/fromAsync` (no changes).
+- **Next smallest step**: F220 (ToPrimitive of wrappers through the real `valueOf`/`toString` lookups) or F110
+  (`Symbol("")`'s description needs a flag on `$symbol`).
 
 ## Checklist
-- [ ] design questions decided and recorded
-- [ ] constructor value, statics, `typeof`
-- [ ] fixture, gating check, test262 + baseline
-- [ ] docs (HISTORY.md, keywords.md, design.md), follow-ups
+- [x] design questions decided and recorded
+- [x] constructor value, statics, `typeof`
+- [x] fixture, gating check, test262 + baseline
+- [x] docs (HISTORY.md, keywords.md, design.md), follow-ups
 
 ## Progress
 - 2026-09-29: handoff written after T48 (T48 suggested F218). State at handoff: `main` at `653bb27`, pushed; test262
   subset 27,159 of 28,512 run pass (95.3%).
+- 2026-09-29: started. Decisions: (1) `Symbol` is a `CTOR_VALUES` entry, linked only when used as a value
+  (`typeof Symbol` is a use: it links the small constructor, no folding); `Symbol(…)` calls stay
+  `Intrinsic::NewSymbol` and no longer root `$$Symbol`. (2) Only the well-known symbols the code names are own
+  properties of the value (`ir::Module::symbol_statics`, like T25's statics by name). (3) Added
+  `Symbol.prototype[Symbol.toPrimitive]` (`$$Symbol_prototype_$toPrimitive`, linked by naming `toPrimitive`);
+  `@@toStringTag` was already there. Construct entry: `Helper::NotConstructor` like `BigInt`.
+- 2026-09-29: fixture `tests/fixtures/builtins/symbol-value.js` passes `diff.sh`.
+- 2026-09-29: gating check (scratchpad `cmp.sh`, old = HEAD in a worktree): only `symbol-value.js` and the 3 fixtures
+  naming `toPrimitive` (`timers-more`, `date-convert`, `symbols`: `Symbol.prototype` gains `@@toPrimitive`, gated like
+  Date's) change; all 4 pass `diff.sh`. (First try edited the shared `$$thisSymbol` and changed ~40 fixtures: the
+  `@@toPrimitive` check is now its own.) `cargo test` green (the `unsupported.rs` case for `const s = Symbol` now lowers).
+- 2026-09-29: `built-ins/Symbol` added to the subset: first run 61/79; fixed `Symbol(x);` statements, `new Symbol`,
+  `Symbol.for` ToString, and the `dispose`-without-stacks build failure (pre-existing): 69/79. Targeted `--update`:
+  0 regressions, 15 unsupported → pass. Docs, follow-ups F220–F223; task done.
