@@ -449,3 +449,18 @@ fn classes() {
     // T20: a library's top-level class is set by its `init`.
     lowers("class A {}\nexport function f() { return new A() instanceof A ? 1 : 0; }");
 }
+
+/// T42: replacing a built-in through the global object is rejected (reads of the name stay
+/// direct references to the built-in); other global-object writes are fine.
+#[test]
+fn global_object_replacement() {
+    assert_eq!(
+        errors("globalThis.Array = 1;\ndelete global.Map;\nObject.defineProperty(globalThis, \"Math\", {});\n"),
+        [
+            "1:1 unsupported: replacing or deleting the built-in global `Array` (planned: later)",
+            "2:1 unsupported: replacing or deleting the built-in global `Map` (planned: later)",
+            "3:1 unsupported: replacing or deleting the built-in global `Math` (planned: later)",
+        ]
+    );
+    lowers("globalThis.mine = 1; globalThis[\"x\"] = 2; mine++; console.log(x, NaN);");
+}

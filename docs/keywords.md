@@ -19,8 +19,8 @@ table in [`tasks/README.md`](../tasks/README.md).
 
 | | ✅ | 🟡 | ❌ | ➖ |
 |---|---|---|---|---|
-| Keywords (66 entries) | 30 | 10 | 2 | 24 |
-| Built-in objects, properties, methods (25) | 11 | 13 | 1 | – |
+| Keywords (66 entries) | 30 | 11 | 1 | 24 |
+| Built-in objects, properties, methods (25) | 11 | 14 | 0 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
 What's most needed, in order: the rest of the built-in library (`Intl`, BigInt typed arrays), spread into `console.log` and calls through `console.log`
@@ -51,7 +51,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `double` | ➖ | Removed in ES5. |
 | `else` | ✅ | |
 | `enum` | ➖ | Reserved; a syntax error in node too. |
-| `eval` | ❌ | Rejected. An ahead-of-time compiler can't compile code built at run time; not planned (would need an interpreter). |
+| `eval` | 🟡 | T42: code known at build time (a string literal or a template without substitutions) is compiled where it's called: direct `eval("…")` is strict eval code in the caller's scope (its bindings, `this`, `super`, `new.target`; its result is the completion value; its early errors are a SyntaxError thrown at the call, with oxc's message); indirect `(0, eval)("…")`/`globalThis.eval("…")`/`eval?.("…")` and `Function(…)`/`new Function(…)` of literals run in the global scope. `eval` and `Function` as values work, but calling them with code only known at run time throws an `EvalError` (that needs an engine inside the program: F191); `eval(x)` with a computed `x` is a build error. Missing: `arguments` in eval code (F203), sloppy-only syntax in `Function`/indirect code (F204), `var` declarations in indirect eval code (F205), module bindings named from `Function` code (F206). |
 | `export` | 🟡 | The entry's named functions and `export default function f` become WIT exports (T07–T09). T20: `export async function` is an `async func`. T41: between modules every form works (`export const`/`let`/`class`, `export { a as b }`, `export default <expr>`, `export … from`, `export *`, `export * as ns from`); `build --command` builds an entry with exports as a command, as node runs it. Missing: exporting variables/classes/namespaces from a library entry, generator exports, rest parameters in exports (F13, F55, F197). |
 | `extends` | ✅ | Classes and native errors (T16). |
 | `false` | ✅ | |
@@ -109,7 +109,7 @@ arguments into `console.log(...xs)`, `console.log` used as a value. BigInt liter
 | `Array` | 🟡 | Literals, indexing, `length`, holes, spread, destructuring, iteration, `Array.isArray`, `Array(…)`/`new Array(…)`, `Array.from`/`of`, and every prototype method (T21: `map`, `forEach`, `filter`, `reduce`/`reduceRight`, `some`/`every`, `find*`, `indexOf`/`lastIndexOf`/`includes`, `at`, `slice`, `splice`, `concat`, `flat`/`flatMap`, `fill`, `copyWithin`, `reverse`, `shift`/`unshift`, `sort` (stable), `toSorted`/`toReversed`/`toSpliced`/`with`, `push`/`pop`/`join`/`toString`/`values`) and (T25) `keys`/`entries`/`toLocaleString`, `Array` as a value, spread into `Array(…)`. T32: `Object.defineProperty` on elements (accessor elements, non-writable/non-enumerable/non-configurable elements) and on `length` (non-writable `length`, shrinking stops at a non-configurable element), printed like node (`[Getter]`). T33/T34: holes read and writes to absent elements go through the prototype chain (`Array.prototype[i]` getters/setters). T35: `push`/`pop`/`join`/`toString` on any `this`, `Symbol.isConcatSpreadable`, species (`constructor[Symbol.species]`), `Array.fromAsync`, `Array.from` with a constructor `this`. Missing: subclass results (`class X extends Array`, F106, F108); sparse arrays past 2^26 (F50, F160); callbacks are slow (F92). |
 | `BigInt` | 🟡 | T40: literals (decimal, hex, octal, binary), `typeof`, every operator (`+ - * / % **`, unary `-`/`~`, `& \| ^ << >>`, `++`/`--`, compound assignment) with V8's errors (mixing with numbers, `+1n`, `>>>`, division by zero, negative exponents, size over 2^30 bits), comparisons with numbers and strings, `==`/`===`/`Object.is`, Map/Set keys, `BigInt(…)`, `asIntN`/`asUintN`, `toString(radix)`/`valueOf`/`toLocaleString` (en-US), `Object(1n)` wrappers, `Number(1n)`, `JSON.stringify` (TypeError, `toJSON`), printed like node (`1n`). Programs without BigInts compile as before. Missing: `BigInt64Array`/`BigUint64Array` (F116), WIT `s64`/`u64` as BigInts (F124), `toLocaleString` with locales or options (needs `Intl`). |
 | `Date` | 🟡 | T26: `new Date(…)` (every form; subclasses), `Date()`, `Date.now`/`UTC`/`parse` (ISO and V8's common legacy forms), every getter and setter (local = UTC), `toString`/`toDateString`/`toTimeString`/`toUTCString`/`toGMTString`/`toISOString`/`toJSON`, `valueOf`, `[Symbol.toPrimitive]`, `getYear`/`setYear`, printed like node. Local time is UTC (no time zone in WASI 0.3.1: node with `TZ=UTC` agrees). Missing: `toLocale*String` with locales or options (needs `Intl`), `Date` in a library (the clock import), `toTemporalInstant` (node 24 lacks it). |
-| `eval` | ❌ | See keywords. |
+| `eval` | 🟡 | See keywords (also `Function(…)`). |
 | `function` | 🟡 | See keywords. |
 | `hasOwnProperty` | ✅ | T21 (also `propertyIsEnumerable`). |
 | `Infinity` | ✅ | |
@@ -150,6 +150,7 @@ node/WASI globals:
 | `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` | ✅ | T19, on the P3 event loop (commands only; libraries: T20). T25: Timeout objects have `ref`/`unref`/`hasRef`/`refresh`/`[Symbol.toPrimitive]` (the id, which the clear functions also take); printing them differs from node (F112); a string delay traps if nothing else converts to a number (F85). |
 | `setImmediate`, `clearImmediate`, `process.nextTick` | ✅ | T25, commands only; `process` itself is not provided (F112). |
 | `constructor` | ✅ | Classes, functions, built-in prototypes. |
+| `globalThis`, `global` | 🟡 | T42: the global object, made when the code names it: the built-ins the code names are its properties (the same values: `globalThis.Array === Array`, node's descriptors), undeclared names are read, written and `typeof`'d through it. Missing: replacing a built-in (`globalThis.Array = X` is rejected, F201); `console`, `process`, `Symbol`, … aren't on it and it prints as a plain object (F202). |
 | `parseInt`, `parseFloat` | ✅ | T21 (also `isNaN`, `isFinite`). Non-decimal `parseInt` past 2^53 isn't correctly rounded (F89). |
 | `decodeURI`, `decodeURIComponent`, `encodeURI`, `encodeURIComponent`, `escape`, `unescape` | ❌ | Rejected (T21). |
 | `crypto` | ❌ | Not provided (a WASI `random` import would back `crypto.getRandomValues`; not planned yet). |

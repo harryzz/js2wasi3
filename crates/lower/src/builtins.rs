@@ -49,6 +49,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/asyncgen.js"),
     include_str!("../builtins/bigint.js"),
     include_str!("../builtins/module.js"),
+    include_str!("../builtins/global.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -256,7 +257,29 @@ pub(crate) struct Prelude {
     pub user_props: HashSet<String>,
     /// Can the user's code make a BigInt (T40: a literal, or it names the global `BigInt`)?
     pub bigint: bool,
+    /// Does the user's code name `globalThis` or `global` (T42: the global object exists)?
+    pub global_object: bool,
+    /// The global object's built-in properties (T42): the [`GLOBAL_NAMES`] the code names.
+    pub global_props: Vec<String>,
+    /// Writes that replace a built-in global (T42: `globalThis.Array = …`, `delete global.Map`,
+    /// `Object.defineProperty(globalThis, "Math", …)`): rejected, as reads of the name stay static.
+    pub replaced: Vec<(Span, String)>,
 }
+
+/// The prelude functions of the global object (T42).
+pub(crate) const GLOBAL_FNS: &[&str] = &["$$GlobalObject", "$$GlobalGet", "$$GlobalRead", "$$GlobalSet"];
+
+/// The implemented built-in globals that can be values, so global-object properties (T42), in
+/// node's order where it has one. `NaN`, `Infinity`, `undefined` are added by the prelude.
+pub(crate) const GLOBAL_NAMES: &[&str] = &[
+    "Object", "Function", "Array", "Number", "parseFloat", "parseInt", "Boolean", "String",
+    "Symbol", "Date", "Promise", "RegExp", "Error", "AggregateError", "EvalError", "RangeError",
+    "ReferenceError", "SyntaxError", "TypeError", "URIError", "globalThis", "JSON", "Math",
+    "ArrayBuffer", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array",
+    "Int32Array", "Float32Array", "Float64Array", "Uint8ClampedArray", "BigInt", "Map", "Set",
+    "Reflect", "isFinite", "isNaN", "global", "clearImmediate", "setImmediate", "clearInterval",
+    "clearTimeout", "setInterval", "setTimeout", "queueMicrotask", "eval",
+];
 
 /// Properties a built-in constructor has as a function (`Array.apply`, `String.name`): reading
 /// them uses the constructor value (T25).
@@ -320,6 +343,8 @@ pub(crate) const CTOR_VALUES: &[&str] = &[
     "RegExp",
     "Date",
     "BigInt",
+    // T42: calling it throws (code known at build time is compiled where `Function` is called).
+    "Function",
 ];
 
 /// Constructors whose prelude function `$$X` is what `new X(…)` runs and that throw when called
@@ -389,6 +414,18 @@ impl Prelude {
             }
             _ => false,
         });
+        // Does the user's code name the global object (T42)?
+        out.global_object = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::IdentifierReference(r) => {
+                matches!(r.name.as_str(), "globalThis" | "global")
+                    && !p.in_prelude(r.span.start)
+                    && scoping.get_reference(r.reference_id()).symbol_id().is_none()
+            }
+            _ => false,
+        });
+        if out.global_object {
+            roots.extend(GLOBAL_FNS.iter().filter_map(|n| out.names.get(*n)).map(|s| item_of[s]));
+        }
         // Prototype methods by property name: `slice` → `$$String_prototype_slice`, ….
         let mut methods: HashMap<String, Vec<usize>> = HashMap::new();
         for (name, sym) in &out.names {
@@ -595,6 +632,68 @@ impl Prelude {
                 }
             }
         }
+        // Writes replacing a built-in global (T42), with the object written as `globalThis`/`global`.
+        if out.global_object {
+            let is_global = |e: &Expression| {
+                matches!(e.without_parentheses(), Expression::Identifier(id)
+                    if matches!(id.name.as_str(), "globalThis" | "global")
+                        && scoping.get_reference(id.reference_id()).symbol_id().is_none())
+            };
+            let member_key = |m: &oxc_ast::ast::MemberExpression| -> Option<String> {
+                if !is_global(m.object()) {
+                    return None;
+                }
+                match m {
+                    oxc_ast::ast::MemberExpression::StaticMemberExpression(s) => Some(s.property.name.to_string()),
+                    oxc_ast::ast::MemberExpression::ComputedMemberExpression(c) => match &c.expression {
+                        Expression::StringLiteral(k) => Some(k.value.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            };
+            for node in p.semantic.nodes().iter() {
+                let hit = match node.kind() {
+                    AstKind::AssignmentExpression(a) => a.left.as_member_expression().and_then(member_key),
+                    AstKind::UpdateExpression(u) => u.argument.as_member_expression().and_then(member_key),
+                    AstKind::UnaryExpression(u)
+                        if u.operator == oxc_syntax::operator::UnaryOperator::Delete =>
+                    {
+                        u.argument.as_member_expression().and_then(member_key)
+                    }
+                    AstKind::CallExpression(c) => match (c.callee.as_member_expression(), c.arguments.first(), c.arguments.get(1)) {
+                        (Some(m), Some(_), Some(oxc_ast::ast::Argument::StringLiteral(k)))
+                            if m.static_property_name() == Some("defineProperty")
+                                && c.arguments[0].as_expression().is_some_and(is_global) =>
+                        {
+                            Some(k.value.to_string())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(name) = hit
+                    && !p.in_prelude(node.kind().span().start)
+                    && GLOBAL_NAMES.contains(&name.as_str())
+                {
+                    out.replaced.push((node.kind().span(), name));
+                }
+            }
+        }
+        // The global object's properties (T42): the built-ins the code names, as values.
+        if out.global_object {
+            for name in GLOBAL_NAMES {
+                if !user_props.contains(*name) {
+                    continue;
+                }
+                out.global_props.push(name.to_string());
+                if CTOR_VALUES.contains(name) || js2wasi3_ir::Namespace::parse(name).is_some() {
+                    out.ctor_values.insert(name.to_string());
+                } else if let Some(sym) = out.names.get(&format!("$${name}")) {
+                    roots.push(item_of[sym]);
+                }
+            }
+        }
         // Constructors used as values: their function, and the statics the code names.
         for (name, sym) in &out.names {
             let Some(rest) = name.strip_prefix("$$") else {
@@ -709,6 +808,7 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$Array_prototype_splice"
         | "$$Array_prototype_toSpliced" => Some(2),
         "$$Array_prototype_flat" | "$$Map" | "$$Set" => Some(0),
+        "$$Function" => Some(1),
         "$$Date" | "$$Date_UTC" => Some(7),
         "$$Date_prototype_toLocaleString"
         | "$$Date_prototype_toLocaleDateString"

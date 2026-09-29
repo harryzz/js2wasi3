@@ -84,9 +84,13 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Dynamic `import()` of modules known at build time: the build finds what each `import()` can load (string
   literals, `const`s, `?:`, template and `+` patterns like ``import(`./locales/${lang}.js`)``); `--include <glob>`
   adds modules for specifiers only known at run time (an `import()` the build can't work out is an error without
-  it). Code that doesn't exist at build time can't be loaded (like `eval`).
+  it). Code that doesn't exist at build time can't be loaded.
 - Packages: bare specifiers (`import x from "pkg"`) resolved from `node_modules` at build time as node does
   (`exports` conditions and patterns, `imports`, `main`); ES module packages only.
+- `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
+  `Function("…")` and indirect eval of code known at build time (string literals) are compiled ahead of time
+  (completion values, the caller's scope, SyntaxErrors at the call); code built at run time can't be (`eval(x)` is
+  a build error, `eval` called through a variable with a string throws an `EvalError`).
 
 Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, CommonJS packages, node's built-in
 modules (`node:fs`), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in

@@ -19,8 +19,10 @@
 
 use std::fmt;
 
+mod eval;
 mod link;
 mod packages;
+pub use eval::EvalMap;
 pub use link::{Fs, Host, Linked, Options, SourceMap, link};
 
 use oxc_ast::ast;
@@ -43,6 +45,10 @@ pub struct Program<'a> {
     pub exports: Vec<Export>,
     /// A program joined from several modules ([`link`]): where its parts came from.
     pub map: Option<SourceMap>,
+    /// A module whose direct `eval` calls were spliced (T42): its file's text, and the offsets
+    /// back to it.
+    pub original: &'a str,
+    pub evals: Option<EvalMap>,
 }
 
 /// One entry of the module's export list.
@@ -137,6 +143,8 @@ pub fn parse<'a>(
         semantic: sem.semantic,
         exports,
         map: None,
+        original: source,
+        evals: None,
     })
 }
 
@@ -224,7 +232,10 @@ impl<'a> Program<'a> {
 
     /// 1-based line and column of a byte offset in this program's source.
     pub fn line_col(&self, offset: u32) -> (u32, u32) {
-        line_col(self.source, offset)
+        match &self.evals {
+            Some(e) => line_col(self.original, e.original(offset)),
+            None => line_col(self.source, offset),
+        }
     }
 
     /// The file, 1-based line and column of a byte offset, for diagnostics: `<builtins>` in the

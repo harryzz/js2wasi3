@@ -321,6 +321,45 @@ node's `formatWithOptions` in `builtins/console.js`, linked when a string in the
 (`inspect.rs`) now matches node's `util.inspect` for cycles (a stack of the objects being formatted), symbol keys,
 escapes, > 100 entries and Map/Set iterators; it is linked into every command through the uncaught-exception path.)
 
+### D6. The global object, `eval` and `Function` (T42)
+Every file is an ES module (strict, top-level `this` is `undefined`, top-level declarations aren't global-object
+properties), so the global object is only observable through `globalThis`/`global`, `eval` and `Function`.
+- **Gated**: `ir::Module::global_object` is set when the user's code names `globalThis` or `global` (unresolved), or
+  (later slices) compiles `eval`/`Function` code; without it the output is byte-for-byte what it was.
+- **Representation**: an ordinary `$object` made on first use (`$$GlobalObject()` in `builtins/global.js`), with
+  `Object.prototype` as its prototype. Its properties are data properties (writable, non-enumerable, configurable;
+  `NaN`/`Infinity`/`undefined` read-only and fixed) for the globals the program can observe: the implemented
+  built-ins whose name appears in the user's code (an identifier, a property name or a string, the same rule that
+  links the prelude, T25), plus `globalThis`/`global`. A global named nowhere isn't there (like F109).
+  `console.log(globalThis)` and `Object.keys` are approximate (node has ~100 more).
+- **Built-ins stay static**: `Array`, `Math.max(…)`, `new Map` keep their direct references, so a write that
+  replaces a built-in through the global object (`globalThis.X = …`, `delete global.X`,
+  `Object.defineProperty(globalThis, "X", …)` for a built-in `X`) is rejected at build time rather than half done
+  (F201: a computed key or an alias isn't seen).
+- **Undeclared names** (not declared anywhere and not a global node has): with the global object, a read is
+  HasProperty + Get on it (else node's ReferenceError), `typeof x` gives `"undefined"` if absent, an assignment
+  (strict) Sets an existing property and throws the ReferenceError otherwise. Without it, reads throw as before
+  (F139) and writes throw the same ReferenceError at run time.
+- **`eval`/`Function` of code known at build time** (string literals and substitution-free templates): compiled
+  ahead of time. `frontend::eval` splices each module's calls into its text before the linker parses it (so the
+  linker's renames reach the eval'd code): direct `eval("S")` → `((() => { S' })())`, strict eval code in the
+  caller's scope (an arrow: own `var` scope; `this`, `super`, `new.target` kept), S' returning the completion value
+  when the call's value is used (a fresh `let`, assigned by expression statements; `if`/loops/`switch`/`try` start
+  from `undefined`; a `finally` block's values count only if it completes abruptly). S is parsed alone inside
+  `class extends Object { constructor() { S } }` (so `super`/`new.target`/`arguments` parse; the body's span must be
+  exactly S, `return` is found by a statement walk), then the module with S in place is parsed with its early
+  errors, which checks the caller's context (PerformEval's rules come out the same); an error inside a call's code
+  makes that call `throw new SyntaxError(…)` (oxc's message). `eval` calls in S are spliced in further rounds.
+  `Function(P…, B)`/`new Function(…)` → `(function anonymous(P\n) {\nB\n})` in place (a new object per
+  evaluation, the spec's source text); indirect eval (`(0, eval)(…)`, `globalThis.eval(…)`, `eval?.(…)`) →
+  `(function () { S' }).call(globalThis)`. Both are sloppy in node: only the sloppy `this` is done (a non-strict
+  `Function` body's `this` is the global object for `undefined`/`null`, else ToObject); a name in them that
+  resolves to a module binding is a build error (node: only globals, F206); indirect code's top-level `var`s are
+  rejected (F205). `EvalMap` takes offsets in spliced text back to the file for diagnostics. Code not known at
+  build time is a build error pointing at F191; `eval` and `Function` as values are functions (`$$eval` returns
+  non-strings, both throw an `EvalError` for code), and `Function` is a constructor value
+  (`f instanceof Function`).
+
 ## Testing
 Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 
@@ -359,8 +398,10 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
   features node 24 lacks (`NODE_MISSING` in the script), script only: the build failed and `node --check` rejects the source as a module too).
 - It prints counts per directory and the tests whose status differs from `tests/test262/baseline.json`; `--update`
   merges the run into it. Exit 1 if a test that passed there doesn't now. Details: `out/test262/results.tsv`.
-- Known noise: modules, not scripts (top-level `this`, global-object `var`s, `eval`); an unhandled rejection is fatal
-  like node's (e.g. `async-function/evaluation-body.js`).
+- Known noise: modules, not scripts (top-level `this`, global-object `var`s, sloppy `eval`/`Function` code); an
+  unhandled rejection is fatal like node's (e.g. `async-function/evaluation-body.js`). A script's function
+  declarations are global-object properties: for async tests including `asyncHelpers.js` the runner adds
+  `globalThis.$DONE = $DONE;` (T42).
 
 ## Working rules
 - One task file = one session. Don't start the next task without approval.

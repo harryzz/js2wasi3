@@ -864,6 +864,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         for (span, name) in self.prelude.user_refs.clone() {
             self.unsupported(span, &format!("global `{name}`"), "T21");
         }
+        for (span, name) in self.prelude.replaced.clone() {
+            // Reads of the name stay direct references to the built-in (T42, docs/design.md D6).
+            self.unsupported(span, &format!("replacing or deleting the built-in global `{name}`"), "later");
+        }
         let body = &self.p.ast.body;
         // Pass 1: declare every top-level function and global so bodies can refer to them in any order.
         let mut fns: Vec<(&'a Function<'a>, FuncId)> = Vec::new();
@@ -1857,7 +1861,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         };
         let mut lexical: Vec<(SymbolId, u32)> =
             self.lexical_end.iter().map(|(s, e)| (*s, *e)).collect();
-        lexical.sort_by_key(|(_, end)| *end);
+        lexical.sort_by_key(|(sym, end)| (*end, *sym)); // ties: one pattern (deterministic, T42)
         for (sym, end) in lexical {
             if first_call < end {
                 self.module.globals.push(ir::Global {
@@ -3769,6 +3773,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.push(Stmt::Expr(v.e));
                 Ok(())
             }
+            Expression::AssignmentExpression(a)
+                if a.left.as_simple_assignment_target().is_some_and(|t| self.global_target(t).is_some()) =>
+            {
+                let v = self.global_assign(cx, a)?;
+                out.push(Stmt::Expr(v.e));
+                Ok(())
+            }
+            Expression::UpdateExpression(u) if self.global_target(&u.argument).is_some() => {
+                let v = self.global_update(cx, u)?;
+                out.push(Stmt::Expr(v.e));
+                Ok(())
+            }
             Expression::AssignmentExpression(a) if a.operator.is_logical() => {
                 let v = self.logical_assign(cx, a)?;
                 out.push(Stmt::Expr(v.e));
@@ -3869,6 +3885,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 {
                     return Ok(Val::js(Expr::Local(l), Kind::Any));
                 }
+                if matches!(id.name.as_str(), "globalThis" | "global")
+                    && self.prelude.global_object
+                    && self.scoping.get_reference(id.reference_id()).symbol_id().is_none()
+                {
+                    // The global object (T42).
+                    return Ok(Val::js(self.prelude_call("$$GlobalObject", vec![]), Kind::Any));
+                }
                 if Builtin::parse(id.name.as_str()).is_none()
                     && let Some(func) = self.builtin_global(e)
                 {
@@ -3923,7 +3946,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     return Ok(Val::js(Expr::intrinsic(op, vec![]), Kind::Any));
                 }
                 if self.undeclared(id) {
-                    return Ok(Val::js(not_defined(&id.name), Kind::Any));
+                    return Ok(self.global_read(id));
                 }
                 let var = self.resolve(cx, id)?;
                 Ok(self.read_var(&var))
@@ -3945,8 +3968,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     if let Expression::Identifier(id) = u.argument.without_parentheses()
                         && self.undeclared(id)
                     {
-                        // `typeof x` of an unresolvable name doesn't throw (F139).
-                        return Ok(Val::js(Expr::str("undefined"), Kind::Str));
+                        // `typeof x` of an unresolvable name doesn't throw (F139): the global
+                        // object's property (T42), else `"undefined"`.
+                        if !self.prelude.global_object {
+                            return Ok(Val::js(Expr::str("undefined"), Kind::Str));
+                        }
+                        let v = self.prelude_call("$$GlobalRead", vec![Expr::str(&id.name)]);
+                        let e = Expr::intrinsic(Intrinsic::TypeofString, vec![v]);
+                        return Ok(Val::js(e, Kind::Str));
                     }
                     let v = self.expr(cx, &u.argument)?;
                     let known = match v.kind {
@@ -4058,6 +4087,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if a.left.as_assignment_target_pattern().is_some() =>
             {
                 self.destructuring_assign(cx, a)
+            }
+            Expression::AssignmentExpression(a)
+                if a.left.as_simple_assignment_target().is_some_and(|t| self.global_target(t).is_some()) =>
+            {
+                self.global_assign(cx, a)
+            }
+            Expression::UpdateExpression(u) if self.global_target(&u.argument).is_some() => {
+                self.global_update(cx, u)
             }
             Expression::AssignmentExpression(a) if a.operator.is_logical() => {
                 self.logical_assign(cx, a)
@@ -5527,6 +5564,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "inspect" => 2,
             "unit" | "i32_get" => 2,
             "sub" | "str_set" | "define" | "i32_set" => 3,
+            "global_init" => 1,
             "i32_new" | "i32_len" => 1,
             _ => return Err(self.unsupported(c.span, &format!("intrinsic `{name}`"), "T21")),
         };
@@ -5712,6 +5750,34 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             };
             let v = jsval_of(self.expr(cx, e)?);
             let e = Expr::intrinsic(Intrinsic::BuiltinTag, vec![v]);
+            return Ok((e, Call::Intrinsic(Some(Kind::Any))));
+        }
+        if name == "global_init" {
+            // The global object's built-in properties (T42): non-enumerable data properties,
+            // except node's own globals (timers, `global`), which node makes enumerable.
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let g = cx.func.add_local("global", Type::JsVal);
+            let mut body = vec![Stmt::Set(g, jsval_of(self.expr(cx, e)?))];
+            for name in self.prelude.global_props.clone() {
+                let Some(v) = self.global_value(&name, &Expr::Local(g)) else {
+                    continue;
+                };
+                let enumerable = name == "global"
+                    || name == "queueMicrotask"
+                    || ir::TIMER_NAMES.contains(&name.as_str());
+                let op = if enumerable {
+                    Intrinsic::DefineProp
+                } else {
+                    Intrinsic::DefineMethod
+                };
+                body.push(Stmt::Expr(Expr::intrinsic(op, vec![Expr::Local(g), Expr::str(&name), v])));
+            }
+            let e = Expr::Seq {
+                body,
+                value: Box::new(Expr::undefined()),
+            };
             return Ok((e, Call::Intrinsic(Some(Kind::Any))));
         }
         if name == "define" {
@@ -6813,6 +6879,173 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && id.name != "arguments"
             && !id.name.starts_with("__intrinsic_")
             && NODE_GLOBALS.binary_search(&id.name.as_str()).is_err()
+    }
+
+    /// An assignment target that is a name no scope declares (T42): an undeclared name, or the
+    /// read-only `NaN`/`Infinity`/`undefined`.
+    fn global_target<'b>(&self, t: &'b SimpleAssignmentTarget<'a>) -> Option<&'b IdentifierReference<'a>> {
+        let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = t else {
+            return None;
+        };
+        let unresolved = self.scoping.get_reference(id.reference_id()).symbol_id().is_none();
+        (unresolved
+            && (self.undeclared(id) || matches!(id.name.as_str(), "NaN" | "Infinity" | "undefined")))
+        .then_some(&**id)
+    }
+
+    /// Reading the unresolvable name `id` (T42): the global object's property (a ReferenceError if
+    /// absent), or without a global object always the ReferenceError (F139).
+    fn global_read(&mut self, id: &IdentifierReference<'a>) -> Val {
+        if let Some(c) = self.global_constant(id) {
+            return Val::new(Expr::Const(c), c.ty());
+        }
+        if self.prelude.global_object {
+            return Val::js(self.prelude_call("$$GlobalGet", vec![Expr::str(&id.name)]), Kind::Any);
+        }
+        Val::js(not_defined(&id.name), Kind::Any)
+    }
+
+    /// Writing `v` (a `jsval`) to the unresolvable name `name` (strict code, T42).
+    fn global_write(&mut self, name: &str, v: Expr) -> Vec<Stmt> {
+        if matches!(name, "NaN" | "Infinity" | "undefined") {
+            return vec![
+                Stmt::Expr(v),
+                Stmt::Throw(Expr::intrinsic(
+                    Intrinsic::NewError(ErrorKind::TypeError),
+                    vec![
+                        Expr::str(&format!(
+                            "Cannot assign to read only property '{name}' of object '#<Object>'"
+                        )),
+                        Expr::undefined(),
+                    ],
+                )),
+            ];
+        }
+        if self.prelude.global_object {
+            return vec![Stmt::Expr(self.prelude_call("$$GlobalSet", vec![Expr::str(name), v]))];
+        }
+        vec![
+            Stmt::Expr(v),
+            Stmt::Throw(Expr::intrinsic(
+                Intrinsic::NewError(ErrorKind::ReferenceError),
+                vec![Expr::str(&format!("{name} is not defined")), Expr::undefined()],
+            )),
+        ]
+    }
+
+    /// `x = e`, `x op= e` for an unresolvable name `x` (T42). The old value is read before `e`.
+    fn global_assign(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<Val> {
+        let id = a
+            .left
+            .as_simple_assignment_target()
+            .and_then(|t| self.global_target(t))
+            .expect("checked by the caller");
+        if a.operator.is_logical() {
+            return Err(self.unsupported(a.span, "logical assignment to a global", "later"));
+        }
+        let old = (a.operator != AssignmentOperator::Assign).then(|| self.global_read(id));
+        let rhs = if a.operator == AssignmentOperator::Assign {
+            self.named(cx, &a.right, Some(id.name.as_str()))?
+        } else {
+            self.expr(cx, &a.right)?
+        };
+        let value = self.combine(cx, a.operator, old, rhs, a.span)?;
+        let kind = match value.kind {
+            Kind::Str | Kind::Bool => value.kind,
+            _ => Kind::Any,
+        };
+        let tv = cx.func.add_local("value", Type::JsVal);
+        let mut body = vec![Stmt::Set(tv, jsval_of(value))];
+        body.extend(self.global_write(&id.name, Expr::Local(tv)));
+        Ok(Val::js(
+            Expr::Seq {
+                body,
+                value: Box::new(Expr::Local(tv)),
+            },
+            kind,
+        ))
+    }
+
+    /// `x++` / `--x` for an unresolvable name `x` (T42).
+    fn global_update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<Val> {
+        let id = self.global_target(&u.argument).expect("checked by the caller");
+        let read = jsval_of(self.global_read(id));
+        let old = cx.func.add_local("old", Type::JsVal);
+        let new = cx.func.add_local("new", Type::JsVal);
+        let (to_old, step) = if self.module.bigint {
+            let n = if u.operator == UpdateOperator::Increment {
+                ir::NumericOp::Inc
+            } else {
+                ir::NumericOp::Dec
+            };
+            (
+                Expr::intrinsic(Intrinsic::ToNumeric, vec![read]),
+                Expr::intrinsic(Intrinsic::Numeric(n), vec![Expr::Local(old)]),
+            )
+        } else {
+            let op = if u.operator == UpdateOperator::Increment {
+                BinOp::Add
+            } else {
+                BinOp::Sub
+            };
+            let num = Expr::convert(Type::JsVal, Type::F64, Expr::Local(old));
+            (
+                Expr::convert(Type::F64, Type::JsVal, Expr::convert(Type::JsVal, Type::F64, read)),
+                Expr::convert(
+                    Type::F64,
+                    Type::JsVal,
+                    Expr::binary(op, Type::F64, num, Expr::f64(1.0)),
+                ),
+            )
+        };
+        let mut body = vec![Stmt::Set(old, to_old), Stmt::Set(new, step)];
+        body.extend(self.global_write(&id.name, Expr::Local(new)));
+        let value = Box::new(Expr::Local(if u.prefix { new } else { old }));
+        Ok(Val::js(Expr::Seq { body, value }, Kind::Any))
+    }
+
+    /// A global-object property's value (T42): a built-in the code names, or `None` if it isn't
+    /// a value here. `g`: the global object itself (`globalThis`, `global`).
+    fn global_value(&mut self, name: &str, g: &Expr) -> Option<Expr> {
+        if matches!(name, "globalThis" | "global") {
+            return Some(g.clone());
+        }
+        if let Some(ns) = ir::Namespace::parse(name)
+            && self.prelude.ctor_values.contains(name)
+        {
+            self.module.namespaces = true;
+            return Some(Expr::intrinsic(Intrinsic::Namespace(ns), vec![]));
+        }
+        if let Some(k) = ErrorKind::parse(name) {
+            self.note_error_kind(k);
+            return Some(Expr::intrinsic(Intrinsic::ErrorCtor(k), vec![]));
+        }
+        if let Some(b) = Builtin::parse(name)
+            && self.prelude.ctor_values.contains(name)
+        {
+            return Some(Expr::intrinsic(Intrinsic::BuiltinCtor(b), vec![]));
+        }
+        match name {
+            "Promise" => {
+                self.module.promises = true;
+                return Some(Expr::intrinsic(Intrinsic::PromiseCtor, vec![]));
+            }
+            "queueMicrotask" => return Some(Expr::intrinsic(Intrinsic::QueueMicrotask, vec![])),
+            _ => {}
+        }
+        if let Some(k) = ir::TIMER_NAMES.iter().position(|n| *n == name) {
+            let async_export = self
+                .exported
+                .iter()
+                .any(|f| self.module.function(*f).flags.is_async);
+            if !self.command && !async_export {
+                return None;
+            }
+            return self.timer_value(Span::default(), k as u8).ok().map(|v| v.e);
+        }
+        let sym = self.prelude.names.get(&format!("$${name}"))?;
+        let func = *self.funcs.get(sym)?;
+        Some(self.func_value(func))
     }
 
     /// The TDZ check of a guarded variable access: throws a ReferenceError like node's.

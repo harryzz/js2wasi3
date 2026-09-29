@@ -1077,7 +1077,7 @@ fn module_errors_are_diagnostics() {
         "{err}"
     );
     // A diagnostic of the lowering points into the module it's in.
-    write("a.js", "// a\nexport function f() {\n  return eval;\n}\n");
+    write("a.js", "// a\nexport function f() {\n  return Proxy;\n}\n");
     write("main.js", "import { f } from './a.js';\nf();\n");
     let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
     let err = String::from_utf8_lossy(&b.stderr);

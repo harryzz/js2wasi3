@@ -85,7 +85,7 @@ pub struct Analysis {
     /// Classes whose constructor uses `new.target`, and functions that use it themselves or
     /// through their arrow functions (T38).
     pub uses_new_target: HashSet<ScopeId>,
-    /// `new.target` in a static block or static field initializer (by start): `undefined` (T38).
+    /// `new.target` in a static block or a field initializer (by start): `undefined` (T38, T42).
     pub static_new_target: HashSet<u32>,
     /// Constructs this analysis can't handle: rejected by the lowering (span, what).
     pub unsupported: Vec<(Span, &'static str)>,
@@ -325,6 +325,17 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
             None => (node.scope_id(), span.start),
         };
         if static_class(&an, scoping, probe_scope, probe_pos).is_some() && which == 2 {
+            an.static_new_target.insert(span.start);
+            continue;
+        }
+        // In an instance field initializer (run by the constructor) it's `undefined` too (T42).
+        if which == 2
+            && let Some(s) = f
+            && an
+                .classes
+                .get(&s)
+                .is_some_and(|c| c.fields.iter().any(|(a, b)| *a <= probe_pos && probe_pos < *b))
+        {
             an.static_new_target.insert(span.start);
             continue;
         }

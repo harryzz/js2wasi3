@@ -68,6 +68,11 @@ const SUBSET = [
   "language/module-code",
   "language/import",
   "language/export",
+  // T42.
+  "built-ins/global",
+  "language/global-code",
+  "language/eval-code",
+  "built-ins/eval",
 ];
 // Features node 24.21.0 (the oracle, TOOLS.md) doesn't implement: proper tail calls and proposals it
 // doesn't ship yet. Tests using them are skipped.
@@ -219,6 +224,9 @@ async function one(rel, work) {
 
   const parts = [PRINT_SHIM, harness("sta.js"), harness("assert.js")];
   if (meta.flags.includes("async")) parts.push(harness("doneprintHandle.js"));
+  // A script's function declarations are global-object properties, a module's aren't: asyncHelpers.js
+  // checks `globalThis.$DONE` (T42).
+  if (meta.flags.includes("async") && meta.includes.includes("asyncHelpers.js")) parts.push("globalThis.$DONE = $DONE;\n");
   for (const inc of meta.includes) parts.push(harness(inc));
   parts.push(src);
   // Plain names: the WIT package/world name comes from the file name (F143).

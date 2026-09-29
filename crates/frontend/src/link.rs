@@ -33,6 +33,8 @@ use crate::{Allocator, Diagnostic, Diagnostics, Program, line_col, packages, par
 pub struct SourceMap {
     /// Each module's path and source.
     files: Vec<(String, String)>,
+    /// Each module's spliced `eval` calls (T42): offsets in its text here → its file.
+    evals: Vec<Option<crate::EvalMap>>,
     /// By joined offset: from `at` on, the text comes from `file` at `offset`. `copied`: later
     /// offsets move along; else it's inserted text, all of it at `offset`.
     segments: Vec<Segment>,
@@ -72,6 +74,10 @@ impl SourceMap {
         let k = self.segments.partition_point(|s| s.at <= offset).saturating_sub(1);
         let s = self.segments[k];
         let at = if s.copied { s.offset + (offset - s.at) } else { s.offset };
+        let at = match &self.evals.get(s.file as usize) {
+            Some(Some(e)) => e.original(at),
+            _ => at,
+        };
         let (path, source) = &self.files[s.file as usize];
         let (line, col) = line_col(source, at);
         (path, line, col)
@@ -153,7 +159,9 @@ pub fn link(
     if !g.diags.is_empty() {
         return Err(sorted(g.diags));
     }
-    if g.modules.iter().all(|m| m.requests.is_empty() && m.meta.is_empty() && m.dynamic.is_empty())
+    if g.modules.iter().all(|m| {
+        m.requests.is_empty() && m.meta.is_empty() && m.dynamic.is_empty() && m.p.evals.is_none()
+    })
         && !(command && !g.modules[0].p.exports.is_empty())
     {
         return Ok(Linked {
@@ -452,8 +460,11 @@ impl<'a> Graph<'a, '_> {
 
     fn load(&mut self, path: String, source: &str) -> Result<usize, Diagnostics> {
         let source: &'a str = self.alloc.alloc_str(source);
-        let (p, failed) = match parse(self.alloc, &path, source) {
-            Ok(p) => (p, None),
+        let (p, failed) = match crate::eval::parse_spliced(self.alloc, &path, source) {
+            Ok((mut p, evals)) => {
+                p.evals = evals;
+                (p, None)
+            }
             // A module only `import()` loads: an empty stand-in that rejects.
             Err(d) if self.lazy => {
                 let message = d.0.first().map_or_else(String::new, |d| d.message.clone());
@@ -1279,8 +1290,9 @@ impl<'a> Graph<'a, '_> {
         map.files = self
             .modules
             .iter()
-            .map(|m| (m.p.path.clone(), m.p.source.to_string()))
+            .map(|m| (m.p.path.clone(), m.p.original.to_string()))
             .collect();
+        map.evals = self.modules.iter().map(|m| m.p.evals.clone()).collect();
         Ok(Linked {
             source: out,
             map: Some(map),

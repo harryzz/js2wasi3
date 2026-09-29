@@ -3,6 +3,23 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T42 global object, `eval`/`Function` of literals (targeted run)
+
+- Compiler: `globalThis`/`global` (the global object; undeclared names through it; writes to undeclared names throw
+  a ReferenceError instead of being rejected), direct `eval` of literals (spliced in place, completion values,
+  early errors as run-time SyntaxErrors), `Function`/`new Function`/indirect eval of literals, `eval`/`Function` as
+  values; `new.target` in instance field initializers is `undefined`.
+- Runner: `globalThis.$DONE = $DONE;` for async tests including `asyncHelpers.js` (a script's function declarations
+  are global properties; the harness checks `globalThis.$DONE`). Subset += `built-ins/global`,
+  `language/global-code`, `language/eval-code`, `built-ins/eval`.
+- Run: every subset test that was unsupported, every test naming `globalThis`/`global`/`eval`/`Function`/
+  `new.target` or including `asyncHelpers.js`/`fnGlobalObject.js`, and the four new directories, with `--update`
+  (1,695 tests + the directories, ~9 min at -j 8): 0 regressions; 619 unsupported → pass, 41 unsupported → fail
+  (EvalError for code only known at run time, sloppy-only code, script `this`, `Promise.try` F207, `ctx-non-ctor`
+  F210, `caller` poison pills F208); new directories: `language/eval-code/direct` 62 of 67 run, `indirect` 21 of 59,
+  `built-ins/global` 15 of 29, `language/global-code` 17 of 24, `built-ins/eval` 8 of 10.
+  Subset: 26,653 of 28,296 run pass (94.2%).
+
 ## 2026-09-29: T41 slice 5, packages (targeted run)
 
 - Compiler: bare specifiers resolved from `node_modules` (test262 has no packages; bare specifiers there name missing

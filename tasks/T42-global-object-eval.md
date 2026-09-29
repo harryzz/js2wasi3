@@ -1,6 +1,6 @@
 # T42: The global object, and `eval`/`Function` of code known at build time (F151)
 
-Status: todo (handoff written 2026-09-29, not started) | Depends on: T21 (prelude), T25 (built-ins as values), T41 (linker, build-time code only)
+Status: done (2026-09-29) | Depends on: T21 (prelude), T25 (built-ins as values), T41 (linker, build-time code only)
 
 ## Goal
 `globalThis` (and node's alias `global`) is a real object holding the global bindings, and names no scope declares
@@ -102,24 +102,126 @@ of every fixture (byte-identical except F186's nondeterministic three). test262:
 new directories; 0 regressions; ask before committing the baseline.
 
 ## Acceptance
-- [ ] Programs that don't use `globalThis`/`global`/`eval`/`Function` compile to the same bytes.
-- [ ] `globalThis` behaves like node's for the implemented built-ins (identity, descriptors, replacement, undeclared
-      names through it).
-- [ ] `eval("…")` of literals: results (completion values), scope access, run-time SyntaxErrors match node.
-- [ ] `Function("…")` of literals works, including `Function("return this")()`.
-- [ ] Code not known at build time is a clear build error (F191).
-- [ ] test262: the new directories in the subset, results in the baseline, 0 regressions.
+- [x] Programs that don't use `globalThis`/`global`/`eval`/`Function` compile to the same bytes (every fixture; F186's nondeterministic ones aside).
+- [x] `globalThis` behaves like node's for the implemented built-ins (identity, descriptors, replacement, undeclared
+      names through it). Replacing a built-in is rejected at build time (F201).
+- [x] `eval("…")` of literals: results (completion values), scope access, run-time SyntaxErrors match node.
+- [x] `Function("…")` of literals works, including `Function("return this")()`.
+- [x] Code not known at build time is a clear build error (F191).
+- [x] test262: the new directories in the subset, results in the baseline, 0 regressions.
 
 ## Notes / Result
-(to be written)
+**What changed** (design: `docs/design.md` D6)
+- Global object (slice 1): `crates/lower/builtins/global.js` (`$$GlobalObject` made on first use, `$$GlobalGet`/
+  `Read`/`Set`, `$$eval`, `$$Function`); the prelude scan (`builtins.rs`) sets `Prelude::global_object` when the
+  user's code names `globalThis`/`global`, lists `global_props` (the `GLOBAL_NAMES` the code names, made values and
+  linked) and `replaced` (writes replacing a built-in through `globalThis`/`global`: rejected); the lowering expands
+  `__intrinsic_global_init` (`global_value`), reads `globalThis`/`global` as `$$GlobalObject()`, and reads, writes,
+  `typeof`s and `++`s undeclared names through the global object (`global_target`/`global_read`/`global_write`/
+  `global_assign`/`global_update`); without a global object, writes to undeclared names throw node's ReferenceError
+  after the right side (F154), writes to `NaN`/`Infinity`/`undefined` node's TypeError.
+- `eval`/`Function` (slices 2–3): `crates/frontend/src/eval.rs`, called by the linker's `load` for every module:
+  direct eval, `Function`/`new Function` and indirect eval of literals spliced in place (see D6), `EvalMap` for
+  diagnostics (`Program::original`/`evals`, `SourceMap::evals`); a single file with evals goes through `join`.
+  `eval` and `Function` are values (`CTOR_VALUES` += `Function`; `GLOBAL_NAMES` += `eval`).
+- Fixed on the way: `new.target` in instance field initializers (and their arrows) is `undefined` (closures.rs);
+  TDZ flag globals of one pattern were allocated in `HashMap` order (a cause of F186: `modules/json/main.js`).
+- test262 runner: `globalThis.$DONE = $DONE;` for async tests including `asyncHelpers.js`; subset +=
+  `built-ins/global`, `language/global-code`, `language/eval-code`, `built-ins/eval` (and `fetch-test262.sh` fetches
+  them and `built-ins/Function`).
+
+**Tests**: fixtures `tests/fixtures/globals/{global-this,eval-direct,function-ctor}.js` (node is the oracle; all
+pass `scripts/diff.sh`); `unsupported.rs::global_object_replacement`; `eval.rs` unit test `offsets_map_back`;
+`build.rs` (its unsupported example is now `Proxy`); `cargo test` ok. Gating: old vs new compiler over every
+fixture: identical except F186's nondeterministic ones. test262 targeted run with `--update` (see
+`tests/test262/HISTORY.md`): 0 regressions, 619 unsupported → pass; subset 26,653 of 28,296 run (94.2%, was 92.2%).
+
+**Unsupported / left** (follow-ups): replacing built-ins F201; global object completeness and printing F202;
+`arguments` in eval code F203; sloppy `Function`/indirect code F204; indirect eval `var`s F205; module bindings
+named from `Function` code F206; `Promise.try` F207; `Function` details (poison pills, `Function.prototype.constructor`,
+subclassing) F208; `built-ins/Function` in the subset F209; Promise statics' constructor check F210; `const`
+strings as eval code, V8's SyntaxError messages F211; code only known at run time F191.
+
+**Next smallest step**: F205 (global `var` bindings from indirect eval: 24 tests) or F203 (`arguments` in arrow
+functions, which also unblocks eval code using `arguments`).
 
 ## Checklist
-- [ ] design questions decided and recorded
-- [ ] slice 1: global object
-- [ ] slice 2: direct `eval` of literals
-- [ ] slice 3: `Function` of literals, indirect eval
-- [ ] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md, README)
+- [x] design questions decided and recorded (D6)
+- [x] slice 1: global object
+- [x] slice 2: direct `eval` of literals
+- [x] slice 3: `Function` of literals, indirect eval
+- [x] test262 + baseline, follow-ups, docs (HISTORY.md, keywords.md, design.md, README)
 
 ## Progress
 - 2026-09-29: handoff written after T41 (the user chose F151 next). State at handoff: `main` at `7324f69`, pushed;
   test262 subset 25,911 of 28,107 run pass (92.2%).
+- 2026-09-29: session start. Tools unchanged (`check-tools.sh` ok). Recount of the baseline (status ≠ pass/skip):
+  only 12 tests are blocked by `globalThis` alone (the handoff's 216 included skipped ones: `import-defer` etc.);
+  `eval(` 402 unsupported (235 pass only literals), `Function`/`fnGlobalObject` 88. So slice 2 (eval) pays most in
+  the current subset; slice 1 mostly pays in the new directories (`built-ins/global`, `language/global-code`).
+- 2026-09-29: design decided and recorded as D6 in `docs/design.md`: handoff recommendations (static built-ins +
+  replacement detection, splice for eval); refinements: the replacement check keys on the *property name* written
+  anywhere (covers aliases of `globalThis`), the global object holds only the built-ins the code names (prelude
+  rule), writes to undeclared names throw a ReferenceError at run time even without a global object (were
+  "unsupported"), `eval`/`Function` as values throw an `EvalError` for strings.
+- 2026-09-29: slice 1 core: `builtins/global.js` (`$$GlobalObject` made on first use, `$$GlobalGet/Read/Set`),
+  scan (`Prelude::global_object`, `global_props` = `GLOBAL_NAMES` the code names, made values/rooted),
+  `__intrinsic_global_init` expanded by the lowering (`global_value`: namespaces, error/built-in ctors, Promise,
+  timers, `$$parseInt`…; node's own globals enumerable), undeclared reads/`typeof`/`=`/`op=`/`++` through it
+  (`global_target`, `global_assign`, `global_update`; reuses `generators.rs`'s `prelude_call`); writes to
+  `NaN`/`Infinity`/`undefined` throw node's TypeError; undeclared writes without a global object throw the
+  ReferenceError (were unsupported). Fixture `globals/global-this.js` matches node; a library export using
+  `globalThis` works (`--invoke`).
+- 2026-09-29: gating check (old vs new compiler, every fixture): only `generators/basics.js` differs (F186). Found
+  and fixed one more F186-style order: TDZ flag globals were allocated in `HashMap` order for bindings of one
+  pattern (same end offset; `modules/json/main.js`): now sorted by `(end, symbol)`. Replacement (question 2):
+  `globalThis.X = …` / `delete global.X` / `Object.defineProperty(globalThis, "X", …)` for a built-in `X` is
+  rejected at build time (`Prelude::replaced`; reads of `X` stay static, so accepting it would miscompile);
+  real replacement is a follow-up. Unit test `unsupported.rs::global_object_replacement`. `cargo test` ok.
+- 2026-09-29: test262 targeted: `built-ins/global` 13/29 pass, `language/global-code` 17/42 (18 skip; the rest are
+  script-only: top-level `this`, `let undefined`, `Object = 12` rejected). Subset tests naming
+  `globalThis`/`global`: 9 unsupported → pass, 0 regressions. `harness/asyncHelpers.js` names `globalThis` and
+  checks `globalThis.$DONE`: the runner now adds `globalThis.$DONE = $DONE;` for async tests including it (a
+  script's function declarations are global properties): of the 247 such tests (all unsupported before), 117 pass;
+  new fails: `Promise.try` (not implemented, 4) and one unhandled-rejection (known noise).
+- 2026-09-29: slice 2 core: `crates/frontend/src/eval.rs`: the linker's `load` splices each module's direct
+  `eval(<literal>)` calls before parsing it (so renames reach eval'd code): `((() => {\n S' \n})())`, S' returning
+  the completion value when the call's value is used (`eval$completion<k>`; UpdateEmpty prefixes `{ c = void 0; … }`
+  for if/loops/switch/try, labels kept on loops, `finally` not counted). S is parsed alone inside
+  `class extends Object { constructor() { S } }` (permits `super`/`new.target`/`arguments`; the body span must be
+  exactly S, so `} m() {` can't escape; `return` found by a statement walk); the module with S in place is parsed
+  again and an early error inside a region makes that call `throw new SyntaxError(msg)` (context rules: `super()`,
+  `new.target`, `arguments` in fields). Nested evals: further rounds (≤ 16). `EvalMap` maps spliced offsets back
+  (a call's code → the call); `Program::original`/`evals`, `SourceMap::evals`. Bug found on the way: `parse()`
+  set `original` to the spliced text. Fixture `globals/eval-direct.js` matches node. Limitation: `arguments` in
+  eval code inside a function hits the lowering's "`arguments` in an arrow function" (follow-up).
+- 2026-09-29: slice 2 test262: subset tests naming `eval` (795 run): 297 unsupported → pass, 0 regressions; fixed
+  on the way: edits at one offset (inner `)` before outer ` }`: for-in `S12.6.4_A3*`), `finally` values count
+  when it completes abruptly (saved/restored around it; `try/completion-values.js`), and a lowering bug outside
+  eval: `new.target` in an instance field initializer (also in its arrows) is `undefined` (closures.rs, like
+  static ones). `language/eval-code/direct` 62 of 67 run pass (219 sloppy-only skipped), `indirect` 0 (slice 3).
+  Left: `toString` as a bare name in eval code (node's global object inherits `Object.prototype`, 2 tests).
+- 2026-09-29: slice 3 core (eval.rs): `Function(lits…)`/`new Function(lits…)` → `(function anonymous(P\n) {\nB\n})`
+  in place (a new object per evaluation; checked alone: parameters and body spans exact, else "Arg string
+  terminates parameters early"); sloppy `this` in a non-strict body → a `const` of `this == null ? globalThis :
+  Object(this)`; indirect eval `(0, eval)(lit)`/`globalThis.eval(lit)` → `(function () { S' }).call(globalThis)`
+  (sloppy script parse; top-level `var`/function declarations rejected: they'd be global properties).
+  References from `Function`/indirect code to module bindings are build errors (`module_refs`; node: only globals,
+  a ReferenceError there). Build errors of a round are all reported (sorted). Lowering: `eval` is `$$eval` (returns
+  non-strings, throws `EvalError` for a string), `Function` a constructor value over `$$Function` (throws
+  `EvalError`), both on the global object. Fixture `globals/function-ctor.js` matches node; `build.rs` test used a
+  bare `eval` as its unsupported example: now `Proxy`. Gating: only F186's fixtures differ; `modules/json/main.js`
+  is now deterministic (the old compiler gave two outputs, 16/9 over 25 builds: the TDZ-flag order fix).
+- 2026-09-29: slice 3 test262: `language/eval-code/indirect` 21 of 59 run (was 0; 24 rejected for `var`/function
+  declarations, 4 `eval` through a variable → EvalError, script-only `this`), `built-ins/eval` 8/10; subset
+  tests naming `Function` (185): 40 unsupported → pass, 15 unsupported → fail (subclassing `Function`/`new F(…)`
+  reach `$$Function` → EvalError (7); strict functions' `caller` poison pill missing (5); sloppy-only code in
+  `Function('var arguments;')` (2); `Function.prototype.constructor` traps (1)), 0 regressions.
+  `built-ins/Function` (509) not added to the subset: 45 `prototype/toString` tests take ~7 s each (the
+  `nativeFunctionMatcher.js` harness) and time out under load; 169 of its prototype tests pass. Subset += 
+  `language/eval-code`, `built-ins/eval` (and slice 1's `built-ins/global`, `language/global-code`).
+- 2026-09-29: `eval?.(…)` is indirect (was skipped as an optional call). Targeted test262 run with `--update`
+  (1,695 tests: all that were unsupported + those naming `globalThis`/`global`/`eval`/`Function`/`new.target`, the
+  asyncHelpers ones, the new directories): 0 regressions, 619 unsupported → pass, 41 unsupported → fail (known
+  causes, follow-ups F201–F211); subset 26,653 of 28,296 run (94.2%). Docs: D6, keywords.md, README, HISTORY.md;
+  follow-ups F201–F211; F151, F154 resolved; F186 note. Task done.
