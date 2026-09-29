@@ -355,8 +355,12 @@ properties), so the global object is only observable through `globalThis`/`globa
   evaluation, the spec's source text); indirect eval (`(0, eval)(…)`, `globalThis.eval(…)`, `eval?.(…)`) →
   `(function () { S' }).call(globalThis)`. Both are sloppy in node: only the sloppy `this` is done (a non-strict
   `Function` body's `this` is the global object for `undefined`/`null`, else ToObject); a name in them that
-  resolves to a module binding is a build error (node: only globals, F206); indirect code's top-level `var`s are
-  rejected (F205). `EvalMap` takes offsets in spliced text back to the file for diagnostics. Code not known at
+  resolves to a module binding is a build error (node: only globals, F206). T44: non-strict indirect eval code's
+  `var` declarations become assignments (their names are then undeclared, so global-object lookups) and its
+  top-level function declarations named function expressions in a prologue that declares them all on the global
+  object first (EvalDeclarationInstantiation: node's TypeErrors, then functions defined or set, then `var`s defined
+  `undefined` where absent; configurable); `for (var … in/of …)`, destructuring `var`s and block-level functions
+  are rejected. `EvalMap` takes offsets in spliced text back to the file for diagnostics. Code not known at
   build time is a build error pointing at F191; `eval` and `Function` as values are functions (`$$eval` returns
   non-strings, both throw an `EvalError` for code), and `Function` is a constructor value
   (`f instanceof Function`).

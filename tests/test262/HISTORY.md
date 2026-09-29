@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T44 indirect eval declarations (targeted run)
+
+- Compiler: non-strict indirect eval code's `var`/function declarations are global-object properties.
+- Run: the subset tests naming `eval` and `language/eval-code`, `built-ins/eval`, `built-ins/global`,
+  `language/global-code`, with `--update`: 11 unsupported → pass, 1 fail → pass, 0 regressions; 6 unsupported →
+  fail (script-only: top-level `this`/`var`s; one later passed with the strict-code fix).
+  `language/eval-code/indirect`: 32 of 59 run (was 21). Subset: 26,677 of 28,296 run pass (94.3%).
+
 ## 2026-09-29: T43 `arguments` in arrow functions (targeted run)
 
 - Compiler: arrows capture the enclosing function's `arguments`; captured parameters of a function using

@@ -594,92 +594,231 @@ fn compile(
     if statements.iter().any(has_return) {
         return Ok(Err("Illegal return statement".to_string()));
     }
-    if global && statements.iter().any(declares_var) {
-        return Err(
-            "unsupported: `var` or function declarations in indirect `eval` code (they would be global-object properties)"
-                .to_string(),
-        );
+    // Indirect eval code (T44): its `var` and function declarations are global-object properties.
+    let mut edits: Vec<(u32, u32, i64, String)> = Vec::new();
+    let mut prologue = String::new();
+    // Strict eval code has its own variable environment (a `"use strict"` directive).
+    let strict = directives.iter().any(|d| d.directive == "use strict");
+    if global && !strict {
+        let mut d = Decls {
+            text: wrapped,
+            vars: Vec::new(),
+            fns: Vec::new(),
+            edits: Vec::new(),
+            error: None,
+        };
+        for stmt in statements {
+            d.stmt(stmt, true);
+        }
+        if let Some(e) = d.error {
+            return Err(e);
+        }
+        prologue = d.prologue();
+        edits = d.edits;
     }
-    let Some(c) = completion else {
+    if completion.is_none() && edits.is_empty() {
         return Ok(Ok(s.to_string()));
-    };
-    let assign = format!("{c} = (");
-    let reset = format!("{{ {c} = void 0; ");
-    let saved = format!("{c}f");
-    let (save, restore) = (
-        format!(" const {saved} = {c}; {c} = void 0; "),
-        format!(";\n{c} = {saved}; "),
-    );
-    let mut w = Completion {
-        assign: &assign,
-        reset: &reset,
-        save: &save,
-        restore: &restore,
-        edits: Vec::new(),
-    };
-    // Directives are expression statements' values too.
-    for d in directives {
-        w.open(d.expression.span.start, &assign);
-        w.close(d.expression.span.end, ")");
     }
-    for stmt in statements {
-        w.stmt(stmt, true);
+    let mut out = prologue;
+    if let Some(c) = completion {
+        let assign = format!("{c} = (");
+        let reset = format!("{{ {c} = void 0; ");
+        let saved = format!("{c}f");
+        let (save, restore) = (
+            format!(" const {saved} = {c}; {c} = void 0; "),
+            format!(";\n{c} = {saved}; "),
+        );
+        let mut w = Completion {
+            assign: &assign,
+            reset: &reset,
+            save: &save,
+            restore: &restore,
+            edits: Vec::new(),
+        };
+        // Directives are expression statements' values too.
+        for d in directives {
+            w.open(d.expression.span.start, &assign);
+            w.close(d.expression.span.end, ")");
+        }
+        for stmt in statements {
+            w.stmt(stmt, true);
+        }
+        edits.extend(
+            w.edits
+                .into_iter()
+                .map(|(at, rank, t)| (at, at, rank, t.to_string())),
+        );
+        out.push_str(&format!("let {c};\n"));
     }
-    let mut edits = w.edits;
-    // At one offset, closing text comes first, innermost first; then opening text, outermost first.
-    edits.sort_by_key(|(at, rank, _)| (*at, *rank));
-    let mut out = format!("let {c};\n");
+    // At one offset, closing text comes first, innermost first; then opening text, outermost first
+    // (replacements, which never share an offset with other edits, rank 0).
+    edits.sort_by_key(|(at, _, rank, _)| (*at, *rank));
     let mut pos = pre.len();
-    for (at, _, t) in edits {
+    for (at, end, _, t) in edits {
         out.push_str(&wrapped[pos..at as usize]);
-        out.push_str(t);
-        pos = at as usize;
+        out.push_str(&t);
+        pos = end as usize;
     }
     out.push_str(&wrapped[pos..pre.len() + s.len()]);
-    out.push_str(&format!("\n;return {c};"));
+    if let Some(c) = completion {
+        out.push_str(&format!("\n;return {c};"));
+    }
     Ok(Ok(out))
 }
 
-/// Does a statement (outside nested functions) declare a `var` or a function?
-fn declares_var(s: &Statement) -> bool {
-    let var = |d: &VariableDeclaration| d.kind == VariableDeclarationKind::Var;
-    match s {
-        Statement::VariableDeclaration(d) => var(d),
-        Statement::FunctionDeclaration(_) => true,
-        Statement::BlockStatement(b) => b.body.iter().any(declares_var),
-        Statement::LabeledStatement(l) => declares_var(&l.body),
-        Statement::IfStatement(i) => {
-            declares_var(&i.consequent) || i.alternate.as_ref().is_some_and(declares_var)
+/// Indirect eval code's declarations (T44): each `var` declaration becomes assignments (its names are
+/// then undeclared, so they go through the global object), each top-level function declaration a
+/// named function expression in a prologue that declares them all on the global object first
+/// (EvalDeclarationInstantiation with the global environment).
+struct Decls<'t> {
+    text: &'t str,
+    vars: Vec<String>,
+    /// Name and source text, the last declaration of a name wins.
+    fns: Vec<(String, String)>,
+    edits: Vec<(u32, u32, i64, String)>,
+    error: Option<String>,
+}
+
+impl Decls<'_> {
+    fn fail(&mut self, what: &str) {
+        self.error
+            .get_or_insert_with(|| format!("unsupported: {what} in indirect `eval` code"));
+    }
+
+    fn stmt(&mut self, s: &Statement, top: bool) {
+        match s {
+            Statement::VariableDeclaration(d) if d.kind == VariableDeclarationKind::Var => {
+                let semi = self.text.as_bytes().get(d.span.end as usize - 1) == Some(&b';');
+                if let Some(a) = self.assigns(d) {
+                    let t = if a.is_empty() {
+                        "void 0".to_string()
+                    } else {
+                        format!("void ({a})")
+                    };
+                    self.edits.push((
+                        d.span.start,
+                        d.span.end,
+                        0,
+                        format!("{t}{}", if semi { ";" } else { "" }),
+                    ));
+                }
+            }
+            Statement::FunctionDeclaration(f) => {
+                let Some(id) = &f.id else { return };
+                if !top {
+                    self.fail("a function declaration in a block");
+                    return;
+                }
+                let name = id.name.to_string();
+                self.fns.retain(|(n, _)| *n != name);
+                self.fns
+                    .push((name, f.span.source_text(self.text).to_string()));
+                self.edits
+                    .push((f.span.start, f.span.end, 0, String::new()));
+            }
+            Statement::BlockStatement(b) => b.body.iter().for_each(|s| self.stmt(s, false)),
+            Statement::LabeledStatement(l) => self.stmt(&l.body, false),
+            Statement::IfStatement(i) => {
+                self.stmt(&i.consequent, false);
+                if let Some(a) = &i.alternate {
+                    self.stmt(a, false);
+                }
+            }
+            Statement::WhileStatement(w) => self.stmt(&w.body, false),
+            Statement::DoWhileStatement(w) => self.stmt(&w.body, false),
+            Statement::ForStatement(f) => {
+                if let Some(ForStatementInit::VariableDeclaration(d)) = &f.init
+                    && d.kind == VariableDeclarationKind::Var
+                    && let Some(a) = self.assigns(d)
+                {
+                    self.edits.push((d.span.start, d.span.end, 0, a));
+                }
+                self.stmt(&f.body, false);
+            }
+            Statement::ForInStatement(f) => {
+                if matches!(&f.left, ForStatementLeft::VariableDeclaration(d) if d.kind == VariableDeclarationKind::Var)
+                {
+                    self.fail("`for (var … in …)`");
+                }
+                self.stmt(&f.body, false);
+            }
+            Statement::ForOfStatement(f) => {
+                if matches!(&f.left, ForStatementLeft::VariableDeclaration(d) if d.kind == VariableDeclarationKind::Var)
+                {
+                    self.fail("`for (var … of …)`");
+                }
+                self.stmt(&f.body, false);
+            }
+            Statement::SwitchStatement(sw) => {
+                for c in &sw.cases {
+                    c.consequent.iter().for_each(|s| self.stmt(s, false));
+                }
+            }
+            Statement::TryStatement(t) => {
+                t.block.body.iter().for_each(|s| self.stmt(s, false));
+                if let Some(h) = &t.handler {
+                    h.body.body.iter().for_each(|s| self.stmt(s, false));
+                }
+                if let Some(f) = &t.finalizer {
+                    f.body.iter().for_each(|s| self.stmt(s, false));
+                }
+            }
+            _ => {}
         }
-        Statement::WhileStatement(w) => declares_var(&w.body),
-        Statement::DoWhileStatement(w) => declares_var(&w.body),
-        Statement::ForStatement(f) => {
-            matches!(&f.init, Some(ForStatementInit::VariableDeclaration(d)) if var(d))
-                || declares_var(&f.body)
+    }
+
+    /// `var a = 1, b` → `a = (1)` (the names noted), or `None` after a failure.
+    fn assigns(&mut self, d: &VariableDeclaration) -> Option<String> {
+        let mut parts = Vec::new();
+        for decl in &d.declarations {
+            let BindingPattern::BindingIdentifier(id) = &decl.id else {
+                self.fail("a destructuring `var`");
+                return None;
+            };
+            let name = id.name.to_string();
+            if !self.vars.contains(&name) {
+                self.vars.push(name.clone());
+            }
+            if let Some(init) = &decl.init {
+                parts.push(format!("{name} = ({})", init.span().source_text(self.text)));
+            }
         }
-        Statement::ForInStatement(f) => {
-            matches!(&f.left, ForStatementLeft::VariableDeclaration(d) if var(d))
-                || declares_var(&f.body)
-        }
-        Statement::ForOfStatement(f) => {
-            matches!(&f.left, ForStatementLeft::VariableDeclaration(d) if var(d))
-                || declares_var(&f.body)
-        }
-        Statement::WithStatement(w) => declares_var(&w.body),
-        Statement::SwitchStatement(sw) => sw
-            .cases
+        Some(parts.join(", "))
+    }
+
+    /// The declarations on the global object: node's checks first, then the functions (defined, or
+    /// set when non-configurable), then the `var`s (`undefined` where absent); all configurable.
+    fn prologue(&self) -> String {
+        let vars: Vec<&String> = self
+            .vars
             .iter()
-            .any(|c| c.consequent.iter().any(declares_var)),
-        Statement::TryStatement(t) => {
-            t.block.body.iter().any(declares_var)
-                || t.handler
-                    .as_ref()
-                    .is_some_and(|h| h.body.body.iter().any(declares_var))
-                || t.finalizer
-                    .as_ref()
-                    .is_some_and(|f| f.body.iter().any(declares_var))
+            .filter(|v| !self.fns.iter().any(|(n, _)| n == *v))
+            .collect();
+        if vars.is_empty() && self.fns.is_empty() {
+            return String::new();
         }
-        _ => false,
+        let fns: Vec<String> = self
+            .fns
+            .iter()
+            .map(|(n, t)| format!("[{}, {t}]", json_string(n)))
+            .collect();
+        let vars: Vec<String> = vars.iter().map(|v| json_string(v)).collect();
+        format!(
+            "((g, fs, vs) => {{ \
+             const own = (n) => Object.getOwnPropertyDescriptor(g, n); \
+             const add = (n) => new TypeError(\"Cannot add property \" + n + \", object is not extensible\"); \
+             for (const [n] of fs) {{ const d = own(n); \
+             if (d === undefined ? !Object.isExtensible(g) : !d.configurable && !(d.writable && d.enumerable)) \
+             throw d === undefined ? add(n) : new TypeError(\"Identifier '\" + n + \"' has already been declared\"); }} \
+             for (const n of vs) {{ if (own(n) === undefined && !Object.isExtensible(g)) throw add(n); }} \
+             for (const [n, f] of fs) {{ const d = own(n); \
+             if (d === undefined || d.configurable) Object.defineProperty(g, n, {{ value: f, writable: true, enumerable: true, configurable: true }}); \
+             else g[n] = f; }} \
+             for (const n of vs) {{ if (own(n) === undefined) Object.defineProperty(g, n, {{ value: undefined, writable: true, enumerable: true, configurable: true }}); }} \
+             }})(globalThis, [{}], [{}]);\n",
+            fns.join(", "),
+            vars.join(", ")
+        )
     }
 }
 
