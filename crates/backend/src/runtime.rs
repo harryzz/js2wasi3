@@ -355,6 +355,15 @@ pub trait Cx {
     fn subclassing(&mut self) -> bool {
         false
     }
+    /// `build --unhandled-rejections=none` (T50, `Module::ignore_unhandled`).
+    fn ignore_unhandled(&mut self) -> bool {
+        false
+    }
+    /// The `Promise` statics implemented by the prelude (T50, `Module::promise_statics`):
+    /// (key, code, length).
+    fn promise_statics(&mut self) -> Vec<(String, u32, u32)> {
+        Vec::new()
+    }
     /// The well-known symbols that are own properties of `Symbol` as a value (T49,
     /// `Module::symbol_statics`).
     fn symbol_statics(&mut self) -> Vec<String> {

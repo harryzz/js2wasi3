@@ -40,6 +40,9 @@ pub const P_RESULT: u32 = 8;
 pub const P_REACTIONS: u32 = 9;
 pub const P_COUNT: u32 = 10;
 pub const P_HANDLED: u32 = 11;
+/// With `--unhandled-rejections=none` (T50), `handled`'s bit 2 marks the entry module's evaluation
+/// promise: only its rejection is reported (bit 1: handled).
+pub const MAIN: i32 = 2;
 
 pub const PENDING: i32 = 0;
 pub const FULFILLED: i32 = 1;
@@ -434,7 +437,7 @@ impl Helper {
                 f
             }
             Helper::CheckCallback => check_callback(cx),
-            Helper::Unhandled => unhandled(),
+            Helper::Unhandled => unhandled(cx),
             Helper::UnhandledText => unhandled_text(cx),
             Helper::Describe => {
                 let desc = cx.helper(runtime::Helper::Prop(props::Helper::Desc));
@@ -606,6 +609,9 @@ fn ctor(cx: &mut dyn Cx) -> Function {
     let construct = ph(cx, Helper::CtorConstruct);
     cx.declare_func(call);
     cx.declare_func(construct);
+    // T50: the prelude's statics (`builtins/promise.js`), in node's order, in place of the native
+    // ones; with none, the native ones as before.
+    let prelude = cx.promise_statics();
     // `any` and `withResolvers` only when the code names them (T25).
     let gated = [
         (Helper::Combine(Combinator::Any), "any", 1),
@@ -622,12 +628,29 @@ fn ctor(cx: &mut dyn Cx) -> Function {
     ]
     .into_iter()
     .chain(gated.collect::<Vec<_>>())
+    .filter(|(_, name, _)| prelude.is_empty() || !prelude.iter().any(|(k, _, _)| k == name))
     .map(|(h, name, len)| {
         let code = ph(cx, h);
         cx.declare_func(code);
         (code, cx.str(name), len)
     })
     .collect();
+    let statics: Vec<(u32, u32, i32)> = if prelude.is_empty() {
+        statics
+    } else {
+        const ORDER: [&str; 8] =
+            ["all", "allSettled", "any", "race", "resolve", "reject", "withResolvers", "try"];
+        let mut all = Vec::new();
+        for key in ORDER {
+            if let Some((_, code, len)) = prelude.iter().find(|(k, _, _)| k == key) {
+                cx.declare_func(*code);
+                all.push((*code, cx.str(key), *len as i32));
+            } else if let Some(&n) = statics.iter().find(|(_, g, _)| *g == cx.str(key)) {
+                all.push(n);
+            }
+        }
+        all
+    };
     let (name, prototype, constructor) = (
         cx.str("Promise"),
         cx.str("prototype"),
@@ -861,7 +884,12 @@ fn settle(cx: &mut dyn Cx, rejected: bool) -> Function {
     s.local_get(P).i32_const(0).struct_set(T_PROMISE, P_COUNT);
     if rejected {
         // HostPromiseRejectionTracker(p, "reject"): record it.
-        s.local_get(P).struct_get(T_PROMISE, P_HANDLED).i32_eqz();
+        s.local_get(P).struct_get(T_PROMISE, P_HANDLED);
+        if cx.ignore_unhandled() {
+            // Bit 1 only: the entry's promise ([`MAIN`]) is recorded too.
+            s.i32_const(1).i32_and();
+        }
+        s.i32_eqz();
         s.if_(BlockType::Empty);
         s.global_get(G_REJECTED).ref_is_null();
         s.if_(BlockType::Result(ValType::I32));
@@ -1775,7 +1803,7 @@ fn code_to_string(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn unhandled() -> Function {
+fn unhandled(cx: &mut dyn Cx) -> Function {
     const I: u32 = 0;
     const P: u32 = 1;
     let mut f = Function::new([(1, ValType::I32), (1, rt(true, T_PROMISE))]);
@@ -1787,7 +1815,13 @@ fn unhandled() -> Function {
         .local_get(I)
         .array_get(T_VALS);
     s.ref_cast_non_null(promise()).local_tee(P);
-    s.struct_get(T_PROMISE, P_HANDLED).i32_eqz();
+    s.struct_get(T_PROMISE, P_HANDLED);
+    if cx.ignore_unhandled() {
+        // `--unhandled-rejections=none` (T50): only the entry's evaluation promise.
+        s.i32_const(MAIN).i32_eq();
+    } else {
+        s.i32_eqz();
+    }
     s.if_(BlockType::Empty);
     s.i32_const(0).global_set(G_REJECTED_N);
     s.local_get(P)

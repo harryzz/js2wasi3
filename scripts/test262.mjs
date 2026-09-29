@@ -15,7 +15,8 @@
 // test262 itself is a sparse clone at the commit pinned in TOOLS.md: scripts/fetch-test262.sh.
 //
 // Each test is its frontmatter's harness (`print` shim, sta.js, assert.js, doneprintHandle.js for
-// `flags: [async]`, then `includes`) followed by the test, compiled as one ES module (always strict).
+// `flags: [async]`, then `includes`) followed by the test, compiled as one ES module (always strict)
+// with `--unhandled-rejections=none` (T50: hosts like d8 don't fail a test on one; node exits with 1).
 // wasmtime runs without its compile cache (it would grow by ~1 MB per test), at opt-level 0 with the
 // single-pass register allocator (compiling is most of a test's time; this halves it) and with
 // one compile thread per test (the runner already runs tests in parallel).
@@ -287,7 +288,9 @@ async function one(rel, work) {
   writeFileSync(js, parts.join("\n"));
 
   const deadline = Date.now() + opt.timeout * 1000;
-  const b = await run(BIN, ["build", "--command", js, "-o", wasm, ...include], deadline - Date.now());
+  // T50: an unhandled rejection doesn't fail a test (test262 hosts ignore them; node exits with 1).
+  const args = ["build", "--command", "--unhandled-rejections=none", js, "-o", wasm, ...include];
+  const b = await run(BIN, args, deadline - Date.now());
   const phase = meta.negative?.phase;
   const early = phase === "parse" || phase === "early" || phase === "resolution";
   if (b.timedOut) return { status: "timeout", reason: "build" };

@@ -120,6 +120,11 @@ pub struct Module {
     /// Statics of those constructors implemented by the prelude (`Array.from`): own properties of
     /// the constructor value.
     pub builtin_statics: Vec<BuiltinMethod>,
+    /// The `Promise` statics implemented by the prelude (T50, `builtins/promise.js`): own methods
+    /// of the native `Promise` value, in place of native ones of the same key.
+    pub promise_statics: Vec<BuiltinMethod>,
+    /// `build --unhandled-rejections=none` (T50): unhandled rejections are ignored.
+    pub ignore_unhandled: bool,
     /// The code names a `constructor` property (T25): the built-in prototypes of
     /// [`Builtin::ctor_length`] without a constructor in [`Module::builtin_ctors`] get a stub one
     /// (identity, `name`, `length`, `prototype`; calling it traps).
@@ -963,6 +968,8 @@ pub enum Intrinsic {
     WellKnownSymbol(u8),
     /// `Array.isArray(v)` (`bool`).
     IsArray,
+    /// IsPromise(v) (`bool`, T50: the prelude's `__intrinsic_is_promise`).
+    IsPromise,
     /// `Object.keys(v)`.
     ObjectKeys,
     /// `Object.getOwnPropertyNames(v)` (T28).
@@ -1343,7 +1350,9 @@ impl Intrinsic {
             | Intrinsic::ObjectEntries
             | Intrinsic::GetOwnPropertyNames => (&[JsVal], Some(JsVal)),
             Intrinsic::IterOpen | Intrinsic::ObjectRest => (&[JsVal, JsVal], Some(JsVal)),
-            Intrinsic::IterStep | Intrinsic::IsArray => (&[JsVal], Some(Bool)),
+            Intrinsic::IterStep | Intrinsic::IsArray | Intrinsic::IsPromise => {
+                (&[JsVal], Some(Bool))
+            }
             Intrinsic::IterClose => (&[JsVal, Bool], None),
             Intrinsic::AsyncIterOpen => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::AsyncIterNext | Intrinsic::AsyncIterResult => (&[JsVal], Some(JsVal)),
@@ -1528,6 +1537,7 @@ impl Intrinsic {
             Intrinsic::SymbolIterator => "symbol_iterator",
             Intrinsic::WellKnownSymbol(_) => "well_known_symbol",
             Intrinsic::IsArray => "is_array",
+            Intrinsic::IsPromise => "is_promise",
             Intrinsic::ObjectKeys => "object_keys",
             Intrinsic::ObjectValues => "object_values",
             Intrinsic::ObjectEntries => "object_entries",

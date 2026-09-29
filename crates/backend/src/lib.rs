@@ -869,6 +869,19 @@ impl runtime::Cx for Emitter<'_> {
         self.m.subclassing
     }
 
+    fn ignore_unhandled(&mut self) -> bool {
+        self.m.ignore_unhandled
+    }
+
+    fn promise_statics(&mut self) -> Vec<(String, u32, u32)> {
+        let base = self.func_base;
+        self.m
+            .promise_statics
+            .iter()
+            .map(|m| (m.key.clone(), base + m.code.0, m.length))
+            .collect()
+    }
+
     fn symbol_statics(&mut self) -> Vec<String> {
         self.m.symbol_statics.clone()
     }
@@ -1593,6 +1606,10 @@ impl Emitter<'_> {
                         s.ref_test_non_null(array::array());
                         return Ok(true);
                     }
+                    Intrinsic::IsPromise => {
+                        s.ref_test_non_null(promise::promise());
+                        return Ok(true);
+                    }
                     Intrinsic::Hole => {
                         s.ref_null(wasm_encoder::HeapType::Abstract {
                             shared: false,
@@ -1711,6 +1728,7 @@ impl Emitter<'_> {
                     | Intrinsic::IterValue
                     | Intrinsic::SymbolIterator
                     | Intrinsic::IsArray
+                    | Intrinsic::IsPromise
                     | Intrinsic::F64Hi
                     | Intrinsic::F64Lo
                     | Intrinsic::F64FromWords

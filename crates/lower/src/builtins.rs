@@ -51,6 +51,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/module.js"),
     include_str!("../builtins/global.js"),
     include_str!("../builtins/dispose.js"),
+    include_str!("../builtins/promise.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -279,6 +280,9 @@ pub(crate) struct Prelude {
     pub big_typed: bool,
     /// Does the user's code name `globalThis` or `global` (T42: the global object exists)?
     pub global_object: bool,
+    /// Does the user's code name the global `Promise` (T50: the statics it names are linked for
+    /// the `Promise` value)?
+    pub promise_value: bool,
     /// The global object's built-in properties (T42): the [`GLOBAL_NAMES`] the code names.
     pub global_props: Vec<String>,
     /// Writes that replace a built-in global (T42: `globalThis.Array = …`, `delete global.Map`,
@@ -513,6 +517,14 @@ impl Prelude {
         out.suppressed = p.semantic.nodes().iter().any(|node| match node.kind() {
             AstKind::IdentifierReference(r) => {
                 r.name == "SuppressedError"
+                    && !p.in_prelude(r.span.start)
+                    && scoping.get_reference(r.reference_id()).symbol_id().is_none()
+            }
+            _ => false,
+        });
+        out.promise_value = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::IdentifierReference(r) => {
+                r.name == "Promise"
                     && !p.in_prelude(r.span.start)
                     && scoping.get_reference(r.reference_id()).symbol_id().is_none()
             }
@@ -837,6 +849,15 @@ impl Prelude {
             if out.ctor_values.contains(b)
                 && !key.starts_with("prototype")
                 && (key.is_empty() || user_props.contains(key))
+            {
+                roots.push(item_of[sym]);
+            }
+            // T50: the `Promise` value's statics the code names (also through `constructor` or
+            // the global object).
+            if b == "Promise"
+                && !key.is_empty()
+                && user_props.contains(key)
+                && (out.promise_value || out.global_object || user_props.contains("constructor"))
             {
                 roots.push(item_of[sym]);
             }

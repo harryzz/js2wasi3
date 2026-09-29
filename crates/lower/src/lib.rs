@@ -1215,6 +1215,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let (b, key) = name[2..].split_once('_').unwrap_or((&name[2..], ""));
                 // `$$Array_isArray$value` is the static `isArray` (T28).
                 let key = key.strip_suffix(builtins::VALUE).unwrap_or(key);
+                if b == "Promise" {
+                    // T50: statics of the native `Promise` value.
+                    for p in self.func_params[&func].clone().into_iter().flatten() {
+                        self.observe(Slot::Var(p), Kind::Any);
+                    }
+                    let code = self.adapter(func);
+                    self.module.promise_statics.push(ir::BuiltinMethod {
+                        proto: Builtin::Promise,
+                        key: key.to_string(),
+                        code,
+                        length: builtins::length(name).unwrap_or(self.fn_length[&func]),
+                    });
+                    continue;
+                }
                 if !self.prelude.ctor_values.contains(b) {
                     continue;
                 }
@@ -4321,7 +4335,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Expression::ClassExpression(c) => {
                 Ok(Val::js(self.class_value(cx, c, None, None)?, Kind::Any))
             }
-            Expression::StaticMemberExpression(_) if self.builtin_static_value(e).is_some() => {
+            // T50: `Promise.all` read as a value is the `Promise` value's own property.
+            Expression::StaticMemberExpression(sm)
+                if self.builtin_static_value(e).is_some()
+                    && !self.is_global(&sm.object, "Promise") =>
+            {
                 let func = self.builtin_static_value(e).expect("checked");
                 self.check_builtin(span, func)?;
                 Ok(Val::js(self.func_value(func), Kind::Any))
@@ -4806,13 +4824,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         {
             // `Math.floor(x)`, `parseInt(s)`: a direct call of the prelude function (T21).
             self.check_builtin(callee.span(), func)?;
+            if let Expression::StaticMemberExpression(m) = callee.without_parentheses()
+                && self.is_global(&m.object, "Promise")
+            {
+                // T50: `Promise.all(…)` & co. take the constructor as `this`.
+                self.module.promises = true;
+                let this = Expr::intrinsic(Intrinsic::PromiseCtor, vec![]);
+                return self.direct_call_this(cx, func, None, Some(this), &c.arguments);
+            }
             return self.direct_call(cx, func, None, &c.arguments);
         }
         if let Expression::StaticMemberExpression(m) = callee
             && let Expression::Identifier(obj) = m.object.without_parentheses()
             && self.is_global(&m.object, &obj.name)
             && self.prelude.has_statics(&obj.name)
-            && !(self.prelude.ctor_values.contains(obj.name.as_str())
+            && !((self.prelude.ctor_values.contains(obj.name.as_str()) || obj.name == "Promise")
                 && builtins::inherited_prop(&obj.name, &m.property.name))
         {
             // `Math.nope(…)`, `JSON.parse(…)`: a static the prelude doesn't implement.
@@ -5024,11 +5050,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         self_obj: Option<Expr>,
         arguments: &'a [Argument<'a>],
     ) -> R<(Expr, Call)> {
+        self.direct_call_this(cx, func, self_obj, None, arguments)
+    }
+
+    /// [`Self::direct_call`] with `this` (default `undefined`).
+    fn direct_call_this(
+        &mut self,
+        cx: &mut FnCx,
+        func: FuncId,
+        self_obj: Option<Expr>,
+        this: Option<Expr>,
+        arguments: &'a [Argument<'a>],
+    ) -> R<(Expr, Call)> {
         let params = self.func_params[&func].clone();
         let hidden = self.hidden[&func];
         let mut args: Vec<Expr> = self_obj.into_iter().collect();
         if hidden.this {
-            args.push(Expr::undefined());
+            args.push(this.unwrap_or_else(Expr::undefined));
         }
         if hidden.new_target {
             args.push(Expr::undefined());
@@ -5611,6 +5649,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
             "trap" => 0,
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
+            "is_promise" => 1,
             "regexp_new" | "regexp_data" | "regexp_builtin_exec" => 1,
             "date_new" | "date_data" => 1,
             "stack_new" | "async_stack_new" | "stack_data" => 1,
@@ -5738,14 +5777,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let kind = op.signature().1.map(|_| Kind::Any);
             return Ok((Expr::intrinsic(op, args), Call::Intrinsic(kind)));
         }
-        if name == "is_constructor" {
-            // IsConstructor (T35).
+        if name == "is_constructor" || name == "is_promise" {
+            // IsConstructor (T35), IsPromise (T50).
+            let op = if name == "is_promise" { Intrinsic::IsPromise } else { Intrinsic::IsConstructor };
             let Some(e) = c.arguments[0].as_expression() else {
                 return Err(self.unsupported(c.span, "spread argument", "T21"));
             };
             let v = jsval_of(self.expr(cx, e)?);
             let e = jsval_of(Val::new(
-                Expr::intrinsic(Intrinsic::IsConstructor, vec![v]),
+                Expr::intrinsic(op, vec![v]),
                 Type::Bool,
             ));
             return Ok((e, Call::Intrinsic(Some(Kind::Bool))));

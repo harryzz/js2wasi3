@@ -3,6 +3,17 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T50 Promise statics per the spec (targeted run)
+
+- Compiler: `Promise.all`/`allSettled`/`any`/`race`/`resolve`/`reject`/`withResolvers`/`try` in the prelude
+  (`builtins/promise.js`) for any constructor `this`; `build --unhandled-rejections=none`. Runner: builds with
+  `--unhandled-rejections=none` (hosts like d8 don't fail a test on an unhandled rejection; the entry module's
+  rejected top-level `await` still fails it, as in node).
+- Run on `a-03`: the 6,256 subset tests that mention `Promise` or are async, with `--update` (-j 36, 363 s): 198
+  fail → pass, 12 timeout → pass (F187), 2 regressions (`prototype/finally/*-observable-then-calls-PromiseResolve.js`:
+  they passed by accident, `finally` ignores species, F225). `Promise/all`, `allSettled`, `race` all pass, `any` 92
+  of 94 (`Object.defineProperties`); `built-ins/Promise` 614 of 639. Subset: 27,451 of 28,591 run pass (96.0%).
+
 ## 2026-09-29: T49 `Symbol` as a value (full run)
 
 - Compiler: `Symbol` as a value (constructor value, statics, `@@toPrimitive`); `Symbol(x);` as a statement, `new Symbol`,

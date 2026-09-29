@@ -48,6 +48,10 @@ enum Cmd {
         /// to the working directory: `*` within a path segment, `**` any directories). Repeatable.
         #[arg(long, value_name = "GLOB")]
         include: Vec<String>,
+        /// What an unhandled promise rejection does, as node's flag: `throw` (the default: the
+        /// program fails with the reason) or `none` (ignored; test262 hosts don't fail on them).
+        #[arg(long, value_name = "MODE", default_value = "throw", value_parser = ["throw", "none"])]
+        unhandled_rejections: String,
     },
 }
 
@@ -458,7 +462,9 @@ fn main() -> anyhow::Result<()> {
             wit,
             command,
             include,
+            unhandled_rejections,
         } => {
+            let ignore_unhandled = unhandled_rejections == "none";
             let source = read(&entry)?;
             let program =
                 js2wasi3_lower::parse_entry(
@@ -477,6 +483,7 @@ fn main() -> anyhow::Result<()> {
                 let user = component::load_world(Path::new(&wit), world.as_deref())?;
                 let (boundary, names) = match_world(&program, &user)?;
                 let mut ir = js2wasi3_lower::lower_with(&program, Some(&boundary))?;
+                ir.ignore_unhandled = ignore_unhandled;
                 for e in &mut ir.exports {
                     e.name = names[&e.name].clone();
                 }
@@ -509,6 +516,7 @@ fn main() -> anyhow::Result<()> {
                 None => component::WorldName::from_path(Path::new(&entry)),
             };
             let mut ir = js2wasi3_lower::lower(&program)?;
+            ir.ignore_unhandled = ignore_unhandled;
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?
             } else {

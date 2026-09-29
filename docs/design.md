@@ -95,6 +95,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
 - (T12) `finally` uses dispatch, not duplication: an `i32` completion local per `finally` (0 normal, 1 throw,
   2+ one per `break`/`continue`/`return` leaving it), one copy of the finally body, then `if` chains re-issue
   the jump or `throw $js` the saved value. No `catch_all`/`exnref`/`throw_ref`: one tag, traps stay uncatchable.
+- (T50) **wasmtime 49 caveat**: a GC reference assigned to a local inside a `try_table` and read in its `catch` is wrong
+  after a collection during the throwing call (`drc`: freed unless the value is also live on the normal path; the
+  default copying collector: stale, "gc heap corruption"); values defined before the `try` are fine. Prelude code
+  avoids the pattern (it fills an array made before the `try`); user code can still hit it (F224).
   Only exports that may throw (`ir::may_throw`) get `result<T, js-error>` (see [wit-names.md](wit-names.md)).
   An uncaught exception in a command prints `Uncaught <name>: <message>` (or the `console.log` text of a
   non-error) to stderr and exits 1. Runtime errors (`.length` of `null`, TDZ) throw node's TypeError/ReferenceError.
@@ -350,6 +354,16 @@ by name stay `Intrinsic::NewSymbol` and don't link it), its call entry is the pr
 entry throws (`new Symbol`, `extends Symbol` + `super()`, `Reflect.construct`). Its well-known symbols are own
 constants only for the names the code uses (`ir::Module::symbol_statics`, like T25's statics by name).
 `Symbol.prototype[Symbol.toPrimitive]` is `$$Symbol_prototype_$toPrimitive`, linked by naming `toPrimitive`.)
+(T50: the `Promise` statics (`all`, `allSettled`, `any`, `race`, `resolve`, `reject`, `withResolvers`, `try`) are the
+spec's steps in `builtins/promise.js` (NewPromiseCapability through `new C(executor)`, GetPromiseResolve, the iterator
+protocol with IteratorClose; intrinsic `is_promise`); promises, `then` and the job queue stay native. They're linked
+by a `Promise.x` reference, or by name when the code names `Promise`, `constructor` or the global object; the
+backend's `Promise` value installs them (`ir::Module::promise_statics`, node's order) in place of the native ones,
+which stay (same bytes) in programs that link none. `Promise.x(…)` is a direct call with `this` = `Promise`
+(`direct_call_this`); `Promise.x` read as a value is the property. `build --unhandled-rejections=none`
+(`Module::ignore_unhandled`) reports only the entry module's rejected evaluation promise (a top-level `await`, as
+node does whatever the flag; `run` marks it with `handled` bit 2, `promise::MAIN`) and ignores the other unhandled
+rejections; the test262 runner uses it, as hosts like d8 don't fail a test on one.)
 
 ### D6. The global object, `eval` and `Function` (T42)
 Every file is an ES module (strict, top-level `this` is `undefined`, top-level declarations aren't global-object

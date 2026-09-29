@@ -591,7 +591,19 @@ impl Helper {
                     }],
                 );
                 s.call(main);
-                if main_result {
+                if main_result && cx.ignore_unhandled() {
+                    // `--unhandled-rejections=none` (T50): the entry's evaluation promise is marked
+                    // (`handled` bit 2), so its rejection still ends the program, as in node.
+                    s.local_tee(R).ref_test_non_null(promise::promise());
+                    s.if_(BlockType::Empty);
+                    s.local_get(R).ref_cast_non_null(promise::promise());
+                    s.local_get(R)
+                        .ref_cast_non_null(promise::promise())
+                        .struct_get(runtime::T_PROMISE, promise::P_HANDLED);
+                    s.i32_const(promise::MAIN).i32_or();
+                    s.struct_set(runtime::T_PROMISE, promise::P_HANDLED);
+                    s.end();
+                } else if main_result {
                     s.drop();
                 }
                 s.call(drain);

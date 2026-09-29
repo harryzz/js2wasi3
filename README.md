@@ -67,7 +67,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Classes: fields (also computed keys), static members and `static {}` blocks, private `#x` fields, methods and
   getters/setters, `extends` (also built-in errors), `super`.
 - Generators (`function*`, `yield`, `yield*`); `Promise` (`then`/`catch`/`finally`, `all`/`allSettled`/`race`/`any`,
-  `withResolvers`), `AggregateError`, `queueMicrotask`; `async`/`await`, including top-level `await`; `for await`
+  `resolve`/`reject`/`withResolvers`/`try`, also on subclasses), `AggregateError`, `queueMicrotask`; `async`/`await`, including top-level `await`; `for await`
   and async generators.
 - Timers (`setTimeout`, `setInterval`, `setImmediate`, `clear*`, `process.nextTick`) on the WASI 0.3 event loop,
   using `wasi:clocks`.
