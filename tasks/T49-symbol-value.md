@@ -117,3 +117,4 @@ fixture byte-identical except those using `Symbol` as a value (scratchpad `cmp.s
   `Symbol.for` ToString, and the `dispose`-without-stacks build failure (pre-existing): 69/79. Targeted `--update`:
   0 regressions, 15 unsupported → pass. Docs, follow-ups F220–F223; task done.
 - 2026-09-29: full subset run on `a-03`: 27,243 of 28,591 run pass (95.3%), baseline unchanged (one flaky timeout, F185).
+- 2026-09-29: README built-ins list mentions `Symbol` (missed at the end of the task).
