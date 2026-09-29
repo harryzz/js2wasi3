@@ -92,7 +92,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   (completion values, the caller's scope, SyntaxErrors at the call); code built at run time can't be (`eval(x)` is
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
-Not yet: many built-ins (`WeakMap`, `Intl`), `arguments` in arrow functions, CommonJS packages, node's built-in
+Not yet: many built-ins (`WeakMap`, `Intl`), CommonJS packages, node's built-in
 modules (`node:fs`), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 

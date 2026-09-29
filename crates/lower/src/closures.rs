@@ -36,6 +36,8 @@ pub enum Cap {
     Home,
     /// The enclosing function's `new.target`, by value (T38).
     NewTarget,
+    /// The enclosing function's `arguments` object, by value (T43).
+    Arguments,
     /// A private name's symbol ([`Analysis::privates`] index), by value.
     Private(u32),
     /// The cell holding an instance private method (filled when the class is evaluated), for its
@@ -283,17 +285,26 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
         {
             continue;
         }
-        let Some(f) = an.fn_at(scoping, node.scope_id(), r.span.start) else {
+        // T43: arrow functions capture it from the nearest non-arrow function.
+        let mut chain = Vec::new();
+        let mut f = an.fn_at(scoping, node.scope_id(), r.span.start);
+        while let Some(s) = f
+            && an.is_arrow(s)
+        {
+            chain.push(s);
+            f = an.parent[&s];
+        }
+        let Some(f) = f else {
             continue; // the module level: an unknown global
         };
-        if an.is_arrow(f) {
-            an.unsupported
-                .push((r.span, "`arguments` in an arrow function"));
-        } else if an.classes.contains_key(&f) {
+        if an.classes.contains_key(&f) {
             an.unsupported
                 .push((r.span, "`arguments` in a class constructor or field"));
         } else {
             an.uses_arguments.insert(f);
+            for a in chain {
+                captures.entry(a).or_default().insert(Cap::Arguments);
+            }
         }
     }
 

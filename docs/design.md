@@ -49,7 +49,8 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   values. See `crates/backend/src/props.rs`, `crates/lower/src/classes.rs`.)
   (T38: a `function` using `new.target` (itself or in its arrows, which capture it like `this`) takes it as a hidden
   param after `this` (`undefined` in calls) and gets its own construct entry `f$construct` (`FnKind::OrdinaryWith`):
-  CreateThis from the new target, the call, then the object result or `this`.)
+  CreateThis from the new target, the call, then the object result or `this`. T43: arrows capture `arguments` the
+  same way (`Cap::Arguments`, the nearest non-arrow function's object).)
   (T31: a private getter/setter pair is one `$accessor` entry with `PRIVATE | ACCESSOR`, installed like private
   methods; computed class field keys are evaluated with the class into a cell per key, which the constructor
   captures; `static {}` blocks are lowered inline like static field initializers. See `crates/lower/src/classes.rs`.)

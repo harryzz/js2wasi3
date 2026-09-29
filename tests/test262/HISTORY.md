@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-29: T43 `arguments` in arrow functions (targeted run)
+
+- Compiler: arrows capture the enclosing function's `arguments`; captured parameters of a function using
+  `arguments` are no longer `undefined` (an older miscompile).
+- Run: the 659 subset tests naming `arguments`, with `--update` (~4 min at -j 8): 12 unsupported → pass, 1 fail →
+  pass, 0 regressions (4 async-generator tests timed out under load and pass at -j 2). Subset: 26,666 of 28,296 run
+  pass (94.2%).
+
 ## 2026-09-29: T42 global object, `eval`/`Function` of literals (targeted run)
 
 - Compiler: `globalThis`/`global` (the global object; undeclared names through it; writes to undeclared names throw

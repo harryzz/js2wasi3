@@ -2642,6 +2642,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Cap::This => "this".to_string(),
                 Cap::Home => "home".to_string(),
                 Cap::NewTarget => "new.target".to_string(),
+                Cap::Arguments => "arguments".to_string(),
                 Cap::Private(i) => self.an.privates[*i as usize].name.clone(),
                 Cap::PrivMethod(i) => format!("{}.cell", self.an.privates[*i as usize].name),
                 Cap::FieldKey(_) => "key.cell".to_string(),
@@ -2663,6 +2664,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Cap::This => cx.this = Some(l),
                 Cap::Home => cx.home = Some(l),
                 Cap::NewTarget => cx.new_target = Some(l),
+                Cap::Arguments => cx.arguments = Some(l),
                 Cap::Private(i) => {
                     cx.privates.insert(*i, l);
                 }
@@ -2686,6 +2688,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             // `function f(...args)` (T25): each parameter from `args[i]`, then `arguments`.
             let all = cx.func.param(k);
             for (i, p) in params.map_or(&[][..], |ps| &ps.items).iter().enumerate() {
+                // Bound here, before `var_cells`: it must not give them fresh cells (T43).
+                param_syms.extend(p.pattern.get_binding_identifiers().iter().filter_map(|b| b.symbol_id.get()));
                 let v = Expr::intrinsic(
                     Intrinsic::GetProp,
                     vec![Expr::Local(all), jsval_of(Val::num(Expr::f64(i as f64)))],
@@ -2841,6 +2845,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Cap::This => cx.this.map_or_else(Expr::undefined, Expr::Local),
                 Cap::Home => cx.home.map_or_else(Expr::undefined, Expr::Local),
                 Cap::NewTarget => cx.new_target.map_or_else(Expr::undefined, Expr::Local),
+                Cap::Arguments => cx.arguments.map_or_else(Expr::undefined, Expr::Local),
                 Cap::FieldKey(at) => match cx.field_keys.get(&at) {
                     Some(l) => Expr::Local(*l),
                     None => {
