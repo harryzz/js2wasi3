@@ -3,6 +3,17 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-30: T55 node's built-in modules, first slice (full run)
+
+- Compiler: node's built-in modules as CommonJS files shipped with the compiler (`path`, `events`, `util`,
+  `assert`, `os`, `tty`, `process`), the `process`/`performance` globals; lowering fixes: a nested function called
+  with a spread argument no longer gets `f64` parameters, `f?.(...xs)`, `Object.create(proto, descriptors)`;
+  `import()` in programs with CommonJS.
+- Full run on `a-03` (31,235 tests, 1,698 s, -j 36): 3 unsupported → pass
+  (`Reflect/getPrototypeOf/skip-own-properties.js`, `optional-chaining/optional-chain-prod-arguments.js`,
+  `for-in/order-enumerable-shadowed.js`); 1 timeout under load (`statements/function/S13.2.1_A1_T1.js`, passes alone
+  in 5 s, left as pass). Subset: 27,826 of 28,799 run pass (96.6%), 0 regressions.
+
 ## 2026-09-30: T54 CommonJS modules (full run)
 
 - Compiler: CommonJS modules (detection, `require`, interop, computed `require`); two lowering fixes (TDZ cells

@@ -21,6 +21,7 @@ use std::fmt;
 
 mod eval;
 mod link;
+mod node;
 mod packages;
 mod using;
 pub use eval::EvalMap;
@@ -267,10 +268,11 @@ impl<'a> Program<'a> {
             .map_or(name, String::as_str)
     }
 
-    /// Is this offset in code the module linker wrote (namespace objects, T41), which may use
-    /// the prelude?
+    /// Is this offset in code the module linker wrote (namespace objects, T41) or in one of node's
+    /// built-in modules (T55), which may use the prelude?
     pub fn is_generated(&self, offset: u32) -> bool {
-        !self.in_prelude(offset) && self.map.as_ref().is_some_and(|m| offset < m.generated || m.is_inserted(offset))
+        !self.in_prelude(offset)
+            && self.map.as_ref().is_some_and(|m| offset < m.generated || m.is_inserted(offset) || m.is_node_module(offset))
     }
 
     /// Does the reference at this offset name an import (an immutable binding, T41)?

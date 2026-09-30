@@ -147,6 +147,10 @@ pub struct Module {
     pub date_call: Option<FuncId>,
     /// The prelude's `$$dateInspect(d) -> string` (T26): `console.log`'s text of a Date.
     pub date_inspect: Option<FuncId>,
+    /// The prelude's `$$processAtExit(status)` (T55, `process`): the event loop calls it once when
+    /// the program ends (`status`: 1 after an uncaught exception, else 0) to emit `'exit'` and
+    /// apply `process.exitCode`.
+    pub process_at_exit: Option<FuncId>,
     /// The module can make a `Map`/`Set` (T25): `console.log` links their formatting.
     pub maps: bool,
     /// The prelude's `$$StreamReader(h, id)` and `$$StreamPump(iterable, w, id)` (T20 slice 6b,
@@ -886,6 +890,15 @@ pub enum Intrinsic {
     /// `() -> f64`: the system clock in ms since the epoch (T26, `wasi:clocks/system-clock`, commands
     /// only).
     DateNow,
+    /// `() -> jsval`: a string from `wasi:cli/environment` (T55, `process`; commands only): 0 the
+    /// variables (`name\0value\0…`), 1 the arguments (`a\0b\0…`), 2 the initial directory ("" if
+    /// none).
+    Environment(u8),
+    /// `() -> f64`: `wasi:clocks/monotonic-clock.now` in ns (T55: `performance.now`, `hrtime`).
+    MonotonicNow,
+    /// `(code: f64)`: `process.exit` (T55): end the program now (no more JS runs: the exit tag is
+    /// caught only by `run` and the event loop), flush the output, and fail unless `code` is 0.
+    ProcessExit,
     /// `(v, hint) -> jsval`: ToPrimitive (T26); hint 0 default, 1 number, 2 string.
     ToPrimitive,
     /// `(v) -> jsval`: the primitive of a wrapper object, anything else unchanged (T30).
@@ -893,6 +906,9 @@ pub enum Intrinsic {
     /// `(v) -> jsval`: `util.inspect(v)` from depth `d` (T25, `console.log` format strings;
     /// strings quoted).
     InspectAt(u8),
+    /// `(v, depth: i32) -> jsval`: `util.inspect(v)` from a depth known at run time (T55:
+    /// `util.inspect(v, { depth })`: node's depth `n` starts at `2 - n`).
+    InspectDepth,
     /// `(v) -> bool`: node's `hasBuiltInToString(o)` (T25): `o.toString` is missing or comes from
     /// a built-in prototype.
     /// IsConstructor(v) (`bool`, T35): a function with a construct entry.
@@ -1306,6 +1322,7 @@ impl Intrinsic {
             | Intrinsic::StackData
             | Intrinsic::Unwrap
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::InspectDepth => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::BuiltinToString | Intrinsic::IsConstructor | Intrinsic::RegExpBuiltinExec => {
                 (&[JsVal], Some(Bool))
             }
@@ -1403,6 +1420,9 @@ impl Intrinsic {
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
             Intrinsic::DateNow => (&[], Some(F64)),
+            Intrinsic::Environment(_) => (&[], Some(JsVal)),
+            Intrinsic::MonotonicNow => (&[], Some(F64)),
+            Intrinsic::ProcessExit => (&[F64], None),
             Intrinsic::ModuleNew => (&[], Some(JsVal)),
             Intrinsic::ToPrimitive => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::CallImport(_) => (&[JsVal], Some(JsVal)),
@@ -1504,6 +1524,7 @@ impl Intrinsic {
             Intrinsic::BigIntToString => "bigint_to_string",
             Intrinsic::Unwrap => "unwrap",
             Intrinsic::InspectAt(_) => "inspect_at",
+            Intrinsic::InspectDepth => "inspect_depth",
             Intrinsic::BuiltinToString => "builtin_to_string",
             Intrinsic::IsConstructor => "is_constructor",
             Intrinsic::HasOwn => "has_own",
@@ -1598,6 +1619,9 @@ impl Intrinsic {
             Intrinsic::F64FromWords => "f64_from_words",
             Intrinsic::RandomSeed => "random_seed",
             Intrinsic::DateNow => "date_now",
+            Intrinsic::Environment(_) => "environment",
+            Intrinsic::MonotonicNow => "monotonic_now",
+            Intrinsic::ProcessExit => "process_exit",
             Intrinsic::CallImport(_) => "call_import",
             Intrinsic::StrUnit => "str_unit",
             Intrinsic::StrSub => "str_sub",

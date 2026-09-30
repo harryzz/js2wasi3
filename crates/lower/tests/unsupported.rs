@@ -345,10 +345,8 @@ fn objects() {
         one("export function f(o) { return o instanceof WeakMap; }"),
         "1:44 unsupported: global `WeakMap` (planned: T21)"
     );
-    assert_eq!(
-        one("export function f(o) { return Object.create(o, {}); }"),
-        "1:31 unsupported: `Object.create` with property descriptors (planned: not scheduled)"
-    );
+    // T55: with property descriptors too.
+    lowers("export function f(o) { return Object.create(o, {}); }");
     lowers("export function f(o) { for (o.k in o) {} }");
 }
 

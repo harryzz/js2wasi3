@@ -359,6 +359,16 @@ pub trait Cx {
     fn ignore_unhandled(&mut self) -> bool {
         false
     }
+    /// Does the command use `process.exit` or `process`'s at-exit hook (T55: `host::EXIT_TAG`
+    /// and the ending state)?
+    fn exits(&mut self) -> bool {
+        false
+    }
+    /// The prelude's `$$processAtExit(status)` (T55): its function index, and whether it returns
+    /// a value.
+    fn process_at_exit(&mut self) -> Option<(u32, bool)> {
+        None
+    }
     /// The `Promise` statics implemented by the prelude (T50, `Module::promise_statics`):
     /// (key, code, length).
     fn promise_statics(&mut self) -> Vec<(String, u32, u32)> {

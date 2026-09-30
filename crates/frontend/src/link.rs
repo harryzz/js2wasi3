@@ -26,7 +26,7 @@ use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::symbol::SymbolId;
 
-use crate::{Allocator, Diagnostic, Diagnostics, Program, line_col, packages, parse};
+use crate::{Allocator, Diagnostic, Diagnostics, Program, line_col, node, packages, parse};
 
 /// Where each part of a joined source came from.
 #[derive(Debug, Clone, Default)]
@@ -67,6 +67,13 @@ impl SourceMap {
     pub fn is_inserted(&self, offset: u32) -> bool {
         let k = self.segments.partition_point(|s| s.at <= offset);
         k > 0 && !self.segments[k - 1].copied
+    }
+
+    /// Is the text at this joined offset from one of node's built-in modules (T55), whose code may
+    /// use the prelude?
+    pub fn is_node_module(&self, offset: u32) -> bool {
+        let k = self.segments.partition_point(|s| s.at <= offset);
+        k > 0 && node::is_module(&self.files[self.segments[k - 1].file as usize].0)
     }
 
     /// The file, 1-based line and column of a joined offset.
@@ -618,6 +625,10 @@ fn absolute(path: &str) -> String {
 
 /// A module's absolute path (symlinks resolved, as node does) and its directory.
 fn abs_file_dir(path: &str) -> (String, String) {
+    if node::is_module(path) {
+        // A built-in (T55): `require.resolve("path")` is `"path"`, as in node.
+        return (path["node:".len()..].to_string(), ".".to_string());
+    }
     let abs = std::fs::canonicalize(path)
         .or_else(|_| std::path::absolute(path))
         .map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned());
@@ -811,8 +822,19 @@ impl<'a> Graph<'a, '_> {
         });
     }
 
-    /// How node runs the file at `path` (T54).
+    /// A module's text: a file, or a node built-in's shipped source (T55, `node:path`).
+    fn read(&mut self, path: &str) -> std::io::Result<String> {
+        match node::source(path) {
+            Some(s) => Ok(s.to_string()),
+            None => self.host.read(path),
+        }
+    }
+
+    /// How node runs the file at `path` (T54). node's built-in modules are CommonJS (T55).
     fn format(&mut self, path: &str) -> Format {
+        if node::is_module(path) {
+            return Format::Cjs;
+        }
         if path.ends_with(".mjs") {
             return Format::Esm;
         }
@@ -981,14 +1003,20 @@ impl<'a> Graph<'a, '_> {
                 let dir = &from[..from.rfind('/').map_or(0, |k| k + 1)];
                 let joined = if spec.starts_with('/') { spec.clone() } else { format!("{dir}{spec}") };
                 packages::load_as_file_or_directory(self.host, &normalize(&joined), spec.ends_with('/')).ok_or(None)
+            } else if let Some(path) = node::path(&spec) {
+                Ok(path)
             } else if packages::is_builtin(spec.strip_prefix("node:").unwrap_or(&spec)) || spec.starts_with("node:") {
                 // A build error where it always runs; elsewhere (`try { require("util") } catch`,
                 // optional features) thrown when it runs, as `import()` of one does.
                 if always {
-                    self.diag(m, span, format!("unsupported: node's built-in module `{spec}` (planned: F200)"), None);
+                    self.diag(m, span, format!("unsupported: node's built-in module `{spec}` (planned: F238)"), None);
                     continue;
                 }
-                let message = format!("node's built-in module '{spec}' isn't available in js2wasi3 (planned: F200)");
+                let message = if packages::is_builtin(spec.strip_prefix("node:").unwrap_or(&spec)) {
+                    format!("node's built-in module '{spec}' isn't available in js2wasi3 (planned: F238)")
+                } else {
+                    format!("No such built-in module: {spec}")
+                };
                 Err(Some(packages::Failure { code: "ERR_UNKNOWN_BUILTIN_MODULE", message }))
             } else {
                 let from = &self.modules[m].p.path;
@@ -1010,7 +1038,7 @@ impl<'a> Graph<'a, '_> {
             }
             let k = match self.index.get(&path) {
                 Some(&k) => Some(k),
-                None => match self.host.read(&path) {
+                None => match self.read(&path) {
                     Ok(text) if path.ends_with(".json") => self.load_cjs_json(path.clone(), &text)?,
                     Ok(text) => Some(self.load(path.clone(), &text)?),
                     Err(_) => None,
@@ -1114,8 +1142,14 @@ impl<'a> Graph<'a, '_> {
                 let [Part::Lit(first), ..] = &pat[..] else { continue };
                 if !is_relative(first) {
                     // A package (slice 5): resolved now, looked up by the importer's directory
-                    // and the specifier. A `node:` or other URL specifier rejects when it runs.
-                    if pat.len() == 1 && !first.contains(':') {
+                    // and the specifier. A `node:` or other URL specifier rejects when it runs,
+                    // unless it's a built-in js2wasi3 has (T55).
+                    let builtin = if pat.len() == 1 { node::path(first) } else { None };
+                    if let Some(path) = builtin {
+                        // Keyed by the name without `node:` (the run time strips it too).
+                        let name = first.strip_prefix("node:").unwrap_or(first);
+                        self.pending.push((format!("{}\n{name}", absolute_dir(&dir)), path));
+                    } else if pat.len() == 1 && !first.contains(':') {
                         let key = format!("{}\n{first}", absolute_dir(&dir));
                         let from = absolute(&self.modules[m].p.path);
                         let failed = |message: String, code: &str| ("Error".to_string(), message, code.to_string());
@@ -1148,7 +1182,7 @@ impl<'a> Graph<'a, '_> {
         let json = path.ends_with(".json");
         let k = match self.index.get(&path) {
             Some(&k) => k,
-            None => match self.host.read(&path) {
+            None => match self.read(&path) {
                 Ok(text) => match self.load_file(path.clone(), &text, json)? {
                     Some(k) => k,
                     None => return Ok(()),
@@ -1312,7 +1346,7 @@ impl<'a> Graph<'a, '_> {
         if let Some(&k) = self.index.get(&path) {
             return Ok(Some(k));
         }
-        match self.host.read(&path) {
+        match self.read(&path) {
             Ok(text) => self.load_file(path, &text, json),
             Err(e) => {
                 let help = (!spec.ends_with(".js") && !spec.ends_with(".mjs"))
@@ -1342,11 +1376,14 @@ impl<'a> Graph<'a, '_> {
             };
             return Some(Request::File(normalize(&joined)));
         }
+        if let Some(path) = node::path(spec) {
+            return Some(Request::File(path));
+        }
         if let Some(name) = spec.strip_prefix("node:") {
             self.diag(
                 m,
                 span,
-                format!("unsupported: node's built-in module `node:{name}` (planned: not scheduled)"),
+                format!("unsupported: node's built-in module `node:{name}` (planned: F238)"),
                 None,
             );
             return None;
@@ -1358,7 +1395,7 @@ impl<'a> Graph<'a, '_> {
             self.diag(
                 m,
                 span,
-                format!("unsupported: node's built-in module `{spec}` (planned: not scheduled)"),
+                format!("unsupported: node's built-in module `{spec}` (planned: F238)"),
                 None,
             );
             return None;
@@ -1472,7 +1509,10 @@ impl<'a> Graph<'a, '_> {
             if !self.modules[m].cjs {
                 continue;
             }
-            let (names, reexports) = cjs_exports(&self.modules[m].p);
+            let (names, reexports) = match node::exports(&self.modules[m].p.path) {
+                Some(names) => (names.iter().map(|n| n.to_string()).collect(), Vec::new()),
+                None => cjs_exports(&self.modules[m].p),
+            };
             let targets = reexports
                 .iter()
                 .filter_map(|spec| self.modules[m].cjs_requests.iter().find(|(s, _)| s == spec).and_then(|(_, t)| t.as_ref().ok().copied()))
@@ -1501,7 +1541,11 @@ impl<'a> Graph<'a, '_> {
             names.retain(|n| n != "default" && n != "module.exports");
             names.sort();
             names.dedup();
-            let mut locals = vec![("default".to_string(), Binding::CjsValue(m)), ("module.exports".to_string(), Binding::CjsValue(m))];
+            let mut locals = vec![("default".to_string(), Binding::CjsValue(m))];
+            // A node built-in's namespace has no `'module.exports'` (T55).
+            if !node::is_module(&self.modules[m].p.path) {
+                locals.push(("module.exports".to_string(), Binding::CjsValue(m)));
+            }
             locals.extend(names.iter().enumerate().map(|(i, name)| (name.clone(), Binding::CjsNamed(m, i))));
             self.modules[m].locals = locals;
             self.modules[m].cjs_names = names;
@@ -2690,6 +2734,28 @@ mod tests {
             ("/w/node_modules/c/index.js", "module.exports = 1;\n"),
         ]);
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn node_builtins() {
+        // T55: `x` and `node:x` are one CommonJS module at `node:x`, whose named exports come from
+        // `node.rs`'s list (no `'module.exports'`); its code may use the prelude.
+        let l = join(&[(
+            "/w/main.js",
+            "import p, { join } from 'node:path';\nimport q from 'path';\nimport { env } from 'process';\nconsole.log(p === q, join, env);\n",
+        )])
+        .unwrap();
+        assert_eq!(l.source.matches("function cjs$").count(), 2, "{}", l.source);
+        assert!(l.source.contains("\"path\", \".\""), "{}", l.source);
+        assert!(!l.source.contains("'module.exports'") && !l.source.contains("\"module.exports\""), "{}", l.source);
+        let map = l.map.unwrap();
+        let at = l.source.find("$$errInvalidArgType").unwrap() as u32;
+        assert!(map.is_node_module(at) && !map.is_node_module(l.source.find("console.log(").unwrap() as u32));
+        // `require` of one js2wasi3 lacks: a build error where it always runs, else node's error.
+        let e = join(&[("/w/main.js", "import 'fs';\n")]).err().unwrap().to_string();
+        assert!(e.contains("unsupported: node's built-in module `fs` (planned: F238)"), "{e}");
+        let l = join(&[("/w/main.cjs", "try { require('node:nope'); } catch {}\n")]).unwrap();
+        assert!(l.source.contains("No such built-in module: node:nope"), "{}", l.source);
     }
 
     #[test]

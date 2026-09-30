@@ -263,6 +263,17 @@ a specifier the build can't work out isn't a build error (CommonJS code does it 
 only what the build has, else node's error plus a line pointing at `--include`. Likewise `require` of a node
 built-in is a build error only where it always runs (module top level, not in `try` or a function), else
 `ERR_UNKNOWN_BUILTIN_MODULE` when it runs.)
+(T55: **node's built-in modules** are CommonJS files shipped with the compiler (`crates/frontend/node/<name>.js`,
+listed in `frontend/src/node.rs`), which the linker loads at the path `node:<name>` for both `x` and `node:x`, so
+`require`, `import`, `import()` (table key `dir\nx`; the run time drops a `node:` prefix it finds there, in an
+`__intrinsic_cjs_mode()` block) and the interop above work unchanged, with one module object per built-in. Their code
+may use the prelude and its intrinsics like the linker's generated code (`SourceMap::is_node_module` →
+`Program::is_generated`), doesn't make functions keep their source text (`Prelude::to_string`: it named whole
+modules' text as string constants), and their namespaces have every listed property as a named export and no
+`'module.exports'` (`node::exports`, for modules whose `module.exports` the lexer can't see). `require.resolve("path")`
+is `"path"`. They're ports of node 24's lib where it's pure JS (`path`'s POSIX half, `events`, parts of `util` and
+`assert`), else our own (`os`: placeholders for a Linux-like host; `tty`: `isatty` false). Built-ins js2wasi3 lacks keep
+T54's rule (a build error where it always runs); unknown `node:x` is node's `No such built-in module`.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
@@ -420,6 +431,20 @@ members (`console.table`, …) are build errors. `builtins/uri.js`: `encodeURI(C
 buffers); a `DataCloneError` is an `Error` whose prototype is a small `DOMException.prototype` (`code` 25, own
 `name`), printed as node's `DOMException [DataCloneError]: … could not be cloned.`; a program naming
 `structuredClone` keeps function source text for that message.)
+(T55: **`process`** and **`performance`** are objects made on first use like `console` (`$$Process()`,
+`$$Performance()` in `builtins/process.js`; commands only), linked where the code names them (`process.nextTick` alone
+stays T25's direct path); `require("process")` is the same object. `env`, `argv` and `cwd()` come from
+`wasi:cli/environment` (`Intrinsic::Environment(k)`: one NUL-separated string per call, the imports only in programs
+that use them); `argv` is [WASI arg 0, the entry's absolute path at build time, the WASI arguments after the first].
+`platform` is `"linux"` (packages take their POSIX paths; node has no WASI platform), `arch` `"wasm32"`, `version`
+node 24.21.0's. It has its own listeners (`on`, `once`, `emit`, …), not `EventEmitter`'s. `process.exit(code)` emits
+`'exit'` then `Intrinsic::ProcessExit`: a second exception tag (`host::EXIT_TAG`, only in programs using `process`)
+that no JS `catch`/`finally` sees (there's no `catch_all`), caught by `run` and the timer tick, which then run no
+more timers and flush the output; `Module::process_at_exit` is the prelude's `$$processAtExit(status)`, which the
+event loop calls once before flushing (`'exit'` listeners, `process.exitCode`). The exit status is 0 or 1 (`run`'s
+`result`): wasmtime 49 has `wasi:cli/exit.exit-with-code` only behind `-S cli-exit-with-code`. Warnings become
+`'warning'` events but aren't printed (node with `--no-warnings`, which the harness uses; node's text has the pid).
+`performance.now()` and `process.hrtime()` read the monotonic clock (`Intrinsic::MonotonicNow`, ns).)
 
 ### D6. The global object, `eval` and `Function` (T42)
 Every file is an ES module (strict, top-level `this` is `undefined`, top-level declarations aren't global-object
@@ -498,11 +523,14 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 - It builds the compiler once, then runs the fixtures in parallel (10 s timeout each). It prints PASS/FAIL/SKIP with
   the time per fixture (SLOW at ≥ 2 s), the diffs or build diagnostics of failures, and a summary. Exit 1 on any failure.
 - `x.skip` next to `x.js` skips it; its first line is the reason (e.g. libraries: exports, nothing to run).
+- `x.args` next to `x.js` (T55): the program's arguments (one line of shell words), given to both; `x.env`:
+  `NAME=value` lines, added to node's environment and passed to wasmtime with `--env` (wasmtime passes no other
+  variables, so such a fixture prints only these).
 - `x.uncaught` next to `x.js` (T12, F29): the program ends with an uncaught exception. node's stderr (source excerpt,
   stack) is reduced to `Uncaught <message>` by `scripts/node-uncaught.mjs` before the comparison.
 - Fixtures are ES modules for node too (`tests/fixtures/package.json`: `"type": "module"`), so strict mode matches.
   T54: `tests/fixtures/commonjs/` has its own `package.json` without `"type"`; like `modules/`, each `<case>/main.js`
-  there is a program's entry.
+  there is a program's entry. T55: `tests/fixtures/node/` has node's built-in modules.
 - A command fixture is self-checking: it prints its results, and node's output is the expectation, so no `.out`
   file is needed. Keep each one under 2 s. Constructs that aren't supported yet show up as build failures.
 - `cargo test` doesn't run it (it needs node, F30).

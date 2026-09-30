@@ -67,6 +67,9 @@ pub enum Import {
     /// waits for timers). Not in [`IMPORTS`].
     BackpressureInc,
     BackpressureDec,
+    /// `wasi:cli/environment`'s `get-environment`, `get-arguments`, `get-initial-cwd` (T55,
+    /// `process`): like [`Import::InsecureRandom`], only by modules that use them.
+    Environment(u8),
 }
 
 pub const IMPORTS: [Import; 19] = [
@@ -149,6 +152,10 @@ impl Import {
             Import::SystemClockNow => ("wasi:clocks/system-clock@0.3.1", "now".into()),
             Import::BackpressureInc => ("$root", "[backpressure-inc]".into()),
             Import::BackpressureDec => ("$root", "[backpressure-dec]".into()),
+            Import::Environment(k) => (
+                "wasi:cli/environment@0.3.1",
+                ["get-environment", "get-arguments", "get-initial-cwd"][k as usize].into(),
+            ),
         }
     }
 
@@ -171,19 +178,26 @@ impl Import {
             Import::InsecureRandom => (vec![], vec![I64]),
             Import::SystemClockNow => (vec![I32], vec![]),
             Import::BackpressureInc | Import::BackpressureDec => (vec![], vec![]),
+            // The result (a list, or an option) is written at the return pointer.
+            Import::Environment(_) => (vec![I32], vec![]),
         }
     }
 }
 
-/// The imports of a command: [`IMPORTS`], then those it uses of [`Import::InsecureRandom`] and
-/// [`Import::SystemClockNow`].
-pub fn import_list(random: bool, clock: bool) -> Vec<Import> {
+/// The imports of a command: [`IMPORTS`], then those it uses of [`Import::InsecureRandom`],
+/// [`Import::SystemClockNow`] and [`Import::Environment`] (`env[k]`).
+pub fn import_list(random: bool, clock: bool, env: [bool; 3]) -> Vec<Import> {
     let mut list = IMPORTS.to_vec();
     if random {
         list.push(Import::InsecureRandom);
     }
     if clock {
         list.push(Import::SystemClockNow);
+    }
+    for (k, used) in env.into_iter().enumerate() {
+        if used {
+            list.push(Import::Environment(k as u8));
+        }
     }
     list
 }
@@ -244,6 +258,13 @@ const G_WS: u32 = STREAMS * STREAM_GLOBALS;
 const G_ERR: u32 = G_WS + 1;
 /// Number of host globals (all `(mut i32)`, initially 0).
 pub const GLOBALS: u32 = G_ERR + 1;
+/// With `process` (T55, [`EXIT_GLOBALS`] more): the program is ending (`process.exit`, or the
+/// `'exit'` listeners ran): no more timers.
+const G_EXITED: u32 = GLOBALS;
+pub const EXIT_GLOBALS: u32 = 1;
+
+/// The exception tag of `process.exit` (T55), after `runtime::TAG`: JS code never catches it.
+pub const EXIT_TAG: u32 = 1;
 
 const PHASE_OPEN: i32 = 1;
 const PHASE_WRITING: i32 = 2;
@@ -306,6 +327,15 @@ pub enum Helper {
     Run,
     /// `(event, index, payload: i32) -> i32`: its callback.
     Callback,
+    /// `() -> (ref $string)`: a `wasi:cli/environment` value as a string (T55, see
+    /// `ir::Intrinsic::Environment`).
+    Environment(u8),
+    /// `(code: f64)`: `process.exit` (T55): the program is ending; fail unless `code` is 0; throw
+    /// [`EXIT_TAG`].
+    Exit,
+    /// `()`: the program ends (T55): once, call the prelude's `$$processAtExit(status)` (the
+    /// `'exit'` listeners, `process.exitCode`), catching its exceptions and exit.
+    AtExit,
 }
 
 impl Helper {
@@ -329,6 +359,11 @@ impl Helper {
             Helper::Disarm => "cancel_wait",
             Helper::Run => "run",
             Helper::Callback => "run_callback",
+            Helper::Environment(0) => "wasi_environment",
+            Helper::Environment(1) => "wasi_arguments",
+            Helper::Environment(_) => "wasi_initial_cwd",
+            Helper::Exit => "process_exit",
+            Helper::AtExit => "process_at_exit",
         }
     }
 
@@ -342,8 +377,10 @@ impl Helper {
             Helper::Pump(_) | Helper::Step(_) | Helper::Flush | Helper::Loop | Helper::Run => {
                 (vec![], vec![I32])
             }
-            Helper::Tick | Helper::Disarm => (vec![], vec![]),
+            Helper::Tick | Helper::Disarm | Helper::AtExit => (vec![], vec![]),
             Helper::Callback => (vec![I32; 3], vec![I32]),
+            Helper::Environment(_) => (vec![], vec![runtime::string_ref()]),
+            Helper::Exit => (vec![ValType::F64], vec![]),
         }
     }
 
@@ -473,10 +510,16 @@ impl Helper {
                     .collect();
                 const D: u32 = 0;
                 const ST: u32 = 1;
+                let exits = cx.exits();
+                let at_exit = cx.process_at_exit().is_some().then(|| cx.helper(runtime::Helper::Host(Helper::AtExit)));
                 let mut f = Function::new([(1, ValType::I64), (1, ValType::I32)]);
                 let mut s = f.instructions();
                 s.loop_(BlockType::Empty);
                 s.global_get(err).i32_eqz();
+                if exits {
+                    // T55: no timers once the program is ending (`process.exit`).
+                    s.global_get(base + G_EXITED).i32_eqz().i32_and();
+                }
                 s.call(next).local_tee(D).i64_const(0).i64_ge_s();
                 s.i32_and();
                 s.if_(BlockType::Empty);
@@ -516,6 +559,9 @@ impl Helper {
                 }
                 s.end();
                 s.end();
+                if let Some(at_exit) = at_exit {
+                    s.call(at_exit);
+                }
                 s.call(disarm);
                 s.call(flush);
                 s.end();
@@ -526,18 +572,16 @@ impl Helper {
                 let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
                 let text = cx.helper(runtime::Helper::Prom(promise::Helper::UnhandledText));
                 let report = cx.helper(runtime::Helper::Host(Helper::Report));
+                let exits = cx.exits();
                 const R: u32 = 0;
                 let mut f = Function::new([(1, runtime::jsval())]);
                 let mut s = f.instructions();
                 s.call(im.get(Import::ClockNow)).global_set(G_LOOP_NOW);
                 s.block(BlockType::Result(runtime::jsval()));
-                s.try_table(
-                    BlockType::Empty,
-                    [Catch::One {
-                        tag: runtime::TAG,
-                        label: 0,
-                    }],
-                );
+                if exits {
+                    s.block(BlockType::Empty);
+                }
+                s.try_table(BlockType::Empty, catches(exits));
                 s.call(run_due).local_tee(R).ref_is_null().i32_eqz();
                 s.if_(BlockType::Empty);
                 s.local_get(R).call(text).call(report);
@@ -545,6 +589,11 @@ impl Helper {
                 s.return_();
                 s.end();
                 s.unreachable();
+                if exits {
+                    // `process.exit` in a timer (T55).
+                    s.end();
+                    s.return_();
+                }
                 s.end();
                 s.call(uncaught);
                 s.end();
@@ -578,18 +627,16 @@ impl Helper {
                 let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
                 let text = cx.helper(runtime::Helper::Prom(promise::Helper::UnhandledText));
                 let report = cx.helper(runtime::Helper::Host(Helper::Report));
+                let exits = cx.exits();
                 const R: u32 = 0;
                 let mut f = Function::new([(1, runtime::jsval())]);
                 let mut s = f.instructions();
                 s.call(im.get(Import::WaitableSetNew)).global_set(ws);
                 s.block(BlockType::Result(runtime::jsval()));
-                s.try_table(
-                    BlockType::Empty,
-                    [Catch::One {
-                        tag: runtime::TAG,
-                        label: 0,
-                    }],
-                );
+                if exits {
+                    s.block(BlockType::Empty);
+                }
+                s.try_table(BlockType::Empty, catches(exits));
                 s.call(main);
                 if main_result && cx.ignore_unhandled() {
                     // `--unhandled-rejections=none` (T50): the entry's evaluation promise is marked
@@ -619,9 +666,61 @@ impl Helper {
                 s.local_get(R).call(text).call(report);
                 s.end();
                 s.call(flush).return_();
+                if exits {
+                    // `process.exit` (T55): straight to flushing.
+                    s.end();
+                    s.call(flush).return_();
+                }
                 s.end();
                 s.call(uncaught);
                 s.call(flush);
+                s.end();
+                f
+            }
+            Helper::Environment(k) => {
+                let realloc = cx.helper(runtime::Helper::Abi(abi::Helper::Realloc));
+                let utf8 = cx.helper(runtime::Helper::Abi(abi::Helper::Utf8ToString));
+                let concat = cx.helper(runtime::Helper::Concat);
+                let (empty, nul) = (cx.str(""), cx.str("\0"));
+                environment(im, k, realloc, utf8, concat, empty, nul)
+            }
+            Helper::Exit => {
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.i32_const(1).global_set(base + G_EXITED);
+                s.local_get(0).f64_const(0.0.into()).f64_ne();
+                s.if_(BlockType::Empty);
+                s.i32_const(1).global_set(err);
+                s.end();
+                s.throw(EXIT_TAG);
+                s.end();
+                f
+            }
+            Helper::AtExit => {
+                let (hook, result) = cx.process_at_exit().expect("the prelude's $$processAtExit");
+                let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.global_get(base + G_EXITED);
+                s.if_(BlockType::Empty);
+                s.return_();
+                s.end();
+                s.i32_const(1).global_set(base + G_EXITED);
+                s.block(BlockType::Result(runtime::jsval()));
+                s.block(BlockType::Empty);
+                s.try_table(BlockType::Empty, catches(true));
+                s.global_get(err).ref_i31().call(hook);
+                if result {
+                    s.drop();
+                }
+                s.return_();
+                s.end();
+                s.unreachable();
+                s.end();
+                // `process.exit` in an `'exit'` listener.
+                s.return_();
+                s.end();
+                s.call(uncaught);
                 s.end();
                 f
             }
@@ -864,6 +963,85 @@ fn step(
     s.end();
     s.local_get(RC).call(closed);
     s.i32_const(0);
+    s.end();
+    f
+}
+
+/// The catch clauses around JS code the host runs: the JS exception tag (to the second enclosing
+/// block when `exits`), and `process.exit`'s tag (to the innermost, T55).
+fn catches(exits: bool) -> Vec<Catch> {
+    let mut c = vec![Catch::One {
+        tag: runtime::TAG,
+        label: exits as u32,
+    }];
+    if exits {
+        c.push(Catch::One {
+            tag: EXIT_TAG,
+            label: 0,
+        });
+    }
+    c
+}
+
+/// [`Helper::Environment`]: call `get-environment` (0), `get-arguments` (1) or `get-initial-cwd`
+/// (2) with a return area from `cabi_realloc` and make one string of the result: the strings each
+/// followed by a NUL (a variable is its name and value), or the directory ("" for `none`).
+fn environment(im: &Imports, k: u8, realloc: u32, utf8: u32, concat: u32, empty: u32, nul: u32) -> Function {
+    const RET: u32 = 0;
+    const PTR: u32 = 1;
+    const LEN: u32 = 2;
+    const I: u32 = 3;
+    const OUT: u32 = 4;
+    let mem = |offset: u64| MemArg {
+        offset,
+        align: 2,
+        memory_index: 0,
+    };
+    let mut f = Function::new([
+        (4, ValType::I32),
+        (
+            1,
+            ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
+                heap_type: runtime::string(),
+            }),
+        ),
+    ]);
+    let mut s = f.instructions();
+    s.i32_const(0).i32_const(0).i32_const(4).i32_const(12).call(realloc).local_set(RET);
+    s.local_get(RET).call(im.get(Import::Environment(k)));
+    if k == 2 {
+        // `option<string>`: the discriminant, then the string at 4.
+        s.local_get(RET).i32_load8_u(mem8(0)).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.global_get(empty).return_();
+        s.end();
+        s.local_get(RET).i32_load(mem(4));
+        s.local_get(RET).i32_load(mem(8));
+        s.call(utf8);
+        s.end();
+        return f;
+    }
+    let (stride, strings) = if k == 0 { (16, 2) } else { (8, 1) };
+    s.local_get(RET).i32_load(mem(0)).local_set(PTR);
+    s.local_get(RET).i32_load(mem(4)).local_set(LEN);
+    s.global_get(empty).local_set(OUT);
+    s.block(BlockType::Empty);
+    s.loop_(BlockType::Empty);
+    s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+    for j in 0..strings {
+        s.local_get(OUT).ref_as_non_null();
+        s.local_get(PTR).i32_load(mem(8 * j));
+        s.local_get(PTR).i32_load(mem(8 * j + 4));
+        s.call(utf8).call(concat);
+        s.global_get(nul).call(concat).local_set(OUT);
+    }
+    s.local_get(PTR).i32_const(stride).i32_add().local_set(PTR);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0);
+    s.end();
+    s.end();
+    s.local_get(OUT).ref_as_non_null();
     s.end();
     f
 }

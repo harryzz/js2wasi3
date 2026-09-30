@@ -232,7 +232,7 @@ function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
   // module found in the table, evaluated, and the promise resolved with its namespace.
   $$moduleImport = (k, specifier, options) => {
     if (__intrinsic_cjs_mode()) {
-      if (options === $$moduleRequireToken) return evaluate(k);
+      if (options !== undefined && options === $$moduleRequireToken) return evaluate(k);
     }
     let resolve;
     let reject;
@@ -277,6 +277,15 @@ function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
     }
     const [dir, from] = paths[k];
     let entry;
+    if (__intrinsic_cjs_mode()) {
+      // A node built-in js2wasi3 has (T55; they're CommonJS) is in the table like a package,
+      // under its name without `node:`.
+      if (spec.startsWith("node:")) {
+        for (let i = 0; i < table.length; i++) {
+          if (table[i][0] === dir + "\n" + spec.slice(5)) spec = spec.slice(5);
+        }
+      }
+    }
     if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/")) {
       const key = $$normalizePath(spec.startsWith("/") ? spec : dir + spec);
       for (let i = 0; i < table.length; i++) {

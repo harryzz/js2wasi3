@@ -92,6 +92,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             bail!("internal error: the prelude's $$dateInspect must be (jsval) -> jsval");
         }
     }
+    if let Some(f) = module.process_at_exit {
+        let f = module.function(f);
+        if f.params != 1 || f.locals[0].ty != Type::JsVal || f.result.is_some_and(|t| t != Type::JsVal) {
+            bail!("internal error: the prelude's $$processAtExit must be (jsval) -> jsval?");
+        }
+    }
 
     // A command (`wasi:cli/run`) always has the JS runtime and memory (for output buffers), a
     // library with `init` the runtime (its globals come after the runtime's, T20).
@@ -120,17 +126,23 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     let n = module.functions.len() as u32;
     // Imported functions come first in the function index space.
-    let (mut random, mut clock) = (false, false);
+    let (mut random, mut clock, mut env, mut exits) = (false, false, [false; 3], false);
     for f in &module.functions {
         visit_exprs(&f.body, &mut |x| {
             if let Expr::Intrinsic { op, .. } = x {
                 random |= *op == Intrinsic::RandomSeed;
                 clock |= *op == Intrinsic::DateNow;
+                if let Intrinsic::Environment(k) = op {
+                    env[*k as usize] = true;
+                }
+                exits |= *op == Intrinsic::ProcessExit;
             }
         });
     }
+    // `process` (T55): `process.exit`'s tag and the ending state (a host global).
+    let exits = command.is_some() && (exits || module.process_at_exit.is_some());
     let import_list = if command.is_some() {
-        host::import_list(random, clock)
+        host::import_list(random, clock, env)
     } else {
         Vec::new()
     };
@@ -164,7 +176,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     );
     let host_base = runtime_globals + abi as u32;
     let host_globals = if command.is_some() {
-        host::GLOBALS
+        host::GLOBALS + exits as u32 * host::EXIT_GLOBALS
     } else if module.init.is_some() || module.exports.iter().any(|x| x.sig.is_async) {
         abi::LIB_GLOBALS
     } else {
@@ -190,6 +202,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     let mut e = Emitter {
         scratch_f64: 0,
         m: module,
+        exits,
         imports: host::Imports {
             base: lifted.len() as u32,
             list: import_list.clone(),
@@ -263,6 +276,13 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         tags.tag(TagType {
             kind: TagKind::Exception,
             func_type_idx: e.type_id(vec![runtime::jsval()], vec![]),
+        });
+    }
+    if exits {
+        // `host::EXIT_TAG` (T55).
+        tags.tag(TagType {
+            kind: TagKind::Exception,
+            func_type_idx: e.type_id(vec![], vec![]),
         });
     }
     let mut funcs = FunctionSection::new();
@@ -777,6 +797,8 @@ enum Frame {
 
 struct Emitter<'m> {
     m: &'m ir::Module,
+    /// The command uses `process.exit` or `process`'s at-exit hook (T55).
+    exits: bool,
     /// The current function's scratch `f64` local (the inline ToInt32 fast path).
     scratch_f64: u32,
     imports: host::Imports,
@@ -871,6 +893,16 @@ impl runtime::Cx for Emitter<'_> {
 
     fn ignore_unhandled(&mut self) -> bool {
         self.m.ignore_unhandled
+    }
+
+    fn exits(&mut self) -> bool {
+        self.exits
+    }
+
+    fn process_at_exit(&mut self) -> Option<(u32, bool)> {
+        self.m
+            .process_at_exit
+            .map(|f| (self.func_base + f.0, self.m.function(f).result.is_some()))
     }
 
     fn promise_statics(&mut self) -> Vec<(String, u32, u32)> {
@@ -1637,6 +1669,10 @@ impl Emitter<'_> {
                             .i32_wrap_i64();
                         return Ok(true);
                     }
+                    Intrinsic::MonotonicNow => {
+                        s.call(self.imports.get(host::Import::ClockNow)).f64_convert_i64_u();
+                        return Ok(true);
+                    }
                     Intrinsic::DateNow => {
                         // `now() -> instant { seconds: s64, nanoseconds: u32 }`, in memory (T26):
                         // seconds * 1000 + floor(nanoseconds / 1e6).
@@ -1734,6 +1770,7 @@ impl Emitter<'_> {
                     | Intrinsic::F64FromWords
                     | Intrinsic::RandomSeed
                     | Intrinsic::DateNow
+                    | Intrinsic::MonotonicNow
                     | Intrinsic::CallImport(_)
                     | Intrinsic::StrUnit
                     | Intrinsic::StrNew
@@ -1775,6 +1812,8 @@ impl Emitter<'_> {
                     Intrinsic::ConsoleWrite { stderr } => {
                         H::Host(host::Helper::Append(*stderr as u32))
                     }
+                    Intrinsic::Environment(k) => H::Host(host::Helper::Environment(*k)),
+                    Intrinsic::ProcessExit => H::Host(host::Helper::Exit),
                     Intrinsic::NewError(k) => H::Obj(object::Helper::NewError(*k)),
                     Intrinsic::NewObject => H::Obj(object::Helper::NewObject),
                     Intrinsic::GetProp => H::Obj(object::Helper::Get),
@@ -1800,6 +1839,7 @@ impl Emitter<'_> {
                     Intrinsic::ModuleNew => H::Obj(object::Helper::ModuleNew),
                     Intrinsic::ToPrimitive => H::Obj(object::Helper::ToPrimitiveValue),
                     Intrinsic::InspectAt(d) => H::Fmt(inspect::Helper::At(*d)),
+                    Intrinsic::InspectDepth => H::Fmt(inspect::Helper::AtDepth),
                     Intrinsic::BuiltinToString => H::Obj(object::Helper::BuiltinToString),
                     Intrinsic::IsConstructor => H::Func(func::Helper::IsConstructor),
                     Intrinsic::WellKnownSymbol(k) => H::WellKnownSymbol(*k),

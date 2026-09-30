@@ -94,6 +94,11 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   conditions, computed `require` of files known at build time (patterns, `--include`), and interop both ways
   (`import x from "./a.cjs"` with node's named exports, `require("./esm.mjs")`); compiled as strict code. tsc's
   CommonJS output works.
+- node's built-in modules, first slice (T55): `path` (POSIX), `events` (`EventEmitter`), `util` (`format`,
+  `inspect`, `inherits`, `promisify`, `callbackify`, `deprecate`, `types`, `isDeepStrictEqual`), `assert`, `os`,
+  `tty`, `process`, through `require`, `import`, `node:` and `import()`; the `process` global (`env`, `argv`,
+  `exit`/`exitCode`, `'exit'` listeners, `hrtime`, `stdout.write`, …, from `wasi:cli/environment`) and
+  `performance.now()`. Packages such as `semver`, `lru-cache`, `inherits`, `minimist` build and match node.
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
@@ -101,8 +106,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   (completion values, the caller's scope, SyntaxErrors at the call); code built at run time can't be (`eval(x)` is
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
-Not yet: many built-ins (`WeakMap`, `Intl`), sloppy-mode CommonJS semantics, node's built-in
-modules (`node:fs`, `process`), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+Not yet: many built-ins (`WeakMap`, `Intl`), sloppy-mode CommonJS semantics, most of node's built-in
+modules (`fs`, `buffer`/`Buffer`, `stream`, `crypto`, `child_process`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

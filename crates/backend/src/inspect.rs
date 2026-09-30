@@ -69,6 +69,8 @@ pub enum Helper {
     /// `(v) -> jsval`: `util.inspect(v)` from depth `d`, strings quoted, cycle tracking reset
     /// (T25: `console.log` format strings).
     At(u8),
+    /// `(v, d: i32) -> jsval`: [`Helper::At`] from a depth known at run time (T55).
+    AtDepth,
 }
 
 impl Helper {
@@ -79,6 +81,7 @@ impl Helper {
             Helper::RefOpen => "inspect_ref_open",
             Helper::MapIter => "inspect_map_iterator",
             Helper::At(_) => "inspect_at",
+            Helper::AtDepth => "inspect_at_depth",
             Helper::Array => "inspect_array",
             Helper::Object => "inspect_object",
             Helper::Quote => "inspect_quote",
@@ -103,6 +106,7 @@ impl Helper {
             Helper::RefOpen => (vec![s, v], vec![s]),
             Helper::MapIter => (vec![rt(false, runtime::T_MAPITER), I32, I32], vec![s]),
             Helper::At(_) => (vec![v], vec![v]),
+            Helper::AtDepth => (vec![v, ValType::I32], vec![v]),
             Helper::Array => (vec![rt(false, T_ARRAY), I32, I32], vec![s]),
             Helper::MapSet => (vec![rt(false, runtime::T_MAP), I32, I32], vec![s]),
             Helper::Object => (
@@ -125,13 +129,18 @@ impl Helper {
             Helper::FormatValue => format(cx),
             Helper::RefOpen => ref_open(cx),
             Helper::MapIter => format_map_iter(cx),
-            Helper::At(d) => {
+            Helper::At(_) | Helper::AtDepth => {
                 let format = ih(cx, Helper::Format);
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
                 s.i32_const(0).global_set(runtime::G_INSPECT_SEEN_N);
                 s.i32_const(0).global_set(runtime::G_INSPECT_CIRC_N);
-                s.local_get(0).i32_const(d as i32).i32_const(0).i32_const(1);
+                s.local_get(0);
+                match self {
+                    Helper::At(d) => s.i32_const(d as i32),
+                    _ => s.local_get(1),
+                };
+                s.i32_const(0).i32_const(1);
                 s.call(format);
                 s.end();
                 f

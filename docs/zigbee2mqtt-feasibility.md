@@ -25,7 +25,7 @@ Native addons: `@serialport/bindings-cpp` (serial ports), `unix-dgram` (syslog).
    `winston`, `ajv`), with `__importStar`/`__importDefault` helpers, JSON `require`s and cycles. The converters' lazy
    device loading is `Promise.resolve(\`./devices/${name}\`).then(s => require(s))`: needs T41-style specifier
    patterns (or `--include`) for `require`.
-2. **node's built-in modules (F200).** Counted over the graph: `assert` 75, `fs` 40, `path` 38, `events` 37, `util` 36,
+2. **node's built-in modules (F200; T55 did `assert`, `path`, `events`, `util`, `os`, `tty`, `process`; the rest: F238).** Counted over the graph: `assert` 75, `fs` 40, `path` 38, `events` 37, `util` 36,
    `buffer` 36 (`Buffer.` ~1,500 uses), `stream` 34, `os` 23, `net` 15, `crypto` 13, `http`/`https`/`tls`, `dgram`,
    `child_process`, `tty`, `zlib`, `worker_threads`.
    - pure JS, from npm polyfills compiled with the program: `events`, `buffer`, `stream` (`readable-stream`),

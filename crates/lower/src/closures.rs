@@ -576,15 +576,18 @@ fn static_class(an: &Analysis, scoping: &Scoping, scope: ScopeId, pos: u32) -> O
     None
 }
 
-/// Is the identifier reference at `node` the callee of a (non-optional, non-`new`) call?
+/// Is the identifier reference at `node` the callee of a (non-optional, non-`new`, no spread) call?
 fn is_callee(semantic: &Semantic, node: oxc_semantic::NodeId) -> bool {
     let nodes = semantic.nodes();
     let AstKind::IdentifierReference(id) = nodes.kind(node) else {
         return false;
     };
     match nodes.parent_kind(node) {
+        // A spread call goes through the function's value (T55: its parameters can be anything).
         AstKind::CallExpression(c) => {
-            !c.optional && matches!(&c.callee, Expression::Identifier(x) if x.span == id.span)
+            !c.optional
+                && !c.arguments.iter().any(|a| a.is_spread())
+                && matches!(&c.callee, Expression::Identifier(x) if x.span == id.span)
         }
         _ => false,
     }

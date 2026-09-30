@@ -1208,6 +1208,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.module.date_inspect = Some(func);
                 continue;
             }
+            if name == builtins::PROCESS_AT_EXIT && self.command {
+                // Called by the event loop when the program ends (T55).
+                for p in self.func_params[&func].clone().into_iter().flatten() {
+                    self.observe(Slot::Var(p), Kind::Any);
+                }
+                self.module.process_at_exit = Some(func);
+                continue;
+            }
             if name == builtins::TO_BIGINT && self.module.big_typed {
                 // Called by the runtime with any value (T48: BigInt array element writes).
                 self.module.to_bigint = Some(func);
@@ -3989,6 +3997,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     // `console` as a value (T53).
                     return self.console_value(id.span).map(|e| Val::js(e, Kind::Any));
                 }
+                if let Some(made) = match id.name.as_str() {
+                    "process" => Some(builtins::PROCESS),
+                    "performance" => Some(builtins::PERFORMANCE),
+                    _ => None,
+                } && self.prelude.is_live(made)
+                    && self.scoping.get_reference(id.reference_id()).symbol_id().is_none()
+                {
+                    // `process` and `performance` (T55): objects made on first use, commands only.
+                    if !self.command {
+                        return Err(self.unsupported(id.span, &format!("`{}` in a module with exports", id.name), "later"));
+                    }
+                    return Ok(Val::js(self.prelude_call(made, vec![]), Kind::Any));
+                }
                 if Builtin::parse(id.name.as_str()).is_none()
                     && let Some(func) = self.builtin_global(e)
                 {
@@ -5784,11 +5805,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "date_new" | "date_data" => 1,
             "stack_new" | "async_stack_new" | "stack_data" => 1,
             "date_now" | "module_new" | "module_bodies" => 0,
+            "monotonic_now" | "entry_path" => 0,
+            "environment" | "process_exit" => 1,
             "to_primitive" => 2,
             "to_key" | "object_desc" => 1,
             "set_proto" => 2,
             "call_list" | "construct_list" => 3,
-            "inspect" => 2,
+            "inspect" | "inspect_depth" => 2,
             "unit" | "i32_get" => 2,
             "sub" | "str_set" | "define" | "i32_set" => 3,
             "global_init" => 1,
@@ -5859,6 +5882,46 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             self.module.names.insert("$module".to_string());
             return Ok((Expr::intrinsic(Intrinsic::ModuleNew, vec![]), Call::Intrinsic(Some(Kind::Any))));
         }
+        if name == "monotonic_now" {
+            // ns of `wasi:clocks/monotonic-clock` (T55: `performance.now`, `process.hrtime`).
+            let e = if self.command {
+                Expr::intrinsic(Intrinsic::MonotonicNow, vec![])
+            } else {
+                library_throws("the monotonic clock isn't available in a module with exports yet (js2wasi3)")
+            };
+            return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+        }
+        if name == "entry_path" {
+            // The entry's absolute path at build time (T55: `process.argv[1]`).
+            let path = std::fs::canonicalize(&self.p.path)
+                .map_or_else(|_| self.p.path.clone(), |p| p.to_string_lossy().into_owned());
+            return Ok((Expr::str(&path), Call::Intrinsic(Some(Kind::Str))));
+        }
+        if name == "environment" {
+            // `wasi:cli/environment` (T55): commands only (`process` is rejected elsewhere).
+            let Some(Expression::NumericLiteral(k)) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "`__intrinsic_environment` of a non-literal", "T55"));
+            };
+            let e = if self.command {
+                Expr::intrinsic(Intrinsic::Environment(k.value as u8), vec![])
+            } else {
+                library_throws("`process` isn't available in a module with exports yet (js2wasi3)")
+            };
+            return Ok((e, Call::Intrinsic(Some(Kind::Any))));
+        }
+        if name == "process_exit" {
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = self.expr(cx, e)?;
+            let code = self.num(v, e.span())?;
+            let e = if self.command {
+                Expr::intrinsic(Intrinsic::ProcessExit, vec![code])
+            } else {
+                library_throws("`process.exit` isn't available in a module with exports (js2wasi3)")
+            };
+            return Ok((e, Call::Intrinsic(None)));
+        }
         if name == "date_now" {
             // An import (`wasi:clocks/system-clock`, T26): commands only; in a library, reading the
             // clock throws (the rest of `Date` works).
@@ -5880,6 +5943,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let h = to_i32(self.num(hv, h.span())?);
             let e = Expr::intrinsic(Intrinsic::ToPrimitive, vec![v, h]);
             return Ok((e, Call::Intrinsic(Some(Kind::Any))));
+        }
+        if name == "inspect_depth" {
+            // T55: `util.inspect(v, { depth })`.
+            let (Some(v), Some(d)) = (c.arguments[0].as_expression(), c.arguments[1].as_expression()) else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, v)?);
+            let dv = self.expr(cx, d)?;
+            let d = to_i32(self.num(dv, d.span())?);
+            return Ok((Expr::intrinsic(Intrinsic::InspectDepth, vec![v, d]), Call::Intrinsic(Some(Kind::Str))));
         }
         if name == "inspect" {
             // `util.inspect(v)` from a literal depth (T25; -1: `console.log`'s own).
@@ -6199,6 +6272,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let op = self
             .object_static(&c.callee)
             .expect("checked by the caller");
+        if op == Intrinsic::ObjectCreate
+            && c.arguments.len() > 1
+            && self.prelude.is_live("$$Object_create$value")
+        {
+            // ObjectDefineProperties for the descriptors (T55: the `inherits` package).
+            let args = self.args(cx, &c.arguments, 2)?;
+            return Ok(Val::js(self.prelude_call("$$Object_create$value", args), Kind::Any));
+        }
         if op == Intrinsic::ObjectCreate && c.arguments.len() > 1 {
             return Err(self.unsupported(
                 c.span,
@@ -6480,6 +6561,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         body.push(Stmt::Set(tf, f));
         if c.optional {
             body.push(nullish_exit(tf));
+        }
+        if c.arguments.iter().any(|a| a.is_spread()) {
+            // `f?.(...xs)` (T55: lru-cache): like a spread call.
+            let args = self.spread_args(cx, &c.arguments, c.span)?;
+            return Ok(Val::js(
+                Expr::intrinsic(
+                    Intrinsic::CallList,
+                    vec![Expr::Local(tf), this, args, Expr::str(&self.callee_text(&c.callee))],
+                ),
+                Kind::Any,
+            ));
         }
         let args = self.value_args(cx, &c.arguments)?;
         Ok(Val::js(

@@ -55,12 +55,16 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/uri.js"),
     include_str!("../builtins/clone.js"),
     include_str!("../builtins/cjs.js"),
+    include_str!("../builtins/node.js"),
+    include_str!("../builtins/process.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
 /// `[Symbol.iterator]` (installed with `entries`/`values`) and its iterator's `next`, which the
 /// user's code never names; a RegExp converts to a string through its `toString` (T27).
 const IMPLIED: &[(&str, &[&str])] = &[
+    // The event loop calls it when the program ends (T55).
+    ("$$Process", &["$$processAtExit"]),
     (
         "$$Map",
         &["$$Map_prototype_entries", "$$MapIterator_prototype_next"],
@@ -139,6 +143,18 @@ pub(crate) const DATE_INSPECT: &str = "$$dateInspect";
 
 /// `console` as a value (T53).
 pub(crate) const CONSOLE: &str = "$$Console";
+
+/// The `process` and `performance` globals (T55), and `process`'s at-exit hook.
+pub(crate) const PROCESS: &str = "$$Process";
+pub(crate) const PERFORMANCE: &str = "$$Performance";
+pub(crate) const PROCESS_AT_EXIT: &str = "$$processAtExit";
+
+/// Is the reference `process` (node `id`) the object of `process.nextTick` (T25: lowered without
+/// the `process` object)?
+fn next_tick(p: &Program, id: oxc_semantic::NodeId) -> bool {
+    matches!(p.semantic.nodes().parent_kind(id), AstKind::StaticMemberExpression(m)
+        if !m.optional && m.property.name == "nextTick")
+}
 
 /// The `console` methods lowered directly when called (T53): `Some(stderr)`.
 pub(crate) fn console_stream(method: &str) -> Option<bool> {
@@ -287,9 +303,9 @@ pub(crate) struct Prelude {
     /// Does the user's code name a property `bind` (T25: `Function.prototype.bind` is installed
     /// only then)?
     pub bind: bool,
-    /// Does it name a property `toString` (T25: functions keep their source text for
-    /// `Function.prototype.toString` only then) or `structuredClone` (T53: its error shows the
-    /// function)?
+    /// Does the user's code (not node's built-in modules, T55) name a property `toString` (T25:
+    /// functions keep their source text for `Function.prototype.toString` only then) or
+    /// `structuredClone` (T53: its error shows the function)?
     pub to_string: bool,
     /// Built-in constructors the user's code uses as values (T25: `arr.map(String)`,
     /// `x.constructor === Array`), and `Math`/`JSON`.
@@ -741,7 +757,9 @@ impl Prelude {
             if let Some((name, span)) = prop {
                 if !p.in_prelude(span.start) {
                     out.bind |= name == "bind";
-                    out.to_string |= name == "toString";
+                    // T55: not node's built-in modules (`Object.prototype.toString.call(v)` in
+                    // `util` would keep every function's source text, whole CommonJS modules).
+                    out.to_string |= name == "toString" && !p.is_generated(span.start);
                     out.constructor |= name == "constructor";
                     user_props.insert(name.to_string());
                 }
@@ -809,6 +827,19 @@ impl Prelude {
                         {
                             add(item_of[sym], r.span, &mut roots);
                         }
+                        // T55: `process` other than `process.nextTick` is `$$Process()`,
+                        // `performance` is `$$Performance()`.
+                        let made = match r.name.as_str() {
+                            "process" if !next_tick(p, node.id()) => Some(PROCESS),
+                            "performance" => Some(PERFORMANCE),
+                            _ => None,
+                        };
+                        if let Some(made) = made
+                            && !p.in_prelude(r.span.start)
+                            && let Some(sym) = out.names.get(made)
+                        {
+                            add(item_of[sym], r.span, &mut roots);
+                        }
                         // `Symbol(…)` is `Intrinsic::NewSymbol` (T49: `$$Symbol` is its value's).
                         if (js2wasi3_ir::Builtin::parse(&r.name).is_none()
                             || (called() && r.name != "Symbol"))
@@ -837,8 +868,10 @@ impl Prelude {
                         continue;
                     };
                     // Read as a value, not called: `$$A_b$value` if there is one (T28).
+                    // T55: `Object.create(proto, descriptors)` is a call of the value's function.
                     let called = matches!(p.semantic.nodes().parent_kind(node.id()),
-                        AstKind::CallExpression(c) if c.callee.span() == m.span);
+                        AstKind::CallExpression(c) if c.callee.span() == m.span
+                            && !(name == "$$Object_create" && c.arguments.len() > 1));
                     let value = format!("{name}{VALUE}");
                     if !called && out.names.contains_key(&value) {
                         name = value;

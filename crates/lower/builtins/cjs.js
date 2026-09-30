@@ -150,7 +150,10 @@ function $$cjsRequireFunction(table, k) {
   };
   require.resolve = function resolve(request) {
     const r = find(request);
-    return r[1] === -3 ? r[4] : table[r[1]][1];
+    if (r[1] === -3) return r[4];
+    // A node built-in's filename is its name (T55): `require.resolve("node:path")` keeps `node:`.
+    const filename = table[r[1]][1];
+    return request === "node:" + filename ? request : filename;
   };
   require.main = $$cjsMainModule;
   return require;
@@ -198,30 +201,7 @@ function $$cjsStack(table, k) {
 }
 
 function $$cjsCheckId(id) {
-  if (typeof id !== "string") {
-    let received;
-    if (id === undefined || id === null) received = "Received " + id;
-    else if (typeof id === "function") received = "Received function " + id.name;
-    else if (typeof id === "object") {
-      // `constructor` is readable only when the program names it (T25).
-      const proto = Object.getPrototypeOf(id);
-      let name = proto === null ? "" : proto === Array.prototype ? "Array" : "Object";
-      if (__intrinsic_named("constructor") && proto !== null) {
-        const c = id.constructor;
-        name = typeof c === "function" ? c.name : "";
-      }
-      received = name !== "" ? "Received an instance of " + name : "Received " + String(id);
-    } else {
-      let shown = String(id);
-      if (__intrinsic_bigint_mode()) {
-        if (typeof id === "bigint") shown += "n";
-      }
-      received = "Received type " + typeof id + " (" + shown + ")";
-    }
-    const e = new TypeError('The "id" argument must be of type string. ' + received);
-    e.code = "ERR_INVALID_ARG_TYPE";
-    throw e;
-  }
+  if (typeof id !== "string") throw $$errInvalidArgType("id", "of type string", id);
   if (id === "") {
     const e = new TypeError("The argument 'id' must be a non-empty string. Received ''");
     e.code = "ERR_INVALID_ARG_VALUE";
