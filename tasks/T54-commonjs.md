@@ -126,7 +126,7 @@ node; frontend unit tests (23: `commonjs_detection`, `commonjs_requires`, `commo
 (`cmp.sh`, every fixture built by the old and the new compiler): identical except the CommonJS fixtures and
 `builtins/set-prototype-of.js` (it uses `Object` as a value and names `create`, which is now on it); real
 packages `ms`, `deepmerge`, `fast-deep-equal`, `balanced-match`, `brace-expansion`, `yallist`, `sprintf-js` equal
-node. Targeted test262 (`language/module-code`, `language/import`, `language/export`, 949 tests, laptop -j 4): 594 pass, 9 fail, 9 unsupported, no change from the baseline; the full subset wasn't run.
+node. Targeted test262 (`language/module-code`, `language/import`, `language/export`, 949 tests, laptop -j 4): 594 pass, 9 fail, 9 unsupported, no change from the baseline. Full subset on `a-03` (31,235 tests, 1,691 s): 27,824 of 28,799 run pass (96.6%), 0 regressions (1 load timeout passes alone).
 
 **Unsupported / follow-ups**: F232 (sloppy mode), F233 (`['__proto__']` printing), F234 (`module`/`require`
 extras), F235 (lexer gaps, ESM ⇄ CJS cycles), F236 (computed `require` leftovers), F237 (built-ins the probe
@@ -252,3 +252,4 @@ needed); `process`/`performance` and `require("fs")` & co.: F200/F112.
 - 2026-09-30: targeted test262 `language/module-code language/import language/export`: 594 pass / 9 fail / 9
   unsupported of 949, "No changes since the baseline". Docs (design.md D4/D6/Testing, README, keywords.md),
   follow-ups F232–F237, F194 ticked. Done.
+- 2026-09-30: full test262 subset on `a-03`: 27,824 of 28,799 run pass (96.6%), 0 regressions (`statements/function/S13.2.1_A1_T1.js` timed out under load, passes alone). HISTORY.md updated.

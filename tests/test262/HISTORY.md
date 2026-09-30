@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-30: T54 CommonJS modules (full run)
+
+- Compiler: CommonJS modules (detection, `require`, interop, computed `require`); two lowering fixes (TDZ cells
+  for destructured bindings captured early inside a function; a class expression's own name inside a function).
+  Runner: the work directory's `package.json` has `"type": "module"` (tests stay ES modules under node's detection).
+- Full run on `a-03` (31,235 tests, 1,691 s, -j 36): no changes except 1 timeout under load
+  (`statements/function/S13.2.1_A1_T1.js`, passes alone in 5 s, left as pass). Subset: 27,824 of 28,799 run pass
+  (96.6%), 0 regressions.
+
 ## 2026-09-30: T53 `console` as a value, URI functions, `structuredClone` (full run)
 
 - Compiler: `console` as a value and `console.log(...xs)`; `encodeURI(Component)`/`decodeURI(Component)`, Annex B
