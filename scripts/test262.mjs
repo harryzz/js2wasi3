@@ -342,6 +342,8 @@ async function one(rel, work) {
 // ---- main
 execFileSync("cargo", ["build", "-q", "--release", "-p", "js2wasi3"], { cwd: ROOT, stdio: "inherit" });
 const work = mkdtempSync(join(tmpdir(), "js2wasi3-test262-"));
+// Tests are ES modules (T54: without a `"type"`, node, and js2wasi3, detect CommonJS by the syntax).
+writeFileSync(join(work, "package.json"), '{ "type": "module" }\n');
 const list = [...tests];
 const results = new Map();
 const t0 = Date.now();

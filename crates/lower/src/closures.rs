@@ -493,11 +493,19 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
                 an.captured.insert(sym);
                 Cap::Cell(sym)
             };
-            // Every function from the reference up to (not including) the declaring one.
+            // Every function from the reference up to (not including) the declaring one. A class
+            // expression's own name: its methods' chain skips the class, so up to the function
+            // evaluating the class, which binds the name while making them (T54: CommonJS module
+            // bodies are functions, and bundles write `var X = class X { … }`).
+            let class_owner = self_of
+                .filter(|s| an.classes.contains_key(s))
+                .and_then(|s| scoping.scope_parent_id(s).map(|p| an.fn_at(scoping, p, scoping.symbol_span(sym).start)))
+                .flatten();
             let mut f = from;
             let mut outermost = None;
             while let Some(s) = f
                 && Some(s) != decl_fn
+                && Some(s) != class_owner
             {
                 captures.entry(s).or_default().insert(cap);
                 outermost = Some(s);

@@ -54,6 +54,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/promise.js"),
     include_str!("../builtins/uri.js"),
     include_str!("../builtins/clone.js"),
+    include_str!("../builtins/cjs.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -312,6 +313,10 @@ pub(crate) struct Prelude {
     /// `ArrayBuffer` or detach one)? Then `new ArrayBuffer` is `$$ArrayBuffer$resizable` and the
     /// prelude's `if (__intrinsic_rab_mode()) { … }` blocks are kept.
     pub rab: bool,
+    /// Does the program have CommonJS modules (T54: the linker's generated code calls `$$cjs…`,
+    /// which user code can't name)? The prelude's `if (__intrinsic_cjs_mode()) { … }` blocks are
+    /// kept only then.
+    pub cjs: bool,
     /// Does the user's code have a class with `extends`, or name `construct` (T47, see
     /// `ir::Module::subclassing`)?
     pub subclassing: bool,
@@ -526,6 +531,7 @@ impl Prelude {
             .as_bytes()
             .windows(3)
             .any(|w| w[0] == b'(' && w[1] == b'?' && matches!(w[2], b'i' | b'm' | b's' | b'-'));
+        out.cjs = p.source[..p.user_end as usize].contains("$$cjs");
         // Prelude code in `if (__intrinsic_regexp_mods()) { … }` blocks, when they're dropped.
         // T47/T48: the same for `if (__intrinsic_rab_mode()) { … }`, `__intrinsic_big_typed_mode()`.
         let mut dropped: Vec<Span> = Vec::new();
@@ -533,6 +539,7 @@ impl Prelude {
             ("__intrinsic_regexp_mods", out.regexp_mods),
             ("__intrinsic_rab_mode", out.rab),
             ("__intrinsic_big_typed_mode", out.big_typed),
+            ("__intrinsic_cjs_mode", out.cjs),
         ]
             .into_iter()
             .filter(|(_, keep)| !keep)

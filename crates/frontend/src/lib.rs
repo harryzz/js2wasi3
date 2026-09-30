@@ -270,7 +270,7 @@ impl<'a> Program<'a> {
     /// Is this offset in code the module linker wrote (namespace objects, T41), which may use
     /// the prelude?
     pub fn is_generated(&self, offset: u32) -> bool {
-        self.map.as_ref().is_some_and(|m| offset < m.generated || m.is_inserted(offset))
+        !self.in_prelude(offset) && self.map.as_ref().is_some_and(|m| offset < m.generated || m.is_inserted(offset))
     }
 
     /// Does the reference at this offset name an import (an immutable binding, T41)?

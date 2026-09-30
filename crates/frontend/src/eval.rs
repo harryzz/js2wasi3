@@ -56,6 +56,13 @@ impl Region {
 }
 
 impl EvalMap {
+    /// `layer` (the first text change: a CommonJS wrapper, T54) followed by `rest`'s rounds.
+    pub(crate) fn first(layer: Vec<Region>, rest: Option<EvalMap>) -> EvalMap {
+        let mut layers = vec![layer];
+        layers.extend(rest.into_iter().flat_map(|m| m.layers));
+        EvalMap { layers }
+    }
+
     pub fn original(&self, mut offset: u32) -> u32 {
         for layer in self.layers.iter().rev() {
             let mut shift: i64 = 0;

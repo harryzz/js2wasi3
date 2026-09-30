@@ -229,7 +229,40 @@ the error at run time, as node does. With any `import()` every module is a funct
 up in the table (absolute path → module, namespace), and evaluates it with the same evaluator (the spec's Evaluate,
 one promise per module) one job later. Slice 5: bare specifiers are resolved at build time with node's ESM algorithm
 (`frontend/src/packages.rs`: `node_modules` upwards, `exports`/`imports` with node 24's conditions, legacy `main`);
-CommonJS files and node's built-in modules are rejected.)
+node's built-in modules are rejected.)
+(T54: **CommonJS**. Which files: node's rule (`Format` in `link.rs`): `.mjs` ESM, `.cjs` CommonJS, else the nearest
+`package.json` `"type"`, else syntax detection (ESM syntax = `import`/`export` statements, `import.meta`, top-level
+`await`; a file that only parses as CommonJS, like one with a top-level `return`, is CommonJS). An entry node would run
+as CommonJS that can't tell (no `module`/`exports`/`require`/`__filename`/`__dirname`/`arguments`, no top-level
+`this`) stays an ES module, so such programs keep their bytes. **Strict**: CommonJS is compiled as strict code (a
+measurement of zigbee2mqtt's graph: 81% of CommonJS files, 94% of the bytes, start with `"use strict"`, and none of
+the others uses sloppy-only syntax); sloppy-only syntax is a build error with a hint (F232). **Representation**: a
+file is parsed inside node's wrapper `(function (exports, require, module, __filename, __dirname) {…})` (offsets map
+back through an `EvalMap` layer), and joined as a hoisted `function cjs$k(…)`; its top-level names stay inside it.
+The linker writes a table first, `modules$1 = [[fn, filename, dirname, requests, module, parent]…]`, `requests`
+being the module's static `require("…")`/`require.resolve("…")` specifiers resolved at build time (node's
+LOAD_AS_FILE/LOAD_AS_DIRECTORY; packages with `packages::resolve_require`: the `require` conditions): `[spec, k]`, an
+ES module's `[spec, -3, evaluation index, namespace, filename]`, not found `[spec, -1]` (node's `MODULE_NOT_FOUND`
+when it runs: optional dependencies in `try` work), another resolution error `[spec, -1, code, message]`. JSON files
+are CommonJS `module.exports = <JSON>`. `builtins/cjs.js`: `$$cjsLoad` runs a module once (node's Module._load: a
+cycle sees the partial `module.exports`, a module that throws leaves the cache), `module` objects share a `Module`
+prototype (`parent` getter), `require` is per module (`resolve`, `main`). A CommonJS entry ends with `$$cjsMain(table,
+k)`. **ESM → CommonJS**: each CommonJS module's `locals` are `default`/`'module.exports'` (its `module.exports`) and
+the names `cjs_exports()` finds (an AST version of cjs-module-lexer, its rules probed against node, re-exports
+followed), so ResolveExport and namespaces are unchanged; after the module's function the linker writes `const
+exports$k = $$cjsImport(table, k)` and a snapshot `const` per name, where ESM evaluation reaches it. **CommonJS →
+ESM**: such a program uses the evaluate mode (every module a function); `require` evaluates the module
+synchronously (`$$moduleRequire`, `evaluate(-m - 1)` on the running DFS stack), a graph with top-level `await` is
+`ERR_REQUIRE_ASYNC_MODULE`, the result is the namespace (`__esModule: true` added when it has a default) or its
+`"module.exports"` export. Code for this in shared prelude functions is in `if (__intrinsic_cjs_mode()) { … }`
+blocks (kept when the source has the linker's `$$cjs…` code), which hold no functions and use only what their
+function already captures: the closure analysis runs over dropped blocks too. **Computed `require`**: T41's
+`import()` patterns (`.js`/`.json` added when a pattern has no extension); the matches and `--include`d modules are
+listed in `$$cjsKnown([...])` and found at run time by path (LOAD_AS_FILE suffixes, `index.*`). Unlike `import()`,
+a specifier the build can't work out isn't a build error (CommonJS code does it on paths that don't run): it finds
+only what the build has, else node's error plus a line pointing at `--include`. Likewise `require` of a node
+built-in is a build error only where it always runs (module top level, not in `try` or a function), else
+`ERR_UNKNOWN_BUILTIN_MODULE` when it runs.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
@@ -390,7 +423,7 @@ buffers); a `DataCloneError` is an `Error` whose prototype is a small `DOMExcept
 
 ### D6. The global object, `eval` and `Function` (T42)
 Every file is an ES module (strict, top-level `this` is `undefined`, top-level declarations aren't global-object
-properties), so the global object is only observable through `globalThis`/`global`, `eval` and `Function`.
+properties) or, since T54, a CommonJS module (a function: top-level `this` is `module.exports`, also strict), so the global object is only observable through `globalThis`/`global`, `eval` and `Function`.
 - **Gated**: `ir::Module::global_object` is set when the user's code names `globalThis` or `global` (unresolved), or
   (later slices) compiles `eval`/`Function` code; without it the output is byte-for-byte what it was.
 - **Representation**: an ordinary `$object` made on first use (`$$GlobalObject()` in `builtins/global.js`), with
@@ -468,6 +501,8 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 - `x.uncaught` next to `x.js` (T12, F29): the program ends with an uncaught exception. node's stderr (source excerpt,
   stack) is reduced to `Uncaught <message>` by `scripts/node-uncaught.mjs` before the comparison.
 - Fixtures are ES modules for node too (`tests/fixtures/package.json`: `"type": "module"`), so strict mode matches.
+  T54: `tests/fixtures/commonjs/` has its own `package.json` without `"type"`; like `modules/`, each `<case>/main.js`
+  there is a program's entry.
 - A command fixture is self-checking: it prints its results, and node's output is the expectation, so no `.out`
   file is needed. Keep each one under 2 s. Constructs that aren't supported yet show up as build failures.
 - `cargo test` doesn't run it (it needs node, F30).
@@ -479,7 +514,8 @@ Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
 
 **test262** (T23): `node scripts/test262.mjs [-j N] [--list] [--causes N] [--update] <dir | file | subset>...`
 - test262 is a blobless sparse clone in `test262/` (gitignored) at the commit pinned in `TOOLS.md`: `scripts/fetch-test262.sh`.
-- Each test is compiled as one ES module (always strict) after its harness (`print` shim, `sta.js`, `assert.js`,
+- Each test is compiled as one ES module (always strict; T54: the work directory's `package.json` says `"type":
+  "module"`, since node's syntax detection would make some tests CommonJS) after its harness (`print` shim, `sta.js`, `assert.js`,
   `doneprintHandle.js` for async, `includes`) and run with `wasmtime run -Sp3` (no compile cache, opt-level 0,
   single-pass register allocator: compiling dominates). Statuses: pass / fail / unsupported (build rejected with
   `unsupported:`) / crash (compiler panic) / timeout / skip (`noStrict`, `raw`, `_FIXTURE`, module resolution, `$262`,

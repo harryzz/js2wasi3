@@ -30,6 +30,14 @@ function $$ModuleNamespace(keys, getters) {
 // `entry`: the entry's index. `sync` (a library's `init`): the entry's evaluation throws instead
 // of rejecting.
 let $$moduleImport = undefined;
+// For `require` of an ES module (T54, `$$moduleRequire`): [tla, requests, n] of the evaluator,
+// the token that makes `$$moduleImport` evaluate synchronously, and where the next such
+// evaluation's DFS indices start. Only a program with CommonJS uses them: its
+// `__intrinsic_cjs_mode()` blocks use only what their functions capture anyway and hold no
+// functions (the closure analysis sees dropped blocks too), so other programs keep their bytes.
+let $$moduleState = undefined;
+let $$moduleRequireToken = undefined;
+let $$moduleRequireBase = 0;
 
 function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
   const n = bodies.length;
@@ -170,6 +178,31 @@ function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
 
   // Evaluate(): a promise for module `m`'s evaluation (its cycle's, once it has run).
   function evaluate(m) {
+    if (__intrinsic_cjs_mode()) {
+      // `evaluate(-m - 1)`: require() of module m (T54), now, on the running evaluation's DFS
+      // stack with indices after any in use; a failed evaluation throws its error again.
+      if (m < 0) {
+        m = -m - 1;
+        if (status[m] === 0) {
+          const depth = stack.length;
+          $$moduleRequireBase += $$moduleState[2];
+          try {
+            inner(m, $$moduleRequireBase);
+          } catch (e) {
+            const mine = stack.splice(depth);
+            for (let k = 0; k < mine.length; k++) {
+              status[mine[k]] = 3;
+              failed[mine[k]] = true;
+              errors[mine[k]] = e;
+            }
+            throw e;
+          }
+        }
+        const root = status[m] === 1 ? m : cycleRoot[m];
+        if (failed[root]) throw errors[root];
+        return undefined;
+      }
+    }
     if (status[m] === 2 || status[m] === 3) m = cycleRoot[m];
     if (caps[m] !== undefined) return caps[m][0];
     let resolve;
@@ -198,6 +231,9 @@ function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
   // import(): the specifier and options are checked as the spec's EvaluateImportCall does, the
   // module found in the table, evaluated, and the promise resolved with its namespace.
   $$moduleImport = (k, specifier, options) => {
+    if (__intrinsic_cjs_mode()) {
+      if (options === $$moduleRequireToken) return evaluate(k);
+    }
     let resolve;
     let reject;
     const promise = new Promise((res, rej) => {
@@ -317,7 +353,31 @@ function $$EvaluateModules(bodies, tla, requests, paths, table, entry, sync) {
     }
     return undefined;
   }
+  if (__intrinsic_cjs_mode()) {
+    $$moduleState = [tla, requests, n];
+  }
   return evaluate(entry);
+}
+
+// require() of an ES module (T54, node 24): evaluated now (by `evaluate(-m - 1)`, through
+// `$$moduleImport` and its token); false, and nothing run, when its graph has top-level `await`
+// (node's ERR_REQUIRE_ASYNC_MODULE).
+function $$moduleRequire(m) {
+  const tla = $$moduleState[0];
+  const requests = $$moduleState[1];
+  const seen = [];
+  const todo = [m];
+  while (todo.length > 0) {
+    const k = todo.pop();
+    if (seen.includes(k)) continue;
+    seen.push(k);
+    if (tla[k]) return false;
+    const reqs = requests[k];
+    for (let i = 0; i < reqs.length; i++) todo.push(reqs[i]);
+  }
+  if ($$moduleRequireToken === undefined) $$moduleRequireToken = {};
+  $$moduleImport(-m - 1, undefined, $$moduleRequireToken);
+  return true;
 }
 
 // A node-style error with a `code`.

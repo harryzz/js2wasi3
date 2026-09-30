@@ -4,7 +4,7 @@
 #
 # Usage: scripts/diff.sh [-j jobs] [fixture.js | dir]...
 #   (default: tests/fixtures and its subdirectories, except unsupported/ which holds rejection tests)
-#   A dir means its *.js files (not subdirectories); in a dir named `modules`, each `<case>/main.js`
+#   A dir means its *.js files (not subdirectories); in a dir named `modules` or `commonjs` (T54), each `<case>/main.js`
 #   is the entry of a multi-file program (T41). `x.skip` next to `x.js` skips it; its
 #   first line is the reason. Each fixture should take under 2 s: slower ones are flagged.
 #   `x.flags` next to `x.js`: extra build options (T41: `--include`), from the fixture's directory.
@@ -91,7 +91,7 @@ for arg in "$@"; do
   if [ -d "$p" ]; then
     for f in "$p"/*.js; do [ -e "$f" ] && files+=("$f"); done
     # A multi-file program (T41): <dir>/<case>/main.js; its other files aren't fixtures.
-    for f in "$p"/*/main.js; do [ -e "$f" ] && [ "$(basename "$p")" = modules ] && files+=("$f"); done
+    for f in "$p"/*/main.js; do [ -e "$f" ] && case "$(basename "$p")" in modules | commonjs) files+=("$f") ;; esac; done
   elif [ -f "$p" ]; then
     files+=("$p")
   else

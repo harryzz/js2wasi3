@@ -835,7 +835,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40), `__intrinsic_regexp_mods()`
-    /// (T46), `__intrinsic_rab_mode()` (T47) or `__intrinsic_big_typed_mode()` (T48)? Which one.
+    /// (T46), `__intrinsic_rab_mode()` (T47), `__intrinsic_big_typed_mode()` (T48) or
+    /// `__intrinsic_cjs_mode()` (T54)? Which one.
     fn bigint_mode_test(&self, test: &Expression<'a>) -> Option<&'static str> {
         let Expression::CallExpression(c) = test else {
             return None;
@@ -851,6 +852,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "__intrinsic_regexp_mods",
             "__intrinsic_rab_mode",
             "__intrinsic_big_typed_mode",
+            "__intrinsic_cjs_mode",
         ]
             .into_iter()
             .find(|n| id.name == *n)
@@ -3164,9 +3166,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             if d.kind == VariableDeclarationKind::Var {
                 continue;
             }
-            for decl in &d.declarations {
-                if let BindingPattern::BindingIdentifier(b) = &decl.id
-                    && let Some(sym) = b.symbol_id.get()
+            // Every name a declaration binds, destructuring too (T54: CommonJS module bodies are
+            // functions, `const { a: re } = require(…)` after the classes using `re`).
+            for b in d.declarations.iter().flat_map(|decl| decl.id.get_binding_identifiers()) {
+                if let Some(sym) = b.symbol_id.get()
                     && self.an.tdz.contains(&sym)
                     && self.an.captured.contains(&sym)
                     && !self.globals.contains_key(&sym)
@@ -3388,6 +3391,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Some("__intrinsic_bigint_mode") => self.module.bigint,
                     Some("__intrinsic_rab_mode") => self.module.rab,
                     Some("__intrinsic_big_typed_mode") => self.module.big_typed,
+                    Some("__intrinsic_cjs_mode") => self.prelude.cjs,
                     _ => self.prelude.regexp_mods,
                 };
                 if keep {

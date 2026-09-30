@@ -12,6 +12,8 @@ use crate::link::Host;
 
 /// node's conditions for `import` (node 24).
 const CONDITIONS: &[&str] = &["node", "import", "module-sync", "node-addons", "default"];
+/// node's conditions for `require` (node 24, T54).
+const REQUIRE_CONDITIONS: &[&str] = &["node", "require", "module-sync", "node-addons", "default"];
 
 /// node's built-in modules that need no `node:` prefix.
 const BUILTINS: &[&str] = &[
@@ -33,13 +35,13 @@ pub(crate) enum Json {
 }
 
 impl Json {
-    fn get(&self, key: &str) -> Option<&Json> {
+    pub(crate) fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Obj(o) => o.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
-    fn str(&self) -> Option<&str> {
+    pub(crate) fn str(&self) -> Option<&str> {
         match self {
             Json::Str(s) => Some(s),
             _ => None,
@@ -244,8 +246,18 @@ pub(crate) fn is_builtin(spec: &str) -> bool {
 /// Resolve a bare specifier (`pkg`, `pkg/sub`, `@scope/pkg`) or a package import (`#name`) from
 /// directory `dir` (ends with `/`, or empty for the working directory): the module's path.
 pub(crate) fn resolve(host: &mut dyn Host, dir: &str, spec: &str) -> Result<String, Failure> {
+    resolve_for(host, dir, spec, false)
+}
+
+/// [`resolve`] for `require` (T54): the `require` conditions, and without `exports` node's
+/// LOAD_AS_FILE/LOAD_AS_DIRECTORY in each `node_modules`; not found is `MODULE_NOT_FOUND`.
+pub(crate) fn resolve_require(host: &mut dyn Host, dir: &str, spec: &str) -> Result<String, Failure> {
+    resolve_for(host, dir, spec, true)
+}
+
+fn resolve_for(host: &mut dyn Host, dir: &str, spec: &str, require: bool) -> Result<String, Failure> {
     if spec.starts_with('#') {
-        return imports(host, dir, spec);
+        return imports(host, dir, spec, require);
     }
     // The package name and the subpath (`.` or `./sub`).
     let mut parts = spec.splitn(if spec.starts_with('@') { 3 } else { 2 }, '/');
@@ -269,10 +281,22 @@ pub(crate) fn resolve(host: &mut dyn Host, dir: &str, spec: &str) -> Result<Stri
         && pj.get("name").and_then(Json::str) == Some(name.as_str())
         && let Some(exports) = pj.get("exports")
     {
-        return exports_resolve(&root, &sub, exports);
+        return exports_resolve(&root, &sub, exports, require);
     }
     for base in ancestors(dir) {
         let root = format!("{base}node_modules/{name}/");
+        if require {
+            // LOAD_PACKAGE_EXPORTS, else LOAD_AS_FILE and LOAD_AS_DIRECTORY of DIR/X.
+            if let Ok(text) = host.read(&format!("{root}package.json"))
+                && let Some(exports) = package_json(&text, &root)?.get("exports")
+            {
+                return exports_resolve(&root, &sub, exports, true);
+            }
+            match load_as_file_or_directory(host, &format!("{base}node_modules/{spec}"), spec.ends_with('/')) {
+                Some(path) => return Ok(path),
+                None => continue,
+            }
+        }
         let pj = match host.read(&format!("{root}package.json")) {
             Ok(text) => Some(package_json(&text, &root)?),
             // A package directory without `package.json`.
@@ -280,14 +304,40 @@ pub(crate) fn resolve(host: &mut dyn Host, dir: &str, spec: &str) -> Result<Stri
             Err(_) => continue,
         };
         if let Some(exports) = pj.as_ref().and_then(|p| p.get("exports")) {
-            return exports_resolve(&root, &sub, exports);
+            return exports_resolve(&root, &sub, exports, false);
         }
         if sub == "." {
             return legacy_main(host, &root, pj.as_ref(), spec);
         }
         return Ok(format!("{root}{}", &sub[2..]));
     }
+    if require {
+        return fail("MODULE_NOT_FOUND", format!("Cannot find module '{spec}'"));
+    }
     fail("ERR_MODULE_NOT_FOUND", format!("Cannot find package '{name}'"))
+}
+
+/// node's LOAD_AS_FILE (`x`, `x.js`, `x.json`, `x.node`), then LOAD_AS_DIRECTORY (`package.json`'s
+/// `main` as a file or with `index.*`, then `index.*`), for `require` (T54). `dir`: the specifier
+/// ends with `/` (only a directory).
+pub(crate) fn load_as_file_or_directory(host: &mut dyn Host, x: &str, dir: bool) -> Option<String> {
+    let exts = ["", ".js", ".json", ".node"];
+    let is_file = |host: &mut dyn Host, f: &str| host.read(f).is_ok();
+    if !dir && let Some(f) = exts.iter().map(|e| format!("{x}{e}")).find(|f| is_file(host, f)) {
+        return Some(f);
+    }
+    let x = x.trim_end_matches('/');
+    if let Ok(text) = host.read(&format!("{x}/package.json"))
+        && let Ok((pj, _)) = parse_json(text.strip_prefix('\u{feff}').unwrap_or(&text))
+        && let Some(main) = pj.get("main").and_then(Json::str)
+    {
+        let main = crate::link::normalize(&format!("{x}/{main}"));
+        let tries = exts.iter().map(|e| format!("{main}{e}")).chain(["/index.js", "/index.json", "/index.node"].map(|i| format!("{main}{i}")));
+        if let Some(f) = tries.into_iter().find(|f| is_file(host, f)) {
+            return Some(f);
+        }
+    }
+    ["index.js", "index.json", "index.node"].map(|i| format!("{x}/{i}")).into_iter().find(|f| is_file(host, f))
 }
 
 /// The directories from `dir` up to the file system's root (`dir` itself first).
@@ -354,7 +404,7 @@ fn legacy_main(host: &mut dyn Host, root: &str, pj: Option<&Json>, spec: &str) -
 }
 
 /// PACKAGE_EXPORTS_RESOLVE.
-fn exports_resolve(root: &str, sub: &str, exports: &Json) -> Result<String, Failure> {
+fn exports_resolve(root: &str, sub: &str, exports: &Json, require: bool) -> Result<String, Failure> {
     // Sugar: a string, an array or a conditions object is the `"."` export.
     let dotted = matches!(exports, Json::Obj(o) if o.first().is_some_and(|(k, _)| k.starts_with('.')));
     let not_exported = || {
@@ -371,11 +421,11 @@ fn exports_resolve(root: &str, sub: &str, exports: &Json) -> Result<String, Fail
     };
     let found = match_key(&map, sub);
     let Some((target, star)) = found else { return Err(not_exported()) };
-    target_resolve(root, &target, star.as_deref(), false)?.ok_or_else(not_exported)
+    target_resolve(root, &target, star.as_deref(), false, require)?.ok_or_else(not_exported)
 }
 
 /// PACKAGE_IMPORTS_RESOLVE: `#name` in the nearest `package.json`'s `imports`.
-fn imports(host: &mut dyn Host, dir: &str, spec: &str) -> Result<String, Failure> {
+fn imports(host: &mut dyn Host, dir: &str, spec: &str, require: bool) -> Result<String, Failure> {
     let not_defined = |root: &str| Failure {
         code: "ERR_PACKAGE_IMPORT_NOT_DEFINED",
         message: format!("Package import specifier \"{spec}\" is not defined in package {root}package.json"),
@@ -385,8 +435,8 @@ fn imports(host: &mut dyn Host, dir: &str, spec: &str) -> Result<String, Failure
     };
     let Some(Json::Obj(map)) = pj.get("imports") else { return Err(not_defined(&root)) };
     let Some((target, star)) = match_key(map, spec) else { return Err(not_defined(&root)) };
-    match target_resolve(&root, &target, star.as_deref(), true)? {
-        Some(path) if path.starts_with("#bare:") => resolve(host, &root, &path["#bare:".len()..]),
+    match target_resolve(&root, &target, star.as_deref(), true, require)? {
+        Some(path) if path.starts_with("#bare:") => resolve_for(host, &root, &path["#bare:".len()..], require),
         Some(path) => Ok(path),
         None => Err(not_defined(&root)),
     }
@@ -417,7 +467,7 @@ fn match_key(map: &[(String, Json)], key: &str) -> Option<(Json, Option<String>)
 /// PACKAGE_TARGET_RESOLVE: a target string (`./dist/x.js`, with `*` replaced), a fallback array or
 /// a conditions object. `None`: `null` or no condition matched. In `imports`, a target that isn't
 /// `./…` is a bare specifier (returned as `#bare:<spec>`).
-fn target_resolve(root: &str, target: &Json, star: Option<&str>, imports: bool) -> Result<Option<String>, Failure> {
+fn target_resolve(root: &str, target: &Json, star: Option<&str>, imports: bool, require: bool) -> Result<Option<String>, Failure> {
     match target {
         Json::Str(t) => {
             let t = match star {
@@ -439,7 +489,7 @@ fn target_resolve(root: &str, target: &Json, star: Option<&str>, imports: bool) 
         Json::Arr(items) => {
             let mut last = Ok(None);
             for item in items {
-                match target_resolve(root, item, star, imports) {
+                match target_resolve(root, item, star, imports, require) {
                     Ok(Some(p)) => return Ok(Some(p)),
                     Ok(None) => last = Ok(None),
                     Err(e) => last = Err(e),
@@ -449,8 +499,9 @@ fn target_resolve(root: &str, target: &Json, star: Option<&str>, imports: bool) 
         }
         Json::Obj(conditions) => {
             for (k, v) in conditions {
-                if CONDITIONS.contains(&k.as_str())
-                    && let Some(p) = target_resolve(root, v, star, imports)?
+                let conditions = if require { REQUIRE_CONDITIONS } else { CONDITIONS };
+                if conditions.contains(&k.as_str())
+                    && let Some(p) = target_resolve(root, v, star, imports, require)?
                 {
                     return Ok(Some(p));
                 }
@@ -489,7 +540,7 @@ mod tests {
         let Json::Obj(map) = map else { panic!() };
         let r = |sub: &str| {
             let (t, s) = match_key(&map, sub)?;
-            target_resolve("/n/", &t, s.as_deref(), false).ok().flatten()
+            target_resolve("/n/", &t, s.as_deref(), false, false).ok().flatten()
         };
         assert_eq!(r(".").as_deref(), Some("/n/i.js"));
         assert_eq!(r("./f/a").as_deref(), Some("/n/lib/a.js"));

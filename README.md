@@ -88,7 +88,12 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   adds modules for specifiers only known at run time (an `import()` the build can't work out is an error without
   it). Code that doesn't exist at build time can't be loaded.
 - Packages: bare specifiers (`import x from "pkg"`) resolved from `node_modules` at build time as node does
-  (`exports` conditions and patterns, `imports`, `main`); ES module packages only.
+  (`exports` conditions and patterns, `imports`, `main`).
+- CommonJS (T54): files node runs as CommonJS (`.cjs`, `"type": "commonjs"`, `.js` without ESM syntax) with
+  `require`, `module.exports`/`exports`, `__filename`/`__dirname`, JSON files, cycles, packages with the `require`
+  conditions, computed `require` of files known at build time (patterns, `--include`), and interop both ways
+  (`import x from "./a.cjs"` with node's named exports, `require("./esm.mjs")`); compiled as strict code. tsc's
+  CommonJS output works.
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
@@ -96,8 +101,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   (completion values, the caller's scope, SyntaxErrors at the call); code built at run time can't be (`eval(x)` is
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
-Not yet: many built-ins (`WeakMap`, `Intl`), CommonJS packages, node's built-in
-modules (`node:fs`), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+Not yet: many built-ins (`WeakMap`, `Intl`), sloppy-mode CommonJS semantics, node's built-in
+modules (`node:fs`, `process`), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

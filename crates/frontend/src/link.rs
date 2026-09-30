@@ -147,6 +147,7 @@ pub fn link(
         pending: Vec::new(),
         poisoned: Vec::new(),
         bare_failed: Vec::new(),
+        cjs_known: Vec::new(),
     };
     g.load(entry.to_string(), source)?;
     // Then what only `import()` loads (its errors reject at run time).
@@ -160,7 +161,7 @@ pub fn link(
         return Err(sorted(g.diags));
     }
     if g.modules.iter().all(|m| {
-        m.requests.is_empty() && m.meta.is_empty() && m.dynamic.is_empty() && m.p.evals.is_none()
+        m.requests.is_empty() && m.meta.is_empty() && m.dynamic.is_empty() && m.p.evals.is_none() && !m.cjs
     })
         && !(command && !g.modules[0].p.exports.is_empty())
     {
@@ -169,15 +170,24 @@ pub fn link(
             map: None,
         });
     }
+    g.cjs_exports();
+    if g.modules.iter().any(|m| m.cjs) {
+        // `--include`d modules: a computed `require` finds them too.
+        for (key, k) in g.table.clone() {
+            if !key.contains('\n') && !g.modules[k].p.path.ends_with(".json") && !g.cjs_known.iter().any(|(p, _)| *p == key) {
+                g.cjs_known.push((key, k));
+            }
+        }
+    }
     g.join()
 }
 
 /// A JSON module's source (slice 3): `export default <the JSON>;` (JSON is JS syntax), with each
 /// `"__proto__"` key made computed so it stays an own property, as `JSON.parse` makes it. Or where
 /// the text isn't JSON, and why.
-fn json_module(text: &str) -> Result<String, (usize, String)> {
+fn json_module(text: &str, prefix: &str) -> Result<String, (usize, String)> {
     let (_, proto) = packages::parse_json(text)?;
-    let mut out = String::from("export default ");
+    let mut out = String::from(prefix);
     let mut pos = 0;
     for (start, end) in proto {
         out.push_str(&text[pos..start]);
@@ -189,6 +199,316 @@ fn json_module(text: &str) -> Result<String, (usize, String)> {
     out.push_str(&text[pos..]);
     out.push_str(";\n");
     Ok(out)
+}
+
+/// A CommonJS module's text is parsed inside node's wrapper (T54), so `return`, `arguments` and
+/// `this` at its top level are the function's, and `exports`, `require`, `module`, `__filename`,
+/// `__dirname` its parameters. The joined source names the function (`function cjs$k(…) {`).
+const CJS_PRE: &str = "(function (exports, require, module, __filename, __dirname) {";
+const CJS_POST: &str = "\n});";
+
+/// Parse a CommonJS file inside [`CJS_PRE`]/[`CJS_POST`] (as strict code, like the rest of the
+/// program: T54's measurement found no sloppy-only syntax in a real graph). Offsets map back
+/// to the file through the program's `evals` map; a `#!` line becomes a comment.
+fn parse_cjs<'a>(alloc: &'a Allocator, path: &str, source: &'a str) -> Result<Program<'a>, Diagnostics> {
+    let body = match source.strip_prefix("#!") {
+        Some(rest) => format!("//{rest}"),
+        None => source.to_string(),
+    };
+    let wrapped: &'a str = alloc.alloc_str(&format!("{CJS_PRE}{body}{CJS_POST}"));
+    let pre = CJS_PRE.len() as u32;
+    let (mut p, evals) = crate::eval::parse_spliced(alloc, path, wrapped).map_err(|mut d| {
+        // Valid sloppy-mode code (`with`, octal literals, …) that doesn't parse as strict code: say
+        // why it's rejected.
+        let sloppy = parse(alloc, path, wrapped).is_err() && {
+            let ret = oxc_parser::Parser::new(alloc, wrapped, oxc_span::SourceType::script()).parse();
+            !ret.fatal_error && !ret.diagnostics.has_errors() && {
+                let ast = alloc.alloc(ret.program);
+                !oxc_semantic::SemanticBuilder::new().with_check_syntax_error(true).build(ast).diagnostics.has_errors()
+            }
+        };
+        for d in &mut d.0 {
+            // The wrapper has no line break: only the first line's columns move.
+            if d.line == 1 {
+                d.col = d.col.saturating_sub(CJS_PRE.chars().count() as u32).max(1);
+            }
+            if sloppy {
+                d.help = Some("node runs this CommonJS file as sloppy-mode code; js2wasi3 compiles CommonJS as strict code (planned: F232)".into());
+            }
+        }
+        d
+    })?;
+    let layer = vec![
+        crate::eval::Region::new(0, pre, 0, 0),
+        crate::eval::Region::new(pre + source.len() as u32, CJS_POST.len() as u32, source.len() as u32, 0),
+    ];
+    p.evals = Some(crate::EvalMap::first(layer, evals));
+    p.original = source;
+    Ok(p)
+}
+
+/// How node runs a file: by its extension, else its package's `"type"`, else by its syntax.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Format {
+    Esm,
+    Cjs,
+    /// A `.js` file without a `"type"`: CommonJS unless it has ESM syntax (node 24's detection).
+    Ambiguous,
+}
+
+/// Does the module have ESM syntax (node's detection: `import`/`export` statements,
+/// `import.meta`, top-level `await`)?
+fn esm_syntax(p: &Program) -> bool {
+    p.ast.body.iter().any(|s| s.is_module_declaration())
+        || has_tla(p)
+        || p.semantic.nodes().iter().any(|n| matches!(n.kind(), AstKind::ImportMeta(_)))
+}
+
+/// Does code parsed as a module observe that node would run it as CommonJS: its names
+/// (`module`, `exports`, `require`, `__filename`, `__dirname`, `arguments`) or top-level `this`?
+fn observes_cjs(p: &Program) -> bool {
+    let names = ["module", "exports", "require", "__filename", "__dirname", "arguments"];
+    let scoping = p.semantic.scoping();
+    if scoping.root_unresolved_references().keys().any(|k| names.contains(&k.as_str())) {
+        return true;
+    }
+    let nodes = p.semantic.nodes();
+    nodes.iter().any(|n| {
+        matches!(n.kind(), AstKind::ThisExpression(_))
+            && !nodes.ancestors(n.id()).any(|a| matches!(a.kind(), AstKind::Function(_) | AstKind::Class(_)))
+    })
+}
+
+/// The static `require` calls of a CommonJS module (T54): each `require("literal")` (or
+/// `require.resolve("literal")`) of the wrapper's `require`, the specifier and where it's written,
+/// in source order, once each; and the computed ones with their `import()`-style patterns.
+fn cjs_requires(p: &Program) -> (Vec<(String, Span, bool)>, Vec<(Span, Option<Vec<Vec<Part>>>)>) {
+    let mut computed = Vec::new();
+    let Some(Statement::ExpressionStatement(s)) = p.ast.body.first() else { return (Vec::new(), computed) };
+    let Expression::FunctionExpression(f) = s.expression.without_parentheses() else { return (Vec::new(), computed) };
+    let Some(sym) = f.params.items.get(1).and_then(|b| b.pattern.get_binding_identifier()).map(|b| b.symbol_id()) else {
+        return (Vec::new(), computed);
+    };
+    let scoping = p.semantic.scoping();
+    let nodes = p.semantic.nodes();
+    let mut out: Vec<(String, Span, bool)> = Vec::new();
+    let wrapper = f.scope_id.get();
+    for &r in scoping.get_resolved_reference_ids(sym) {
+        let node = scoping.get_reference(r).node_id();
+        // `require(x)`, or `require.resolve(x)`.
+        let mut callee = nodes.kind(node).span();
+        let mut parent = nodes.parent_id(node);
+        if let AstKind::StaticMemberExpression(m) = nodes.kind(parent)
+            && m.property.name == "resolve"
+        {
+            callee = m.span;
+            parent = nodes.parent_id(parent);
+        }
+        let AstKind::CallExpression(c) = nodes.kind(parent) else { continue };
+        if c.callee.span() != callee || c.arguments.len() != 1 {
+            continue;
+        }
+        let Some(arg) = c.arguments[0].as_expression() else { continue };
+        let spec = match arg.without_parentheses() {
+            Expression::StringLiteral(s) => s.value.to_string(),
+            Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
+                match t.quasis.first().and_then(|q| q.value.cooked) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                }
+            }
+            // Computed (slice 4): the files T41's `import()` patterns match.
+            _ => {
+                let pats = patterns(p, arg, 0).map(|ps| ps.into_iter().map(merge).collect());
+                computed.push((c.span, pats));
+                continue;
+            }
+        };
+        // Does it always run when the module does: not in a `try`, or a function the module
+        // may not call?
+        let always = !nodes.ancestors(parent).any(|a| match a.kind() {
+            AstKind::TryStatement(_) => true,
+            AstKind::Function(g) => g.scope_id.get() != wrapper,
+            AstKind::ArrowFunctionExpression(_) => true,
+            _ => false,
+        });
+        match out.iter_mut().find(|(s, ..)| *s == spec) {
+            Some(o) => o.2 |= always,
+            None => out.push((spec, arg.span(), always)),
+        }
+    }
+    out.sort_by_key(|(_, span, _)| span.start);
+    (out, computed)
+}
+
+/// A CommonJS module's named exports as node's cjs-module-lexer finds them (T54), from the AST:
+/// `exports.x =`, `module.exports.x =` (also `["x"]`), the keys of `module.exports = { a, b: c }`
+/// (the lexer's rules for where the list ends), `Object.defineProperty(exports, "x", …)`
+/// with a `value` or a getter returning an identifier or member; and the specifiers it
+/// re-exports: `module.exports = require("…")`, `...require("…")` in that object,
+/// `__exportStar(require("…"), exports)` / `__export(require("…"))` (tsc). Dead code counts, as
+/// for the lexer.
+fn cjs_exports(p: &Program) -> (Vec<String>, Vec<String>) {
+    let (mut names, mut reexports) = (Vec::new(), Vec::new());
+    let Some(Statement::ExpressionStatement(s)) = p.ast.body.first() else { return (names, reexports) };
+    let Expression::FunctionExpression(f) = s.expression.without_parentheses() else { return (names, reexports) };
+    let param = |i: usize| f.params.items.get(i).and_then(|b| b.pattern.get_binding_identifier()).map(|b| b.symbol_id());
+    let (Some(exports), Some(require), Some(module)) = (param(0), param(1), param(2)) else { return (names, reexports) };
+    let scoping = p.semantic.scoping();
+    let is = |e: &Expression, sym: SymbolId| match e.without_parentheses() {
+        Expression::Identifier(id) => scoping.get_reference(id.reference_id()).symbol_id() == Some(sym),
+        _ => false,
+    };
+    let key = |m: &MemberExpression| -> Option<String> {
+        match m {
+            MemberExpression::StaticMemberExpression(s) => Some(s.property.name.to_string()),
+            MemberExpression::ComputedMemberExpression(c) => match &c.expression {
+                Expression::StringLiteral(l) => Some(l.value.to_string()),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    // `module.exports`
+    let is_module_exports = |e: &Expression| match e.without_parentheses().as_member_expression() {
+        Some(m) => is(m.object(), module) && key(m).as_deref() == Some("exports"),
+        None => false,
+    };
+    let is_exports = |e: &Expression| is(e, exports) || is_module_exports(e);
+    // `require("…")`
+    let required = |e: &Expression| -> Option<String> {
+        let Expression::CallExpression(c) = e.without_parentheses() else { return None };
+        if !is(&c.callee, require) || c.arguments.len() != 1 {
+            return None;
+        }
+        match c.arguments[0].as_expression()?.without_parentheses() {
+            Expression::StringLiteral(l) => Some(l.value.to_string()),
+            _ => None,
+        }
+    };
+    let property_key = |k: &PropertyKey| -> Option<String> {
+        match k {
+            PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+            PropertyKey::StringLiteral(l) => Some(l.value.to_string()),
+            _ => None,
+        }
+    };
+    for node in p.semantic.nodes().iter() {
+        match node.kind() {
+            AstKind::AssignmentExpression(a) if a.operator == AssignmentOperator::Assign => {
+                let Some(target) = a.left.as_simple_assignment_target().and_then(|t| t.as_member_expression()) else {
+                    continue;
+                };
+                if is_exports(target.object()) {
+                    if let Some(k) = key(target) {
+                        names.push(k);
+                    }
+                    continue;
+                }
+                if !(is(target.object(), module) && key(target).as_deref() == Some("exports")) {
+                    continue;
+                }
+                if let Some(spec) = required(&a.right) {
+                    reexports.push(spec);
+                } else if let Expression::ObjectExpression(o) = a.right.without_parentheses() {
+                    // The lexer's token rules: `a`, `a: b` and `...b` go on; a value that only
+                    // starts with an identifier (`a: b.c`, `a: require(…)`) or a method `a() {}`
+                    // is the last key; anything else ends the list before its key.
+                    fn starts_with_identifier(e: &Expression) -> bool {
+                        match e {
+                            Expression::Identifier(_) => true,
+                            Expression::StaticMemberExpression(m) => starts_with_identifier(&m.object),
+                            Expression::ComputedMemberExpression(m) => starts_with_identifier(&m.object),
+                            Expression::CallExpression(c) => starts_with_identifier(&c.callee),
+                            _ => false,
+                        }
+                    }
+                    for prop in &o.properties {
+                        match prop {
+                            ObjectPropertyKind::SpreadProperty(sp) => {
+                                if let Some(spec) = required(&sp.argument) {
+                                    reexports.push(spec);
+                                } else if !matches!(sp.argument, Expression::Identifier(_)) {
+                                    break;
+                                }
+                            }
+                            ObjectPropertyKind::ObjectProperty(op) => {
+                                let key = (!op.computed && op.kind == PropertyKind::Init).then(|| property_key(&op.key)).flatten();
+                                let Some(k) = key else { break };
+                                let (simple, last) = match &op.value {
+                                    _ if op.shorthand => (true, false),
+                                    Expression::FunctionExpression(f) if op.method => (!f.r#async && !f.generator, true),
+                                    Expression::Identifier(_) => (true, false),
+                                    v => (starts_with_identifier(v), true),
+                                };
+                                if simple {
+                                    names.push(k);
+                                }
+                                if last || !simple {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            AstKind::CallExpression(c) => {
+                let args: Vec<&Expression> = c.arguments.iter().filter_map(|a| a.as_expression()).collect();
+                let callee = c.callee.without_parentheses();
+                // `Object.defineProperty(exports, "x", { value } | { get() { return a.b; } })`
+                if let Some(m) = callee.as_member_expression()
+                    && matches!(m.object().without_parentheses(), Expression::Identifier(o) if o.name == "Object")
+                    && key(m).as_deref() == Some("defineProperty")
+                    && args.len() == 3
+                    && is_exports(args[0])
+                    && let Expression::StringLiteral(name) = args[1].without_parentheses()
+                    && let Expression::ObjectExpression(desc) = args[2].without_parentheses()
+                {
+                    let simple_return = |body: &FunctionBody| {
+                        matches!(&body.statements[..], [Statement::ReturnStatement(r)]
+                            if r.argument.as_ref().is_some_and(|e| matches!(e.without_parentheses(),
+                                Expression::Identifier(_) | Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_))))
+                    };
+                    let ok = desc.properties.iter().any(|prop| {
+                        let ObjectPropertyKind::ObjectProperty(op) = prop else { return false };
+                        match property_key(&op.key).as_deref() {
+                            Some("value") => true,
+                            Some("get") => match op.value.without_parentheses() {
+                                // `get: function () { … }` or `get() { … }`.
+                                Expression::FunctionExpression(g) => g.body.as_ref().is_some_and(|b| simple_return(b)),
+                                _ => false,
+                            },
+                            _ => false,
+                        }
+                    });
+                    if ok {
+                        names.push(name.value.to_string());
+                    }
+                    continue;
+                }
+                // tsc: `__exportStar(require("x"), exports)`, `tslib.__exportStar(…)`, `__export(require("x"))`.
+                let helper = match callee {
+                    Expression::Identifier(id) => Some(id.name.as_str()),
+                    Expression::StaticMemberExpression(s) => Some(s.property.name.as_str()),
+                    _ => None,
+                };
+                let star = match helper {
+                    Some("__exportStar") => args.len() == 2 && is_exports(args[1]),
+                    Some("__export") => args.len() == 1,
+                    _ => false,
+                };
+                if star && let Some(spec) = args.first().and_then(|a| required(a)) {
+                    reexports.push(spec);
+                }
+            }
+            _ => {}
+        }
+    }
+    names.retain(|n| n != "default");
+    names.sort();
+    names.dedup();
+    reexports.dedup();
+    (names, reexports)
 }
 
 /// The specifier patterns of an `import()` argument known at build time: string literals,
@@ -268,7 +588,7 @@ fn is_relative_pattern(pat: &[Part]) -> bool {
 }
 
 fn is_module_file(name: &str) -> bool {
-    name.ends_with(".js") || name.ends_with(".mjs") || name.ends_with(".json")
+    name.ends_with(".js") || name.ends_with(".mjs") || name.ends_with(".cjs") || name.ends_with(".json")
 }
 
 /// Does `name` match a path segment's pattern?
@@ -294,6 +614,19 @@ fn absolute(path: &str) -> String {
     }
     let cwd = std::env::current_dir().map_or_else(|_| "/".to_string(), |d| d.to_string_lossy().into_owned());
     normalize(&format!("{cwd}/{path}"))
+}
+
+/// A module's absolute path (symlinks resolved, as node does) and its directory.
+fn abs_file_dir(path: &str) -> (String, String) {
+    let abs = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned());
+    let dir = match abs.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(k) => abs[..k].to_string(),
+        None => ".".to_string(),
+    };
+    (abs, dir)
 }
 
 /// node's `url.pathToFileURL(path)` for an absolute POSIX path.
@@ -341,6 +674,14 @@ enum Binding {
     Namespace(usize),
     /// A module's `import.meta` object (slice 3).
     Meta(usize),
+    /// A CommonJS module's function (T54).
+    Cjs(usize),
+    /// An ES module's view of a CommonJS module (T54): its `module.exports` once it has run
+    /// (`default`, `'module.exports'`), and a named export (index into [`Module::cjs_names`]).
+    CjsValue(usize),
+    CjsNamed(usize, usize),
+    /// The table of CommonJS modules (T54).
+    CjsTable,
 }
 
 #[derive(Debug, Clone)]
@@ -382,6 +723,16 @@ struct Module<'a> {
     lazy: bool,
     /// Such a module's error: the error's class, message and node's `code` (or empty).
     failed: Option<Failed>,
+    /// A CommonJS module (T54), parsed inside [`CJS_PRE`]/[`CJS_POST`].
+    cjs: bool,
+    /// Its static `require`s: the specifier and the module, or the error `require` throws at run
+    /// time: node's `MODULE_NOT_FOUND` (`None`), or a code and message.
+    cjs_requests: Vec<(String, Result<usize, Option<(String, String)>>)>,
+    /// Its named exports for ES modules, as node's cjs-module-lexer finds them, with those of
+    /// the modules it re-exports (T54).
+    cjs_names: Vec<String>,
+    /// Imported by an ES module (or by `import()`): its exports are read once it has run.
+    esm_imported: bool,
 }
 
 struct Graph<'a, 'r> {
@@ -404,6 +755,8 @@ struct Graph<'a, 'r> {
     poisoned: Vec<Option<Failed>>,
     /// `import()` of a package that doesn't resolve: its key and error.
     bare_failed: Vec<(String, Failed)>,
+    /// What a computed `require` can load (T54 slice 4): absolute path → module.
+    cjs_known: Vec<(String, usize)>,
 }
 
 /// A module that fails to load for `import()`: the error's class, message and node's `code`.
@@ -458,20 +811,83 @@ impl<'a> Graph<'a, '_> {
         });
     }
 
+    /// How node runs the file at `path` (T54).
+    fn format(&mut self, path: &str) -> Format {
+        if path.ends_with(".mjs") {
+            return Format::Esm;
+        }
+        if path.ends_with(".cjs") {
+            return Format::Cjs;
+        }
+        match packages::package_type(self.host, &path[..=path.rfind('/').unwrap_or(0)]).as_deref() {
+            Some("module") => Format::Esm,
+            Some("commonjs") => Format::Cjs,
+            _ => Format::Ambiguous,
+        }
+    }
+
+    /// Parse a file as node would run it: an ES module or CommonJS (T54). The entry, when node
+    /// would run it as CommonJS but nothing in it can tell, stays an ES module (the same bytes as
+    /// before T54).
+    fn parse_as(&mut self, path: &str, source: &'a str) -> Result<(Program<'a>, bool), Diagnostics> {
+        let esm = |alloc| {
+            crate::eval::parse_spliced(alloc, path, source).map(|(mut p, evals)| {
+                p.evals = evals;
+                p
+            })
+        };
+        match self.format(path) {
+            Format::Esm => esm(self.alloc).map(|p| (p, false)),
+            Format::Cjs => parse_cjs(self.alloc, path, source).map(|p| (p, true)),
+            Format::Ambiguous => match esm(self.alloc) {
+                Ok(p) if esm_syntax(&p) || (self.modules.is_empty() && !observes_cjs(&p)) => Ok((p, false)),
+                Ok(_) => parse_cjs(self.alloc, path, source).map(|p| (p, true)),
+                // Not a module (`return` at the top level): CommonJS if it parses as that.
+                Err(d) => parse_cjs(self.alloc, path, source).map(|p| (p, true)).map_err(|c| {
+                    if c.0.iter().any(|d| d.help.is_some()) { c } else { d }
+                }),
+            },
+        }
+    }
+
     fn load(&mut self, path: String, source: &str) -> Result<usize, Diagnostics> {
         let source: &'a str = self.alloc.alloc_str(source);
-        let (p, failed) = match crate::eval::parse_spliced(self.alloc, &path, source) {
-            Ok((mut p, evals)) => {
-                p.evals = evals;
-                (p, None)
-            }
+        let (p, failed, cjs) = match self.parse_as(&path, source) {
+            Ok((p, cjs)) => (p, None, cjs),
             // A module only `import()` loads: an empty stand-in that rejects.
             Err(d) if self.lazy => {
                 let message = d.0.first().map_or_else(String::new, |d| d.message.clone());
-                (parse(self.alloc, &path, "")?, Some(("SyntaxError".to_string(), message, String::new())))
+                (parse(self.alloc, &path, "")?, Some(("SyntaxError".to_string(), message, String::new())), false)
             }
             Err(d) => return Err(d),
         };
+        self.add(path, p, failed, cjs)
+    }
+
+    /// A JSON file `require` loads (T54): CommonJS `module.exports = <the JSON>;`.
+    fn load_cjs_json(&mut self, path: String, text: &str) -> Result<Option<usize>, Diagnostics> {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        match json_module(text, "module.exports = ") {
+            Ok(source) => {
+                let source: &'a str = self.alloc.alloc_str(&source);
+                let p = parse_cjs(self.alloc, &path, source)?;
+                self.add(path, p, None, true).map(Some)
+            }
+            Err((at, what)) => {
+                let (line, col) = line_col(text, at as u32);
+                self.diags.push(Diagnostic {
+                    path,
+                    line,
+                    col,
+                    message: format!("invalid JSON: {what}"),
+                    help: None,
+                });
+                Ok(None)
+            }
+        }
+    }
+
+    fn add(&mut self, path: String, p: Program<'a>, failed: Option<Failed>, cjs: bool) -> Result<usize, Diagnostics> {
         let m = self.modules.len();
         self.index.insert(path, m);
         let ast = p.ast;
@@ -498,25 +914,18 @@ impl<'a> Graph<'a, '_> {
             dynamic: Vec::new(),
             lazy: self.lazy,
             failed,
+            cjs: false,
+            cjs_requests: Vec::new(),
+            cjs_names: Vec::new(),
+            esm_imported: false,
         });
-        // node runs `.cjs` files, and `.js` files of a package without `"type": "module"` that
-        // have no ESM syntax, as CommonJS (slice 5; F194).
-        let esm = ast.body.iter().any(|s| s.is_module_declaration()) || !self.modules[m].meta.is_empty() || tla;
-        let commonjs_names = ["module", "exports", "require"];
-        let cjs_refs = self.modules[m].p.semantic.scoping().root_unresolved_references().keys().any(|k| commonjs_names.contains(&k.as_str()));
-        let path = self.modules[m].p.path.clone();
-        let package_cjs = path.contains("node_modules/")
-            && path.ends_with(".js")
-            && !esm
-            && cjs_refs
-            && packages::package_type(self.host, &path[..=path.rfind('/').unwrap_or(0)]).as_deref() != Some("module");
-        if path.ends_with(".cjs") || package_cjs {
-            self.diag(
-                m,
-                Span::new(0, 0),
-                "unsupported: CommonJS module (node runs this file as CommonJS: `module.exports`, `require`) (planned: F194)".into(),
-                None,
-            );
+        if cjs {
+            self.modules[m].cjs = true;
+            if let Some(&span) = self.modules[m].meta.first() {
+                self.diag(m, span, "SyntaxError: Cannot use 'import.meta' outside a module (node runs this file as CommonJS)".into(), None);
+            }
+            self.cjs_requests(m)?;
+            self.dynamic_imports(m)?;
             return Ok(m);
         }
         for stmt in &ast.body {
@@ -559,6 +968,105 @@ impl<'a> Graph<'a, '_> {
         self.dynamic_imports(m)?;
         self.scan(m);
         Ok(m)
+    }
+
+    /// CommonJS module `m`'s static `require`s (T54): each specifier resolved with node's CommonJS
+    /// algorithm and its module loaded. One that isn't found throws when it runs, as in node.
+    fn cjs_requests(&mut self, m: usize) -> Result<(), Diagnostics> {
+        let (statics, computed) = cjs_requires(&self.modules[m].p);
+        self.cjs_computed(m, computed)?;
+        for (spec, span, always) in statics {
+            let target = if is_relative(&spec) {
+                let from = &self.modules[m].p.path;
+                let dir = &from[..from.rfind('/').map_or(0, |k| k + 1)];
+                let joined = if spec.starts_with('/') { spec.clone() } else { format!("{dir}{spec}") };
+                packages::load_as_file_or_directory(self.host, &normalize(&joined), spec.ends_with('/')).ok_or(None)
+            } else if packages::is_builtin(spec.strip_prefix("node:").unwrap_or(&spec)) || spec.starts_with("node:") {
+                // A build error where it always runs; elsewhere (`try { require("util") } catch`,
+                // optional features) thrown when it runs, as `import()` of one does.
+                if always {
+                    self.diag(m, span, format!("unsupported: node's built-in module `{spec}` (planned: F200)"), None);
+                    continue;
+                }
+                let message = format!("node's built-in module '{spec}' isn't available in js2wasi3 (planned: F200)");
+                Err(Some(packages::Failure { code: "ERR_UNKNOWN_BUILTIN_MODULE", message }))
+            } else {
+                let from = &self.modules[m].p.path;
+                let dir = from[..from.rfind('/').map_or(0, |k| k + 1)].to_string();
+                packages::resolve_require(self.host, &dir, &spec).map_err(|f| (f.code != "MODULE_NOT_FOUND").then_some(f))
+            };
+            let path = match target {
+                Ok(path) => path,
+                // Not found, or another resolution error (`exports`): thrown when it runs.
+                Err(f) => {
+                    let failed = f.map(|f| (f.code.to_string(), f.message));
+                    self.modules[m].cjs_requests.push((spec, Err(failed)));
+                    continue;
+                }
+            };
+            if path.ends_with(".node") {
+                self.diag(m, span, format!("unsupported: native addon `{path}` (a `.node` file)"), None);
+                continue;
+            }
+            let k = match self.index.get(&path) {
+                Some(&k) => Some(k),
+                None => match self.host.read(&path) {
+                    Ok(text) if path.ends_with(".json") => self.load_cjs_json(path.clone(), &text)?,
+                    Ok(text) => Some(self.load(path.clone(), &text)?),
+                    Err(_) => None,
+                },
+            };
+            self.modules[m].cjs_requests.push((spec, k.ok_or(None)));
+        }
+        Ok(())
+    }
+
+    /// A `require` whose specifier is computed (slice 4): the files its patterns match (relative to
+    /// the module, as for `import()`) are loaded and looked up by absolute path when it runs; for
+    /// one the build can't work out, `--include` names the modules.
+    fn cjs_computed(&mut self, m: usize, computed: Vec<(Span, Option<Vec<Vec<Part>>>)>) -> Result<(), Diagnostics> {
+        let from = self.modules[m].p.path.clone();
+        let dir = from[..from.rfind('/').map_or(0, |k| k + 1)].to_string();
+        for (span, pats) in computed {
+            // Unlike `import()`, not a build error: CommonJS code does this on paths that never
+            // run (optional plugins, native addons); when it runs it finds only what the build has
+            // (`--include`), else node's `MODULE_NOT_FOUND` with a hint.
+            let _ = span;
+            let Some(pats) = pats.filter(|ps| ps.iter().all(|p| is_relative_pattern(p))) else { continue };
+            for mut pat in pats {
+                if let [Part::Lit(first), ..] = &pat[..]
+                    && !first.starts_with('/')
+                {
+                    pat[0] = Part::Lit(format!("{dir}{first}"));
+                }
+                // node adds `.js`/`.json` when the pattern has no extension.
+                let mut paths = self.expand(&pat);
+                if paths.is_empty() && !matches!(pat.last(), Some(Part::Lit(t)) if t.ends_with(".js") || t.ends_with(".json") || t.ends_with(".cjs") || t.ends_with(".mjs")) {
+                    for ext in [".js", ".json"] {
+                        let mut with = pat.clone();
+                        with.push(Part::Lit(ext.into()));
+                        paths.extend(self.expand(&merge(with)));
+                    }
+                }
+                for path in paths {
+                    let k = match self.index.get(&path) {
+                        Some(&k) => Some(k),
+                        None => match self.host.read(&path) {
+                            Ok(text) if path.ends_with(".json") => self.load_cjs_json(path.clone(), &text)?,
+                            Ok(text) => Some(self.load(path.clone(), &text)?),
+                            Err(_) => None,
+                        },
+                    };
+                    if let Some(k) = k {
+                        let key = absolute(&path);
+                        if !self.cjs_known.iter().any(|(p, _)| *p == key) {
+                            self.cjs_known.push((key, k));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Module `m`'s `import()` expressions: the modules each can load join the graph and the table;
@@ -672,7 +1180,7 @@ impl<'a> Graph<'a, '_> {
                     path: glob.clone(),
                     line: 1,
                     col: 1,
-                    message: "--include: the glob matches no module (`.js`, `.mjs` or `.json` file)".into(),
+                    message: "--include: the glob matches no module (`.js`, `.mjs`, `.cjs` or `.json` file)".into(),
                     help: None,
                 });
             }
@@ -682,7 +1190,7 @@ impl<'a> Graph<'a, '_> {
     }
 
     /// The module files a pattern names: `*` (`Part::Wild`) matches within one path segment, and
-    /// a segment `**` any number of directories. Only `.js`, `.mjs` and `.json` files.
+    /// a segment `**` any number of directories. Only `.js`, `.mjs`, `.cjs` and `.json` files.
     fn expand(&mut self, pat: &[Part]) -> Vec<String> {
         // Split into segments at `/`.
         let mut segs: Vec<Vec<Part>> = vec![Vec::new()];
@@ -760,7 +1268,7 @@ impl<'a> Graph<'a, '_> {
             return self.load(path, text).map(Some);
         }
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        match json_module(text) {
+        match json_module(text, "export default ") {
             Ok(source) => self.load(path, &source).map(Some),
             Err((at, what)) if self.lazy => {
                 let m = self.load(path, "")?;
@@ -955,6 +1463,54 @@ impl<'a> Graph<'a, '_> {
         self.modules[m].locals.extend(locals);
     }
 
+    /// What ES modules see of each CommonJS module (T54): `default` and `'module.exports'` are its
+    /// `module.exports`, and the names node's lexer finds (with its re-exports') its properties.
+    fn cjs_exports(&mut self) {
+        let n = self.modules.len();
+        let mut own: Vec<(Vec<String>, Vec<usize>)> = vec![(Vec::new(), Vec::new()); n];
+        for (m, o) in own.iter_mut().enumerate() {
+            if !self.modules[m].cjs {
+                continue;
+            }
+            let (names, reexports) = cjs_exports(&self.modules[m].p);
+            let targets = reexports
+                .iter()
+                .filter_map(|spec| self.modules[m].cjs_requests.iter().find(|(s, _)| s == spec).and_then(|(_, t)| t.as_ref().ok().copied()))
+                .collect();
+            *o = (names, targets);
+        }
+        for m in 0..n {
+            if !self.modules[m].cjs {
+                for k in self.modules[m].requests.clone() {
+                    self.modules[k].esm_imported = true;
+                }
+                continue;
+            }
+            let mut names = Vec::new();
+            let mut todo = vec![m];
+            let mut seen = vec![m];
+            while let Some(k) = todo.pop() {
+                names.extend(own[k].0.iter().cloned());
+                for &t in &own[k].1 {
+                    if !seen.contains(&t) {
+                        seen.push(t);
+                        todo.push(t);
+                    }
+                }
+            }
+            names.retain(|n| n != "default" && n != "module.exports");
+            names.sort();
+            names.dedup();
+            let mut locals = vec![("default".to_string(), Binding::CjsValue(m)), ("module.exports".to_string(), Binding::CjsValue(m))];
+            locals.extend(names.iter().enumerate().map(|(i, name)| (name.clone(), Binding::CjsNamed(m, i))));
+            self.modules[m].locals = locals;
+            self.modules[m].cjs_names = names;
+        }
+        for &(_, k) in &self.table {
+            self.modules[k].esm_imported = true;
+        }
+    }
+
     /// ResolveExport: the binding module `m` exports as `name`; `Err` if star exports conflict.
     fn resolve_export(
         &self,
@@ -1040,6 +1596,14 @@ impl<'a> Graph<'a, '_> {
                     Ok(Some(b)) => {
                         binds.insert((m, sym), b);
                     }
+                    Ok(None) if self.modules[i.module].cjs => errors.push((
+                        m,
+                        i.span,
+                        format!(
+                            "SyntaxError: Named export '{name}' not found. The requested module '{}' is a CommonJS module, which may not support all module.exports as named exports.",
+                            i.specifier
+                        ),
+                    )),
                     Ok(None) => errors.push((
                         m,
                         i.span,
@@ -1144,13 +1708,71 @@ impl<'a> Graph<'a, '_> {
                 getters.join(", ")
             ));
         }
+        let command = self.command || self.modules[0].p.exports.is_empty();
+        let dynamic = self.modules.iter().any(|m| !m.dynamic.is_empty());
+        // T54: `require` of an ES module evaluates it (synchronously) with the same algorithm.
+        let require_esm = self.modules.iter().any(|m| m.cjs_requests.iter().any(|(_, t)| t.as_ref().is_ok_and(|t| !self.modules[*t].cjs)))
+            || self.cjs_known.iter().any(|(_, k)| !self.modules[*k].cjs);
+        let evaluate = (command && self.modules[1..].iter().any(|m| m.tla)) || dynamic || require_esm;
+        let at: HashMap<usize, usize> = order.iter().enumerate().map(|(k, m)| (*m, k)).collect();
+        // The CommonJS modules (T54): [function, filename, dirname, requests, module, parent],
+        // requests being [specifier, index] (-1: not found); `module` and `parent` are set when
+        // it's first required.
+        let cjs: Vec<usize> = (0..self.modules.len()).filter(|&m| self.modules[m].cjs).collect();
+        if !cjs.is_empty() {
+            let rows: Vec<String> = cjs
+                .iter()
+                .map(|&m| {
+                    let (file, dir) = abs_file_dir(&self.modules[m].p.path);
+                    let reqs: Vec<String> = self.modules[m]
+                        .cjs_requests
+                        .iter()
+                        .map(|(spec, t)| match t {
+                            // An ES module: [specifier, -3, its evaluation index, namespace, filename].
+                            Ok(t) if !self.modules[*t].cjs => format!(
+                                "[{}, -3, {}, {}, {}]",
+                                js_string(spec),
+                                at[t],
+                                names[&Binding::Namespace(*t)],
+                                js_string(&abs_file_dir(&self.modules[*t].p.path).0)
+                            ),
+                            Ok(t) => format!("[{}, {}]", js_string(spec), cjs.iter().position(|c| c == t).expect("a CommonJS module")),
+                            Err(None) => format!("[{}, -1]", js_string(spec)),
+                            Err(Some((code, message))) => {
+                                format!("[{}, -1, {}, {}]", js_string(spec), js_string(code), js_string(message))
+                            }
+                        })
+                        .collect();
+                    format!(
+                        "[{}, {}, {}, [{}], undefined, -1]",
+                        names[&Binding::Cjs(m)],
+                        js_string(&file),
+                        js_string(&dir),
+                        reqs.join(", ")
+                    )
+                })
+                .collect();
+            out.push_str(&format!("const {} = [{}];\n", names[&Binding::CjsTable], rows.join(", ")));
+            // What a computed `require` finds (slice 4): [absolute path, index] or an ES module's row.
+            let known: Vec<String> = self
+                .cjs_known
+                .iter()
+                .filter(|(_, k)| self.poisoned[*k].is_none())
+                .map(|(key, k)| {
+                    if self.modules[*k].cjs {
+                        format!("[{}, {}]", js_string(key), cjs.iter().position(|c| c == k).expect("a CommonJS module"))
+                    } else {
+                        format!("[{}, -3, {}, {}, {}]", js_string(key), at[k], names[&Binding::Namespace(*k)], js_string(key))
+                    }
+                })
+                .collect();
+            if !known.is_empty() {
+                out.push_str(&format!("$$cjsKnown([{}]);\n", known.join(", ")));
+            }
+        }
         // A dependency with top-level `await` (slice 3, commands only: a library's `init` can't
         // wait) or an `import()` (slice 4): every module becomes a function, run by the spec's
         // algorithm; `import()` evaluates the modules it loads the same way.
-        let command = self.command || self.modules[0].p.exports.is_empty();
-        let dynamic = self.modules.iter().any(|m| !m.dynamic.is_empty());
-        let evaluate = (command && self.modules[1..].iter().any(|m| m.tla)) || dynamic;
-        let at: HashMap<usize, usize> = order.iter().enumerate().map(|(k, m)| (*m, k)).collect();
         if evaluate {
             let tla: Vec<&str> = order.iter().map(|m| if self.modules[*m].tla { "true" } else { "false" }).collect();
             let requests: Vec<String> = order
@@ -1273,6 +1895,32 @@ impl<'a> Graph<'a, '_> {
                 copied: true,
             });
             out.push_str(&source[pos as usize..]);
+            // A CommonJS module an ES module imports runs where ESM evaluation reaches it; its
+            // named exports are what `module.exports` has then (node's snapshot).
+            if self.modules[m].cjs && self.modules[m].esm_imported {
+                map.segments.push(Segment {
+                    at: out.len() as u32,
+                    file: m as u32,
+                    offset: 0,
+                    copied: false,
+                });
+                let value = &names[&Binding::CjsValue(m)];
+                let k = cjs.iter().position(|&c| c == m).expect("a CommonJS module");
+                out.push_str(&format!("\nconst {value} = $$cjsImport({}, {k});\n", names[&Binding::CjsTable]));
+                for (i, name) in self.modules[m].cjs_names.iter().enumerate() {
+                    out.push_str(&format!("const {} = $$cjsNamed({value}, {});\n", names[&Binding::CjsNamed(m, i)], js_string(name)));
+                }
+            }
+            // A CommonJS entry runs as node's main module.
+            if m == 0 && self.modules[0].cjs {
+                map.segments.push(Segment {
+                    at: out.len() as u32,
+                    file: 0,
+                    offset: 0,
+                    copied: false,
+                });
+                out.push_str(&format!("\n$$cjsMain({}, {});\n", names[&Binding::CjsTable], cjs.iter().position(|&c| c == 0).expect("the entry")));
+            }
             if evaluate {
                 map.modules.push((start, out.len() as u32));
             }
@@ -1281,7 +1929,8 @@ impl<'a> Graph<'a, '_> {
             let original = match *b {
                 Binding::Sym(m, s) => self.modules[m].p.semantic.scoping().symbol_name(s),
                 Binding::Default(_) => "default",
-                Binding::Namespace(_) | Binding::Meta(_) => continue,
+                Binding::Namespace(_) | Binding::Meta(_) | Binding::Cjs(_) | Binding::CjsTable => continue,
+                Binding::CjsValue(_) | Binding::CjsNamed(..) => continue,
             };
             if original != name {
                 map.names.insert(name.clone(), original.to_string());
@@ -1309,11 +1958,21 @@ impl<'a> Graph<'a, '_> {
             for &t in &g.modules[m].requests {
                 visit(g, t, seen, out);
             }
+            // What a CommonJS module `require`s runs when it's required: anywhere in the source.
+            for (_, t) in &g.modules[m].cjs_requests {
+                if let Ok(t) = t {
+                    visit(g, *t, seen, out);
+                }
+            }
             out.push(m);
         }
         let mut seen = vec![false; self.modules.len()];
         let mut out = Vec::new();
         visit(self, 0, &mut seen, &mut out);
+        // Modules only a computed `require` loads (T54).
+        for &(_, k) in &self.cjs_known {
+            visit(self, k, &mut seen, &mut out);
+        }
         // Modules only `import()` loads (slice 4): after the entry, each after its dependencies.
         for &(_, k) in &self.table {
             if self.poisoned[k].is_none() {
@@ -1337,6 +1996,11 @@ impl<'a> Graph<'a, '_> {
             .collect();
         // Every module `import()` can load (slice 4).
         todo.extend(self.table.iter().map(|(_, k)| *k).filter(|k| self.poisoned[*k].is_none()));
+        // Every ES module a CommonJS module requires (T54).
+        for m in &self.modules {
+            todo.extend(m.cjs_requests.iter().filter_map(|(_, t)| t.as_ref().ok().copied()).filter(|t| !self.modules[*t].cjs));
+        }
+        todo.extend(self.cjs_known.iter().map(|(_, k)| *k).filter(|k| !self.modules[*k].cjs && self.poisoned[*k].is_none()));
         todo.sort();
         todo.dedup();
         let mut out: Vec<(usize, Vec<(String, Binding)>)> = Vec::new();
@@ -1431,8 +2095,29 @@ impl<'a> Graph<'a, '_> {
             used.insert(name.clone());
             names.insert(Binding::Namespace(*t), name);
         }
+        let fresh = |base: &str, used: &mut HashSet<String>| {
+            let name = (1..)
+                .map(|k| format!("{base}${k}"))
+                .find(|c| !used.contains(c) && !taken.contains(c) && !globals.contains(c))
+                .expect("a free name");
+            used.insert(name.clone());
+            name
+        };
         for m in 0..self.modules.len() {
-            if self.modules[m].meta.is_empty() {
+            if self.modules[m].cjs {
+                names.insert(Binding::Cjs(m), fresh("cjs", &mut used));
+                names.entry(Binding::CjsTable).or_insert_with(|| fresh("modules", &mut used));
+                if self.modules[m].esm_imported {
+                    names.insert(Binding::CjsValue(m), fresh("exports", &mut used));
+                    for (i, name) in self.modules[m].cjs_names.iter().enumerate() {
+                        let base = if is_identifier_name(name) && !name.starts_with('$') { name.as_str() } else { "export" };
+                        names.insert(Binding::CjsNamed(m, i), fresh(base, &mut used));
+                    }
+                }
+            }
+        }
+        for m in 0..self.modules.len() {
+            if self.modules[m].meta.is_empty() || self.modules[m].cjs {
                 continue;
             }
             let name = (1..)
@@ -1461,6 +2146,14 @@ impl<'a> Graph<'a, '_> {
         let nodes = p.semantic.nodes();
         let mut edits = Vec::new();
         let del = |edits: &mut Vec<Edit>, start: u32, end: u32| edits.push(Edit::new(start, end, String::new()));
+        if module.cjs {
+            // The wrapper becomes a (hoisted) function declaration.
+            let end = source.len() as u32;
+            let header = format!("function {}(exports, require, module, __filename, __dirname) {{", names[&Binding::Cjs(m)]);
+            edits.push(Edit::new(0, CJS_PRE.len() as u32, header));
+            edits.push(Edit::new(end - CJS_POST.len() as u32, end, "\n}".into()));
+            return edits;
+        }
 
         if let Some(h) = &p.ast.hashbang {
             del(&mut edits, h.span.start, h.span.end);
@@ -1858,7 +2551,7 @@ mod tests {
         let texts: Vec<&str> = map.modules.iter().map(|(a, b)| &l.source[*a as usize..*b as usize]).collect();
         assert_eq!(texts, ["await 0;\n", "\nasync function f() { await 1; }\n", "\n\nconsole.log(1);\n"]);
         // `await` only inside a function: no module functions.
-        let l = join(&[("main.js", "import './b.js';\n"), ("b.js", "async function f() { await 1; }\n")]).unwrap();
+        let l = join(&[("main.js", "import './b.js';\n"), ("b.js", "export async function f() { await 1; }\n")]).unwrap();
         assert!(l.map.unwrap().modules.is_empty());
     }
 
@@ -1891,7 +2584,7 @@ mod tests {
             ("\"a\tb\"", 2, "expected a character (control characters must be escaped), found `\t`"),
             ("1 2", 2, "expected the end of the text, found `2`"),
         ] {
-            assert_eq!(json_module(text), Err((at, what.to_string())), "{text}");
+            assert_eq!(json_module(text, "export default "), Err((at, what.to_string())), "{text}");
         }
         let err = |files: &[(&str, &str)]| join(files).err().unwrap().to_string();
         let e = err(&[("main.js", "import d from './d.json';\n"), ("d.json", "1")]);
@@ -1981,8 +2674,15 @@ mod tests {
         let e = err("import 'nope';\nimport 'fs/promises';\n", &[]);
         assert!(e.contains("main.js:1:8: error: Cannot find package 'nope' imported from /w/app/main.js (ERR_MODULE_NOT_FOUND)"), "{e}");
         assert!(e.contains("main.js:2:8: error: unsupported: node's built-in module `fs/promises`"), "{e}");
-        let e = err("import 'c';\n", &[("/w/node_modules/c/package.json", "{}"), ("/w/node_modules/c/index.js", "module.exports = 1;\n")]);
-        assert!(e.contains("index.js:1:1: error: unsupported: CommonJS module"), "{e}");
+        // A package without `"type"` whose file has no ESM syntax is CommonJS (T54).
+        let l = join(&[
+            ("/w/app/main.js", "import c from 'c';\nconsole.log(c);\n"),
+            ("/w/node_modules/c/package.json", "{}"),
+            ("/w/node_modules/c/index.js", "module.exports = 1;\n"),
+        ])
+        .unwrap();
+        assert!(l.source.contains("const exports$1 = $$cjsImport(modules$1, 0);"), "{}", l.source);
+        assert!(l.source.contains("console.log(exports$1);"), "{}", l.source);
         // `"type": "module"`: the same file is ESM (and `module` is an undeclared global).
         let ok = join(&[
             ("/w/app/main.js", "import 'c';\n"),
@@ -1990,5 +2690,84 @@ mod tests {
             ("/w/node_modules/c/index.js", "module.exports = 1;\n"),
         ]);
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn commonjs_detection() {
+        // An entry node runs as CommonJS but that can't tell stays an ES module (same bytes).
+        let l = join(&[("/w/main.js", "console.log(1);\n")]).unwrap();
+        assert!(l.map.is_none());
+        // Its CommonJS names make it CommonJS: a function run as the main module.
+        let l = join(&[("/w/main.js", "console.log(typeof require);\n")]).unwrap();
+        assert!(l.source.contains("function cjs$1(exports, require, module, __filename, __dirname) {console.log"), "{}", l.source);
+        assert!(l.source.contains("$$cjsMain(modules$1, 0);"), "{}", l.source);
+        // `return` at the top level parses only as CommonJS.
+        assert!(join(&[("/w/main.js", "return;\n")]).unwrap().source.contains("cjs$1"));
+        // ESM syntax, or `"type": "module"`: an ES module (`module` is an undeclared global).
+        assert!(join(&[("/w/main.js", "export {};\nmodule.x = 1;\n")]).unwrap().map.is_none());
+        let l = join(&[("/w/main.js", "module.x = 1;\n"), ("/w/package.json", r#"{"type": "module"}"#)]).unwrap();
+        assert!(l.map.is_none());
+        // `.cjs` and `"type": "commonjs"` are CommonJS; ESM syntax there doesn't parse.
+        let e = join(&[("/w/main.cjs", "import x from './y.js';\n")]).err().unwrap().to_string();
+        assert!(e.contains("main.cjs:1:1: error:"), "{e}");
+        let e = join(&[("/w/main.js", "with (a) {}\n")]).err().unwrap().to_string();
+        assert!(e.contains("main.js:1:1: error:") && e.contains("(planned: F232)"), "{e}");
+    }
+
+    #[test]
+    fn commonjs_requires() {
+        let l = join(&[
+            ("/w/main.js", "const a = require('./a'), b = require(`./b.json`), c = require('./c');\nrequire.resolve('./d');\nrequire(x);\n"),
+            ("/w/a.js", "#!/usr/bin/env node\nexports.a = require('./a.js');\n"),
+            ("/w/b.json", r#"{"__proto__": 1}"#),
+            ("/w/d/index.js", ""),
+        ])
+        .unwrap();
+        let s = &l.source;
+        assert!(s.contains("[[\"./a\", 1], [\"./b.json\", 2], [\"./c\", -1], [\"./d\", 3]]"), "{s}");
+        assert!(s.contains("function cjs$2(exports, require, module, __filename, __dirname) {//"), "{s}");
+        assert!(s.contains("{module.exports = {[\"__proto__\"]: 1};"), "{s}");
+        let map = l.map.unwrap();
+        // Offsets in a wrapper map back to the file.
+        let at = s.find("exports.a").unwrap() as u32;
+        assert_eq!(map.locate(at), ("/w/a.js", 2, 1));
+        let e = join(&[("/w/main.js", "require('fs');\n")]).err().unwrap().to_string();
+        assert!(e.contains("main.js:1:9: error: unsupported: node's built-in module `fs`"), "{e}");
+        // Packages: the `require` conditions, LOAD_AS_FILE/DIRECTORY without `exports`; errors
+        // other than not found are thrown with node's code.
+        let l = join(&[
+            ("/w/app/main.js", "require('p'); require('p/x'); require('q'); require('q/sub'); require('r'); require('nope');\n"),
+            ("/w/node_modules/p/package.json", r#"{"exports": {".": {"import": "./i.js", "require": "./r.js"}}}"#),
+            ("/w/node_modules/p/r.js", ""),
+            ("/w/node_modules/q/package.json", r#"{"main": "lib/main"}"#),
+            ("/w/node_modules/q/lib/main.js", ""),
+            ("/w/node_modules/q/sub.json", "{}"),
+            ("/w/app/node_modules/r.js", ""),
+        ])
+        .unwrap();
+        let s = &l.source;
+        assert!(s.contains(r#"[["p", 1], ["p/x", -1, "ERR_PACKAGE_PATH_NOT_EXPORTED", "Package subpath './x' is not defined by \"exports\" in /w/node_modules/p/package.json"], ["q", 2], ["q/sub", 3], ["r", 4], ["nope", -1]]"#), "{s}");
+        assert!(s.contains("\"/w/node_modules/q/sub.json\""), "{s}");
+        assert!(s.contains("\"/w/app/node_modules/r.js\""), "{s}");
+    }
+
+    #[test]
+    fn commonjs_export_names() {
+        let names = |src: &str| {
+            let alloc = Allocator::default();
+            let p = parse_cjs(&alloc, "/w/x.js", alloc.alloc_str(src)).unwrap();
+            cjs_exports(&p)
+        };
+        // cjs-module-lexer's rules (checked against node 24).
+        let (n, r) = names("const a = 1, c = 2, f = 3;\nmodule.exports = { a, b: c, 'd': a, e: 1, f };\n");
+        assert_eq!((n, r), (vec!["a".into(), "b".into(), "d".into()], vec![]));
+        let (n, _) = names("const x = {};\nmodule.exports = { a: x.y, b: x };\nif (false) exports.dead = 1;\nexports['d-e'] = 2;\n");
+        assert_eq!(n, ["a", "d-e", "dead"]);
+        let (n, _) = names("module.exports = { get a() { return 1; }, b: 2 };\nmodule.exports = { m() {}, k: 1 };\n");
+        assert_eq!(n, ["m"]);
+        let (n, r) = names("Object.defineProperty(exports, '__esModule', { value: true });\nObject.defineProperty(exports, 'g', { enumerable: true, get: function () { return m.g; } });\nObject.defineProperty(exports, 'h', { get() { return 1; } });\n__exportStar(require('./s'), exports);\nmodule.exports = { ...require('./t'), ...rest };\n");
+        assert_eq!((n, r), (vec!["__esModule".into(), "g".into()], vec!["./s".into(), "./t".into()]));
+        let (n, r) = names("exports.default = 1;\nmodule.exports = require('./u');\n");
+        assert_eq!((n, r), (vec![], vec!["./u".into()]));
     }
 }

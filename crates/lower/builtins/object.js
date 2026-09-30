@@ -304,6 +304,17 @@ function $$Object_prototype_valueOf() {
 // `const f = Object.defineProperty`: `$$A_b$value` is `A.b` read as a value (calls stay
 // intrinsics). Named and sized like node's (`builtins::length`).
 
+// T54: tsc's CommonJS helpers test `Object.create ? … : …`.
+function $$Object_create$value(proto, props) {
+  const o = Object.create(proto);
+  if (props !== undefined) {
+    // ObjectDefineProperties, simplified: each descriptor read and defined in turn.
+    const from = Object(props);
+    const keys = Object.keys(from);
+    for (let i = 0; i < keys.length; i++) Object.defineProperty(o, keys[i], from[keys[i]]);
+  }
+  return o;
+}
 function $$Object_defineProperty$value(o, key, desc) {
   return Object.defineProperty(o, key, desc);
 }
