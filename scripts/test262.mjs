@@ -80,6 +80,13 @@ const SUBSET = [
   "built-ins/SuppressedError",
   // T49.
   "built-ins/Symbol",
+  // T53.
+  "built-ins/encodeURI",
+  "built-ins/encodeURIComponent",
+  "built-ins/decodeURI",
+  "built-ins/decodeURIComponent",
+  "annexB/built-ins/escape",
+  "annexB/built-ins/unescape",
 ];
 // Features node 24.21.0 (the oracle, TOOLS.md) doesn't implement: proper tail calls and proposals it
 // doesn't ship yet. Tests using them are skipped.

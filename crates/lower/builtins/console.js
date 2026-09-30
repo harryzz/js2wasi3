@@ -114,3 +114,51 @@ function $$consoleFormat(args) {
   }
   return str;
 }
+
+// ---- `console` as a value (T53) --------------------------------------------------------------
+// `console.log(x)` is lowered directly; `console` anywhere else (`const log = console.log`,
+// `console.log(...xs)`, `typeof console`) is this object, made on first use, with the methods
+// implemented here (enumerable, in node's order). Intrinsics `write_stdout/stderr(text)`.
+
+let $$consoleObject = undefined;
+
+function $$Console() {
+  if ($$consoleObject === undefined) {
+    const c = {};
+    c.log = $$Console_log;
+    c.info = $$Console_info;
+    c.debug = $$Console_debug;
+    c.warn = $$Console_warn;
+    c.error = $$Console_error;
+    $$consoleObject = c;
+  }
+  return $$consoleObject;
+}
+
+// A line as `console.log` writes it: node's `formatWithOptions` (a lone string as it is).
+function $$consoleLine(args) {
+  if (+args.length === 1 && typeof args[0] === "string") {
+    return args[0] + "\n";
+  }
+  return $$consoleFormat(args) + "\n";
+}
+
+function $$Console_log(...args) {
+  __intrinsic_write_stdout($$consoleLine(args));
+}
+
+function $$Console_warn(...args) {
+  __intrinsic_write_stderr($$consoleLine(args));
+}
+
+function $$Console_debug(...args) {
+  __intrinsic_write_stdout($$consoleLine(args));
+}
+
+function $$Console_info(...args) {
+  __intrinsic_write_stdout($$consoleLine(args));
+}
+
+function $$Console_error(...args) {
+  __intrinsic_write_stderr($$consoleLine(args));
+}

@@ -63,7 +63,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Built-ins written in JS and compiled with the program (only what's used): `Math`, `String`/`Number` methods and
   parsing, `Array.prototype` methods (`map`, `filter`, `reduce`, `sort`, `splice`, …, generic over array-likes, with species), `Array.from`/`of`/`fromAsync`, `JSON.stringify`/`parse`, `Map`/`Set`, typed arrays and `ArrayBuffer`, `Object.assign`/`fromEntries`,
   `hasOwnProperty` and the other `Object.prototype` methods, `Symbol` (`Symbol.for`/`keyFor`, the well-known
-  symbols, `Symbol` as a value).
+  symbols, `Symbol` as a value), `encodeURIComponent` & co., `escape`/`unescape`, `structuredClone`.
 - Classes: fields (also computed keys), static members and `static {}` blocks, private `#x` fields, methods and
   getters/setters, `extends` (also built-in errors), `super`.
 - Generators (`function*`, `yield`, `yield*`); `Promise` (`then`/`catch`/`finally`, `all`/`allSettled`/`race`/`any`,
@@ -78,7 +78,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   imported interfaces as ES imports (`import { f } from "ns:pkg/iface"`, an `async func` gives a Promise) and
   exported interfaces as objects (`export const iface = { … }`), so components compose with `wac plug`; see
   [docs/user-worlds.md](docs/user-worlds.md).
-- `console.log` and friends, printed like node; uncaught errors and unhandled rejections reported like node.
+- `console.log` and friends, printed like node (also `console` as a value, `console.log(...xs)` and replaced
+  methods); uncaught errors and unhandled rejections reported like node.
 - Programs of several files: `import`/`export` between ES modules (relative paths), joined into one component at
   build time (namespaces, re-exports, live bindings, cycles, top-level `await` in node's order, `import.meta`, JSON
   modules); `build --command` makes an entry with exports a command, as node runs it.

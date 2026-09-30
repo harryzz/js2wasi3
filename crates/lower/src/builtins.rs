@@ -52,6 +52,8 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/global.js"),
     include_str!("../builtins/dispose.js"),
     include_str!("../builtins/promise.js"),
+    include_str!("../builtins/uri.js"),
+    include_str!("../builtins/clone.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -133,6 +135,34 @@ const REGEXP_SYMBOL_METHODS: &[(&str, &[&str])] = &[
 pub(crate) const DATE_NEW: &str = "$$Date";
 pub(crate) const DATE_CALL: &str = "$$DateCall";
 pub(crate) const DATE_INSPECT: &str = "$$dateInspect";
+
+/// `console` as a value (T53).
+pub(crate) const CONSOLE: &str = "$$Console";
+
+/// The `console` methods lowered directly when called (T53): `Some(stderr)`.
+pub(crate) fn console_stream(method: &str) -> Option<bool> {
+    match method {
+        "log" | "info" | "debug" => Some(false),
+        "error" | "warn" => Some(true),
+        _ => None,
+    }
+}
+
+/// Is the reference `console` (node `id`) the object of a direct call `console.log(…)` (T53: no
+/// spread, not optional), which the lowering writes without the `console` object?
+fn console_direct(p: &Program, id: oxc_semantic::NodeId) -> bool {
+    let nodes = p.semantic.nodes();
+    let AstKind::StaticMemberExpression(m) = nodes.parent_kind(id) else {
+        return false;
+    };
+    let member = nodes.parent_id(id);
+    matches!(nodes.parent_kind(member), AstKind::CallExpression(c)
+        if c.callee.span() == m.span
+            && !m.optional
+            && !c.optional
+            && !c.arguments.iter().any(|a| a.is_spread())
+            && console_stream(&m.property.name).is_some())
+}
 
 /// The prelude's StringToNumber: the runtime's ToNumber of a string calls it.
 pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
@@ -243,6 +273,12 @@ pub(crate) struct Prelude {
     pub names: HashMap<String, SymbolId>,
     /// User references to prelude names (errors: they aren't JS globals).
     pub user_refs: Vec<(Span, String)>,
+    /// `console.x` for a method node has that isn't implemented (T53: `console.table`): errors,
+    /// unless the code changes `console` (its own members).
+    pub console_members: Vec<(Span, String)>,
+    /// Does the user's code change the `console` object (T53: `console.log = f`,
+    /// `Object.assign(console, …)`)? Then every `console.x(…)` goes through the object.
+    pub console_patched: bool,
     /// The spans of the prelude functions not needed, in source order.
     dead: Vec<Span>,
     /// The names of the needed top-level declarations.
@@ -251,7 +287,8 @@ pub(crate) struct Prelude {
     /// only then)?
     pub bind: bool,
     /// Does it name a property `toString` (T25: functions keep their source text for
-    /// `Function.prototype.toString` only then)?
+    /// `Function.prototype.toString` only then) or `structuredClone` (T53: its error shows the
+    /// function)?
     pub to_string: bool,
     /// Built-in constructors the user's code uses as values (T25: `arr.map(String)`,
     /// `x.constructor === Array`), and `Math`/`JSON`.
@@ -304,9 +341,12 @@ pub(crate) const GLOBAL_NAMES: &[&str] = &[
     "ReferenceError", "SyntaxError", "TypeError", "URIError", "globalThis", "JSON", "Math",
     "ArrayBuffer", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array",
     "Int32Array", "Float32Array", "Float64Array", "Uint8ClampedArray", "BigInt", "Map", "Set",
-    "Reflect", "isFinite", "isNaN", "global", "clearImmediate", "setImmediate", "clearInterval",
-    "clearTimeout", "setInterval", "setTimeout", "queueMicrotask", "eval", "SuppressedError",
-    "DisposableStack", "AsyncDisposableStack", "BigInt64Array", "BigUint64Array",
+    "Reflect", "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent", "escape",
+    "unescape", "isFinite", "isNaN", "console", "global", "clearImmediate", "setImmediate",
+    "clearInterval", "clearTimeout", "setInterval", "setTimeout", "queueMicrotask",
+    "structuredClone", "eval",
+    "SuppressedError", "DisposableStack", "AsyncDisposableStack", "BigInt64Array",
+    "BigUint64Array",
 ];
 
 /// Properties a built-in constructor has as a function (`Array.apply`, `String.name`): reading
@@ -525,6 +565,29 @@ impl Prelude {
             }
             _ => false,
         });
+        // T53: writes to `console`'s properties (not through an alias).
+        let is_console = |e: &Expression| {
+            matches!(e.without_parentheses(), Expression::Identifier(id)
+                if id.name == "console"
+                    && !p.in_prelude(id.span.start)
+                    && scoping.get_reference(id.reference_id()).symbol_id().is_none())
+        };
+        out.console_patched = p.semantic.nodes().iter().any(|node| match node.kind() {
+            AstKind::AssignmentExpression(a) => a.left.as_member_expression().is_some_and(|m| is_console(m.object())),
+            AstKind::UpdateExpression(u) => u.argument.as_member_expression().is_some_and(|m| is_console(m.object())),
+            AstKind::UnaryExpression(u) if u.operator == oxc_syntax::operator::UnaryOperator::Delete => {
+                u.argument.as_member_expression().is_some_and(|m| is_console(m.object()))
+            }
+            AstKind::CallExpression(c) => {
+                c.callee.as_member_expression().is_some_and(|m| {
+                    matches!(
+                        m.static_property_name(),
+                        Some("defineProperty" | "defineProperties" | "assign" | "setPrototypeOf" | "set")
+                    )
+                }) && c.arguments.first().and_then(|a| a.as_expression()).is_some_and(is_console)
+            }
+            _ => false,
+        });
         out.promise_value = p.semantic.nodes().iter().any(|node| match node.kind() {
             AstKind::IdentifierReference(r) => {
                 r.name == "Promise"
@@ -718,6 +781,27 @@ impl Prelude {
                         {
                             out.ctor_values.insert(r.name.to_string());
                         }
+                        // T53: a function that `structuredClone` rejects shows its source.
+                        out.to_string |= r.name == "structuredClone" && !p.in_prelude(r.span.start);
+                        // T53: node's other `console` methods are build errors, not TypeErrors.
+                        if r.name == "console"
+                            && !out.console_patched
+                            && !p.in_prelude(r.span.start)
+                            && let AstKind::StaticMemberExpression(m) = p.semantic.nodes().parent_kind(node.id())
+                            && m.object.span() == r.span
+                            && console_stream(&m.property.name).is_none()
+                            && !OBJECT_PROTO_PROPS.contains(&m.property.name.as_str())
+                        {
+                            out.console_members.push((m.span, m.property.name.to_string()));
+                        }
+                        // T53: `console` other than `console.log(…)` without spread is `$$Console()`.
+                        if r.name == "console"
+                            && !p.in_prelude(r.span.start)
+                            && (out.console_patched || !console_direct(p, node.id()))
+                            && let Some(sym) = out.names.get(CONSOLE)
+                        {
+                            add(item_of[sym], r.span, &mut roots);
+                        }
                         // `Symbol(…)` is `Intrinsic::NewSymbol` (T49: `$$Symbol` is its value's).
                         if (js2wasi3_ir::Builtin::parse(&r.name).is_none()
                             || (called() && r.name != "Symbol"))
@@ -837,7 +921,11 @@ impl Prelude {
                 out.global_props.push(name.to_string());
                 if CTOR_VALUES.contains(name) || js2wasi3_ir::Namespace::parse(name).is_some() {
                     out.ctor_values.insert(name.to_string());
-                } else if let Some(sym) = out.names.get(&format!("$${name}")) {
+                } else if let Some(sym) = out
+                    .names
+                    .get(&format!("$${name}"))
+                    .or_else(|| (*name == "console").then(|| out.names.get(CONSOLE)).flatten())
+                {
                     roots.push(item_of[sym]);
                 }
             }
@@ -967,6 +1055,7 @@ pub(crate) fn length(name: &str) -> Option<u32> {
         | "$$Array_prototype_toSpliced" => Some(2),
         "$$Array_prototype_flat" | "$$Map" | "$$Set" | "$$Symbol" => Some(0),
         "$$Function" => Some(1),
+        "$$structuredClone" => Some(2),
         "$$Date" | "$$Date_UTC" => Some(7),
         "$$Date_prototype_toLocaleString"
         | "$$Date_prototype_toLocaleDateString"

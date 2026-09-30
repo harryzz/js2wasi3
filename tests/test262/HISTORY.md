@@ -3,6 +3,17 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-30: T53 `console` as a value, URI functions, `structuredClone` (full run)
+
+- Compiler: `console` as a value and `console.log(...xs)`; `encodeURI(Component)`/`decodeURI(Component)`, Annex B
+  `escape`/`unescape`; `structuredClone`; the Map/Set iterator `Symbol.toStringTag` fix. Runner: `built-ins/encodeURI`,
+  `encodeURIComponent`, `decodeURI`, `decodeURIComponent`, `annexB/built-ins/escape`, `unescape` (208 tests) joined
+  the subset (and the sparse clone).
+- Full run on `a-03` (31,235 tests, 1,937 s, -j 36): the new directories 196 pass, 10 fail (a script's top-level
+  `this` as the global object, F228), 2 timeout (`decodeURI*/…A2.5_T1`, ~1M calls: F229); 2 unsupported → pass
+  (`built-ins/global`), 0 regressions (1 timeout under load passed alone and was set back). Subset: 27,824 of
+  28,799 run pass (96.6%).
+
 ## 2026-09-30: T52 evaluation order (full run)
 
 - Compiler: a `null`/`undefined` base throws before its key is converted; array destructuring closes its iterator on

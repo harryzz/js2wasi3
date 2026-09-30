@@ -903,6 +903,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         for (span, name) in self.prelude.user_refs.clone() {
             self.unsupported(span, &format!("global `{name}`"), "T21");
         }
+        for (span, name) in self.prelude.console_members.clone() {
+            self.unsupported(span, &format!("`console.{name}`"), "later");
+        }
         for (span, name) in self.prelude.replaced.clone() {
             // Reads of the name stay direct references to the built-in (T42, docs/design.md D6).
             self.unsupported(span, &format!("replacing or deleting the built-in global `{name}`"), "later");
@@ -3975,6 +3978,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     // The global object (T42).
                     return Ok(Val::js(self.prelude_call("$$GlobalObject", vec![]), Kind::Any));
                 }
+                if id.name == "console"
+                    && self.prelude.is_live(builtins::CONSOLE)
+                    && self.scoping.get_reference(id.reference_id()).symbol_id().is_none()
+                {
+                    // `console` as a value (T53).
+                    return self.console_value(id.span).map(|e| Val::js(e, Kind::Any));
+                }
                 if Builtin::parse(id.name.as_str()).is_none()
                     && let Some(func) = self.builtin_global(e)
                 {
@@ -4859,7 +4869,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if c.optional {
             return Err(self.unsupported(span, "optional call `?.()`", "T14"));
         }
-        if let Some(stderr) = self.console_method(&c.callee) {
+        // T53: with a spread argument, a call of the `console` object's method.
+        if !c.arguments.iter().any(|a| a.is_spread())
+            && let Some(stderr) = self.console_method(&c.callee)
+        {
             return Ok((self.console(cx, c, stderr)?, Call::Console));
         }
         if matches!(c.callee, Expression::Super(_)) {
@@ -5424,6 +5437,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return None;
         };
         if obj.name != "console"
+            || self.prelude.console_patched
             || m.optional
             || self
                 .scoping
@@ -5433,11 +5447,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         {
             return None;
         }
-        match m.property.name.as_str() {
-            "log" | "info" | "debug" => Some(false),
-            "error" | "warn" => Some(true),
-            _ => None,
+        builtins::console_stream(&m.property.name)
+    }
+
+    /// `console` as a value (T53): `$$Console()`, in a command only.
+    fn console_value(&mut self, span: Span) -> R<Expr> {
+        if !self.command {
+            return Err(self.unsupported(
+                span,
+                "`console` in a module with exports (a library can't write to stdout yet)",
+                "T20",
+            ));
         }
+        Ok(self.prelude_call(builtins::CONSOLE, vec![]))
     }
 
     /// `console.log(a, b, …)` on primitives: each argument formatted (`-0` prints as `-0`),
@@ -5766,11 +5788,30 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "unit" | "i32_get" => 2,
             "sub" | "str_set" | "define" | "i32_set" => 3,
             "global_init" => 1,
+            "write_stdout" | "write_stderr" => 1,
             "i32_new" | "i32_len" => 1,
             _ => return Err(self.unsupported(c.span, &format!("intrinsic `{name}`"), "T21")),
         };
         if c.arguments.len() != arity {
             return Err(self.unsupported(c.span, &format!("intrinsic `{name}` arity"), "T21"));
+        }
+        if let Some(stderr) = match name {
+            "write_stdout" => Some(false),
+            "write_stderr" => Some(true),
+            _ => None,
+        } {
+            // T53: `console`'s methods as values write a line (commands only; a library's use of
+            // `console` is reported where it's named).
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let text = jsval_of(self.expr(cx, e)?);
+            let e = if self.command {
+                Expr::intrinsic(Intrinsic::ConsoleWrite { stderr }, vec![text])
+            } else {
+                library_throws("`console` isn't available in a module with exports yet (js2wasi3)")
+            };
+            return Ok((e, Call::Intrinsic(None)));
         }
         if name == "random_seed" {
             // An import (`wasi:random`): commands only. `check_builtin` rejects `Math.random` where
@@ -7238,6 +7279,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && self.prelude.ctor_values.contains(name)
         {
             return Some(Expr::intrinsic(Intrinsic::BuiltinCtor(b), vec![]));
+        }
+        if name == "console" {
+            return self.console_value(Span::default()).ok();
         }
         match name {
             "Promise" => {

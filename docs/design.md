@@ -375,6 +375,18 @@ which stay (same bytes) in programs that link none. `Promise.x(…)` is a direct
 (`Module::ignore_unhandled`) reports only the entry module's rejected evaluation promise (a top-level `await`, as
 node does whatever the flag; `run` marks it with `handled` bit 2, `promise::MAIN`) and ignores the other unhandled
 rejections; the test262 runner uses it, as hosts like d8 don't fail a test on one.)
+(T53: `console` as a value is `$$Console()` in `builtins/console.js`, an object made on first use with the prelude
+methods `$$Console_log`/`info`/`debug`/`warn`/`error` (rest parameters, the line from `$$consoleFormat`, written by the
+prelude intrinsics `write_stdout`/`write_stderr`); not an `ir::Namespace`, whose global would shift every program's
+global indices. It's linked only when `console` appears other than as `console.<method>(…)` without spread; the
+direct path stays for those (same bytes). `console.log(...xs)` is a call of the object's method. A program that
+writes a property of `console` (`Prelude::console_patched`) calls every method through the object. node's other
+members (`console.table`, …) are build errors. `builtins/uri.js`: `encodeURI(Component)`/`decodeURI(Component)`
+(the spec's Encode/Decode over UTF-8, V8's `URIError: URI malformed`) and Annex B `escape`/`unescape`.
+`builtins/clone.js`: `structuredClone` in one pass with a native identity map (cycles, shared references, shared
+buffers); a `DataCloneError` is an `Error` whose prototype is a small `DOMException.prototype` (`code` 25, own
+`name`), printed as node's `DOMException [DataCloneError]: … could not be cloned.`; a program naming
+`structuredClone` keeps function source text for that message.)
 
 ### D6. The global object, `eval` and `Function` (T42)
 Every file is an ES module (strict, top-level `this` is `undefined`, top-level declarations aren't global-object

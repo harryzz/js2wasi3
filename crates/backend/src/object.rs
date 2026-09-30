@@ -3851,7 +3851,8 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
         s.if_(BlockType::Empty);
         {
             let (m, st) = (cx.str("Map Iterator"), cx.str("Set Iterator"));
-            s.global_get(m).global_get(st);
+            // Modes 3–5 are a Set's (T53: were swapped).
+            s.global_get(st).global_get(m);
             s.local_get(O)
                 .ref_cast_non_null(mapset::mapiter())
                 .struct_get(runtime::T_MAPITER, mapset::I_MODE)

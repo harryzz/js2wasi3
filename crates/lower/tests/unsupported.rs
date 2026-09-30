@@ -287,7 +287,7 @@ fn command_rules() {
     );
     assert_eq!(
         one("console.table(1);"),
-        "1:1 unsupported: global `console` (planned: T21)"
+        "1:1 unsupported: `console.table` (planned: later)"
     );
     // A top-level `await using` is reported, not a panic (F140).
     assert_eq!(

@@ -21,10 +21,9 @@ table in [`tasks/README.md`](../tasks/README.md).
 |---|---|---|---|---|
 | Keywords (66 entries) | 30 | 12 | 0 | 24 |
 | Built-in objects, properties, methods (25) | 11 | 14 | 0 | – |
-| Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
+| Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite`, `encodeURI*`/`decodeURI*`/`escape`/`unescape`, `console`, `structuredClone` ✅ | | | the rest ➖ |
 
-What's most needed, in order: the rest of the built-in library (`Intl`, `DataView`, `Float16Array`), spread into `console.log` and calls through `console.log`
-as a value, `typeof` of an undeclared name, then the language gaps below.
+What's most needed, in order: the rest of the built-in library (`Intl`, `DataView`, `Float16Array`), `typeof` of an undeclared name, then the language gaps below.
 
 ## 1. Keywords
 
@@ -97,8 +96,8 @@ as a value, `typeof` of an undeclared name, then the language gaps below.
 | `with` | ➖ | Not allowed in strict mode / ES modules: a syntax error in node too. |
 | `yield` | ✅ | `yield`, `yield*`, `next`/`return`/`throw`, `finally` on `return()` (T18). |
 
-Other syntax found missing while probing (not on the list): spread arguments into `console.log(...xs)`, `console.log`
-used as a value. Tagged templates (``tag`a${x}b` ``, `String.raw`) work since T51 (template objects cached per site,
+Other syntax found missing while probing (not on the list): none left; spread arguments into `console.log(...xs)` and
+`console` as a value work since T53. Tagged templates (``tag`a${x}b` ``, `String.raw`) work since T51 (template objects cached per site,
 frozen, invalid escapes cooked to `undefined`); regex literals since T27, dynamic `import()` since T41. BigInt literals and operators work since T40 (see
 `BigInt` below).
 
@@ -151,7 +150,9 @@ node/WASI globals:
 | `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` | ✅ | T19, on the P3 event loop (commands only; libraries: T20). T25: Timeout objects have `ref`/`unref`/`hasRef`/`refresh`/`[Symbol.toPrimitive]` (the id, which the clear functions also take); printing them differs from node (F112); a string delay traps if nothing else converts to a number (F85). |
 | `setImmediate`, `clearImmediate`, `process.nextTick` | ✅ | T25, commands only; `process` itself is not provided (F112). |
 | `constructor` | ✅ | Classes, functions, built-in prototypes. |
-| `globalThis`, `global` | 🟡 | T42: the global object, made when the code names it: the built-ins the code names are its properties (the same values: `globalThis.Array === Array`, node's descriptors), undeclared names are read, written and `typeof`'d through it. Missing: replacing a built-in (`globalThis.Array = X` is rejected, F201); `console`, `process`, `Symbol`, … aren't on it and it prints as a plain object (F202). |
+| `globalThis`, `global` | 🟡 | T42: the global object, made when the code names it: the built-ins the code names are its properties (the same values: `globalThis.Array === Array`, node's descriptors), undeclared names are read, written and `typeof`'d through it. Missing: replacing a built-in (`globalThis.Array = X` is rejected, F201); `process`, `Symbol`, … aren't on it and it prints as a plain object (F202). |
 | `parseInt`, `parseFloat` | ✅ | T21 (also `isNaN`, `isFinite`). Non-decimal `parseInt` past 2^53 isn't correctly rounded (F89). |
-| `decodeURI`, `decodeURIComponent`, `encodeURI`, `encodeURIComponent`, `escape`, `unescape` | ❌ | Rejected (T21). |
+| `decodeURI`, `decodeURIComponent`, `encodeURI`, `encodeURIComponent`, `escape`, `unescape` | ✅ | T53: the spec's Encode/Decode over UTF-8 (`URIError: URI malformed`), Annex B `escape`/`unescape`. |
+| `console` | ✅ | `log`/`info`/`debug` (stdout), `warn`/`error` (stderr), printed like node, with format strings (T10, T25); T53: `console` as a value (`const log = console.log`, `forEach(console.log)`, `bind`), `console.log(...xs)`, replacing its methods (`console.log = f`). Commands only (a library can't write to stdout yet). Missing: node's other methods (`table`, `dir`, `time`, `assert`, `group`, `count`, `trace`, …: build errors), `console.log(console)` prints a plain object (F230). |
+| `structuredClone` | ✅ | T53: primitives, plain objects, arrays, `Date`, `RegExp`, `Map`, `Set`, wrappers, errors, `ArrayBuffer`s and typed arrays, with cycles and shared references; node's `DataCloneError` for functions, symbols and other objects. Missing: the `transfer` option, `DOMException` as a global, errors' `stack` (F231). |
 | `crypto` | ❌ | Not provided (a WASI `random` import would back `crypto.getRandomValues`; not planned yet). |
