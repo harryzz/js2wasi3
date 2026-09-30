@@ -354,6 +354,12 @@ by name stay `Intrinsic::NewSymbol` and don't link it), its call entry is the pr
 entry throws (`new Symbol`, `extends Symbol` + `super()`, `Reflect.construct`). Its well-known symbols are own
 constants only for the names the code uses (`ir::Module::symbol_statics`, like T25's statics by name).
 `Symbol.prototype[Symbol.toPrimitive]` is `$$Symbol_prototype_$toPrimitive`, linked by naming `toPrimitive`.)
+(T51: a tagged template ``tag`a${x}b` `` is lowered like a spread call (`Lowerer::tagged_template`: a member tag's
+object is `this`) to `CallList(tag, this, [templateObject, ...substitutions])`; the template object comes from
+`$$templateObject(site, cooked, raw)` in `builtins/string.js` (GetTemplateObject: frozen arrays, `raw`
+non-enumerable), cached by the lowering's site number, linked only when the user's source has a tagged template.
+Cooked strings of invalid escapes are `undefined`; raw strings get TRV (CR/CRLF → LF). `String.raw` is prelude
+code. `eval` code is compiled once (T42), so its sites are shared by every run of the same `eval` (F226).)
 (T50: the `Promise` statics (`all`, `allSettled`, `any`, `race`, `resolve`, `reject`, `withResolvers`, `try`) are the
 spec's steps in `builtins/promise.js` (NewPromiseCapability through `new C(executor)`, GetPromiseResolve, the iterator
 protocol with IteratorClose; intrinsic `is_promise`); promises, `then` and the job queue stay native. They're linked

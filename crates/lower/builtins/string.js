@@ -1860,3 +1860,44 @@ function $$Number_prototype_toFixed(fractionDigits) {
   const point = digits.length - f;
   return sign + __intrinsic_sub(digits, 0, point) + "." + __intrinsic_sub(digits, point, digits.length);
 }
+
+// Tagged templates (T51): GetTemplateObject. `site` is the lowering's number for the call site, so
+// every evaluation of a site gets the same frozen array of cooked strings with its frozen,
+// non-enumerable `raw` array; `cooked`/`raw` are fresh literals, used the first time.
+let $$templateCache = null;
+
+function $$templateObject(site, cooked, raw) {
+  if ($$templateCache === null) {
+    $$templateCache = [];
+  }
+  if (site < $$templateCache.length) {
+    const t = $$templateCache[site];
+    if (t !== undefined) {
+      return t;
+    }
+  }
+  Object.freeze(raw);
+  Object.defineProperty(cooked, "raw", { value: raw });
+  Object.freeze(cooked);
+  __intrinsic_define($$templateCache, site, cooked);
+  return cooked;
+}
+
+// `String.raw(template, ...substitutions)` (T51).
+function $$String_raw(template, ...substitutions) {
+  const literals = __intrinsic_to_object(__intrinsic_to_object(template).raw);
+  const len = $$lengthOf(literals);
+  if (len <= 0) {
+    return "";
+  }
+  let r = "";
+  for (let i = 0; ; i++) {
+    r += __intrinsic_to_string(literals[i]);
+    if (i + 1 === len) {
+      return r;
+    }
+    if (i < substitutions.length) {
+      r += __intrinsic_to_string(substitutions[i]);
+    }
+  }
+}

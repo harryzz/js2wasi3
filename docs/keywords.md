@@ -24,8 +24,7 @@ table in [`tasks/README.md`](../tasks/README.md).
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite` ✅; `encodeURI*`/`escape`… ❌ | | | the rest ➖ |
 
 What's most needed, in order: the rest of the built-in library (`Intl`, `DataView`, `Float16Array`), spread into `console.log` and calls through `console.log`
-as a value, `typeof` of an undeclared name, then the language gaps below (tagged templates, regex, dynamic
-`import()`).
+as a value, `typeof` of an undeclared name, then the language gaps below.
 
 ## 1. Keywords
 
@@ -98,8 +97,9 @@ as a value, `typeof` of an undeclared name, then the language gaps below (tagged
 | `with` | ➖ | Not allowed in strict mode / ES modules: a syntax error in node too. |
 | `yield` | ✅ | `yield`, `yield*`, `next`/`return`/`throw`, `finally` on `return()` (T18). |
 
-Other syntax found missing while probing (not on the list): tagged templates (F78; regex literals are done, T27), spread
-arguments into `console.log(...xs)`, `console.log` used as a value. BigInt literals and operators work since T40 (see
+Other syntax found missing while probing (not on the list): spread arguments into `console.log(...xs)`, `console.log`
+used as a value. Tagged templates (``tag`a${x}b` ``, `String.raw`) work since T51 (template objects cached per site,
+frozen, invalid escapes cooked to `undefined`); regex literals since T27, dynamic `import()` since T41. BigInt literals and operators work since T40 (see
 `BigInt` below).
 
 ## 2. JavaScript objects, properties and methods

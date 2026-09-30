@@ -196,6 +196,13 @@ pub fn lower_with(
         if boundary.is_some_and(Boundary::has_streams) {
             extra.extend(builtins::STREAMS);
         }
+        if program.semantic.nodes().iter().any(|n| {
+            matches!(n.kind(), oxc_ast::AstKind::TaggedTemplateExpression(t)
+                if !program.in_prelude(t.span.start))
+        }) {
+            // T51.
+            extra.push(builtins::TEMPLATE_OBJECT);
+        }
         let prelude = builtins::Prelude::new(program, &extra);
         let mut l = Lowerer {
             p: program,
@@ -228,6 +235,7 @@ pub fn lower_with(
                     .collect(),
                 ..ir::Module::default()
             },
+            template_sites: 0,
             funcs: HashMap::new(),
             func_params: HashMap::new(),
             globals: HashMap::new(),
@@ -359,6 +367,8 @@ enum Binding {
 
 struct Lowerer<'p, 'a> {
     p: &'p Program<'a>,
+    /// Tagged template sites lowered so far (T51: each one's number for `$$templateObject`).
+    template_sites: u32,
     /// A user world's export signatures (T20).
     boundary: Option<&'p Boundary>,
     /// The built-ins prelude (T21).
@@ -1158,6 +1168,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             let Some(&func) = self.funcs.get(sym) else {
                 continue;
             };
+            if name == builtins::TEMPLATE_OBJECT {
+                // Called by tagged templates with JS values (T51).
+                for p in self.func_params[&func].clone().into_iter().flatten() {
+                    self.observe(Slot::Var(p), Kind::Any);
+                }
+                continue;
+            }
             if builtins::STREAMS.contains(&name.as_str()) {
                 // Called by the backend's stream lifting / lowering (T20 slice 6b): JS values.
                 if name == builtins::STREAMS[0] {
@@ -4280,6 +4297,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Kind::Str,
             )),
             Expression::TemplateLiteral(t) => self.template(cx, t),
+            Expression::TaggedTemplateExpression(t) => self.tagged_template(cx, t),
             Expression::RegExpLiteral(r) => {
                 // A new RegExp per evaluation (T27); oxc checked the pattern.
                 let src = Expr::Str(utf16(r.regex.pattern.text.as_str(), false));
@@ -4645,6 +4663,90 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .reduce(|a, b| Expr::intrinsic(Intrinsic::Concat, vec![a, b]))
             .unwrap_or_else(|| Expr::str(""));
         Ok(Val::js(e, Kind::Str))
+    }
+
+    /// ``tag`a${x}b` `` (T51): the tag called with the template object (GetTemplateObject: the
+    /// prelude's `$$templateObject`, one per site) and the substitutions; `this` from a member tag,
+    /// as in [`Self::spread_call`].
+    fn tagged_template(
+        &mut self,
+        cx: &mut FnCx,
+        t: &'a TaggedTemplateExpression<'a>,
+    ) -> R<Val> {
+        let Some(template_object) = self
+            .prelude
+            .names
+            .get(builtins::TEMPLATE_OBJECT)
+            .and_then(|s| self.funcs.get(s))
+            .copied()
+        else {
+            return Err(self.unsupported(t.span, "tagged template", "T51"));
+        };
+        let tag = t.tag.without_parentheses();
+        let (f, this, pre) = match tag.as_member_expression() {
+            Some(m)
+                if !matches!(m, MemberExpression::PrivateFieldExpression(_))
+                    && self.builtin_prototype(m).is_none()
+                    && self.builtin_static(tag).is_none() =>
+            {
+                let (obj, key) = self.member(cx, m)?;
+                let this = cx.func.add_local("this", Type::JsVal);
+                (
+                    Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(this), key]),
+                    Expr::Local(this),
+                    vec![Stmt::Set(this, obj)],
+                )
+            }
+            _ => (jsval_of(self.expr(cx, &t.tag)?), Expr::undefined(), Vec::new()),
+        };
+        let callee = cx.func.add_local("callee", Type::JsVal);
+        let mut body = pre;
+        body.push(Stmt::Set(callee, f));
+        // The cooked strings (`undefined` for an invalid escape) and the raw ones (TRV: CR and CRLF
+        // are LF).
+        let quasis = &t.quasi.quasis;
+        let cooked = quasis
+            .iter()
+            .map(|q| {
+                Some(match &q.value.cooked {
+                    Some(c) => Expr::Str(utf16(c.as_str(), q.lone_surrogates)),
+                    None => Expr::undefined(),
+                })
+            })
+            .collect();
+        let raw = quasis
+            .iter()
+            .map(|q| {
+                let text = q.value.raw.as_str().replace("\r\n", "\n").replace('\r', "\n");
+                Some(Expr::Str(utf16(&text, false)))
+            })
+            .collect();
+        let site = self.template_sites;
+        self.template_sites += 1;
+        let site = jsval_of(Val::num(Expr::f64(site as f64)));
+        let mut args = vec![Some(Expr::Call {
+            func: template_object,
+            args: vec![site, Expr::Array(cooked), Expr::Array(raw)],
+        })];
+        for e in &t.quasi.expressions {
+            args.push(Some(jsval_of(self.expr(cx, e)?)));
+        }
+        let call = Expr::intrinsic(
+            Intrinsic::CallList,
+            vec![
+                Expr::Local(callee),
+                this,
+                Expr::Array(args),
+                Expr::str(&self.callee_text(&t.tag)),
+            ],
+        );
+        Ok(Val::js(
+            Expr::Seq {
+                body,
+                value: Box::new(call),
+            },
+            Kind::Any,
+        ))
     }
 
     /// `typeof x === "tag"` (also `==`, `!==`, `!=`, either side). `None` if `b` isn't one.
@@ -5172,6 +5274,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 format!("{{{}}}", "(intermediate value)".repeat(o.properties.len()))
             }
             Expression::CallExpression(c) => format!("{}(...)", self.callee_text(&c.callee)),
+            // T51: V8 prints a tagged template as a call.
+            Expression::TaggedTemplateExpression(t) => format!("{}(...)", self.callee_text(&t.tag)),
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(c) => {
                     format!("{}(...)", self.callee_text(&c.callee))

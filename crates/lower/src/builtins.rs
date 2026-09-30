@@ -146,6 +146,9 @@ pub(crate) const TO_BIGINT: &str = "$$toBigInt";
 /// world's streams with them.
 pub(crate) const STREAMS: [&str; 2] = ["$$StreamReader", "$$StreamPump"];
 
+/// GetTemplateObject (T51, `builtins/string.js`): what a tagged template passes its tag.
+pub(crate) const TEMPLATE_OBJECT: &str = "$$templateObject";
+
 /// Parse a user module followed by the built-ins prelude (what [`crate::lower`] expects).
 pub fn parse<'a>(
     alloc: &'a Allocator,

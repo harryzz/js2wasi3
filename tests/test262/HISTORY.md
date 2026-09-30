@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-30: T51 tagged templates and `String.raw` (targeted run)
+
+- Compiler: tagged templates (template objects per site, frozen, invalid escapes cooked to `undefined`, raw TRV) and
+  `String.raw`; programs without one build the same bytes.
+- Run on `a-03`: the 1,247 subset tests in `tagged-template`, `template-literal`, `String/raw` or whose source has a
+  tagged template or `String.raw`, with `--update` (-j 36, 78 s): 64 unsupported → pass, 4 fail → pass, 1
+  unsupported → fail (`cache-eval-inner-function.js`: `eval` code is compiled once, F226), 0 regressions. Subset:
+  27,519 of 28,591 run pass (96.25%).
+
 ## 2026-09-29: T50 Promise statics per the spec (targeted run)
 
 - Compiler: `Promise.all`/`allSettled`/`any`/`race`/`resolve`/`reject`/`withResolvers`/`try` in the prelude

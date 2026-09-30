@@ -53,7 +53,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 ## What works
 
 - Numbers, BigInts, strings (UTF-16), booleans, `null`/`undefined`, symbols; operators, including `**`, `&&=`/`||=`/`??=`,
-  template literals.
+  template literals, tagged templates (``tag`…` ``, `String.raw`).
 - `let`/`const`/`var` with TDZ checks, closures, arrow functions, `this`, default/rest parameters, destructuring,
   spread.
 - Control flow: `if`, loops (`for`, `for-in`, `for-of`, `while`, `do`), labels, `switch`, `break`/`continue`,
