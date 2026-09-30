@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-30: T56 `Buffer`, `string_decoder`, `atob`/`btoa` (full run)
+
+- Compiler: the `Buffer` global and `node:buffer`, `string_decoder`, `atob`/`btoa`, `util.inspect.custom` when
+  printing; built-in modules' and CommonJS wrappers' functions keep no source text.
+- Full run on `a-03` (31,235 tests, 1,702 s, -j 36): no changes except the same timeout under load
+  (`statements/function/S13.2.1_A1_T1.js`, passes alone, left as pass). Subset: 27,826 of 28,799 run pass (96.6%),
+  0 regressions.
+
 ## 2026-09-30: T55 node's built-in modules, first slice (full run)
 
 - Compiler: node's built-in modules as CommonJS files shipped with the compiler (`path`, `events`, `util`,

@@ -92,6 +92,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             bail!("internal error: the prelude's $$dateInspect must be (jsval) -> jsval");
         }
     }
+    if let Some(f) = module.inspect_custom {
+        let f = module.function(f);
+        if f.params != 2 || f.locals[..2].iter().any(|l| l.ty != Type::JsVal) || f.result != Some(Type::JsVal) {
+            bail!("internal error: the prelude's $$inspectCustom must be (jsval, jsval) -> jsval");
+        }
+    }
     if let Some(f) = module.process_at_exit {
         let f = module.function(f);
         if f.params != 1 || f.locals[0].ty != Type::JsVal || f.result.is_some_and(|t| t != Type::JsVal) {
@@ -944,6 +950,10 @@ impl runtime::Cx for Emitter<'_> {
 
     fn date_inspect(&mut self) -> Option<u32> {
         self.m.date_inspect.map(|f| self.func_base + f.0)
+    }
+
+    fn inspect_custom(&mut self) -> Option<u32> {
+        self.m.inspect_custom.map(|f| self.func_base + f.0)
     }
 
     fn has_maps(&mut self) -> bool {

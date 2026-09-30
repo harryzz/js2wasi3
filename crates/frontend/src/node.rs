@@ -16,6 +16,8 @@ const MODULES: &[(&str, &str)] = &[
     ("assert", include_str!("../node/assert.js")),
     ("assert/strict", "module.exports = require(\"node:assert\").strict;\n"),
     ("tty", include_str!("../node/tty.js")),
+    ("buffer", include_str!("../node/buffer.js")),
+    ("string_decoder", include_str!("../node/string_decoder.js")),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if

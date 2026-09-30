@@ -653,6 +653,17 @@ fn file_url(path: &str) -> String {
     out
 }
 
+/// The spans of the references to the undeclared global `name`.
+fn global_refs(p: &Program, name: &str) -> Vec<Span> {
+    let scoping = p.semantic.scoping();
+    let nodes = p.semantic.nodes();
+    scoping
+        .root_unresolved_references()
+        .get(name)
+        .map(|refs| refs.iter().map(|&r| nodes.kind(scoping.get_reference(r).node_id()).span()).collect())
+        .unwrap_or_default()
+}
+
 /// Does the module have top-level `await` (outside any function)?
 fn has_tla(p: &Program) -> bool {
     let nodes = p.semantic.nodes();
@@ -744,6 +755,11 @@ struct Module<'a> {
     cjs_names: Vec<String>,
     /// Imported by an ES module (or by `import()`): its exports are read once it has run.
     esm_imported: bool,
+    /// T56: its references to node's `Buffer` global (unresolved `Buffer`), and the `node:buffer`
+    /// module they name (an ES module's are replaced by its export; a CommonJS module gets
+    /// `const Buffer = require("node:buffer").Buffer;` first).
+    buffer_refs: Vec<Span>,
+    buffer: Option<usize>,
 }
 
 struct Graph<'a, 'r> {
@@ -940,7 +956,10 @@ impl<'a> Graph<'a, '_> {
             cjs_requests: Vec::new(),
             cjs_names: Vec::new(),
             esm_imported: false,
+            buffer_refs: Vec::new(),
+            buffer: None,
         });
+        self.modules[m].buffer_refs = global_refs(&self.modules[m].p, "Buffer");
         if cjs {
             self.modules[m].cjs = true;
             if let Some(&span) = self.modules[m].meta.first() {
@@ -987,6 +1006,20 @@ impl<'a> Graph<'a, '_> {
             self.modules[m].requests.push(target);
             self.modules[m].targets.insert(span.start, target);
         }
+        if let Some(&span) = self.modules[m].buffer_refs.first() {
+            // node's `Buffer` global (T56): like an import of `node:buffer`'s export.
+            if let Some(Request::File(path)) = self.resolve(m, "node:buffer", span) {
+                let k = match self.index.get(&path) {
+                    Some(&k) => k,
+                    None => {
+                        let text = self.read(&path).expect("a built-in module");
+                        self.load(path, &text)?
+                    }
+                };
+                self.modules[m].requests.push(k);
+                self.modules[m].buffer = Some(k);
+            }
+        }
         self.dynamic_imports(m)?;
         self.scan(m);
         Ok(m)
@@ -995,8 +1028,12 @@ impl<'a> Graph<'a, '_> {
     /// CommonJS module `m`'s static `require`s (T54): each specifier resolved with node's CommonJS
     /// algorithm and its module loaded. One that isn't found throws when it runs, as in node.
     fn cjs_requests(&mut self, m: usize) -> Result<(), Diagnostics> {
-        let (statics, computed) = cjs_requires(&self.modules[m].p);
+        let (mut statics, computed) = cjs_requires(&self.modules[m].p);
         self.cjs_computed(m, computed)?;
+        if let Some(&span) = self.modules[m].buffer_refs.first() {
+            // node's `Buffer` global (T56): the wrapper requires it first.
+            statics.push(("node:buffer".to_string(), span, false));
+        }
         for (spec, span, always) in statics {
             let target = if is_relative(&spec) {
                 let from = &self.modules[m].p.path;
@@ -2193,7 +2230,10 @@ impl<'a> Graph<'a, '_> {
         if module.cjs {
             // The wrapper becomes a (hoisted) function declaration.
             let end = source.len() as u32;
-            let header = format!("function {}(exports, require, module, __filename, __dirname) {{", names[&Binding::Cjs(m)]);
+            let mut header = format!("function {}(exports, require, module, __filename, __dirname) {{", names[&Binding::Cjs(m)]);
+            if !module.buffer_refs.is_empty() {
+                header.push_str("const Buffer = require(\"node:buffer\").Buffer;");
+            }
             edits.push(Edit::new(0, CJS_PRE.len() as u32, header));
             edits.push(Edit::new(end - CJS_POST.len() as u32, end, "\n}".into()));
             return edits;
@@ -2398,6 +2438,13 @@ impl<'a> Graph<'a, '_> {
         }
         for span in &module.meta {
             edits.push(Edit::new(span.start, span.end, names[&Binding::Meta(m)].clone()));
+        }
+        if let Some(k) = module.buffer {
+            let i = self.modules[k].cjs_names.iter().position(|n| n == "Buffer").expect("node:buffer exports Buffer");
+            let name = &names[&Binding::CjsNamed(k, i)];
+            for &span in &module.buffer_refs {
+                ident(&mut edits, span, "Buffer", name, true);
+            }
         }
         edits.sort_by_key(|e| (e.start, e.end));
         edits
@@ -2756,6 +2803,17 @@ mod tests {
         assert!(e.contains("unsupported: node's built-in module `fs` (planned: F238)"), "{e}");
         let l = join(&[("/w/main.cjs", "try { require('node:nope'); } catch {}\n")]).unwrap();
         assert!(l.source.contains("No such built-in module: node:nope"), "{}", l.source);
+    }
+
+    #[test]
+    fn buffer_global() {
+        // T56: an ES module's `Buffer` names `node:buffer`'s export; a CommonJS module requires it
+        // first; a program without it doesn't load the module.
+        let l = join(&[("/w/main.js", "const b = { Buffer };\nconsole.log(Buffer.from('x'), typeof Buffer);\n")]).unwrap();
+        assert!(l.source.contains("{ Buffer: Buffer$1 }") && l.source.contains("console.log(Buffer$1.from('x'), typeof Buffer$1)"), "{}", l.source);
+        let l = join(&[("/w/main.cjs", "console.log(Buffer.alloc(1));\n")]).unwrap();
+        assert!(l.source.contains("{const Buffer = require(\"node:buffer\").Buffer;console.log(Buffer.alloc(1));"), "{}", l.source);
+        assert!(join(&[("/w/main.js", "let Buffer = 1;\nconsole.log(Buffer);\n")]).unwrap().map.is_none());
     }
 
     #[test]

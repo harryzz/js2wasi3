@@ -274,6 +274,14 @@ modules' text as string constants), and their namespaces have every listed prope
 is `"path"`. They're ports of node 24's lib where it's pure JS (`path`'s POSIX half, `events`, parts of `util` and
 `assert`), else our own (`os`: placeholders for a Linux-like host; `tty`: `isatty` false). Built-ins js2wasi3 lacks keep
 T54's rule (a build error where it always runs); unknown `node:x` is node's `No such built-in module`.)
+(T56: **`Buffer`**, node's global, is `node:buffer`'s export, made by the linker: a CommonJS module with an unresolved
+`Buffer` gets `const Buffer = require("node:buffer").Buffer;` first in its wrapper (loaded lazily, in node's order);
+an ES module's unresolved `Buffer` references become `node:buffer`'s `Buffer` export and the module requests it, like
+an import (`Module::buffer_refs`); programs that don't name it don't load it. `node/buffer.js` is the `buffer` npm
+package (feross, which re-prototypes plain `Uint8Array`s, so typed arrays need no species) with node 24's errors and
+checks, a WHATWG UTF-8 decoder, `base64url`, `subarray` giving a Buffer; `node/string_decoder.js` is node's former
+pure-JS decoder. Functions of node's built-in modules and every CommonJS module's wrapper function keep no source text
+(F246: the 66 KB `buffer` module as a string constant cost 30 s in wasmtime).)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
@@ -445,6 +453,12 @@ event loop calls once before flushing (`'exit'` listeners, `process.exitCode`). 
 `result`): wasmtime 49 has `wasi:cli/exit.exit-with-code` only behind `-S cli-exit-with-code`. Warnings become
 `'warning'` events but aren't printed (node with `--no-warnings`, which the harness uses; node's text has the pid).
 `performance.now()` and `process.hrtime()` read the monotonic clock (`Intrinsic::MonotonicNow`, ns).)
+(T56: **`util.inspect.custom`**: in programs whose code has the string `"nodejs.util.inspect.custom"` (`util`,
+`buffer`, or the user's), the formatter first calls the prelude's `$$inspectCustom(v, depth)` for every object
+(`Module::inspect_custom`, `builtins/node.js`): node's formatValue: a method's string result is printed as is, another
+value is formatted in its place, `v` itself means none; prototypes are skipped; the method gets the levels left, the
+options and an `inspect`. `atob`/`btoa` are prelude globals (`builtins/base64.js`) with node's `InvalidCharacterError`
+`DOMException` (`$$domException`, shared with `structuredClone`'s `DataCloneError`).)
 
 ### D6. The global object, `eval` and `Function` (T42)
 Every file is an ES module (strict, top-level `this` is `undefined`, top-level declarations aren't global-object

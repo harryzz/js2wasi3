@@ -57,6 +57,7 @@ pub const PRELUDE: &str = concat!(
     include_str!("../builtins/cjs.js"),
     include_str!("../builtins/node.js"),
     include_str!("../builtins/process.js"),
+    include_str!("../builtins/base64.js"),
 );
 
 /// Prelude dependencies the AST doesn't show (T25): a `Map`/`Set` iterates through
@@ -148,6 +149,9 @@ pub(crate) const CONSOLE: &str = "$$Console";
 pub(crate) const PROCESS: &str = "$$Process";
 pub(crate) const PERFORMANCE: &str = "$$Performance";
 pub(crate) const PROCESS_AT_EXIT: &str = "$$processAtExit";
+
+/// `util.inspect.custom` methods (T56): the formatter calls `$$inspectCustom(v, depth)` first.
+pub(crate) const INSPECT_CUSTOM: &str = "$$inspectCustom";
 
 /// Is the reference `process` (node `id`) the object of `process.nextTick` (T25: lowered without
 /// the `process` object)?
@@ -727,6 +731,12 @@ impl Prelude {
                 && !p.in_prelude(s.span.start)
             {
                 user_props.insert(s.value.to_string());
+                // `util.inspect.custom` (T56): the formatter asks the prelude first.
+                if s.value == "nodejs.util.inspect.custom"
+                    && let Some(sym) = out.names.get(INSPECT_CUSTOM)
+                {
+                    roots.push(item_of[sym]);
+                }
                 // `console.log` format strings (T25).
                 if s.value.contains('%')
                     && let Some(sym) = out.names.get("$$consoleFormat")

@@ -297,6 +297,10 @@ pub trait Cx {
     fn date_call(&mut self) -> Option<u32>;
     /// The prelude's `$$dateInspect` `(jsval) -> jsval` (T26): `console.log`'s text of a Date.
     fn date_inspect(&mut self) -> Option<u32>;
+    /// The prelude's `$$inspectCustom` `(jsval, jsval) -> jsval` (T56): `util.inspect.custom`.
+    fn inspect_custom(&mut self) -> Option<u32> {
+        None
+    }
     /// The prelude's generic fallback of a native `Array.prototype` method (T35): its `$code`
     /// function index.
     fn array_generic(&mut self, key: &str) -> Option<u32>;

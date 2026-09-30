@@ -43,3 +43,35 @@ function $$errOutOfRange(name, range, v) {
   e.code = "ERR_OUT_OF_RANGE";
   return e;
 }
+
+// `util.inspect.custom` (T56): the formatter calls this first for every object (only in programs
+// whose code has the string "nodejs.util.inspect.custom"): `v` itself if it has no such method (or
+// is a prototype, as node checks), else the method's result, called with node's arguments
+// (`depth`: the levels left, the options, `inspect`).
+let $$inspectSymbol = undefined;
+function $$inspectCustom(v, depth) {
+  if ($$inspectSymbol === undefined) $$inspectSymbol = Symbol.for("nodejs.util.inspect.custom");
+  const f = v[$$inspectSymbol];
+  if (typeof f !== "function") return v;
+  // node skips a prototype (`value.constructor.prototype === value`): its own `constructor`.
+  const d = Object.getOwnPropertyDescriptor(v, "constructor");
+  if (d !== undefined && typeof d.value === "function" && d.value.prototype === v) return v;
+  const options = {
+    showHidden: false, depth: 2, colors: false, customInspect: true, showProxy: false, maxArrayLength: 100,
+    maxStringLength: 10000, breakLength: 80, compact: 3, sorted: false, getters: false, numericSeparator: false,
+    stylize: $$inspectStylize,
+  };
+  options.depth = depth;
+  return f.call(v, depth, options, $$inspectValue);
+}
+function $$inspectStylize(text, styleType) {
+  return text;
+}
+// `inspect` for custom inspectors: `util.inspect(v, options)` with only `depth`.
+function $$inspectValue(v, options) {
+  let depth = 2;
+  if (options !== null && typeof options === "object" && options.depth !== undefined) depth = options.depth;
+  if (depth === 2) return __intrinsic_inspect(v, 0);
+  if (depth === null || depth > 1000000) depth = 1000000;
+  return __intrinsic_inspect_depth(v, 2 - Math.floor(depth));
+}

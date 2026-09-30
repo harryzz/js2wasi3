@@ -1208,6 +1208,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 self.module.date_inspect = Some(func);
                 continue;
             }
+            if name == builtins::INSPECT_CUSTOM {
+                // Called by the formatter with any object (T56).
+                for p in self.func_params[&func].clone().into_iter().flatten() {
+                    self.observe(Slot::Var(p), Kind::Any);
+                }
+                self.module.inspect_custom = Some(func);
+                continue;
+            }
             if name == builtins::PROCESS_AT_EXIT && self.command {
                 // Called by the event loop when the program ends (T55).
                 for p in self.func_params[&func].clone().into_iter().flatten() {
@@ -2912,9 +2920,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// The source text of `span` for `Function.prototype.toString` (T25): only when the code names
-    /// `toString`, and not for the prelude's functions.
+    /// `toString`, and not for the prelude's functions, nor (T56, F246) node's built-in modules' or
+    /// the linker's (a CommonJS module's function: its whole text, which nothing can observe).
     pub(crate) fn source_text(&self, span: Span) -> Option<String> {
-        (self.module.to_string && !self.p.in_prelude(span.start))
+        (self.module.to_string && !self.p.in_prelude(span.start) && !self.p.is_generated(span.start))
             .then(|| self.p.source[span.start as usize..span.end as usize].to_string())
     }
 

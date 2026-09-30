@@ -151,6 +151,9 @@ pub struct Module {
     /// the program ends (`status`: 1 after an uncaught exception, else 0) to emit `'exit'` and
     /// apply `process.exitCode`.
     pub process_at_exit: Option<FuncId>,
+    /// The prelude's `$$inspectCustom(v, depth)` (T56): the formatter calls it first for every
+    /// object; it gives `v` itself unless `v` has a `util.inspect.custom` method, else its result.
+    pub inspect_custom: Option<FuncId>,
     /// The module can make a `Map`/`Set` (T25): `console.log` links their formatting.
     pub maps: bool,
     /// The prelude's `$$StreamReader(h, id)` and `$$StreamPump(iterable, w, id)` (T20 slice 6b,

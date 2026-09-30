@@ -14,6 +14,7 @@ c.on("tick", (n) => console.log("tick", n));
 c.tick();
 c.tick();
 console.log(c instanceof require("events"), Counter.super_ === require("events"), c.listenerCount("tick"));
+console.log(c.bytes(), Buffer === require("buffer").Buffer, require("node:buffer").Buffer.from([1, 2]));
 try {
   require("node:no-such-module");
 } catch (e) {

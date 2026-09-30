@@ -15,18 +15,31 @@ function $$DOMException() {
   throw new TypeError("DOMException isn't implemented (js2wasi3)");
 }
 
-// node's `DOMException [DataCloneError]: <what> could not be cloned.`
-function $$dataCloneError(what) {
+// A `DOMException` named `name` (T56: also `atob`/`btoa`'s `InvalidCharacterError`): the legacy
+// `code` of its name comes from the prototype (a getter).
+function $$domException(message, name) {
   if ($$domExceptionProto === undefined) {
     const p = Object.create(Error.prototype);
     Object.defineProperty(p, "constructor", { value: $$DOMException, writable: true, enumerable: false, configurable: true });
-    Object.defineProperty(p, "code", { value: 25, writable: false, enumerable: false, configurable: true });
+    Object.defineProperty(p, "code", {
+      get: function code() {
+        const n = this.name;
+        return n === "DataCloneError" ? 25 : n === "InvalidCharacterError" ? 5 : 0;
+      },
+      enumerable: false,
+      configurable: true,
+    });
     $$domExceptionProto = p;
   }
-  const e = new Error(what + " could not be cloned.");
+  const e = new Error(message);
   Object.setPrototypeOf(e, $$domExceptionProto);
-  Object.defineProperty(e, "name", { value: "DataCloneError", writable: true, enumerable: false, configurable: true });
+  Object.defineProperty(e, "name", { value: name, writable: true, enumerable: false, configurable: true });
   return e;
+}
+
+// node's `DOMException [DataCloneError]: <what> could not be cloned.`
+function $$dataCloneError(what) {
+  return $$domException(what + " could not be cloned.", "DataCloneError");
 }
 
 function $$structuredClone(...args) {

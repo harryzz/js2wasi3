@@ -12,3 +12,8 @@ Counter.prototype.tick = function () {
   this.emit("tick", this.n);
 };
 module.exports = Counter;
+
+// node's `Buffer` global in a CommonJS module (T56).
+Counter.prototype.bytes = function () {
+  return Buffer.from(String(this.n)).toString("hex");
+};

@@ -217,12 +217,19 @@ fn format(cx: &mut dyn Cx) -> Function {
     const STK: u32 = 7;
     const ERRS: u32 = 8;
     let aggregate = cx.names("any") || cx.names("AggregateError");
-    let mut f = Function::new([
+    // T56: `util.inspect.custom` methods, through the prelude (`R`: its result).
+    let custom = cx.inspect_custom();
+    const R: u32 = 9;
+    let mut locals = vec![
         (1, jsval()),
         (1, rt(true, runtime::T_OBJECT)),
         (1, rt(true, T_STRING)),
         (2, jsval()),
-    ]);
+    ];
+    if custom.is_some() {
+        locals.push((1, jsval()));
+    }
+    let mut f = Function::new(locals);
     let mut s = f.instructions();
     runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
@@ -250,6 +257,25 @@ fn format(cx: &mut dyn Cx) -> Function {
         s.local_get(V).ref_cast_non_null(crate::bigint::bigint());
         s.i32_const(10).call(big_to_string);
         s.global_get(suffix).call(concat).return_();
+        s.end();
+    }
+    if let Some(custom) = custom {
+        // node's formatValue: a custom inspector's string is printed as is, another value is
+        // formatted in its place; `v` itself means none. Its `depth` argument is what's left.
+        let format_value = ih(cx, Helper::FormatValue);
+        s.local_get(V).ref_test_non_null(runtime::object());
+        s.if_(BlockType::Empty);
+        s.local_get(V);
+        s.i32_const(2).local_get(DEPTH).i32_sub().ref_i31();
+        s.call(custom).local_tee(R);
+        s.local_get(V).ref_eq().i32_eqz();
+        s.if_(BlockType::Empty);
+        runtime::is_string(&mut s, R);
+        s.if_(BlockType::Empty);
+        s.local_get(R).ref_cast_non_null(string()).return_();
+        s.end();
+        s.local_get(R).local_get(DEPTH).local_get(INDENT).local_get(NESTED).call(format_value).return_();
+        s.end();
         s.end();
     }
     // A function: `[Function: name]` / `[class Name extends Parent]`, then its own enumerable
