@@ -95,6 +95,11 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
 - (T12) `finally` uses dispatch, not duplication: an `i32` completion local per `finally` (0 normal, 1 throw,
   2+ one per `break`/`continue`/`return` leaving it), one copy of the finally body, then `if` chains re-issue
   the jump or `throw $js` the saved value. No `catch_all`/`exnref`/`throw_ref`: one tag, traps stay uncatchable.
+- (T52) Array destructuring closes its iterator through the same `finally` dispatch as `for-of`: a throw, a
+  generator `return()` at a `yield` inside the pattern or another jump closes it unless it's done; an assignment
+  pattern's member target has its reference (object, key) evaluated before the iterator steps. A `null`/`undefined`
+  base in a property get/set throws before its key is converted (an object key is named `#<Class>`, a symbol
+  `Symbol(desc)`). node converts the key twice in `o[k] op= v` (the spec: once); js2wasi3 follows node.
 - (T50) **wasmtime 49 caveat**: a GC reference assigned to a local inside a `try_table` and read in its `catch` is wrong
   after a collection during the throwing call (`drc`: freed unless the value is also live on the normal path; the
   default copying collector: stale, "gc heap corruption"); values defined before the `try` are fine. Prelude code

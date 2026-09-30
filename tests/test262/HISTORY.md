@@ -3,6 +3,16 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-09-30: T52 evaluation order (full run)
+
+- Compiler: a `null`/`undefined` base throws before its key is converted; array destructuring closes its iterator on
+  every abrupt exit and evaluates member targets before stepping; undeclared destructuring targets throw at run time;
+  an object pattern with only a rest checks for `null`/`undefined`.
+- Full run on `a-03` (31,027 tests, 1,647 s, -j 36): 86 fail → pass, 21 unsupported → pass (`for-of` 32, `assignment`
+  30, `compound-assignment` 22, `for-await-of` 7, update expressions 8, others), 0 regressions (2 timeouts under load
+  passed alone and were set back). Subset: 27,626 of 28,591 run pass (96.6%). `compound-assignment`'s 11
+  `S11.13.2_A7.*_T4` stay failing: they expect the key converted once, node converts it twice (F227).
+
 ## 2026-09-30: T51 tagged templates and `String.raw` (targeted run)
 
 - Compiler: tagged templates (template objects per site, frozen, invalid escapes cooked to `undefined`, raw TRV) and

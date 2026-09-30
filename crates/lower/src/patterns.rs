@@ -151,6 +151,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     self.pattern(cx, Pat::Target(t), v, mode, src, out)
                 }
             },
+            Pat::Ident(id) if self.undeclared(id) => {
+                // T52: an undeclared name (strict: a ReferenceError at run time, or a global-object
+                // property, T42).
+                out.extend(self.global_write(&id.name, v));
+                Ok(())
+            }
             Pat::Ident(id) => {
                 let var = self.resolve(cx, id)?;
                 self.check_assignable(&var, id.span)?;
@@ -275,8 +281,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     ) -> R<()> {
         let t = cx.func.add_local("object", Type::JsVal);
         out.push(Stmt::Set(t, v));
-        // The outermost pattern (and an empty one, which reads nothing) checks with node's message.
-        let src = src.or_else(|| (props.is_empty() && rest.is_none()).then_some(Src::Value));
+        // The outermost pattern (and one without properties, which reads nothing before its rest,
+        // T52) checks with node's message.
+        let src = src.or_else(|| props.is_empty().then_some(Src::Value));
         if let Some(src) = &src {
             let first = match props.first() {
                 Some((Key::Static(_, name), _, _)) => Some(name.as_str()),
@@ -339,8 +346,101 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ),
         ));
         out.push(Stmt::Set(done, Expr::bool(false)));
+        // A `finally` around the elements (T52): a throw, a `return` (a generator's `return()` at a
+        // `yield` in a default) or another jump out of them closes the iterator unless it's done.
+        let label = cx.label();
+        let kind = cx.func.add_local("completion", Type::I32);
+        let exc = cx.func.add_local("exception", Type::JsVal);
+        cx.finally.push(Finally {
+            depth: cx.targets.len(),
+            label,
+            kind,
+            jumps: Vec::new(),
+        });
+        let result = self.array_elements(cx, elems, rest, it, done, mode);
+        let fin = cx.finally.pop().expect("pushed above");
+        let body = result?;
+        out.push(Stmt::Set(kind, Expr::i32(0)));
+        out.push(Stmt::Block {
+            label,
+            body: vec![Stmt::Try {
+                body,
+                catch_local: Some(exc),
+                catch_body: vec![Stmt::Set(kind, Expr::i32(1))],
+            }],
+        });
+        let is = |code: i32| Expr::binary(BinOp::Eq, Type::I32, Expr::Local(kind), Expr::i32(code));
+        out.push(Stmt::If {
+            cond: Expr::unary(UnOp::Not, Type::Bool, Expr::Local(done)),
+            then: vec![Stmt::Expr(Expr::intrinsic(
+                Intrinsic::IterClose,
+                vec![Expr::Local(it), is(1)],
+            ))],
+            els: vec![],
+        });
+        for (i, j) in fin.jumps.into_iter().enumerate() {
+            let value = match (j, cx.func.result) {
+                (super::Jump::Return, Some(_)) => cx.ret.map(Expr::Local),
+                _ => None,
+            };
+            let then = self.jump(cx, j, value);
+            out.push(Stmt::If {
+                cond: is(i as i32 + 2),
+                then,
+                els: vec![],
+            });
+        }
+        out.push(Stmt::If {
+            cond: is(1),
+            then: vec![Stmt::Throw(Expr::Local(exc))],
+            els: vec![],
+        });
+        Ok(())
+    }
+
+    /// A member target of an assignment pattern (and its default), whose reference is evaluated
+    /// before the iterator steps (T52: AssignmentElement's `lref` first).
+    fn member_target(p: Pat<'a>, mode: Mode) -> Option<(&'a MemberExpression<'a>, Option<&'a Expression<'a>>)> {
+        if !matches!(mode, Mode::Assign) {
+            return None;
+        }
+        let (t, def) = match p {
+            Pat::MaybeDefault(AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d)) => {
+                (&d.binding, Some(&d.init))
+            }
+            Pat::MaybeDefault(m) => (m.as_assignment_target()?, None),
+            Pat::Target(t) => (t, None),
+            _ => return None,
+        };
+        let m = t.as_simple_assignment_target()?.as_member_expression()?;
+        Some((m, def))
+    }
+
+    /// The elements of an array pattern: each steps the iterator (unless it's done) into its
+    /// target; the rest takes what's left.
+    fn array_elements(
+        &mut self,
+        cx: &mut FnCx,
+        elems: Vec<Option<Pat<'a>>>,
+        rest: Option<Pat<'a>>,
+        it: LocalId,
+        done: LocalId,
+        mode: Mode,
+    ) -> R<Vec<Stmt>> {
         let mut body = Vec::new();
         for e in elems {
+            // A member target's object and key come first.
+            let lref = match e.and_then(|p| Self::member_target(p, mode)) {
+                Some((m, def)) => {
+                    let (obj, key, member) = self.member_ref(cx, m)?;
+                    let o = cx.func.add_local("target", Type::JsVal);
+                    let k = cx.func.add_local("key", Type::JsVal);
+                    body.push(Stmt::Set(o, obj));
+                    body.push(Stmt::Set(k, key));
+                    Some((o, k, member, def))
+                }
+                None => None,
+            };
             let value = cx.func.add_local("element", Type::JsVal);
             body.push(Stmt::Set(value, Expr::undefined()));
             body.push(Stmt::If {
@@ -361,35 +461,67 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ],
                 els: vec![],
             });
-            if let Some(p) = e {
-                self.pattern(cx, p, Expr::Local(value), mode, None, &mut body)?;
+            match (lref, e) {
+                (Some((o, k, member, def)), _) => {
+                    let v = match def {
+                        Some(d) => {
+                            let d = self.named(cx, d, None)?;
+                            Expr::Cond {
+                                cond: Box::new(Expr::binary(
+                                    BinOp::Eq,
+                                    Type::JsVal,
+                                    Expr::Local(value),
+                                    Expr::undefined(),
+                                )),
+                                then: Box::new(jsval_of(d)),
+                                els: Box::new(Expr::Local(value)),
+                                ty: Type::JsVal,
+                            }
+                        }
+                        None => Expr::Local(value),
+                    };
+                    body.push(Stmt::Expr(super::member_set(
+                        &member,
+                        Expr::Local(o),
+                        Expr::Local(k),
+                        v,
+                    )));
+                }
+                (None, Some(p)) => self.pattern(cx, p, Expr::Local(value), mode, None, &mut body)?,
+                (None, None) => {}
             }
         }
         if let Some(r) = rest {
+            let lref = match Self::member_target(r, mode) {
+                Some((m, _)) => {
+                    let (obj, key, member) = self.member_ref(cx, m)?;
+                    let o = cx.func.add_local("target", Type::JsVal);
+                    let k = cx.func.add_local("key", Type::JsVal);
+                    body.push(Stmt::Set(o, obj));
+                    body.push(Stmt::Set(k, key));
+                    Some((o, k, member))
+                }
+                None => None,
+            };
             let value = cx.func.add_local("rest", Type::JsVal);
+            // Done first: an error while stepping leaves the iterator alone (IteratorStep sets
+            // [[Done]] on an abrupt completion).
+            body.push(Stmt::Set(done, Expr::bool(true)));
             body.push(Stmt::Set(
                 value,
                 Expr::intrinsic(Intrinsic::IterRest, vec![Expr::Local(it)]),
             ));
-            body.push(Stmt::Set(done, Expr::bool(true)));
-            self.pattern(cx, r, Expr::Local(value), mode, None, &mut body)?;
+            match lref {
+                Some((o, k, member)) => body.push(Stmt::Expr(super::member_set(
+                    &member,
+                    Expr::Local(o),
+                    Expr::Local(k),
+                    Expr::Local(value),
+                ))),
+                None => self.pattern(cx, r, Expr::Local(value), mode, None, &mut body)?,
+            }
         }
-        let close = |throwing: bool| Stmt::If {
-            cond: Expr::unary(UnOp::Not, Type::Bool, Expr::Local(done)),
-            then: vec![Stmt::Expr(Expr::intrinsic(
-                Intrinsic::IterClose,
-                vec![Expr::Local(it), Expr::bool(throwing)],
-            ))],
-            els: vec![],
-        };
-        let exc = cx.func.add_local("exception", Type::JsVal);
-        out.push(Stmt::Try {
-            body,
-            catch_local: Some(exc),
-            catch_body: vec![close(true), Stmt::Throw(Expr::Local(exc))],
-        });
-        out.push(close(false));
-        Ok(())
+        Ok(body)
     }
 
     /// `[a, , ...b]`. `msg`: the TypeError text for a spread value that isn't iterable (`None`:

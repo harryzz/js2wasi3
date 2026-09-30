@@ -1947,7 +1947,9 @@ fn get(cx: &mut dyn Cx) -> Function {
     }
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
-    s.local_get(V).local_get(KEY).call(to_key).call(throw_read);
+    s.local_get(V);
+    key_text(cx, &mut s, KEY, to_key);
+    s.call(throw_read);
     s.unreachable();
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
@@ -1994,6 +1996,27 @@ fn get(cx: &mut dyn Cx) -> Function {
     s.call(value);
     s.end();
     f
+}
+
+/// The key in local `key` as the TypeError for a `null`/`undefined` base names it (T52): an
+/// object isn't converted (GetValue/PutValue throw before ToPropertyKey), V8 names it without side
+/// effects (`#<Object>`); other keys by ToPropertyKey, which can't run user code for them.
+/// A symbol is `Symbol(desc)`. (V8 leaves some objects out entirely, arrays and objects with their
+/// own `toString` among them; here every object is `#<Class>`.)
+fn key_text(cx: &mut dyn Cx, s: &mut InstructionSink, key: u32, to_key: u32) {
+    let desc = rh(cx, runtime::Helper::Prop(props::Helper::Desc));
+    let inspect = rh(cx, runtime::Helper::Inspect);
+    s.local_get(key).ref_test_non_null(object());
+    s.if_(BlockType::Result(rt(false, T_STRING)));
+    s.local_get(key).ref_cast_non_null(object()).call(desc);
+    s.else_();
+    s.local_get(key).ref_test_non_null(runtime::symbol());
+    s.if_(BlockType::Result(rt(false, T_STRING)));
+    s.local_get(key).call(inspect);
+    s.else_();
+    s.local_get(key).call(to_key).ref_as_non_null();
+    s.end();
+    s.end();
 }
 
 fn set(cx: &mut dyn Cx) -> Function {
@@ -2107,7 +2130,8 @@ fn set(cx: &mut dyn Cx) -> Function {
     s.global_get(set_of);
     s.local_get(V).call(to_string).call(concat);
     s.global_get(setting).call(concat);
-    s.local_get(KEY).call(to_key).call(concat);
+    key_text(cx, &mut s, KEY, to_key);
+    s.call(concat);
     s.global_get(close).call(concat);
     s.call(throw);
     s.end();

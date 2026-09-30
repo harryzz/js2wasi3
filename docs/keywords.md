@@ -57,7 +57,7 @@ as a value, `typeof` of an undeclared name, then the language gaps below.
 | `final` | ➖ | Removed in ES5. |
 | `finally` | ✅ | Completion dispatch for every jump, also around `yield`/`await` (T12, T18, T19). |
 | `float` | ➖ | Removed in ES5. |
-| `for` | ✅ | `for`, `for-in`, `for-of` (iterator protocol, destructuring), `for await` (T20). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). |
+| `for` | ✅ | `for`, `for-in`, `for-of` (iterator protocol, destructuring), `for await` (T20). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). T52: array destructuring closes its iterator on every abrupt exit (also a generator's `return()`) and evaluates member targets before stepping. |
 | `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments`, `toString` (source text, T25), names from computed keys (T25). Missing: `"" + f` in code that never names `toString` traps (F104); assigning to a function declaration's name (F45). |
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |
