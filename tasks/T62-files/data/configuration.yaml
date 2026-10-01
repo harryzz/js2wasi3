@@ -1,0 +1,15 @@
+version: 5
+homeassistant:
+  enabled: false
+frontend:
+  enabled: false
+mqtt:
+  base_topic: zigbee2mqtt
+  server: mqtt://127.0.0.1:1883
+serial:
+  port: tcp://127.0.0.1:6638
+  adapter: zstack
+advanced:
+  log_level: debug
+  log_output:
+    - console

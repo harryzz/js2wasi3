@@ -2586,7 +2586,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// Lower a nested function's body (once per round).
     fn lower_nested(&mut self, scope: ScopeId) -> R<()> {
-        let n = &self.nested[&scope];
+        // Missing: its signature was already reported unsupported.
+        let n = self.nested.get(&scope).ok_or(Unsupported)?;
         let (id, f) = (n.id, n.f);
         if self.lowered.contains(&id) {
             return Ok(());
@@ -2890,7 +2891,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         name: Option<&str>,
         span: Span,
     ) -> R<Expr> {
-        let n = &self.nested[&scope];
+        // Missing: its signature was already reported unsupported (T62: was a panic).
+        let n = self.nested.get(&scope).ok_or(Unsupported)?;
         let (id, f, own, constructor, value) = (n.id, n.f, n.name.clone(), n.constructor, n.value);
         let body = self.lower_nested(scope);
         // Called through a value: its parameters can be anything. (A declaration only called
@@ -3252,7 +3254,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             decls.push((f, scope, sym));
         }
         for (f, scope, sym) in decls {
-            let id = self.nested[&scope].id;
+            let Some(id) = self.nested.get(&scope).map(|n| n.id) else {
+                continue; // reported unsupported
+            };
             // Only called directly and captures nothing: no object needed.
             if !self.an.fn_values.contains(&sym) && !self.hidden[&id].self_ {
                 let _ = self.lower_nested(scope);

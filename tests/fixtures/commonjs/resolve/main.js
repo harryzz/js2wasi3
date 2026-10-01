@@ -8,3 +8,4 @@ console.log(require('./noext'), require('./proto.json').__proto__, Object.getPro
 console.log(Object.keys(require('./proto.json')), require('./scalar.json'));
 data.mutated = true;
 console.log(require('./data.json').mutated);
+console.log(require('./lib/dot.js'));

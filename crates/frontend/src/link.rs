@@ -903,7 +903,12 @@ impl<'a> Graph<'a, '_> {
                 let message = d.0.first().map_or_else(String::new, |d| d.message.clone());
                 (parse(self.alloc, &path, "")?, Some(("SyntaxError".to_string(), message, String::new())), false)
             }
-            Err(d) => return Err(d),
+            // Reported with the rest of the graph's errors (T62): an empty CommonJS stand-in keeps
+            // the build going so that one run lists them all.
+            Err(d) => {
+                self.diags.extend(d.0);
+                (parse_cjs(self.alloc, &path, "")?, None, true)
+            }
         };
         self.add(path, p, failed, cjs)
     }
@@ -1049,11 +1054,13 @@ impl<'a> Graph<'a, '_> {
             statics.push((node::GLOBALS[*g].1.to_string(), refs[0], false));
         }
         for (spec, span, always) in statics {
-            let target = if is_relative(&spec) {
+            // node's `require` also takes `.` and `..` as relative, and as directories (T62).
+            let dot = spec == "." || spec == ".." || spec.ends_with("/.") || spec.ends_with("/..");
+            let target = if is_relative(&spec) || spec == "." || spec == ".." {
                 let from = &self.modules[m].p.path;
                 let dir = &from[..from.rfind('/').map_or(0, |k| k + 1)];
                 let joined = if spec.starts_with('/') { spec.clone() } else { format!("{dir}{spec}") };
-                packages::load_as_file_or_directory(self.host, &normalize(&joined), spec.ends_with('/')).ok_or(None)
+                packages::load_as_file_or_directory(self.host, &normalize(&joined), spec.ends_with('/') || dot).ok_or(None)
             } else if let Some(path) = node::path(&spec) {
                 Ok(path)
             } else if packages::is_builtin(spec.strip_prefix("node:").unwrap_or(&spec)) || spec.starts_with("node:") {
