@@ -107,6 +107,22 @@ pub enum Helper {
     StreamWriteStep(u32),
     /// `Intrinsic::Stream(op)`: `op` on the stream type given as its last argument.
     Stream(StreamOp),
+    /// `(h: i32) -> i32` (T59): block until the waitable `h` (a stream or future end with a read
+    /// or write in progress) has an event, in a waitable set of its own; the event's payload (the
+    /// operation's status). The task blocks: a command's WASI imports.
+    BlockOn,
+    /// `(h: i32) -> jsval` (T59): [`Helper::FutureLift`] blocking: the future's value (throws if
+    /// the writer dropped it).
+    FutureLiftSync(u32),
+    /// `(h: i32) -> jsval` (T59): [`Helper::StreamRead`] blocking: `[chunk, ended]`.
+    StreamReadSync(u32),
+    /// `(chunk: jsval, w: i32) -> jsval` (T59): [`Helper::StreamWrite`] blocking: `true` once
+    /// all of `chunk` is written, `false` if the reader dropped its end.
+    StreamWriteSync(u32),
+    /// `(v: jsval) -> i32` (T59): a new stream of type `p` for a blocking call's argument: its
+    /// readable end; `v` (one `list<T>`-shaped chunk) is written after the call returns
+    /// (`$$StreamDefer`, `$$StreamFlush`).
+    StreamLowerSync(u32),
 }
 
 impl Helper {
@@ -139,6 +155,11 @@ impl Helper {
             Helper::StreamWrite(_) => "stream_write",
             Helper::StreamWriteStep(_) => "stream_write_step",
             Helper::Stream(op) => ir::Intrinsic::Stream(op).name(),
+            Helper::BlockOn => "block_on",
+            Helper::FutureLiftSync(_) => "future_lift_sync",
+            Helper::StreamReadSync(_) => "stream_read_sync",
+            Helper::StreamWriteSync(_) => "stream_write_sync",
+            Helper::StreamLowerSync(_) => "stream_lower_sync",
         }
     }
 
@@ -166,7 +187,10 @@ impl Helper {
                 let v = runtime::jsval();
                 (vec![v, v, v], vec![v])
             }
-            Helper::StreamLower(_) => (vec![runtime::jsval()], vec![I32]),
+            Helper::StreamLower(_) | Helper::StreamLowerSync(_) => (vec![runtime::jsval()], vec![I32]),
+            Helper::BlockOn => (vec![I32], vec![I32]),
+            Helper::FutureLiftSync(_) | Helper::StreamReadSync(_) => (vec![I32], vec![runtime::jsval()]),
+            Helper::StreamWriteSync(_) => (vec![runtime::jsval(), I32], vec![runtime::jsval()]),
             Helper::StreamRead(_) => (vec![I32], vec![runtime::jsval()]),
             Helper::StreamReadDone(_) => (vec![I32, runtime::jsval(), I32, I32], vec![]),
             Helper::StreamWrite(_) => (vec![runtime::jsval(), I32], vec![runtime::jsval()]),
@@ -205,6 +229,11 @@ impl Helper {
             Helper::StreamWrite(p) => stream_write(cx, p),
             Helper::StreamWriteStep(p) => stream_write_step(cx, p),
             Helper::Stream(op) => stream_dispatch(cx, op),
+            Helper::BlockOn => block_on(cx, bump),
+            Helper::FutureLiftSync(p) => future_lift_sync(cx, p),
+            Helper::StreamReadSync(p) => stream_read_sync(cx, p),
+            Helper::StreamWriteSync(p) => stream_write_sync(cx, p),
+            Helper::StreamLowerSync(p) => stream_lower_sync(cx, p),
             Helper::Utf8ToString => utf8_to_string(),
             Helper::StringToUtf8 => {
                 let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
@@ -610,6 +639,7 @@ fn import_adapter(cx: &mut dyn Cx, bump: u32, i: u32) -> Function {
     let tuple = import_params(&sig);
     let result = sig.result.map(|t| sig.wit(t));
     let mut g = wit::Gen::new(1);
+    g.blocking = sig.blocking;
     let (saved, area, ret) = (
         g.local(ValType::I32),
         g.local(ValType::I32),
@@ -641,14 +671,28 @@ fn import_adapter(cx: &mut dyn Cx, bump: u32, i: u32) -> Function {
         return f;
     }
     let rflat = result.as_ref().map_or(Vec::new(), wit::flatten);
+    // T59: a blocking call's stream arguments are written once it returns, before its results
+    // (streams, futures) are read.
+    let flush = (sig.blocking && has_payloads(sig.params.iter().map(|t| sig.wit(*t))))
+        .then(|| cx.blocking_stream_funcs().2);
+    let flush = |s: &mut InstructionSink| {
+        if let Some((f, result)) = flush {
+            s.call(f);
+            if result {
+                s.drop();
+            }
+        }
+    };
     match &result {
         Some(t) if rflat.len() > 1 => {
             alloc(&mut s, t, ret);
             s.local_get(ret).call(func);
+            flush(&mut s);
             wit::lift_mem(cx, &mut g, &mut s, t, ret, 0);
         }
         Some(t) => {
             s.call(func);
+            flush(&mut s);
             let slots: Vec<(u32, ValType)> = rflat.iter().map(|v| (g.local(*v), *v)).collect();
             for (l, _) in slots.iter().rev() {
                 s.local_set(*l);
@@ -656,7 +700,9 @@ fn import_adapter(cx: &mut dyn Cx, bump: u32, i: u32) -> Function {
             wit::lift_flat(cx, &mut g, &mut s, t, &slots);
         }
         None => {
-            s.call(func).global_get(runtime::G_UNDEFINED);
+            s.call(func);
+            flush(&mut s);
+            s.global_get(runtime::G_UNDEFINED);
         }
     }
     // (A future's value is read into memory later: keep it, T20 slice 6a.)
@@ -1226,6 +1272,190 @@ fn stream_write_step(cx: &mut dyn Cx, id: u32) -> Function {
     f
 }
 
+/// `$block_on(h) -> status`: see [`Helper::BlockOn`].
+fn block_on(cx: &mut dyn Cx, bump: u32) -> Function {
+    let im = cx.imports();
+    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    const H: u32 = 0;
+    const WS: u32 = 1;
+    const EV: u32 = 2;
+    const ST: u32 = 3;
+    let mut f = Function::new([(3, ValType::I32)]);
+    let mut s = f.instructions();
+    // The event's (waitable, payload) pair, in an allocation freed again below.
+    s.i32_const(0).i32_const(0).i32_const(4).i32_const(8).call(realloc).local_set(EV);
+    s.call(im.get(Import::WaitableSetNew)).local_set(WS);
+    s.local_get(H).local_get(WS).call(im.get(Import::WaitableJoin));
+    s.local_get(WS).local_get(EV).call(im.get(Import::WaitableSetWait)).drop();
+    s.local_get(H).i32_const(0).call(im.get(Import::WaitableJoin));
+    s.local_get(WS).call(im.get(Import::WaitableSetDrop));
+    s.local_get(EV).i32_load(mem(4, 2)).local_set(ST);
+    s.local_get(EV).global_set(bump);
+    s.local_get(ST);
+    s.end();
+    f
+}
+
+/// The value of a settled promise `p` (a local): its result, or (rejected: marked handled)
+/// thrown.
+fn settled_value(s: &mut InstructionSink, p: u32) {
+    s.local_get(p).ref_cast_non_null(promise::promise());
+    s.struct_get(runtime::T_PROMISE, promise::P_STATE);
+    s.i32_const(promise::REJECTED).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(p).ref_cast_non_null(promise::promise());
+    s.i32_const(1).struct_set(runtime::T_PROMISE, promise::P_HANDLED);
+    s.local_get(p).ref_cast_non_null(promise::promise());
+    s.struct_get(runtime::T_PROMISE, promise::P_RESULT);
+    s.throw(runtime::TAG);
+    s.end();
+    s.local_get(p).ref_cast_non_null(promise::promise());
+    s.struct_get(runtime::T_PROMISE, promise::P_RESULT);
+}
+
+/// `$future_lift_sync(h) -> jsval`: see [`Helper::FutureLiftSync`].
+fn future_lift_sync(cx: &mut dyn Cx, id: u32) -> Function {
+    let elem = cx.payload_elem(id);
+    let new_promise = cx.helper(runtime::Helper::Prom(promise::Helper::New));
+    let read = cx.payload_import(id, PayloadOp::Read);
+    let wait = cx.helper(runtime::Helper::Abi(Helper::BlockOn));
+    let done = cx.helper(runtime::Helper::Abi(Helper::FutureRead(id)));
+    const H: u32 = 0;
+    let mut g = wit::Gen::new(1);
+    let (p, buf, st) = (
+        g.local(runtime::jsval()),
+        g.local(ValType::I32),
+        g.local(ValType::I32),
+    );
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    s.call(new_promise).local_set(p);
+    alloc_elem(cx, &mut s, elem.as_ref(), buf);
+    s.local_get(H).local_get(buf).call(read).local_tee(st);
+    s.i32_const(BLOCKED).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(H).call(wait).local_set(st);
+    s.end();
+    s.local_get(H).local_get(p).local_get(buf).local_get(st).call(done);
+    settled_value(&mut s, p);
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// `$stream_read_sync(h) -> jsval`: see [`Helper::StreamReadSync`].
+fn stream_read_sync(cx: &mut dyn Cx, id: u32) -> Function {
+    let (_, size, align, cap) = stream_elem(cx, id);
+    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    let new_promise = cx.helper(runtime::Helper::Prom(promise::Helper::New));
+    let read = cx.payload_import(id, PayloadOp::Read);
+    let wait = cx.helper(runtime::Helper::Abi(Helper::BlockOn));
+    let done = cx.helper(runtime::Helper::Abi(Helper::StreamReadDone(id)));
+    const H: u32 = 0;
+    const P: u32 = 1;
+    const BUF: u32 = 2;
+    const ST: u32 = 3;
+    let mut f = Function::new([(1, runtime::jsval()), (2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.call(new_promise).local_set(P);
+    s.i32_const(0).i32_const(0).i32_const(align as i32);
+    s.i32_const((cap * size).max(1) as i32);
+    s.call(realloc).local_set(BUF);
+    s.local_get(H).local_get(BUF).i32_const(cap as i32).call(read).local_tee(ST);
+    s.i32_const(BLOCKED).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(H).call(wait).local_set(ST);
+    s.end();
+    s.local_get(H).local_get(P).local_get(BUF).local_get(ST).call(done);
+    settled_value(&mut s, P);
+    s.end();
+    f
+}
+
+/// `$stream_write_sync(chunk, w) -> jsval`: see [`Helper::StreamWriteSync`].
+fn stream_write_sync(cx: &mut dyn Cx, id: u32) -> Function {
+    let (elem, size, ..) = stream_elem(cx, id);
+    let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
+    let write = cx.payload_import(id, PayloadOp::Write);
+    let wait = cx.helper(runtime::Helper::Abi(Helper::BlockOn));
+    let bump = cx.bump_global();
+    const CHUNK: u32 = 0;
+    const W: u32 = 1;
+    let mut g = wit::Gen::new(2);
+    let (start, ptr, len, st, out) = (
+        g.local(ValType::I32),
+        g.local(ValType::I32),
+        g.local(ValType::I32),
+        g.local(ValType::I32),
+        g.local(runtime::jsval()),
+    );
+    let mut body = Vec::new();
+    let mut s = InstructionSink::new(&mut body);
+    // The chunk as a `list<T>`: `(ptr, len)` at `start`, its elements after it.
+    s.i32_const(0).i32_const(0).i32_const(4).i32_const(8);
+    s.call(realloc).local_set(start);
+    let list = WitType::List(Box::new(elem));
+    wit::lower_mem(cx, &mut g, &mut s, &list, CHUNK, start, 0);
+    s.local_get(start).i32_load(mem(0, 2)).local_set(ptr);
+    s.local_get(start).i32_load(mem(4, 2)).local_set(len);
+    s.global_get(runtime::G_TRUE).local_set(out);
+    s.block(BlockType::Empty);
+    s.loop_(BlockType::Empty);
+    s.local_get(len).i32_eqz().br_if(1);
+    s.local_get(W).local_get(ptr).local_get(len).call(write).local_tee(st);
+    s.i32_const(BLOCKED).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(W).call(wait).local_set(st);
+    s.end();
+    s.local_get(ptr);
+    s.local_get(st).i32_const(4).i32_shr_u().i32_const(size as i32).i32_mul();
+    s.i32_add().local_set(ptr);
+    s.local_get(len).local_get(st).i32_const(4).i32_shr_u().i32_sub().local_set(len);
+    s.local_get(st).i32_const(0xf).i32_and().i32_const(COPY_COMPLETED).i32_ne();
+    s.if_(BlockType::Empty);
+    // The reader dropped its end.
+    s.global_get(runtime::G_FALSE).local_set(out);
+    s.br(2);
+    s.end();
+    s.br(0);
+    s.end();
+    s.end();
+    s.local_get(start).global_set(bump);
+    s.local_get(out);
+    s.end();
+    let mut f = Function::new(g.decls());
+    f.raw(body);
+    f
+}
+
+/// `$stream_lower_sync(v) -> i32`: see [`Helper::StreamLowerSync`].
+fn stream_lower_sync(cx: &mut dyn Cx, id: u32) -> Function {
+    let new = cx.payload_import(id, PayloadOp::New);
+    let (_, (defer, result), _) = cx.blocking_stream_funcs();
+    let boxed = cx.helper(runtime::Helper::Box);
+    const V: u32 = 0;
+    const PAIR: u32 = 1;
+    let mut f = Function::new([(1, ValType::I64)]);
+    let mut s = f.instructions();
+    s.call(new).local_set(PAIR);
+    s.local_get(V);
+    s.local_get(PAIR)
+        .i64_const(32)
+        .i64_shr_u()
+        .i32_wrap_i64()
+        .f64_convert_i32_u()
+        .call(boxed);
+    s.f64_const((id as f64).into()).call(boxed);
+    s.call(defer);
+    if result {
+        s.drop();
+    }
+    s.local_get(PAIR).i32_wrap_i64();
+    s.end();
+    f
+}
+
 /// `$stream_<op>(…, id)`: see [`Helper::Stream`]. `id` is one of the module's stream types.
 fn stream_dispatch(cx: &mut dyn Cx, op: StreamOp) -> Function {
     let lib = cx.host_globals();
@@ -1240,6 +1470,8 @@ fn stream_dispatch(cx: &mut dyn Cx, op: StreamOp) -> Function {
         let callee = match op {
             StreamOp::Read => cx.helper(runtime::Helper::Abi(Helper::StreamRead(p))),
             StreamOp::Write => cx.helper(runtime::Helper::Abi(Helper::StreamWrite(p))),
+            StreamOp::ReadSync => cx.helper(runtime::Helper::Abi(Helper::StreamReadSync(p))),
+            StreamOp::WriteSync => cx.helper(runtime::Helper::Abi(Helper::StreamWriteSync(p))),
             StreamOp::DropReadable => cx.payload_import(p, PayloadOp::DropReadable),
             StreamOp::DropWritable => cx.payload_import(p, PayloadOp::DropWritable),
         };
@@ -1249,7 +1481,8 @@ fn stream_dispatch(cx: &mut dyn Cx, op: StreamOp) -> Function {
             s.local_get(i);
         }
         s.call(callee);
-        if op == StreamOp::DropWritable {
+        // (A command's blocking streams aren't counted: T59.)
+        if op == StreamOp::DropWritable && !cx.imports().list.contains(&Import::TaskReturn) {
             // The pump is over.
             s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
             s.global_set(lib + G_PENDING_N);

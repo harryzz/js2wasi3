@@ -273,7 +273,9 @@ has a provider and an app that use streams both ways, composed with `wac plug`.
 
 - `option<option<T>>`: `some(none)` and `none` are both `undefined` (F127).
 - 64-bit integers are numbers, not BigInts; integer results wrap instead of being range-checked (F124).
-- Resources: not yet.
+- Resources (T59): an imported resource's handle is a number; its functions are imported by their WIT names
+  (`import { "[method]blob.read" as read } from "acme:demo/store"`, `self` first) and `[resource-drop]blob` drops
+  one. Exported resources and jco's resource classes: not yet.
 - Composed components with async calls between them (timers, async imports, streams) can fail when wasmtime
   49.0.1 collects garbage (a wasmtime internal error or crash with the default collector); running with
   `-O gc-heap-initial-size=64MiB` avoids it for short calls (F134).

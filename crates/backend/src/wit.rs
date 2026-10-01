@@ -26,6 +26,9 @@ use crate::{array, object, typed};
 pub struct Gen {
     base: u32,
     pub locals: Vec<ValType>,
+    /// Lifting and lowering for a blocking call (T59): streams and futures are read and written
+    /// to the end instead of becoming async iterables and promises.
+    pub blocking: bool,
 }
 
 impl Gen {
@@ -33,6 +36,7 @@ impl Gen {
         Gen {
             base,
             locals: Vec::new(),
+            blocking: false,
         }
     }
 
@@ -240,11 +244,25 @@ pub fn lift_flat(
     };
     match t {
         WitType::Future(p) => {
-            // The readable end: a promise of its value (T20 slice 6a).
+            // The readable end: a promise of its value (T20 slice 6a), or (T59, blocking) the value.
             get(s, 0);
             let id = cx.payload(p);
-            let lift = cx.helper(runtime::Helper::Abi(abi::Helper::FutureLift(id)));
+            let lift = cx.helper(runtime::Helper::Abi(if g.blocking {
+                abi::Helper::FutureLiftSync(id)
+            } else {
+                abi::Helper::FutureLift(id)
+            }));
             s.call(lift);
+        }
+        WitType::Stream(p) if g.blocking => {
+            // T59: read to its end, one `list<T>`-shaped value.
+            let id = cx.payload(p);
+            let (read_all, ..) = cx.blocking_stream_funcs();
+            let boxed = rh(cx, runtime::Helper::Box);
+            get(s, 0);
+            s.f64_convert_i32_u().call(boxed);
+            s.f64_const((id as f64).into()).call(boxed);
+            s.call(read_all);
         }
         WitType::Stream(p) => {
             // The readable end: the prelude's reader, an async generator (T20 slice 6b).
@@ -545,9 +563,14 @@ pub fn lower_mem(
             s.i32_store(mem(off, 2));
         }
         WitType::Stream(p) => {
-            // A new stream, the value pumped into it (T20 slice 6b); its readable end.
+            // A new stream, the value pumped into it (T20 slice 6b), or (T59, blocking) written
+            // after the call; its readable end.
             let id = cx.payload(p);
-            let lower = cx.helper(runtime::Helper::Abi(abi::Helper::StreamLower(id)));
+            let lower = cx.helper(runtime::Helper::Abi(if g.blocking {
+                abi::Helper::StreamLowerSync(id)
+            } else {
+                abi::Helper::StreamLower(id)
+            }));
             s.local_get(addr).local_get(v).call(lower);
             s.i32_store(mem(off, 2));
         }

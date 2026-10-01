@@ -11,6 +11,8 @@
 #   `x.args` next to `x.js` (T55): the program's arguments (one line, shell words), given to both.
 #   `x.env` next to `x.js` (T55): `NAME=value` lines, set for node and passed to wasmtime (`--env`);
 #   wasmtime passes no other variables, so such a fixture prints only these.
+#   `x.fs/` next to `x.js` (T59): a directory copied fresh for each run; node runs in its copy, and
+#   wasmtime gets its copy preopened as `/` (`--dir`), the program's working directory.
 #   `x.uncaught` next to `x.js`: the program ends with an uncaught exception. node's stderr (source
 #   excerpt and stack) is first reduced to `Uncaught <message>`, as a js2wasi3 command prints it
 #   (scripts/node-uncaught.mjs).
@@ -46,7 +48,13 @@ one() {
   fi
   # --no-warnings: process warnings (node 24: TimeoutNegativeWarning, …) carry the pid.
   # TZ=UTC: js2wasi3's local time is UTC (T26: WASI 0.3.1 has no stable time zone interface).
-  env TZ=UTC "${envs[@]}" timeout "$TIMEOUT" node --no-warnings "$f" "${args[@]}" >"$d/node.out" 2>"$d/node.err"
+  local ncwd=. wdir=()
+  if [ -d "${f%.js}.fs" ]; then
+    rm -rf "$d/node.fs" "$d/wasm.fs"
+    cp -r "${f%.js}.fs" "$d/node.fs" && cp -r "${f%.js}.fs" "$d/wasm.fs"
+    ncwd="$d/node.fs" wdir=(--dir "$d/wasm.fs::/")
+  fi
+  (cd "$ncwd" && env TZ=UTC "${envs[@]}" timeout "$TIMEOUT" node --no-warnings "$f" "${args[@]}") >"$d/node.out" 2>"$d/node.err"
   echo $? >"$d/node.status"
   if [ -f "${f%.js}.uncaught" ]; then
     mv "$d/node.err" "$d/node.err.raw"
@@ -63,7 +71,7 @@ one() {
     cat "$d/build.err" >"$diff"
     return
   fi
-  timeout "$TIMEOUT" wasmtime run -Sp3 "${wenv[@]}" "$d/x.wasm" "${args[@]}" >"$d/wasm.out" 2>"$d/wasm.err"
+  timeout "$TIMEOUT" wasmtime run -Sp3 "${wenv[@]}" "${wdir[@]}" "$d/x.wasm" "${args[@]}" >"$d/wasm.out" 2>"$d/wasm.err"
   echo $? >"$d/wasm.status"
   local ms=$(($(now_ms) - t0))
   local what=()

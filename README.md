@@ -102,6 +102,11 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - `Buffer` (T56): the global and `node:buffer` (every encoding, the read/write number methods, node's errors,
   printed `<Buffer 68 69>`), `string_decoder`, `atob`/`btoa`, and `util.inspect.custom` methods when printing;
   `safe-buffer`, `buffer-crc32` and `iconv-lite` match node.
+- `fs` (T59) over `wasi:filesystem`, in commands: the sync API (files, directories, stats, links, file descriptors,
+  node's errors such as `ENOENT: no such file or directory, open 'x'`), callbacks, `fs/promises`, and `constants`;
+  paths must lie under a directory given to `wasmtime run --dir host::guest`. A command may also import WASI
+  interfaces directly (`import { getRandomBytes } from "wasi:random/random@0.3.1"`): an `async func` blocks, a
+  resource handle is a number, streams are read and written whole.
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,

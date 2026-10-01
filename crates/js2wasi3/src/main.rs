@@ -113,25 +113,7 @@ fn match_world(
     js2wasi3_lower::Boundary,
     std::collections::HashMap<String, String>,
 )> {
-    let ty = |t: component::ValType| {
-        use component::ValType as V;
-        use ir::AbiType as A;
-        match t {
-            V::Bool => A::Bool,
-            V::S8 => A::S8,
-            V::U8 => A::U8,
-            V::S16 => A::S16,
-            V::U16 => A::U16,
-            V::S32 => A::S32,
-            V::U32 => A::U32,
-            V::S64 => A::S64,
-            V::U64 => A::U64,
-            V::F32 => A::F32,
-            V::F64 => A::F64,
-            V::Char => A::Char,
-            V::String => A::String,
-        }
-    };
+    let ty = abi_scalar;
     let mut diags = Vec::new();
     let diag = |e: Option<&frontend::Export>, message: String, help: Option<String>| {
         let (line, col) = e.map_or((1, 1), |e| program.line_col(e.span.start));
@@ -284,67 +266,7 @@ fn match_world(
             names.insert(key, format!("{}#{name}", iface.module));
         }
     }
-    // Imported interfaces (T20 slice 5), by name with and without the version.
-    for iface in &world.imports {
-        let mut funcs = Vec::new();
-        for (name, sig) in &iface.functions {
-            let mut types = Vec::new();
-            let site = (iface.module.clone(), name.clone());
-            let mut abi = |t: &component::Ty| match t {
-                component::Ty::Scalar(v) => ty(*v),
-                t => {
-                    types.push(wit_type(t, &ty, &site));
-                    ir::AbiType::Compound(types.len() as u32 - 1)
-                }
-            };
-            let (params, result, throws, is_async, signature, unsupported) = match sig {
-                Ok(w) => {
-                    // The whole WIT result: the stub unwraps a `result`.
-                    let whole = if w.throws {
-                        Some(component::Ty::Result {
-                            ok: w.result.clone().map(Box::new),
-                            err: w.err.clone().map(Box::new),
-                        })
-                    } else {
-                        w.result.clone()
-                    };
-                    (
-                        w.params.iter().map(|(_, t)| abi(t)).collect(),
-                        whole.as_ref().map(&mut abi),
-                        w.throws,
-                        w.is_async,
-                        w.signature.clone(),
-                        None,
-                    )
-                }
-                Err(why) => (Vec::new(), None, false, false, String::new(), Some(why.clone())),
-            };
-            funcs.push(js2wasi3_lower::WorldImport {
-                js_name: camel_case(name),
-                wit_name: name.clone(),
-                throws,
-                is_async,
-                import: ir::Import {
-                    module: iface.module.clone(),
-                    name: name.clone(),
-                    sig: ir::AbiSig {
-                        params,
-                        result,
-                        is_async,
-                        types,
-                        ..ir::AbiSig::default()
-                    },
-                    unwrap: None,
-                },
-                signature,
-                unsupported,
-            });
-        }
-        if let Some((plain, _)) = iface.module.split_once('@') {
-            boundary.imports.insert(plain.to_string(), funcs.clone());
-        }
-        boundary.imports.insert(iface.module.clone(), funcs);
-    }
+    import_boundary(&mut boundary, &world.imports, false);
     if !diags.is_empty() {
         return Err(frontend::Diagnostics(diags).into());
     }
@@ -394,6 +316,129 @@ fn wit_type(
             elem: Some(sub(elem)),
             stream: true,
         })),
+    }
+}
+
+/// A WIT scalar's IR boundary type.
+fn abi_scalar(t: component::ValType) -> ir::AbiType {
+    use component::ValType as V;
+    use ir::AbiType as A;
+    match t {
+        V::Bool => A::Bool,
+        V::S8 => A::S8,
+        V::U8 => A::U8,
+        V::S16 => A::S16,
+        V::U16 => A::U16,
+        V::S32 => A::S32,
+        V::U32 => A::U32,
+        V::S64 => A::S64,
+        V::U64 => A::U64,
+        V::F32 => A::F32,
+        V::F64 => A::F64,
+        V::Char => A::Char,
+        V::String => A::String,
+    }
+}
+
+/// The imported interfaces' functions (T20 slice 5), by interface name with and without the version.
+/// `blocking` (T59, a command's WASI imports): an `async func` is sync-lowered: the call blocks
+/// until it returns, and gives its value (not a promise).
+fn import_boundary(
+    boundary: &mut js2wasi3_lower::Boundary,
+    imports: &[component::WorldInterface],
+    blocking: bool,
+) {
+    let ty = abi_scalar;
+    for iface in imports {
+        let mut funcs = Vec::new();
+        for (name, sig) in &iface.functions {
+            let mut types = Vec::new();
+            let site = (iface.module.clone(), name.clone());
+            let mut abi = |t: &component::Ty| match t {
+                component::Ty::Scalar(v) => ty(*v),
+                t => {
+                    types.push(wit_type(t, &ty, &site));
+                    ir::AbiType::Compound(types.len() as u32 - 1)
+                }
+            };
+            // A blocking call is sync-lowered; its streams are read and written to the end around
+            // it, its returned futures read. A future argument would need the call to wait for a
+            // value it can't get: not supported.
+            let future_param = |t: &component::Ty| {
+                fn has(t: &component::Ty) -> bool {
+                    use component::Ty as T;
+                    match t {
+                        T::Future { .. } => true,
+                        T::Option(t) | T::List(t) => has(t),
+                        T::Result { ok, err } => [ok, err].into_iter().flatten().any(|t| has(t)),
+                        T::Tuple(ts) => ts.iter().any(has),
+                        T::Record(fs) => fs.iter().any(|(_, t)| has(t)),
+                        T::Variant(cs) => cs.iter().flat_map(|(_, t)| t).any(has),
+                        _ => false,
+                    }
+                }
+                has(t)
+            };
+            let blocked =
+                Err("unsupported: a future argument in a command's import (planned: later)".to_string());
+            let sig = match sig {
+                Ok(w) if blocking && w.params.iter().any(|(_, t)| future_param(t)) => &blocked,
+                sig => sig,
+            };
+            let (params, result, throws, is_async, signature, unsupported) = match sig {
+                Ok(w) => {
+                    // The whole WIT result: the stub unwraps a `result`.
+                    let whole = if w.throws {
+                        Some(component::Ty::Result {
+                            ok: w.result.clone().map(Box::new),
+                            err: w.err.clone().map(Box::new),
+                        })
+                    } else {
+                        w.result.clone()
+                    };
+                    (
+                        w.params.iter().map(|(_, t)| abi(t)).collect(),
+                        whole.as_ref().map(&mut abi),
+                        w.throws,
+                        w.is_async,
+                        w.signature.clone(),
+                        None,
+                    )
+                }
+                Err(why) => (Vec::new(), None, false, false, String::new(), Some(why.clone())),
+            };
+            let is_async = is_async && !blocking;
+            funcs.push(js2wasi3_lower::WorldImport {
+                // Resource functions (`[method]r.f`, T59) are imported by their WIT names.
+                js_name: if name.starts_with('[') {
+                    name.clone()
+                } else {
+                    camel_case(name)
+                },
+                wit_name: name.clone(),
+                throws,
+                is_async,
+                import: ir::Import {
+                    module: iface.module.clone(),
+                    name: name.clone(),
+                    sig: ir::AbiSig {
+                        params,
+                        result,
+                        is_async,
+                        types,
+                        blocking,
+                        ..ir::AbiSig::default()
+                    },
+                    unwrap: None,
+                },
+                signature,
+                unsupported,
+            });
+        }
+        if let Some((plain, _)) = iface.module.split_once('@') {
+            boundary.imports.insert(plain.to_string(), funcs.clone());
+        }
+        boundary.imports.insert(iface.module.clone(), funcs);
     }
 }
 
@@ -515,7 +560,22 @@ fn main() -> anyhow::Result<()> {
                 Some(w) => component::WorldName::parse(&w)?,
                 None => component::WorldName::from_path(Path::new(&entry)),
             };
-            let mut ir = js2wasi3_lower::lower(&program)?;
+            // A command may import WASI interfaces directly (T59).
+            // Only the interfaces it names: a boundary's types decide some of the runtime.
+            let named = program.import_sources();
+            let wasi = if (command || program.exports.is_empty()) && !named.is_empty() {
+                let mut ifaces = component::wasi_world()?.imports;
+                ifaces.retain(|i| {
+                    let plain = i.module.split_once('@').map_or(i.module.as_str(), |(p, _)| p);
+                    named.contains(&i.module.as_str()) || named.contains(&plain)
+                });
+                let mut b = js2wasi3_lower::Boundary::default();
+                import_boundary(&mut b, &ifaces, true);
+                Some(b)
+            } else {
+                None
+            };
+            let mut ir = js2wasi3_lower::lower_with(&program, wasi.as_ref())?;
             ir.ignore_unhandled = ignore_unhandled;
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?

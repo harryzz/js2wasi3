@@ -216,6 +216,19 @@ fn offset_of(source: &str, line: u32, col: u32) -> u32 {
 }
 
 impl<'a> Program<'a> {
+    /// The sources of the program's remaining `import` declarations (after linking: WIT
+    /// interfaces, e.g. `wasi:filesystem/types@0.3.1`).
+    pub fn import_sources(&self) -> Vec<&str> {
+        self.ast
+            .body
+            .iter()
+            .filter_map(|s| match s {
+                ast::Statement::ImportDeclaration(i) => Some(i.source.value.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Is this byte offset in the built-ins prelude (not the user's source)?
     pub fn in_prelude(&self, offset: u32) -> bool {
         offset > self.user_end

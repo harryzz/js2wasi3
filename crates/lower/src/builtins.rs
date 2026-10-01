@@ -194,8 +194,14 @@ pub(crate) const STRING_TO_BIGINT: &str = "$$StringToBigInt";
 pub(crate) const TO_BIGINT: &str = "$$toBigInt";
 
 /// The prelude's stream reader and pump (T20 slice 6b): the backend lifts and lowers a user
-/// world's streams with them.
-pub(crate) const STREAMS: [&str; 2] = ["$$StreamReader", "$$StreamPump"];
+/// world's streams with them; T59: the blocking ones of a command's WASI imports.
+pub(crate) const STREAMS: [&str; 5] = [
+    "$$StreamReader",
+    "$$StreamPump",
+    "$$StreamReadAll",
+    "$$StreamDefer",
+    "$$StreamFlush",
+];
 
 /// GetTemplateObject (T51, `builtins/string.js`): what a tagged template passes its tag.
 pub(crate) const TEMPLATE_OBJECT: &str = "$$templateObject";

@@ -1056,7 +1056,7 @@ fn module_errors_are_diagnostics() {
     write("a.js", "export const x = 1;\n");
     write(
         "main.js",
-        "import { y } from './a.js';\nimport './b';\nimport 'lodash';\nimport 'node:fs';\n",
+        "import { y } from './a.js';\nimport './b';\nimport 'lodash';\nimport 'node:net';\n",
     );
     let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
     assert!(!b.status.success());
@@ -1065,7 +1065,7 @@ fn module_errors_are_diagnostics() {
         "main.js:2:8: error: cannot find module `./b`",
         "help: node needs the file's extension: `./b.js`?",
         "main.js:3:8: error: Cannot find package 'lodash' imported from",
-        "main.js:4:8: error: unsupported: node's built-in module `node:fs`",
+        "main.js:4:8: error: unsupported: node's built-in module `node:net`",
     ] {
         assert!(err.contains(want), "missing {want:?} in:\n{err}");
     }
@@ -1088,4 +1088,62 @@ fn module_errors_are_diagnostics() {
     let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
     let err = String::from_utf8_lossy(&b.stderr);
     assert!(err.contains("a.js:1:1: error: unsupported: top-level `await` in a module with exports"), "{err}");
+}
+
+/// T59: a command imports WASI interfaces directly: sync functions, blocking `async func`s,
+/// resources as numbers (`[method]…`, `[resource-drop]…`), `result` errors thrown with `payload`.
+#[test]
+fn commands_import_wasi_interfaces() {
+    let dir = out_dir("wasi");
+    let out = dir.join("random.wasm");
+    let b = build(&fixture("wasi/random.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let (ok, stdout, stderr) = run_command(&out);
+    assert!(ok, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(String::from_utf8(stdout).unwrap(), "true 8 number\n");
+
+    let files = dir.join("files");
+    std::fs::create_dir_all(&files).unwrap();
+    std::fs::write(files.join("hello.txt"), "hello file\n").unwrap();
+    let out = dir.join("filesystem.wasm");
+    let b = build(&fixture("wasi/filesystem.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let run = Command::new("wasmtime")
+        .args(["run", "-Sp3", "--dir"])
+        .arg(format!("{}::/", files.display()))
+        .arg(&out)
+        .output()
+        .expect("wasmtime is installed (TOOLS.md)");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap(),
+        "1 number /\n\
+         { tag: 'regular-file' } 11 1 object\n\
+         stat missing: { tag: 'no-entry' }\n\
+         number 11\n\
+         mkdir twice: { tag: 'exist' }\n\
+         done\n"
+    );
+
+    let out = dir.join("streams.wasm");
+    let b = build(&fixture("wasi/streams.js"), &out, &[]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let run = Command::new("wasmtime")
+        .args(["run", "-Sp3", "--dir"])
+        .arg(format!("{}::/", files.display()))
+        .arg(&out)
+        .output()
+        .expect("wasmtime is installed (TOOLS.md)");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap(),
+        "Uint8Array(11) [\n\
+         \x20 104, 101, 108, 108,\n\
+         \x20 111,  32, 102, 105,\n\
+         \x20 108, 101,  10\n\
+         ] { tag: 'ok', val: undefined }\n\
+         { tag: 'ok', val: undefined }\n\
+         200000 65 65\n\
+         [ [ 'regular-file', 'hello.txt' ], [ 'regular-file', 'out.txt' ] ] { tag: 'ok', val: undefined }\n"
+    );
 }

@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::{
-    FunctionKind, InterfaceId, Resolve, Type, TypeDefKind, TypeId, WorldId, WorldItem,
+    InterfaceId, Resolve, Type, TypeDefKind, TypeId, WorldId, WorldItem,
 };
 
 pub mod names;
@@ -369,18 +369,62 @@ pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld>
         .push_path(path)
         .with_context(|| format!("reading WIT from {}", path.display()))?;
     let id = resolve.select_world(&[pkg], world)?;
+    user_world(resolve, id, false)
+}
+
+/// The WASI interfaces a command may import from JS (T59): `import { f } from "wasi:…"`.
+/// Those the runtime itself imports (`wasi:cli`'s `stdout`, `stderr`, `environment`, `exit`,
+/// `run`, the clocks it reads, `wasi:random/insecure`) aren't listed.
+pub const COMMAND_WASI_IMPORTS: &[&str] = &[
+    "wasi:clocks/types@0.3.1",
+    "wasi:random/random@0.3.1",
+    "wasi:random/insecure-seed@0.3.1",
+    "wasi:filesystem/types@0.3.1",
+    "wasi:filesystem/preopens@0.3.1",
+    "wasi:sockets/types@0.3.1",
+    "wasi:sockets/ip-name-lookup@0.3.1",
+];
+
+/// A world importing [`COMMAND_WASI_IMPORTS`] (T59): what a command's JS may import.
+pub fn wasi_world() -> anyhow::Result<UserWorld> {
+    let mut resolve = Resolve::default();
+    for (file, text) in WASI {
+        resolve
+            .push_source(file, text)
+            .with_context(|| format!("vendored WIT {file}"))?;
+    }
+    let imports: String = COMMAND_WASI_IMPORTS
+        .iter()
+        .map(|i| format!("  import {i};\n"))
+        .collect();
+    let wit = format!("package js2wasi3:wasi;\n\nworld imports {{\n{imports}}}\n");
+    let pkg = resolve.push_source("wasi-imports.wit", &wit)?;
+    let id = resolve.select_world(&[pkg], Some("imports"))?;
+    user_world(resolve, id, true)
+}
+
+/// `blocking` (T59, a command's WASI imports): a sync function may take or return streams and
+/// futures (they're read and written to the end around the call).
+fn user_world(resolve: Resolve, id: WorldId, blocking: bool) -> anyhow::Result<UserWorld> {
     let w = &resolve.worlds[id];
     let mut exports = Vec::new();
     let mut export_interfaces = Vec::new();
     let mut errs = Vec::new();
     for (key, item) in &w.exports {
         match item {
-            WorldItem::Function(f) => match function(&resolve, f) {
+            WorldItem::Function(f) => match function(&resolve, f, false) {
                 Ok(e) => exports.push(e),
                 Err(why) => errs.extend(why),
             },
             WorldItem::Interface { id: iface, .. } => {
-                export_interfaces.push(interface(&resolve, key, *iface));
+                // Exported resources aren't supported: only imports get handles (T59).
+                let mut i = interface(&resolve, key, *iface, false);
+                for (name, sig) in &mut i.functions {
+                    if name.starts_with('[') {
+                        *sig = Err(format!("unsupported: `{name}` is a resource function (planned: later)"));
+                    }
+                }
+                export_interfaces.push(i);
             }
             WorldItem::Type { .. } => {}
         }
@@ -391,7 +435,7 @@ pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld>
         let WorldItem::Interface { id: iface, .. } = item else {
             continue;
         };
-        imports.push(interface(&resolve, key, *iface));
+        imports.push(interface(&resolve, key, *iface, blocking));
     }
     if !errs.is_empty() {
         bail!("world `{}`:\n  {}", w.name, errs.join("\n  "));
@@ -407,23 +451,38 @@ pub fn load_world(path: &Path, world: Option<&str>) -> anyhow::Result<UserWorld>
 }
 
 /// An imported or exported interface: its name and its functions' signatures.
-fn interface(resolve: &Resolve, key: &wit_parser::WorldKey, id: InterfaceId) -> WorldInterface {
-    let functions = resolve.interfaces[id]
+fn interface(
+    resolve: &Resolve,
+    key: &wit_parser::WorldKey,
+    id: InterfaceId,
+    blocking: bool,
+) -> WorldInterface {
+    // T59: resource functions too (`[method]r.f`, `[static]r.f`, `[constructor]r`: handles are
+    // numbers, `self` first), and each resource's `[resource-drop]r`.
+    let mut functions: Vec<(String, Result<WorldExport, String>)> = resolve.interfaces[id]
         .functions
         .values()
         .map(|f| {
-            let sig = match f.kind {
-                FunctionKind::Freestanding | FunctionKind::AsyncFreestanding => {
-                    function(resolve, f).map_err(|why| why.join("; "))
-                }
-                _ => Err(format!(
-                    "unsupported: `{}` is a resource function (planned: later)",
-                    f.name
-                )),
-            };
+            let sig = function(resolve, f, blocking).map_err(|why| why.join("; "));
             (f.name.clone(), sig)
         })
         .collect();
+    for (name, t) in &resolve.interfaces[id].types {
+        if matches!(resolve.types[*t].kind, TypeDefKind::Resource) {
+            functions.push((
+                format!("[resource-drop]{name}"),
+                Ok(WorldExport {
+                    name: format!("[resource-drop]{name}"),
+                    params: vec![("self".into(), Ty::Scalar(ValType::U32))],
+                    result: None,
+                    throws: false,
+                    err: None,
+                    is_async: false,
+                    signature: format!("[resource-drop]{name}: func(self: own<{name}>)"),
+                }),
+            ));
+        }
+    }
     let name = match key {
         wit_parser::WorldKey::Name(n) => n.clone(),
         wit_parser::WorldKey::Interface(_) => resolve.interfaces[id].name.clone().unwrap_or_default(),
@@ -436,10 +495,14 @@ fn interface(resolve: &Resolve, key: &wit_parser::WorldKey, id: InterfaceId) -> 
 }
 
 /// A world function's signature: its WIT types, a `result<T, E>` result split into `T` and `E`.
-fn function(resolve: &Resolve, f: &wit_parser::Function) -> Result<WorldExport, Vec<String>> {
+fn function(
+    resolve: &Resolve,
+    f: &wit_parser::Function,
+    blocking: bool,
+) -> Result<WorldExport, Vec<String>> {
     let mut errs = Vec::new();
     let futures = f.find_futures_and_streams(resolve);
-    if !futures.is_empty() && !f.kind.is_async() {
+    if !futures.is_empty() && !f.kind.is_async() && !blocking {
         errs.push(format!(
             "unsupported: `{}` takes or returns a future or stream and isn't an `async func` (planned: later)",
             f.name
@@ -552,6 +615,8 @@ fn boundary_type(resolve: &Resolve, t: &Type, futures: &[TypeId]) -> Result<Ty, 
                     .expect("wit-parser lists every stream") as u32,
             }
         }
+        // T59: a handle is its `i32` index, a JS number (resources at the low level).
+        TypeDefKind::Handle(_) => Ty::Scalar(ValType::U32),
         _ => return later("a resource", "later"),
     })
 }
@@ -630,7 +695,8 @@ const WASI: [(&str, &str); 5] = [
 
 /// The world of a command: it exports `wasi:cli/run` and imports stdout, stderr, (T19, timers)
 /// the monotonic clock, (T21, `Math.random`) `wasi:random/insecure`, (T26, `Date`) the system
-/// clock and (T55, `process`) `wasi:cli/environment`. The core module's imports
+/// clock, (T55, `process`) `wasi:cli/environment` and (T59) [`COMMAND_WASI_IMPORTS`], which JS
+/// imports directly. The core module's imports
 /// are fixed, except `wasi:random` (see the backend's `host` module); a world import the core
 /// module doesn't use isn't in the component.
 pub fn command_world(name: WorldName) -> World {
@@ -641,9 +707,15 @@ pub fn command_world(name: WorldName) -> World {
          import wasi:clocks/monotonic-clock@0.3.1;\n  \
          import wasi:random/insecure@0.3.1;\n  \
          import wasi:clocks/system-clock@0.3.1;\n  \
-         import wasi:cli/environment@0.3.1;\n  \
+         import wasi:cli/environment@0.3.1;\n{}  \
          export wasi:cli/run@0.3.1;\n}}\n",
-        name.namespace, name.package, name.world
+        name.namespace,
+        name.package,
+        name.world,
+        COMMAND_WASI_IMPORTS
+            .iter()
+            .map(|i| format!("  import {i};\n"))
+            .collect::<String>()
     );
     World {
         name,

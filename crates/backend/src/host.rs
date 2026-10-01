@@ -70,6 +70,10 @@ pub enum Import {
     /// `wasi:cli/environment`'s `get-environment`, `get-arguments`, `get-initial-cwd` (T55,
     /// `process`): like [`Import::InsecureRandom`], only by modules that use them.
     Environment(u8),
+    /// `waitable-set.wait` / `.drop` (T59): blocking reads and writes of the streams and futures
+    /// of a command's WASI imports. Only in modules that have them.
+    WaitableSetWait,
+    WaitableSetDrop,
 }
 
 pub const IMPORTS: [Import; 19] = [
@@ -156,6 +160,8 @@ impl Import {
                 "wasi:cli/environment@0.3.1",
                 ["get-environment", "get-arguments", "get-initial-cwd"][k as usize].into(),
             ),
+            Import::WaitableSetWait => ("$root", "[waitable-set-wait]".into()),
+            Import::WaitableSetDrop => ("$root", "[waitable-set-drop]".into()),
         }
     }
 
@@ -180,13 +186,16 @@ impl Import {
             Import::BackpressureInc | Import::BackpressureDec => (vec![], vec![]),
             // The result (a list, or an option) is written at the return pointer.
             Import::Environment(_) => (vec![I32], vec![]),
+            Import::WaitableSetWait => (vec![I32; 2], vec![I32]),
+            Import::WaitableSetDrop => (vec![I32], vec![]),
         }
     }
 }
 
 /// The imports of a command: [`IMPORTS`], then those it uses of [`Import::InsecureRandom`],
-/// [`Import::SystemClockNow`] and [`Import::Environment`] (`env[k]`).
-pub fn import_list(random: bool, clock: bool, env: [bool; 3]) -> Vec<Import> {
+/// [`Import::SystemClockNow`] and [`Import::Environment`] (`env[k]`), and (`blocking`: its WASI
+/// imports have streams or futures, T59) [`Import::WaitableSetWait`] and `Drop`.
+pub fn import_list(random: bool, clock: bool, env: [bool; 3], blocking: bool) -> Vec<Import> {
     let mut list = IMPORTS.to_vec();
     if random {
         list.push(Import::InsecureRandom);
@@ -198,6 +207,9 @@ pub fn import_list(random: bool, clock: bool, env: [bool; 3]) -> Vec<Import> {
         if used {
             list.push(Import::Environment(k as u8));
         }
+    }
+    if blocking {
+        list.extend([Import::WaitableSetWait, Import::WaitableSetDrop]);
     }
     list
 }

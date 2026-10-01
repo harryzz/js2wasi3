@@ -148,7 +148,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     // `process` (T55): `process.exit`'s tag and the ending state (a host global).
     let exits = command.is_some() && (exits || module.process_at_exit.is_some());
     let import_list = if command.is_some() {
-        host::import_list(random, clock, env)
+        host::import_list(random, clock, env, !abi::payloads(module).is_empty())
     } else {
         Vec::new()
     };
@@ -1097,6 +1097,18 @@ impl runtime::Cx for Emitter<'_> {
     fn stream_funcs(&mut self) -> (u32, u32) {
         let f = |x: Option<ir::FuncId>| self.func_base + x.expect("the prelude's streams").0;
         (f(self.m.stream_reader), f(self.m.stream_pump))
+    }
+
+    fn blocking_stream_funcs(&mut self) -> (u32, (u32, bool), (u32, bool)) {
+        let f = |x: Option<ir::FuncId>| {
+            let x = x.expect("the prelude's streams");
+            (self.func_base + x.0, self.m.function(x).result.is_some())
+        };
+        (
+            f(self.m.stream_read_all).0,
+            f(self.m.stream_defer),
+            f(self.m.stream_flush),
+        )
     }
 
     fn user_import_count(&mut self) -> u32 {

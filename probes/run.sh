@@ -19,3 +19,6 @@ time wasmtime run -W component-model-async-stackful=y,component-model-threading=
 time wasmtime run -W stack-switching=y --invoke main out/bench_ss.wasm 2>/dev/null
 echo "8) timers: two concurrent wait-until (50 ms) + a cancelled 5 s one (expect ~50 ms, exit 0)"
 wasm-tools parse timers.wat -o out/timers.core.wasm && wasm-tools component embed wit out/timers.core.wasm -o out/timers.emb.wasm && wasm-tools component new out/timers.emb.wasm -o out/timers.wasm && time wasmtime run -Sp3 out/timers.wasm
+echo "9) blocking filesystem calls from a callback-lifted run (T59): expect 'hello from a preopened file'"
+mkdir -p out/fsdir && printf 'hello from a preopened file\n' > out/fsdir/hello.txt
+wasm-tools parse fs.wat -o out/fs.core.wasm && wasm-tools component embed wit --world cmdfs out/fs.core.wasm -o out/fs.emb.wasm && wasm-tools component new out/fs.emb.wasm -o out/fs.wasm && wasmtime run -Sp3 --dir out/fsdir::/ out/fs.wasm

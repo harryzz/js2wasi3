@@ -281,6 +281,9 @@ pub trait Cx {
     /// Function indices of the prelude's `$$StreamReader` and `$$StreamPump` (T20 slice 6b):
     /// set when a boundary type is a stream.
     fn stream_funcs(&mut self) -> (u32, u32);
+    /// Function indices of the prelude's `$$StreamReadAll`, `$$StreamDefer` and `$$StreamFlush`
+    /// (T59: a command's blocking WASI imports); for the last two, whether they have a result.
+    fn blocking_stream_funcs(&mut self) -> (u32, (u32, bool), (u32, bool));
     /// Does the library have top-level code (`init`, T20)?
     fn has_init(&mut self) -> bool;
     /// A library's `init`: its function index, whether it may throw (or leave a rejection), and

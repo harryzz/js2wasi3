@@ -39,3 +39,58 @@ async function $$StreamPump(src, w, id) {
     __intrinsic_stream_drop_writable(w, id);
   }
 }
+
+// A command's blocking WASI imports (T59): a returned stream is read to its end, one value shaped
+// like `list<T>` (all of a `stream<u8>`'s bytes in one `Uint8Array`).
+function $$StreamReadAll(h, id) {
+  const chunks = [];
+  let total = 0;
+  let ended = false;
+  while (!ended) {
+    const r = __intrinsic_stream_read_sync(h, id);
+    ended = r[1];
+    if (r[0] !== undefined) {
+      chunks.push(r[0]);
+      total += r[0].length;
+    }
+  }
+  __intrinsic_stream_drop_readable(h, id);
+  if (chunks.length === 1) {
+    return chunks[0];
+  }
+  // (Streams of other numeric types: chunks are other typed arrays, not joined yet.)
+  if (chunks.length === 0 || chunks[0] instanceof Uint8Array) {
+    const all = new Uint8Array(total);
+    let at = 0;
+    for (const c of chunks) {
+      all.set(c, at);
+      at += c.length;
+    }
+    return all;
+  }
+  return [].concat(...chunks);
+}
+
+// A stream argument of a blocking call: written (`v`, one chunk) after the call returns.
+// (Made on first use: the prelude's top-level values are literals.)
+let $$streamWrites;
+function $$StreamDefer(v, w, id) {
+  if ($$streamWrites === undefined) {
+    $$streamWrites = [];
+  }
+  $$streamWrites.push(v, w, id);
+}
+
+function $$StreamFlush() {
+  if ($$streamWrites === undefined) {
+    return;
+  }
+  for (let i = 0; i < $$streamWrites.length; i += 3) {
+    const v = $$streamWrites[i];
+    const w = $$streamWrites[i + 1];
+    const id = $$streamWrites[i + 2];
+    __intrinsic_stream_write_sync(v, w, id);
+    __intrinsic_stream_drop_writable(w, id);
+  }
+  $$streamWrites.length = 0;
+}

@@ -296,6 +296,20 @@ package (feross, which re-prototypes plain `Uint8Array`s, so typed arrays need n
 checks, a WHATWG UTF-8 decoder, `base64url`, `subarray` giving a Buffer; `node/string_decoder.js` is node's former
 pure-JS decoder. Functions of node's built-in modules and every CommonJS module's wrapper function keep no source text
 (F246: the 66 KB `buffer` module as a string constant cost 30 s in wasmtime).)
+(T59: **a command imports WASI interfaces** from JS like a user world's (`import { f } from "wasi:x/y@0.3.1"`,
+`component::COMMAND_WASI_IMPORTS`: those the runtime doesn't import itself); its boundary has only the interfaces
+its `import`s name (a boundary's types decide some of the runtime). The calls **block** (`ir::AbiSig::blocking`):
+an `async func` is sync-lowered (a plain import name; the callback-lifted `run` task may block: probe 9), a returned
+`stream<T>` is read to its end into one `list<T>`-shaped value and a returned future to its value (async
+`stream.read`/`future.read`, then `waitable-set.wait` on a fresh set when they'd block: sync stream built-ins need
+wasmtime's 🚝), a stream argument (a `list<T>`-shaped value) is written after the call returns, before the results
+are read. Resources are low-level: a handle is a number, `[method]r.f`/`[static]r.f`/`[constructor]r` and a
+synthetic `[resource-drop]r` are imported by their WIT names (string imports), `self` first. **`node:fs`** is JS
+over that (`node/fs.js`; its imports are in `node:internal/wasi_fs`, an ES module: `node:internal/…` built-ins are
+parsed as ES modules): paths resolve against `process.cwd()` ("/" under wasmtime) and the longest preopen, WASI's
+`error-code` becomes node's error (code, Linux errno, libuv's message), `Stats` have node's shape with what WASI
+lacks zeroed; callbacks and promises run the sync call at once and deliver the result later (`setImmediate`, a
+settled promise). `constants` is node's deprecated module.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

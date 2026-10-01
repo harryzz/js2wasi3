@@ -18,6 +18,11 @@ const MODULES: &[(&str, &str)] = &[
     ("tty", include_str!("../node/tty.js")),
     ("buffer", include_str!("../node/buffer.js")),
     ("string_decoder", include_str!("../node/string_decoder.js")),
+    ("fs", include_str!("../node/fs.js")),
+    ("constants", include_str!("../node/constants.js")),
+    ("fs/promises", "module.exports = require(\"node:fs\").promises;\n"),
+    // `fs`'s `wasi:filesystem` imports (T59): an ES module (a CommonJS file can't `import`).
+    ("internal/wasi_fs", include_str!("../node/wasi_fs.mjs")),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if
@@ -43,6 +48,25 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
             "execPath", "exit", "exitCode", "hrtime", "listenerCount", "listeners", "nextTick", "off", "on", "once",
             "platform", "release", "removeAllListeners", "removeListener", "stderr", "stdout", "title", "uptime",
             "version", "versions",
+        ]),
+        // What `node/fs.js` exports (its `module.exports` has non-identifier values).
+        "node:fs/promises" => Some(&[
+            "access", "appendFile", "chmod", "chown", "constants", "copyFile", "lchmod", "lchown", "link", "lstat",
+            "mkdir", "mkdtemp", "open", "readFile", "readdir", "readlink", "realpath", "rename", "rm", "rmdir", "stat",
+            "symlink", "truncate", "unlink", "utimes", "writeFile",
+        ]),
+        "node:fs" => Some(&[
+            "Dirent", "F_OK", "R_OK", "Stats", "W_OK", "X_OK", "access", "accessSync", "appendFile",
+            "appendFileSync", "chmod", "chmodSync", "chown", "chownSync", "close", "closeSync", "constants",
+            "copyFile", "copyFileSync", "createReadStream", "createWriteStream", "exists", "existsSync", "fchmod",
+            "fchmodSync", "fchown", "fchownSync", "fdatasync", "fdatasyncSync", "fstat", "fstatSync", "fsync",
+            "fsyncSync", "ftruncate", "ftruncateSync", "lchmod", "lchmodSync", "lchown", "lchownSync", "link",
+            "linkSync", "lstat", "lstatSync", "mkdir", "mkdirSync", "mkdtemp", "mkdtempSync", "open", "openSync",
+            "promises", "read", "readFile", "readFileSync", "readSync", "readdir", "readdirSync", "readlink",
+            "readlinkSync", "realpath", "realpathSync", "rename", "renameSync", "rm", "rmSync", "rmdir",
+            "rmdirSync", "stat", "statSync", "symlink", "symlinkSync", "truncate", "truncateSync", "unlink",
+            "unlinkSync", "unwatchFile", "utimes", "utimesSync", "watch", "watchFile", "write", "writeFile",
+            "writeFileSync", "writeSync",
         ]),
         "node:events" => Some(&[
             "EventEmitter", "EventEmitterAsyncResource", "addAbortListener", "captureRejectionSymbol",

@@ -1,0 +1,1 @@
+node can't import `wasi:` interfaces: run by crates/js2wasi3/tests/build.rs (T59)

@@ -846,10 +846,15 @@ impl<'a> Graph<'a, '_> {
         }
     }
 
-    /// How node runs the file at `path` (T54). node's built-in modules are CommonJS (T55).
+    /// How node runs the file at `path` (T54). node's built-in modules are CommonJS (T55), except
+    /// js2wasi3's internal ones (`node:internal/…`, T59: they import WASI interfaces).
     fn format(&mut self, path: &str) -> Format {
         if node::is_module(path) {
-            return Format::Cjs;
+            return if path.starts_with("node:internal/") {
+                Format::Esm
+            } else {
+                Format::Cjs
+            };
         }
         if path.ends_with(".mjs") {
             return Format::Esm;

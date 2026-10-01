@@ -162,17 +162,23 @@ pub struct Boundary {
 }
 
 impl Boundary {
-    /// Does a signature take or return a `stream` (T20 slice 6b: the prelude's reader and pump
-    /// are needed)?
-    fn has_streams(&self) -> bool {
-        let mut found = Vec::new();
-        self.exports
-            .values()
-            .map(|w| &w.types)
-            .chain(self.imports.values().flatten().map(|i| &i.import.sig.types))
-            .flatten()
-            .for_each(|t| t.payloads(&mut found));
-        found.iter().any(|p| p.stream)
+    /// Does a signature take or return a `stream`: one of an async boundary (T20 slice 6b: the
+    /// prelude's reader and pump are needed), one of a blocking import (T59: its blocking
+    /// functions)?
+    fn has_streams(&self) -> (bool, bool) {
+        let streams = |types: &[ir::WitType]| {
+            let mut found = Vec::new();
+            types.iter().for_each(|t| t.payloads(&mut found));
+            found.iter().any(|p| p.stream)
+        };
+        let exports = self.exports.values().any(|w| streams(&w.types));
+        let imports = |blocking: bool| {
+            self.imports
+                .values()
+                .flatten()
+                .any(|i| i.import.sig.blocking == blocking && streams(&i.import.sig.types))
+        };
+        (exports || imports(false), imports(true))
     }
 }
 
@@ -193,8 +199,13 @@ pub fn lower_with(
         if facts.string_to_number {
             extra.push(builtins::STRING_TO_NUMBER);
         }
-        if boundary.is_some_and(Boundary::has_streams) {
-            extra.extend(builtins::STREAMS);
+        if let Some((streams, blocking)) = boundary.map(Boundary::has_streams) {
+            if streams {
+                extra.extend(&builtins::STREAMS[..2]);
+            }
+            if blocking {
+                extra.extend(&builtins::STREAMS[2..]);
+            }
         }
         if program.semantic.nodes().iter().any(|n| {
             matches!(n.kind(), oxc_ast::AstKind::TaggedTemplateExpression(t)
@@ -1181,12 +1192,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 continue;
             }
             if builtins::STREAMS.contains(&name.as_str()) {
-                // Called by the backend's stream lifting / lowering (T20 slice 6b): JS values.
-                if name == builtins::STREAMS[0] {
-                    self.module.stream_reader = Some(func);
-                } else {
-                    self.module.stream_pump = Some(func);
-                }
+                // Called by the backend's stream lifting / lowering (T20 slice 6b, T59): JS values.
+                let slot = match name.as_str() {
+                    "$$StreamReader" => &mut self.module.stream_reader,
+                    "$$StreamPump" => &mut self.module.stream_pump,
+                    "$$StreamReadAll" => &mut self.module.stream_read_all,
+                    "$$StreamDefer" => &mut self.module.stream_defer,
+                    _ => &mut self.module.stream_flush,
+                };
+                *slot = Some(func);
                 for p in self.func_params[&func].clone().into_iter().flatten() {
                     self.observe(Slot::Var(p), Kind::Any);
                 }
@@ -2225,6 +2239,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     is_async,
                     err: w.err,
                     types: w.types.clone(),
+                    blocking: false,
                 }
             } else {
                 let result = if !is_async {
@@ -2263,6 +2278,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     is_async,
                     err: ir::ErrType::JsError,
                     types: Vec::new(),
+                    blocking: false,
                 }
             };
             if let Some((_, _, w)) = done.iter().find(|(g, s, _)| *g == func && *s == sig) {
@@ -8152,6 +8168,8 @@ fn stream_op(name: &str) -> Option<ir::StreamOp> {
         "stream_write" => S::Write,
         "stream_drop_readable" => S::DropReadable,
         "stream_drop_writable" => S::DropWritable,
+        "stream_read_sync" => S::ReadSync,
+        "stream_write_sync" => S::WriteSync,
         _ => return None,
     })
 }

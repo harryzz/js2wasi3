@@ -161,6 +161,12 @@ pub struct Module {
     /// pumped. Set when the user world has a `stream`.
     pub stream_reader: Option<FuncId>,
     pub stream_pump: Option<FuncId>,
+    /// T59, a command's blocking WASI imports: `$$StreamReadAll(h, id)` reads a returned stream to
+    /// its end (one `list<T>`-shaped value), `$$StreamDefer(v, w, id)` keeps a stream argument's
+    /// value to write after the call, `$$StreamFlush()` writes them.
+    pub stream_read_all: Option<FuncId>,
+    pub stream_defer: Option<FuncId>,
+    pub stream_flush: Option<FuncId>,
     /// The code names a property `bind` (T25): `Function.prototype.bind` is installed.
     pub bind: bool,
     /// The code names a property `toString` (T25): `Function.prototype.toString` is installed and
@@ -428,6 +434,9 @@ pub struct AbiSig {
     pub is_async: bool,
     /// With `throws`: the `result`'s `err` (T20).
     pub err: ErrType,
+    /// A command's WASI import (T59): sync-lowered (an `async func` blocks), its streams and
+    /// futures read and written to the end around the call.
+    pub blocking: bool,
     /// The compound types [`AbiType::Compound`] refers to (T20).
     pub types: Vec<WitType>,
 }
@@ -453,6 +462,7 @@ impl AbiSig {
             is_async: false,
             err: ErrType::JsError,
             types: Vec::new(),
+            blocking: false,
         }
     }
 }
@@ -1223,6 +1233,11 @@ pub enum StreamOp {
     DropReadable,
     /// `(w, id)`: drop the writable end (the stream ends); the call stops waiting for it.
     DropWritable,
+    /// `(h, id) -> jsval`: [`StreamOp::Read`] blocking until the read ends (T59): `[chunk, ended]`.
+    ReadSync,
+    /// `(chunk, w, id) -> jsval`: [`StreamOp::Write`] blocking until it's all written (T59):
+    /// `true`, or `false` if the reader dropped its end.
+    WriteSync,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1443,8 +1458,8 @@ impl Intrinsic {
             Intrinsic::SetFunctionName => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::BuiltinCtor(_) | Intrinsic::Namespace(_) => (&[], Some(JsVal)),
             Intrinsic::Stream(op) => match op {
-                StreamOp::Read => (&[I32, I32], Some(JsVal)),
-                StreamOp::Write => (&[JsVal, I32, I32], Some(JsVal)),
+                StreamOp::Read | StreamOp::ReadSync => (&[I32, I32], Some(JsVal)),
+                StreamOp::Write | StreamOp::WriteSync => (&[JsVal, I32, I32], Some(JsVal)),
                 StreamOp::DropReadable | StreamOp::DropWritable => (&[I32, I32], None),
             },
             Intrinsic::Map(op) => match op {
@@ -1658,6 +1673,8 @@ impl Intrinsic {
             Intrinsic::Stream(op) => match op {
                 StreamOp::Read => "stream_read",
                 StreamOp::Write => "stream_write",
+                StreamOp::ReadSync => "stream_read_sync",
+                StreamOp::WriteSync => "stream_write_sync",
                 StreamOp::DropReadable => "stream_drop_readable",
                 StreamOp::DropWritable => "stream_drop_writable",
             },
