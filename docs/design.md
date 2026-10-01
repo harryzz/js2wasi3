@@ -78,6 +78,15 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   operators `JsLess`. Literals are constant globals.)
   (T09: string literals are immutable globals built with `array.new_fixed`; number → string is Ryu
   (`crates/backend/src/numstr.rs`), with its tables in a passive data segment loaded by `array.new_data`.)
+  (T57: string and BigInt constants are mutable `(ref $string)`/`(ref $bigint)` globals, initialized to an immutable
+  placeholder (an empty string, a zero BigInt) and filled by the module's start function: their contents are one
+  passive data segment (after Ryu's tables), each constant `i32.const offset; i32.const length; call
+  consts$string|consts$bigint; global.set` (the makers are `array.new_data`), 1,024 constants per function
+  (`consts$init<k>`; the last is the start function and calls the others). Constant expressions
+  (`array.new_fixed` of `i32.const`s) need no code, but wasmtime compiles all of a module's initializers as one
+  function whose compile time grows superlinearly with their count and length (10k short strings: 11 s; now
+  ~20 µs per constant). Uses are unchanged (`global.get`, non-null), and so is identity: each constant is made once,
+  at instantiation, as before. Every program with strings changed (uniformly); no run-time cost measured.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
 - Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
   inline caches only after T12 works and a benchmark justifies them.

@@ -68,7 +68,7 @@ use wasm_encoder::{
     BlockType, Catch, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
     Elements, ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType,
     ImportSection, IndirectNameMap, InstructionSink, MemorySection, MemoryType, NameMap,
-    NameSection, TagKind, TagSection, TagType, TypeSection, ValType,
+    NameSection, StartSection, TagKind, TagSection, TagType, TypeSection, ValType,
 };
 
 /// Emit a core Wasm module for `module`.
@@ -359,6 +359,10 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         code.function(&e.helper(h));
         i += 1;
     }
+    // The constants' initializers (T57), after the helpers; the last one is the start function.
+    let const_data = e.const_inits(&mut funcs, &mut code);
+    let init_base = e.helper_base + e.helpers.len() as u32;
+    let start = (!const_data.1.is_empty()).then(|| init_base + const_data.1.len() as u32 - 1);
 
     let mut globals = GlobalSection::new();
     if js {
@@ -446,10 +450,17 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             }),
         );
     }
+    // String and BigInt constants (T57): mutable globals holding a placeholder (the first one or
+    // two globals here), filled by the start function (see `const_inits`).
+    if !e.strings.is_empty() {
+        runtime::const_placeholders(&mut globals, module.bigint);
+    }
     for c in &e.strings {
         match c {
-            ConstGlobal::Str(units) => runtime::string_global(&mut globals, units),
-            ConstGlobal::BigInt(words) => bigint::const_global(&mut globals, words),
+            ConstGlobal::Str(_) => {
+                runtime::string_global(&mut globals, e.const_base() - 1 - module.bigint as u32)
+            }
+            ConstGlobal::BigInt(_) => bigint::const_global(&mut globals, e.const_base() - 1),
         }
     }
 
@@ -535,6 +546,9 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     for (k, h) in e.helpers.iter().enumerate() {
         fnames.append(e.helper_base + k as u32, h.name());
     }
+    for (k, name) in const_data.1.iter().enumerate() {
+        fnames.append(init_base + k as u32, name);
+    }
     names.functions(&fnames);
     names.locals(&lnames);
 
@@ -554,18 +568,28 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         out.section(&globals);
     }
     out.section(&exports);
+    if let Some(function_index) = start {
+        out.section(&StartSection { function_index });
+    }
     if !e.declared.is_empty() {
         let mut elems = ElementSection::new();
         elems.declared(Elements::Functions(e.declared.clone().into()));
         out.section(&elems);
     }
-    if e.tables {
-        out.section(&DataCountSection { count: 1 });
+    // Data segments: the number → string tables (0, when used), then the constants' contents.
+    let segments = e.tables as u32 + !const_data.0.is_empty() as u32;
+    if segments > 0 {
+        out.section(&DataCountSection { count: segments });
     }
     out.section(&code);
-    if e.tables {
+    if segments > 0 {
         let mut data = DataSection::new();
-        data.passive(numstr::table_bytes().iter().copied());
+        if e.tables {
+            data.passive(numstr::table_bytes().iter().copied());
+        }
+        if !const_data.0.is_empty() {
+            data.passive(const_data.0.iter().copied());
+        }
         out.section(&data);
     }
     out.section(&names);
@@ -757,6 +781,9 @@ fn unsupported_expr(e: &Expr, out: &mut Vec<(&'static str, &'static str)>) {
 }
 
 // ---- emitter -------------------------------------------------------------------------------
+
+/// Constants per initializer function (T57).
+const CONST_CHUNK: usize = 1024;
 
 /// A constant global after the module's own: a string, or a BigInt's words (T40).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -1100,9 +1127,96 @@ impl runtime::Cx for Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// The global index of the first constant, after the placeholders.
+    fn const_base(&self) -> u32 {
+        self.global_base
+            + (self.m.globals.len() + self.shared.len()) as u32
+            + 1
+            + self.m.bigint as u32
+    }
+
+    /// Functions that fill the constants' globals (T57), and their data segment's bytes. Each
+    /// constant is `array.new_data` of its slice of the segment (UTF-16 code units, or a BigInt's
+    /// words, little-endian), made by a maker per type, [`CONST_CHUNK`] constants per function.
+    /// The last function is the start function: it also calls the other chunks. The functions'
+    /// names are the second result.
+    ///
+    /// A constant expression per global (`array.new_fixed` of `i32.const`s) would need no code,
+    /// but wasmtime compiles all of them as one function whose compile time grows faster than
+    /// linearly with their count and length (F245).
+    fn const_inits(
+        &mut self,
+        funcs: &mut FunctionSection,
+        code: &mut CodeSection,
+    ) -> (Vec<u8>, Vec<String>) {
+        let mut bytes = Vec::new();
+        let mut names = Vec::new();
+        if self.strings.is_empty() {
+            return (bytes, names);
+        }
+        let seg = self.tables as u32;
+        let base = self.const_base();
+        let ty = self.type_id(vec![], vec![]);
+        // The makers, `(offset, length) -> (ref $string)` and `(ref $bigint)`: `array.new_data`
+        // inline in every initializer compiles slowly (T57).
+        let first = self.helper_base + self.helpers.len() as u32;
+        let makers: &[(u32, &str)] = if self.m.bigint {
+            &[(runtime::T_STRING, "string"), (runtime::T_BIGINT, "bigint")]
+        } else {
+            &[(runtime::T_STRING, "string")]
+        };
+        for &(t, name) in makers {
+            let r = ValType::Ref(wasm_encoder::RefType {
+                nullable: false,
+                heap_type: wasm_encoder::HeapType::Concrete(t),
+            });
+            funcs.function(self.type_id(vec![ValType::I32, ValType::I32], vec![r]));
+            let mut f = Function::new([]);
+            f.instructions()
+                .local_get(0)
+                .local_get(1)
+                .array_new_data(t, seg)
+                .end();
+            code.function(&f);
+            names.push(format!("consts${name}"));
+        }
+        let first_chunk = first + makers.len() as u32;
+        let chunks = self.strings.len().div_ceil(CONST_CHUNK);
+        for (j, chunk) in self.strings.chunks(CONST_CHUNK).enumerate() {
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            for (k, c) in chunk.iter().enumerate() {
+                s.i32_const(bytes.len() as i32);
+                let (maker, len) = match c {
+                    ConstGlobal::Str(units) => {
+                        bytes.extend(units.iter().flat_map(|u| u.to_le_bytes()));
+                        (first, units.len())
+                    }
+                    ConstGlobal::BigInt(words) => {
+                        bytes.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+                        (first + 1, words.len())
+                    }
+                };
+                s.i32_const(len as i32)
+                    .call(maker)
+                    .global_set(base + (j * CONST_CHUNK + k) as u32);
+            }
+            if j + 1 == chunks && chunks > 1 {
+                for i in 0..chunks as u32 - 1 {
+                    s.call(first_chunk + i);
+                }
+            }
+            s.end();
+            funcs.function(ty);
+            code.function(&f);
+            names.push(format!("consts$init{j}"));
+        }
+        (bytes, names)
+    }
+
     /// The global index of a constant (interned).
     fn const_global(&mut self, c: ConstGlobal) -> u32 {
-        let base = self.global_base + (self.m.globals.len() + self.shared.len()) as u32;
+        let base = self.const_base();
         if let Some(k) = self.string_ids.get(&c) {
             return base + k;
         }

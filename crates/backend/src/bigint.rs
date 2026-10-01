@@ -11,8 +11,7 @@
 
 use js2wasi3_ir::{BinOp, ErrorKind, NumericOp};
 use wasm_encoder::{
-    BlockType, ConstExpr, Function, GlobalSection, GlobalType, HeapType, Instruction,
-    InstructionSink, ValType,
+    BlockType, ConstExpr, Function, GlobalSection, GlobalType, HeapType, InstructionSink, ValType,
 };
 
 use crate::object;
@@ -208,20 +207,16 @@ pub fn from_decimal(digits: &str) -> Vec<i32> {
         .collect()
 }
 
-/// A constant's global: `(global (ref $bigint) (array.new_fixed $bigint n words…))`.
-pub fn const_global(globals: &mut GlobalSection, words: &[i32]) {
-    let mut insns: Vec<Instruction> = words.iter().map(|w| Instruction::I32Const(*w)).collect();
-    insns.push(Instruction::ArrayNewFixed {
-        array_type_index: T_BIGINT,
-        array_size: words.len() as u32,
-    });
+/// A constant's global (T57): `(global (mut (ref $bigint)) (global.get placeholder))`, set by
+/// the start function.
+pub fn const_global(globals: &mut GlobalSection, placeholder: u32) {
     globals.global(
         GlobalType {
             val_type: big(),
-            mutable: false,
+            mutable: true,
             shared: false,
         },
-        &ConstExpr::extended(insns),
+        &ConstExpr::global_get(placeholder),
     );
 }
 

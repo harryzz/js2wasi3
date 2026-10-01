@@ -881,23 +881,53 @@ pub fn globals(
     }
 }
 
-/// A string constant's global: `(global (ref $string) (array.new_fixed $string n ...))`.
-pub fn string_global(globals: &mut GlobalSection, units: &[u16]) {
-    let mut insns: Vec<Instruction> = units
-        .iter()
-        .map(|u| Instruction::I32Const(*u as i32))
-        .collect();
-    insns.push(Instruction::ArrayNewFixed {
-        array_type_index: T_STRING,
-        array_size: units.len() as u32,
-    });
+/// The placeholders of the constants' globals (T57): an empty `$string`, and (with BigInts) a
+/// zero `$bigint`. Immutable, so constant expressions can read them.
+pub fn const_placeholders(globals: &mut GlobalSection, bigint: bool) {
+    let mut one = |ty: u32, insns: Vec<Instruction>| {
+        globals.global(
+            GlobalType {
+                val_type: ValType::Ref(RefType {
+                    nullable: false,
+                    heap_type: HeapType::Concrete(ty),
+                }),
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::extended(insns),
+        );
+    };
+    one(
+        T_STRING,
+        vec![Instruction::ArrayNewFixed {
+            array_type_index: T_STRING,
+            array_size: 0,
+        }],
+    );
+    if bigint {
+        one(
+            T_BIGINT,
+            vec![
+                Instruction::I32Const(0),
+                Instruction::ArrayNewFixed {
+                    array_type_index: T_BIGINT,
+                    array_size: 1,
+                },
+            ],
+        );
+    }
+}
+
+/// A string constant's global (T57): `(global (mut (ref $string)) (global.get placeholder))`,
+/// set by the start function.
+pub fn string_global(globals: &mut GlobalSection, placeholder: u32) {
     globals.global(
         GlobalType {
             val_type: string_ref(),
-            mutable: false,
+            mutable: true,
             shared: false,
         },
-        &ConstExpr::extended(insns),
+        &ConstExpr::global_get(placeholder),
     );
 }
 
