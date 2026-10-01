@@ -1357,6 +1357,17 @@ impl Emitter<'_> {
                 catch_local,
                 catch_body,
             } => {
+                // T58: a catch local is set only on the catch path, but read after the `try` (a
+                // `finally`'s or `for-of`'s rethrow). Without this `null`, wasmtime's SSA construction
+                // follows that read back to the function's entry value through every earlier
+                // statement: translating a function with N such `try`s took O(N³) (F249).
+                if let Some(l) = catch_local {
+                    s.ref_null(wasm_encoder::HeapType::Abstract {
+                        shared: false,
+                        ty: wasm_encoder::AbstractHeapType::Eq,
+                    })
+                    .local_set(l.0);
+                }
                 s.block(BlockType::Empty);
                 frames.push(Frame::Anon);
                 s.block(BlockType::Result(runtime::jsval()));

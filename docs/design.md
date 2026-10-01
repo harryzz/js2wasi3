@@ -104,6 +104,11 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
 - (T12) `finally` uses dispatch, not duplication: an `i32` completion local per `finally` (0 normal, 1 throw,
   2+ one per `break`/`continue`/`return` leaving it), one copy of the finally body, then `if` chains re-issue
   the jump or `throw $js` the saved value. No `catch_all`/`exnref`/`throw_ref`: one tag, traps stay uncatchable.
+- (T58) A `try`'s catch local is set to `null` before its `try_table`: it's assigned only on the catch path but read
+  after the `try` (`finally`'s and `for-of`'s rethrow), and without a definition on the normal path wasmtime's SSA
+  construction follows the read back to the function's entry through every earlier statement (a function with
+  N `for-of`s translated in O(N³): 400 took 26 s; now 0.14 s). Generated code should define a local on every path
+  before a read that can see the entry value.
 - (T52) Array destructuring closes its iterator through the same `finally` dispatch as `for-of`: a throw, a
   generator `return()` at a `yield` inside the pattern or another jump closes it unless it's done; an assignment
   pattern's member target has its reference (object, key) evaluated before the iterator steps. A `null`/`undefined`
