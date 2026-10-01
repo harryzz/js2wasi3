@@ -179,6 +179,12 @@ pub(crate) fn parse_spliced<'a>(
             Err(Err(d)) => return Err(d),
         }
     }
+    // Assigned function declarations (T60): one more round.
+    if crate::fn_assign::has_assigned(&p) {
+        let (next, layer) = crate::fn_assign::rewrite(alloc, path, &p)?;
+        map.layers.push(layer);
+        p = next;
+    }
     p.original = source;
     Ok((p, (!map.layers.is_empty()).then_some(map)))
 }

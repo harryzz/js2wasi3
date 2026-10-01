@@ -107,6 +107,9 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   paths must lie under a directory given to `wasmtime run --dir host::guest`. A command may also import WASI
   interfaces directly (`import { getRandomBytes } from "wasi:random/random@0.3.1"`): an `async func` blocks, a
   resource handle is a number, streams are read and written whole.
+- `stream` (T60): node 24's own stream code (`Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`,
+  `pipeline`, `finished`, async iteration, operators, `duplexPair`), `stream/promises`, `fs.createReadStream`/
+  `createWriteStream`, `fs.opendir`, with node's event order; `graceful-fs` and `fs-extra` match node.
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
@@ -115,7 +118,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
 Not yet: many built-ins (`WeakMap`, `Intl`), sloppy-mode CommonJS semantics, most of node's built-in
-modules (`fs`, `stream`, `crypto`, `child_process`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+modules (`crypto`, `url`, `child_process`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

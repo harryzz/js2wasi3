@@ -300,6 +300,54 @@ function $$Object_prototype_valueOf() {
   return o;
 }
 
+// `Object.defineProperties(o, props)` (T60): ObjectDefineProperties, every descriptor read
+// before any is defined.
+function $$Object_defineProperties(o, props) {
+  if ((typeof o !== "object" && typeof o !== "function") || o === null) {
+    throw new TypeError("Object.defineProperties called on non-object");
+  }
+  if (props === undefined || props === null) {
+    throw new TypeError("Cannot convert undefined or null to object");
+  }
+  const from = Object(props);
+  const keys = Reflect.ownKeys(from);
+  const descs = [];
+  for (let i = 0; i < keys.length; i++) {
+    const d = Object.getOwnPropertyDescriptor(from, keys[i]);
+    if (d !== undefined && d.enumerable) {
+      $$append(descs, [keys[i], from[keys[i]]]);
+    }
+  }
+  for (let i = 0; i < descs.length; i++) {
+    Object.defineProperty(o, descs[i][0], descs[i][1]);
+  }
+  return o;
+}
+
+// `Function.prototype[Symbol.hasInstance](v)` (T60): OrdinaryHasInstance, without a constructor's
+// own `@@hasInstance` (readable-stream's `FunctionPrototypeSymbolHasInstance`). Linked by naming
+// `hasInstance`. Not for bound functions (their target's prototype).
+function $$Function_prototype_$hasInstance(v) {
+  if (typeof this !== "function") {
+    return false;
+  }
+  if ((typeof v !== "object" && typeof v !== "function") || v === null) {
+    return false;
+  }
+  const p = this.prototype;
+  if ((typeof p !== "object" && typeof p !== "function") || p === null) {
+    throw new TypeError("Function has non-object prototype '" + $$String(p) + "' in instanceof check");
+  }
+  let o = Object.getPrototypeOf(v);
+  while (o !== null) {
+    if (o === p) {
+      return true;
+    }
+    o = Object.getPrototypeOf(o);
+  }
+  return false;
+}
+
 // ---- Statics lowered to intrinsics, as values (T28) ---------------------------------------
 // `const f = Object.defineProperty`: `$$A_b$value` is `A.b` read as a value (calls stay
 // intrinsics). Named and sized like node's (`builtins::length`).

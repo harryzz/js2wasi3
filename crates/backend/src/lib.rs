@@ -928,6 +928,10 @@ impl runtime::Cx for Emitter<'_> {
         self.m.ignore_unhandled
     }
 
+    fn cjs_main(&mut self) -> bool {
+        self.m.cjs_main
+    }
+
     fn exits(&mut self) -> bool {
         self.exits
     }

@@ -1510,8 +1510,9 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         {
             let sym = cx.helper(runtime::Helper::WellKnownSymbol(k));
             let name = cx.str(&format!("[Symbol.{}]", &key[1..]));
-            // `Date.prototype[Symbol.toPrimitive]` is read-only (T26).
-            let attrs = if key == "$toPrimitive" { HIDDEN | READONLY } else { HIDDEN };
+            // `Date.prototype[Symbol.toPrimitive]` (T26) and `Function.prototype[Symbol.hasInstance]`
+            // (T60) are read-only.
+            let attrs = if key == "$toPrimitive" || key == "$hasInstance" { HIDDEN | READONLY } else { HIDDEN };
             sym_methods.push((sym, name, code, len as i32, attrs));
             continue;
         }

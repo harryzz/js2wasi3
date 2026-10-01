@@ -23,6 +23,40 @@ const MODULES: &[(&str, &str)] = &[
     ("fs/promises", "module.exports = require(\"node:fs\").promises;\n"),
     // `fs`'s `wasi:filesystem` imports (T59): an ES module (a CommonJS file can't `import`).
     ("internal/wasi_fs", include_str!("../node/wasi_fs.mjs")),
+    // `stream` (T60): node 24's lib (`scripts/gen-node-streams.mjs`) over support modules partly from
+    // readable-stream 4.7.0 (`errors`, `primordials`, `util`, `util/inspect`, `validators`).
+    ("stream", include_str!("../node/stream/stream.js")),
+    ("stream/promises", include_str!("../node/stream/promises.js")),
+    ("_stream_duplex", include_str!("../node/stream/_stream_duplex.js")),
+    ("_stream_passthrough", include_str!("../node/stream/_stream_passthrough.js")),
+    ("_stream_readable", include_str!("../node/stream/_stream_readable.js")),
+    ("_stream_transform", include_str!("../node/stream/_stream_transform.js")),
+    ("_stream_writable", include_str!("../node/stream/_stream_writable.js")),
+    ("internal/abort", include_str!("../node/abort.js")),
+    ("internal/fs/streams", include_str!("../node/stream/fs_streams.js")),
+    ("internal/fs_support", include_str!("../node/fs_support.js")),
+    ("internal/errors", include_str!("../node/stream/errors.js")),
+    ("internal/primordials", include_str!("../node/stream/primordials.js")),
+    ("internal/streams/add-abort-signal", include_str!("../node/stream/streams/add-abort-signal.js")),
+    ("internal/streams/compose", include_str!("../node/stream/streams/compose.js")),
+    ("internal/streams/destroy", include_str!("../node/stream/streams/destroy.js")),
+    ("internal/streams/duplex", include_str!("../node/stream/streams/duplex.js")),
+    ("internal/streams/duplexpair", include_str!("../node/stream/streams/duplexpair.js")),
+    ("internal/streams/duplexify", include_str!("../node/stream/streams/duplexify.js")),
+    ("internal/streams/end-of-stream", include_str!("../node/stream/streams/end-of-stream.js")),
+    ("internal/streams/from", include_str!("../node/stream/streams/from.js")),
+    ("internal/streams/legacy", include_str!("../node/stream/streams/legacy.js")),
+    ("internal/streams/operators", include_str!("../node/stream/streams/operators.js")),
+    ("internal/streams/passthrough", include_str!("../node/stream/streams/passthrough.js")),
+    ("internal/streams/pipeline", include_str!("../node/stream/streams/pipeline.js")),
+    ("internal/streams/readable", include_str!("../node/stream/streams/readable.js")),
+    ("internal/streams/state", include_str!("../node/stream/streams/state.js")),
+    ("internal/streams/transform", include_str!("../node/stream/streams/transform.js")),
+    ("internal/streams/utils", include_str!("../node/stream/streams/utils.js")),
+    ("internal/streams/writable", include_str!("../node/stream/streams/writable.js")),
+    ("internal/util", include_str!("../node/stream/util.js")),
+    ("internal/util/inspect", include_str!("../node/stream/util/inspect.js")),
+    ("internal/validators", include_str!("../node/stream/validators.js")),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if
@@ -52,21 +86,28 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
         // What `node/fs.js` exports (its `module.exports` has non-identifier values).
         "node:fs/promises" => Some(&[
             "access", "appendFile", "chmod", "chown", "constants", "copyFile", "lchmod", "lchown", "link", "lstat",
-            "mkdir", "mkdtemp", "open", "readFile", "readdir", "readlink", "realpath", "rename", "rm", "rmdir", "stat",
-            "symlink", "truncate", "unlink", "utimes", "writeFile",
+            "mkdir", "mkdtemp", "open", "opendir", "readFile", "readdir", "readlink", "realpath", "rename", "rm",
+            "rmdir", "stat", "symlink", "truncate", "unlink", "utimes", "writeFile",
         ]),
         "node:fs" => Some(&[
-            "Dirent", "F_OK", "R_OK", "Stats", "W_OK", "X_OK", "access", "accessSync", "appendFile",
-            "appendFileSync", "chmod", "chmodSync", "chown", "chownSync", "close", "closeSync", "constants",
-            "copyFile", "copyFileSync", "createReadStream", "createWriteStream", "exists", "existsSync", "fchmod",
-            "fchmodSync", "fchown", "fchownSync", "fdatasync", "fdatasyncSync", "fstat", "fstatSync", "fsync",
-            "fsyncSync", "ftruncate", "ftruncateSync", "lchmod", "lchmodSync", "lchown", "lchownSync", "link",
-            "linkSync", "lstat", "lstatSync", "mkdir", "mkdirSync", "mkdtemp", "mkdtempSync", "open", "openSync",
-            "promises", "read", "readFile", "readFileSync", "readSync", "readdir", "readdirSync", "readlink",
-            "readlinkSync", "realpath", "realpathSync", "rename", "renameSync", "rm", "rmSync", "rmdir",
-            "rmdirSync", "stat", "statSync", "symlink", "symlinkSync", "truncate", "truncateSync", "unlink",
-            "unlinkSync", "unwatchFile", "utimes", "utimesSync", "watch", "watchFile", "write", "writeFile",
-            "writeFileSync", "writeSync",
+            "Dir", "Dirent", "F_OK", "FileReadStream", "FileWriteStream", "R_OK", "ReadStream", "Stats", "W_OK",
+            "WriteStream", "X_OK", "access", "accessSync", "appendFile", "appendFileSync", "chmod", "chmodSync",
+            "chown", "chownSync", "close", "closeSync", "constants", "copyFile", "copyFileSync", "createReadStream",
+            "createWriteStream", "exists", "existsSync", "fchmod", "fchmodSync", "fchown", "fchownSync", "fdatasync",
+            "fdatasyncSync", "fstat", "fstatSync", "fsync", "fsyncSync", "ftruncate", "ftruncateSync", "lchmod",
+            "lchmodSync", "lchown", "lchownSync", "link", "linkSync", "lstat", "lstatSync", "mkdir", "mkdirSync",
+            "mkdtemp", "mkdtempSync", "open", "openSync", "opendir", "opendirSync", "promises", "read", "readFile",
+            "readFileSync", "readSync", "readdir", "readdirSync", "readlink", "readlinkSync", "realpath",
+            "realpathSync", "rename", "renameSync", "rm", "rmSync", "rmdir", "rmdirSync", "stat", "statSync", "symlink",
+            "symlinkSync", "truncate", "truncateSync", "unlink", "unlinkSync", "unwatchFile", "utimes", "utimesSync",
+            "watch", "watchFile", "write", "writeFile", "writeFileSync", "writeSync",
+        ]),
+        // What `node/stream/stream.js` (node 24's lib/stream.js) assigns to `Stream` (T60).
+        "node:stream" => Some(&[
+            "Duplex", "PassThrough", "Readable", "Stream", "Transform", "Writable", "_isArrayBufferView",
+            "_isUint8Array", "_uint8ArrayToBuffer", "addAbortSignal", "compose", "destroy", "duplexPair", "finished",
+            "getDefaultHighWaterMark", "isDestroyed", "isDisturbed", "isErrored", "isReadable", "isWritable",
+            "pipeline", "promises", "setDefaultHighWaterMark",
         ]),
         "node:events" => Some(&[
             "EventEmitter", "EventEmitterAsyncResource", "addAbortListener", "captureRejectionSymbol",
@@ -104,6 +145,12 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
         ]),
         _ => None,
     }
+}
+
+/// Is this built-in an ES module? Only js2wasi3's own that import WASI interfaces (T59); the others,
+/// `node:internal/…` ones included, are CommonJS.
+pub(crate) fn is_esm(path: &str) -> bool {
+    path == "node:internal/wasi_fs"
 }
 
 /// Is this program path a built-in module's?

@@ -20,8 +20,8 @@
 //! keep the loop alive. Immediates (`setImmediate`) are `$timer`s in a FIFO (`G_IMMEDIATES`) run
 //! after the due timers of a pass, only those queued before it (node's check phase).
 //! `process.nextTick` callbacks queue in `G_TICKS`; after a callback node runs the ticks, then
-//! the microtasks, until both are empty ([`Helper::RunTicks`]); after the (ES module) main code,
-//! the microtasks come first.
+//! the microtasks, until both are empty ([`Helper::RunTicks`]); after the main code of an ES module
+//! the microtasks come first (of a CommonJS entry, the ticks: T60).
 
 use js2wasi3_ir::{
     Builtin, TIMER_CLEAR_IMMEDIATE, TIMER_CLEAR_INTERVAL, TIMER_CLEAR_TIMEOUT, TIMER_NAMES,

@@ -343,6 +343,8 @@ pub(crate) struct Prelude {
     /// which user code can't name)? The prelude's `if (__intrinsic_cjs_mode()) { … }` blocks are
     /// kept only then.
     pub cjs: bool,
+    /// Is the entry CommonJS (T60: the linker's `$$cjsMain(…)` call; `ir::Module::cjs_main`)?
+    pub cjs_main: bool,
     /// Does the user's code have a class with `extends`, or name `construct` (T47, see
     /// `ir::Module::subclassing`)?
     pub subclassing: bool,
@@ -558,6 +560,7 @@ impl Prelude {
             .windows(3)
             .any(|w| w[0] == b'(' && w[1] == b'?' && matches!(w[2], b'i' | b'm' | b's' | b'-'));
         out.cjs = p.source[..p.user_end as usize].contains("$$cjs");
+        out.cjs_main = p.source[..p.user_end as usize].contains("$$cjsMain(");
         // Prelude code in `if (__intrinsic_regexp_mods()) { … }` blocks, when they're dropped.
         // T47/T48: the same for `if (__intrinsic_rab_mode()) { … }`, `__intrinsic_big_typed_mode()`.
         let mut dropped: Vec<Span> = Vec::new();
@@ -664,8 +667,9 @@ impl Prelude {
                 }
                 // `Date.prototype[Symbol.toPrimitive]` (T26) is reached by naming `toPrimitive`.
                 // T45: `[Symbol.dispose]`/`[Symbol.asyncDispose]` by naming `dispose`/`asyncDispose`.
+                // T60: `Function.prototype[Symbol.hasInstance]` by naming `hasInstance`.
                 let m = match m {
-                    "$toPrimitive" | "$dispose" | "$asyncDispose" => &m[1..],
+                    "$toPrimitive" | "$dispose" | "$asyncDispose" | "$hasInstance" => &m[1..],
                     _ => m,
                 };
                 methods.entry(m.to_string()).or_default().push(item_of[sym]);
@@ -972,6 +976,18 @@ impl Prelude {
         if out.global_object {
             for name in GLOBAL_NAMES {
                 if !user_props.contains(*name) {
+                    continue;
+                }
+                // Built-ins whose runtime support is gated on naming them as identifiers aren't
+                // properties when it's off (T60: `node:util` has "BigInt64Array" as a string).
+                let off = match *name {
+                    "BigInt" => !out.bigint,
+                    "BigInt64Array" | "BigUint64Array" => !out.big_typed,
+                    "SuppressedError" => !out.suppressed,
+                    "DisposableStack" | "AsyncDisposableStack" => !out.stacks,
+                    _ => false,
+                };
+                if off {
                     continue;
                 }
                 out.global_props.push(name.to_string());

@@ -24,7 +24,7 @@ function $$domException(message, name) {
     Object.defineProperty(p, "code", {
       get: function code() {
         const n = this.name;
-        return n === "DataCloneError" ? 25 : n === "InvalidCharacterError" ? 5 : 0;
+        return n === "DataCloneError" ? 25 : n === "InvalidCharacterError" ? 5 : n === "AbortError" ? 20 : n === "TimeoutError" ? 23 : 0;
       },
       enumerable: false,
       configurable: true,

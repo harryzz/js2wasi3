@@ -665,9 +665,13 @@ impl Helper {
                 } else if main_result {
                     s.drop();
                 }
-                s.call(drain);
+                // An ES module: its microtasks first, then the `nextTick` queue (T25); a CommonJS
+                // entry: the `nextTick` queue first (T60), as `run_ticks` does.
+                let cjs_ticks = cx.names("$ticks") && cx.cjs_main();
+                if !cjs_ticks {
+                    s.call(drain);
+                }
                 if cx.names("$ticks") {
-                    // (An ES module: its microtasks first, then the `nextTick` queue, T25.)
                     let ticks = cx.helper(runtime::Helper::Timer(timers::Helper::RunTicks));
                     s.call(ticks);
                 }

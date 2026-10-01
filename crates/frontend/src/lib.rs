@@ -20,6 +20,7 @@
 use std::fmt;
 
 mod eval;
+mod fn_assign;
 mod link;
 mod node;
 mod packages;

@@ -125,6 +125,9 @@ pub struct Module {
     pub promise_statics: Vec<BuiltinMethod>,
     /// `build --unhandled-rejections=none` (T50): unhandled rejections are ignored.
     pub ignore_unhandled: bool,
+    /// The entry is a CommonJS module (T60): after its code node runs the `nextTick` queue before
+    /// the microtasks (after an ES module's, the microtasks first).
+    pub cjs_main: bool,
     /// The code names a `constructor` property (T25): the built-in prototypes of
     /// [`Builtin::ctor_length`] without a constructor in [`Module::builtin_ctors`] get a stub one
     /// (identity, `name`, `length`, `prototype`; calling it traps).

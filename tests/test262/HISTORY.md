@@ -3,6 +3,17 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-01: T60 `stream`, fs streams (full run)
+
+- Compiler: node 24's `stream` built-ins; a CommonJS entry runs `nextTick`s before microtasks; node's exact
+  built-in names; assigned function declarations (`frontend::fn_assign`); `Function.prototype[Symbol.hasInstance]`,
+  `Object.defineProperties`; gated built-ins left off the global object when their support is off.
+- Full run on `a-03` (31,235 tests, 866 s, -j 36): 7 unsupported → pass (`Promise/any/iter-step-err-{no-close,reject}`,
+  `RegExp/prototype/Symbol.{match,replace}/flags-tostring-error`,
+  `assignment/destructuring/iterator-destructuring-property-reference-target-evaluation-order`,
+  `module-code/instn-local-bndng-{fun,gen}`); 1 unsupported → fail (`typeof/get-value.js`: top-level `this` is
+  `undefined` in the runner's module mode). Subset: 27,834 of 28,799 run pass (96.6%), 0 regressions.
+
 ## 2026-09-30: T56 `Buffer`, `string_decoder`, `atob`/`btoa` (full run)
 
 - Compiler: the `Buffer` global and `node:buffer`, `string_decoder`, `atob`/`btoa`, `util.inspect.custom` when

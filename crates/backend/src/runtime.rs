@@ -366,6 +366,10 @@ pub trait Cx {
     fn ignore_unhandled(&mut self) -> bool {
         false
     }
+    /// Is the entry CommonJS (T60, `Module::cjs_main`)?
+    fn cjs_main(&mut self) -> bool {
+        false
+    }
     /// Does the command use `process.exit` or `process`'s at-exit hook (T55: `host::EXIT_TAG`
     /// and the ending state)?
     fn exits(&mut self) -> bool {

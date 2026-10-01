@@ -251,8 +251,10 @@ function flagsNumber(flags, fallback) {
   return n;
 }
 
-// Open `p` with node's numeric flags: the descriptor and whether writes append.
-function openPath(p, flags, syscall) {
+// Open `p` with node's numeric flags: the descriptor and whether writes append. `shown`: the path
+// errors name (`null`: none, `opendirSync`'s).
+function openPath(p, flags, syscall, shown = p) {
+  shown = shown === null ? undefined : shown;
   const [dir, rel] = at(p, syscall);
   const access = flags & 3;
   const open = {
@@ -262,7 +264,10 @@ function openPath(p, flags, syscall) {
     truncate: (flags & 512) !== 0,
   };
   const desc = { read: access !== 1, write: access !== 0 };
-  const d = call(syscall, p, undefined, () =>
+  if (open.truncate) {
+    writes++;
+  }
+  const d = call(syscall, shown, undefined, () =>
     wasi.openAt(dir, { symlinkFollow: (flags & 131072) === 0 }, rel, open, desc),
   );
   return d;
@@ -299,6 +304,10 @@ function closeSync(fd) {
   fds[fd] = undefined;
 }
 
+// Writes and truncations through `fs` so far (T60): a descriptor's cached bytes (`readSync`) are
+// stale after one. Writes by other processes aren't seen while a cache is used.
+let writes = 0;
+
 // All bytes of descriptor `d` from `offset`.
 function readFrom(d, offset) {
   const r = call("read", undefined, undefined, () => wasi.readViaStream(d, offset));
@@ -308,6 +317,7 @@ function readFrom(d, offset) {
 
 // Write `bytes` to descriptor `d` at `offset` (or appending).
 function writeTo(d, bytes, offset, append) {
+  writes++;
   const r = call("write", undefined, undefined, () =>
     append ? wasi.appendViaStream(d, bytes) : wasi.writeViaStream(d, bytes, offset),
   );
@@ -327,7 +337,16 @@ function readSync(fd, buffer, offsetOrOptions, length, position) {
     length = buffer.byteLength - offset;
   }
   const from = position === null || position === undefined || position === -1 ? f.pos : Number(position);
-  const bytes = readFrom(f.d, from);
+  // WASI reads a descriptor's bytes to its end (`read-via-stream`, T59): kept for the next reads
+  // (T60: a read stream's chunks), unless `fs` wrote since (F252).
+  let bytes;
+  const c = f.cache;
+  if (c !== undefined && c.writes === writes && from >= c.from && from <= c.from + c.bytes.length) {
+    bytes = c.bytes.subarray(from - c.from);
+  } else {
+    bytes = readFrom(f.d, from);
+    f.cache = { writes, from, bytes };
+  }
   const n = Math.min(length, bytes.length);
   const view = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   view.set(bytes.subarray(0, n), offset);
@@ -370,6 +389,7 @@ function fdatasyncSync(fd) {
 
 function ftruncateSync(fd, len) {
   const f = file(fd, "ftruncate");
+  writes++;
   call("ftruncate", undefined, undefined, () => wasi.setSize(f.d, len === undefined ? 0 : len));
 }
 
@@ -609,6 +629,7 @@ function truncateSync(path, len) {
   const p = pathString(path);
   const d = openPath(p, 1, "open");
   try {
+    writes++;
     call("ftruncate", undefined, undefined, () => wasi.setSize(d, len === undefined ? 0 : len));
   } finally {
     wasi.drop(d);
@@ -658,11 +679,12 @@ class Dirent {
 }
 
 // The entries of directory `p`: `[name, type tag]`s.
-function entries(p, syscall) {
-  const d = openPath(p, 65536, syscall);
+function entries(p, syscall, shown = p) {
+  const d = openPath(p, 65536, syscall, shown);
+  shown = shown === null ? undefined : shown;
   try {
-    const r = call(syscall, p, undefined, () => wasi.readDirectory(d));
-    check(r[1], syscall, p);
+    const r = call(syscall, shown, undefined, () => wasi.readDirectory(d));
+    check(r[1], syscall, shown);
     return r[0].map((e) => [e.name, e.type.tag]);
   } finally {
     wasi.drop(d);
@@ -685,6 +707,105 @@ function readdirSync(path, options) {
   };
   walk(p, "");
   return out;
+}
+
+// `fs.Dir` (T60): its entries are read when it's opened (WASI's `read-directory` is a stream,
+// read whole).
+const kDir = Symbol("kDir");
+
+function dirClosed() {
+  const e = new Error("Directory handle was closed");
+  e.code = "ERR_DIR_CLOSED";
+  return e;
+}
+
+class Dir {
+  constructor(path, list) {
+    this[kDir] = { path, list, closed: false };
+  }
+  get path() {
+    return this[kDir].path;
+  }
+  readSync() {
+    const d = this[kDir];
+    if (d.closed) {
+      throw dirClosed();
+    }
+    return d.list.length === 0 ? null : d.list.shift();
+  }
+  read(cb) {
+    if (typeof cb !== "function") {
+      return new Promise((resolve, reject) => this.read((err, e) => (err ? reject(err) : resolve(e))));
+    }
+    let e;
+    try {
+      e = this.readSync();
+    } catch (err) {
+      process.nextTick(cb, err);
+      return;
+    }
+    process.nextTick(cb, null, e);
+  }
+  closeSync() {
+    const d = this[kDir];
+    if (d.closed) {
+      throw dirClosed();
+    }
+    d.closed = true;
+  }
+  close(cb) {
+    if (typeof cb !== "function") {
+      return new Promise((resolve, reject) => this.close((err) => (err ? reject(err) : resolve())));
+    }
+    try {
+      this.closeSync();
+    } catch (err) {
+      process.nextTick(cb, err);
+      return;
+    }
+    process.nextTick(cb, null);
+  }
+  async *entries() {
+    try {
+      while (true) {
+        const e = this.readSync();
+        if (e === null) {
+          break;
+        }
+        yield e;
+      }
+    } finally {
+      if (!this[kDir].closed) {
+        this.closeSync();
+      }
+    }
+  }
+  [Symbol.asyncIterator]() {
+    return this.entries();
+  }
+}
+
+function openDir(path, shown) {
+  const p = pathString(path);
+  return new Dir(p, entries(p, "opendir", shown).map(([name, tag]) => new Dirent(name, DIRENT[tag] || 0, p)));
+}
+
+function opendirSync(path) {
+  return openDir(path, null);
+}
+
+function opendir(path, options, cb) {
+  if (typeof options === "function") {
+    cb = options;
+  }
+  let dir;
+  try {
+    dir = openDir(path, pathString(path));
+  } catch (err) {
+    process.nextTick(cb, err);
+    return;
+  }
+  process.nextTick(cb, null, dir);
 }
 
 function mkdirSync(path, options) {
@@ -968,6 +1089,26 @@ function promisify(sync) {
   return async (...args) => sync(...args);
 }
 
+// ---- streams (T60): node 24's lib/internal/fs/streams.js, loaded on first use ----------------
+
+let ReadStream;
+let WriteStream;
+function lazyLoadStreams() {
+  if (!ReadStream) {
+    ({ ReadStream, WriteStream } = require("node:internal/fs/streams"));
+  }
+}
+
+function createReadStream(path, options) {
+  lazyLoadStreams();
+  return new ReadStream(path, options);
+}
+
+function createWriteStream(path, options) {
+  lazyLoadStreams();
+  return new WriteStream(path, options);
+}
+
 function unsupported(name) {
   return function () {
     throw new Error(`fs.${name} isn't supported by js2wasi3 yet`);
@@ -1026,6 +1167,7 @@ for (const key of Object.keys(sync)) {
 callbacks.realpath.native = callbacks.realpath;
 promises.open = async (path, flags, mode) => new FileHandle(openSync(path, flags, mode));
 promises.constants = constants;
+promises.opendir = async (path) => openDir(path, pathString(path));
 
 module.exports = {
   ...sync,
@@ -1035,15 +1177,30 @@ module.exports = {
   write,
   constants,
   promises,
+  Dir,
   Dirent,
   Stats,
+  opendir,
+  opendirSync,
   F_OK: 0,
   R_OK: 4,
   W_OK: 2,
   X_OK: 1,
-  createReadStream: unsupported("createReadStream"),
-  createWriteStream: unsupported("createWriteStream"),
+  createReadStream,
+  createWriteStream,
   watch: unsupported("watch"),
   watchFile: unsupported("watchFile"),
   unwatchFile: unsupported("unwatchFile"),
 };
+
+// node's lazy stream classes (T60); graceful-fs replaces them through the setters.
+let FileReadStream;
+let FileWriteStream;
+for (const [name, get, set] of [
+  ["ReadStream", () => (lazyLoadStreams(), ReadStream), (v) => (ReadStream = v)],
+  ["WriteStream", () => (lazyLoadStreams(), WriteStream), (v) => (WriteStream = v)],
+  ["FileReadStream", () => (lazyLoadStreams(), FileReadStream || ReadStream), (v) => (FileReadStream = v)],
+  ["FileWriteStream", () => (lazyLoadStreams(), FileWriteStream || WriteStream), (v) => (FileWriteStream = v)],
+]) {
+  Object.defineProperty(module.exports, name, { get, set, enumerable: true, configurable: true });
+}

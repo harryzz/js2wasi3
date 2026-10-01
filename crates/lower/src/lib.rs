@@ -229,6 +229,7 @@ pub fn lower_with(
                 stacks: prelude.stacks,
                 rab: prelude.rab,
                 subclassing: prelude.subclassing,
+                cjs_main: prelude.cjs_main,
                 big_typed: prelude.big_typed,
                 symbol_statics: if prelude.ctor_values.contains("Symbol") {
                     std::iter::once("iterator")
