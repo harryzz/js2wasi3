@@ -1549,15 +1549,26 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     let length = matches!(b, Builtin::Function | Builtin::Array).then(|| cx.str("length"));
     const O: u32 = 0;
     const M: u32 = 1;
-    let mut f = Function::new([(1, rt(true, T_OBJECT)), (1, jsval())]);
+    const PARENT: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (1, jsval()), (1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
     s.global_get(g).local_tee(O).ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(O).ref_as_non_null().return_();
     s.end();
+    if let Some(p) = parent {
+        // The parent first, then check again: making it can make this prototype (T61:
+        // `Object.prototype`'s `constructor` is a function, whose prototype is
+        // `Function.prototype`), which must not be made twice.
+        s.call(p).local_set(PARENT);
+        s.global_get(g).local_tee(O).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_as_non_null().return_();
+        s.end();
+    }
     s.i32_const(CLASS_PLAIN);
     match parent {
-        Some(p) => s.call(p),
+        Some(_) => s.local_get(PARENT),
         None => s.ref_null(object()),
     };
     if b == Builtin::Function {

@@ -378,6 +378,8 @@ pub(crate) const GLOBAL_NAMES: &[&str] = &[
     "unescape", "isFinite", "isNaN", "console", "global", "clearImmediate", "setImmediate",
     "clearInterval", "clearTimeout", "setInterval", "setTimeout", "queueMicrotask",
     "structuredClone", "eval",
+    // T61: node's `process` (npm's `process` package is `module.exports = global.process`).
+    "process",
     "SuppressedError", "DisposableStack", "AsyncDisposableStack", "BigInt64Array",
     "BigUint64Array",
 ];
@@ -835,6 +837,7 @@ impl Prelude {
                             && let AstKind::StaticMemberExpression(m) = p.semantic.nodes().parent_kind(node.id())
                             && m.object.span() == r.span
                             && console_stream(&m.property.name).is_none()
+                            && m.property.name != "assert"
                             && !OBJECT_PROTO_PROPS.contains(&m.property.name.as_str())
                         {
                             out.console_members.push((m.span, m.property.name.to_string()));
@@ -972,6 +975,12 @@ impl Prelude {
                 }
             }
         }
+        // T61: every function's `constructor` (through `Function.prototype`; async and generator
+        // functions' too, F256) is `Function` as a value: reading it trapped (readable-stream's
+        // `Object.getPrototypeOf(async function () {}).constructor`).
+        if out.constructor {
+            out.ctor_values.insert("Function".to_string());
+        }
         // The global object's properties (T42): the built-ins the code names, as values.
         if out.global_object {
             for name in GLOBAL_NAMES {
@@ -997,6 +1006,7 @@ impl Prelude {
                     .names
                     .get(&format!("$${name}"))
                     .or_else(|| (*name == "console").then(|| out.names.get(CONSOLE)).flatten())
+                    .or_else(|| (*name == "process").then(|| out.names.get(PROCESS)).flatten())
                 {
                     roots.push(item_of[sym]);
                 }

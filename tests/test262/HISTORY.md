@@ -3,6 +3,17 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-01: T61 `WeakMap`/`WeakSet`, abort/event globals (full run)
+
+- Compiler: `WeakMap`/`WeakSet` and `AbortController`/`AbortSignal`/`EventTarget`/`Event` as node globals bound by
+  the linker (`node::GLOBALS`); functions' `constructor`; `Function.prototype` no longer made twice.
+  Runner: `built-ins/WeakMap`, `built-ins/WeakSet` joined the subset (sparse checkout too).
+- Full run on `a-03` (31,461 tests, 863 s, -j 36): WeakMap/WeakSet 183 of 185 run pass (2: top-level `this` in
+  module mode); 39 more changes elsewhere: unsupported/fail → pass for Map/Set methods on WeakMap/WeakSet receivers,
+  subclassing WeakMap/WeakSet, `instanceof`, property accessors, DisposableStack `move`, RegExp match indices,
+  `await using`; 1 unsupported → fail (`await-using/gets-initializer-Symbol.dispose-after-Symbol.asyncDispose-is-null.js`,
+  F260). Subset: 28,052 of 28,984 run pass (96.8%), 0 regressions.
+
 ## 2026-10-01: T60 `stream`, fs streams (full run)
 
 - Compiler: node 24's `stream` built-ins; a CommonJS entry runs `nextTick`s before microtasks; node's exact

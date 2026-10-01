@@ -324,6 +324,12 @@ node's exact `builtinModules` list (`process/` is the npm package). After a **Co
 microtasks first. Function declarations whose binding is assigned are rewritten in the source
 (`frontend::fn_assign`: `function f$fn…` plus `var f = f$fn` after the scope's directives), since declared
 functions are called directly.)
+(T61: node's **globals that are built-in modules' exports** are a table, `node::GLOBALS` (`Buffer` from T56, and
+`WeakMap`/`WeakSet` from `node:internal/weak`, `AbortController`/`AbortSignal`/`EventTarget`/`Event` from
+`node:internal/abort`): the linker binds a module's unresolved references to one like T56's `Buffer`. So
+`WeakMap`/`WeakSet` are JS classes over a `Map` with private-field brand checks, not native: weakness isn't
+observable without `WeakRef`/`FinalizationRegistry`. They aren't global-object properties (`globalThis.WeakMap`);
+`process` is.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

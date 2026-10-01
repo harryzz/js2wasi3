@@ -33,6 +33,8 @@ const MODULES: &[(&str, &str)] = &[
     ("_stream_transform", include_str!("../node/stream/_stream_transform.js")),
     ("_stream_writable", include_str!("../node/stream/_stream_writable.js")),
     ("internal/abort", include_str!("../node/abort.js")),
+    // `WeakMap`, `WeakSet` (T61): node's globals, bound by the linker (`GLOBALS`).
+    ("internal/weak", include_str!("../node/weak.js")),
     ("internal/fs/streams", include_str!("../node/stream/fs_streams.js")),
     ("internal/fs_support", include_str!("../node/fs_support.js")),
     ("internal/errors", include_str!("../node/stream/errors.js")),
@@ -57,6 +59,20 @@ const MODULES: &[(&str, &str)] = &[
     ("internal/util", include_str!("../node/stream/util.js")),
     ("internal/util/inspect", include_str!("../node/stream/util/inspect.js")),
     ("internal/validators", include_str!("../node/stream/validators.js")),
+];
+
+/// node's globals that are a built-in module's export, bound by the linker where a module's code
+/// names them without declaring them (T56: `Buffer`; T61: the others): (global, module, export).
+/// A CommonJS module gets `const X = require(module).export;` first in its wrapper, an ES module's
+/// references become the export (an import); programs that don't name one don't load its module.
+pub(crate) const GLOBALS: &[(&str, &str, &str)] = &[
+    ("Buffer", "node:buffer", "Buffer"),
+    ("WeakMap", "node:internal/weak", "WeakMap"),
+    ("WeakSet", "node:internal/weak", "WeakSet"),
+    ("AbortController", "node:internal/abort", "AbortController"),
+    ("AbortSignal", "node:internal/abort", "AbortSignal"),
+    ("EventTarget", "node:internal/abort", "EventTarget"),
+    ("Event", "node:internal/abort", "Event"),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if

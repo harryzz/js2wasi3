@@ -110,6 +110,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - `stream` (T60): node 24's own stream code (`Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`,
   `pipeline`, `finished`, async iteration, operators, `duplexPair`), `stream/promises`, `fs.createReadStream`/
   `createWriteStream`, `fs.opendir`, with node's event order; `graceful-fs` and `fs-extra` match node.
+- node's other globals that are built-in modules' exports (T61): `WeakMap`, `WeakSet`, `AbortController`,
+  `AbortSignal`, `EventTarget`, `Event`; `console.assert`. Packages bundling npm's `readable-stream` build.
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
@@ -117,7 +119,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   (completion values, the caller's scope, SyntaxErrors at the call); code built at run time can't be (`eval(x)` is
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
-Not yet: many built-ins (`WeakMap`, `Intl`), sloppy-mode CommonJS semantics, most of node's built-in
+Not yet: many built-ins (`Intl`, `WeakRef`), sloppy-mode CommonJS semantics, most of node's built-in
 modules (`crypto`, `url`, `child_process`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 

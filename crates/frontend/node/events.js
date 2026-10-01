@@ -32,8 +32,33 @@ function EventEmitter(opts) {
   EventEmitter.init.call(this, opts);
 }
 module.exports = EventEmitter;
+// T61: node's, over any `AbortSignal` (here, without loading node:internal/abort: its listener
+// option key is a registered symbol).
 module.exports.addAbortListener = function addAbortListener(signal, listener) {
-  throw notImplemented("events.addAbortListener");
+  const typeError = (message) => {
+    const e = new TypeError(message);
+    e.code = "ERR_INVALID_ARG_TYPE";
+    return e;
+  };
+  if (signal === null || typeof signal !== "object" || !("aborted" in signal)) {
+    throw typeError(`The "signal" argument must be an instance of AbortSignal. Received ${$$typeDescribe(signal)}`);
+  }
+  if (typeof listener !== "function") {
+    throw typeError(`The "listener" argument must be of type function. Received ${$$typeDescribe(listener)}`);
+  }
+  let remove;
+  if (signal.aborted) {
+    queueMicrotask(() => listener());
+  } else {
+    signal.addEventListener("abort", listener, { once: true, [Symbol.for("js2wasi3.resistStopPropagation")]: true });
+    remove = () => signal.removeEventListener("abort", listener);
+  }
+  return {
+    __proto__: null,
+    [Symbol.dispose]() {
+      if (remove !== undefined) remove();
+    },
+  };
 };
 module.exports.once = once;
 module.exports.on = function on(emitter, event, options) {

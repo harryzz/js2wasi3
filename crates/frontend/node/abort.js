@@ -1,187 +1,423 @@
-// node:internal/abort (T60): a minimal `Event`, `EventTarget`, `AbortSignal` and `AbortController`
-// for `node:stream` (readable-stream needs them: `pipeline` makes an `AbortController` per call).
-// Not node's globals yet (F241): only the stream built-ins use them. Simplified from node's
-// lib/internal/event_target.js and abort_controller.js: no capture/bubbling phases, `passive`,
-// `isTrusted`, or listener leak warnings.
+// node:internal/abort (T60, T61): `Event`, `EventTarget`, `AbortSignal`, `AbortController`: node's
+// globals (bound by the linker, `node::GLOBALS`) and what `node:stream` uses. After node 24's
+// lib/internal/event_target.js and abort_controller.js (MIT), simplified: no `CustomEvent`,
+// `NodeEventTarget`, weak listeners, listener leak warnings, or transfer between threads.
 'use strict';
 
-const kEvents = Symbol('kEvents');
-const kStop = Symbol('kStop');
+const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
 
-class Event {
-  constructor(...args) {
-    const type = args[0];
-    const options = args[1];
-    if (args.length === 0) {
-      const e = new TypeError('The "type" argument must be specified');
-      e.code = 'ERR_MISSING_ARGS';
-      throw e;
-    }
-    this.type = `${type}`;
-    this.bubbles = !!(options && options.bubbles);
-    this.cancelable = !!(options && options.cancelable);
-    this.defaultPrevented = false;
-    this.target = null;
-    this.currentTarget = null;
-    this.timeStamp = 0;
-    this[kStop] = false;
-  }
-  preventDefault() {
-    if (this.cancelable) this.defaultPrevented = true;
-  }
-  stopImmediatePropagation() {
-    this[kStop] = true;
-  }
-  stopPropagation() {}
+function codeError(Base, code, message) {
+  const e = new Base(message);
+  e.code = code;
+  return e;
 }
 
-class EventTarget {
-  constructor() {
-    this[kEvents] = new Map();
+function invalidThis(type) {
+  return codeError(TypeError, 'ERR_INVALID_THIS', `Value of "this" must be of type ${type}`);
+}
+
+const kTrust = Symbol('kTrust');
+
+class Event {
+  #type;
+  #cancelable = false;
+  #bubbles = false;
+  #composed = false;
+  #defaultPrevented = false;
+  #timestamp = performance.now();
+  #propagationStopped = false;
+  #stop = false;
+  #trusted = false;
+  // node's kTarget/kIsBeingDispatched.
+  #target = null;
+  #dispatching = false;
+
+  constructor(...args) {
+    if (args.length === 0) throw codeError(TypeError, 'ERR_MISSING_ARGS', 'The "type" argument must be specified');
+    const options = args[1];
+    if (options !== undefined && options !== null && typeof options !== 'object') {
+      throw codeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+        `The "options" argument must be of type object. Received ${$$typeDescribe(options)}`);
+    }
+    this.#type = `${args[0]}`;
+    this.#bubbles = !!(options && options.bubbles);
+    this.#cancelable = !!(options && options.cancelable);
+    this.#composed = !!(options && options.composed);
+    if (options && options[kTrust]) this.#trusted = true;
   }
-  addEventListener(type, listener, options) {
+
+  static is(v) {
+    return typeof v === 'object' && v !== null && #type in v;
+  }
+
+  static setDispatch(e, target, dispatching) {
+    if (target !== undefined) e.#target = target;
+    e.#dispatching = dispatching;
+  }
+
+  static stopped(e) {
+    return e.#stop;
+  }
+
+  initEvent(type, bubbles = false, cancelable = false) {
+    if (!isEvent(this)) throw invalidThis('Event');
+    if (this.#dispatching) return;
+    this.#type = `${type}`;
+    this.#bubbles = !!bubbles;
+    this.#cancelable = !!cancelable;
+  }
+
+  stopImmediatePropagation() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    this.#propagationStopped = true;
+    this.#stop = true;
+  }
+
+  preventDefault() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    if (this.#cancelable) this.#defaultPrevented = true;
+  }
+
+  get target() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#target;
+  }
+
+  get currentTarget() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#dispatching ? this.#target : null;
+  }
+
+  get srcElement() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#target;
+  }
+
+  get type() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#type;
+  }
+
+  get cancelable() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#cancelable;
+  }
+
+  get defaultPrevented() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#cancelable && this.#defaultPrevented;
+  }
+
+  get timeStamp() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#timestamp;
+  }
+
+  composedPath() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#dispatching ? [this.#target] : [];
+  }
+
+  get returnValue() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return !this.#cancelable || !this.#defaultPrevented;
+  }
+
+  set returnValue(value) {
+    if (!isEvent(this)) throw invalidThis('Event');
+    if (!value && this.#cancelable) this.#defaultPrevented = true;
+  }
+
+  get bubbles() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#bubbles;
+  }
+
+  get composed() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#composed;
+  }
+
+  get eventPhase() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#dispatching ? 2 : 0;
+  }
+
+  get cancelBubble() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    return this.#propagationStopped;
+  }
+
+  set cancelBubble(value) {
+    if (!isEvent(this)) throw invalidThis('Event');
+    if (value) this.#propagationStopped = true;
+  }
+
+  stopPropagation() {
+    if (!isEvent(this)) throw invalidThis('Event');
+    this.#propagationStopped = true;
+  }
+
+  get isTrusted() {
+    return isEvent(this) && this.#trusted;
+  }
+
+  [inspectCustom](depth, options, inspect) {
+    const name = this.constructor.name;
+    if (depth < 0) return name;
+    return `${name} ${inspect({
+      type: this.#type,
+      defaultPrevented: this.#defaultPrevented,
+      cancelable: this.#cancelable,
+      timeStamp: this.#timestamp,
+    }, options)}`;
+  }
+}
+
+const isEvent = Event.is;
+const setDispatch = Event.setDispatch;
+const stopped = Event.stopped;
+delete Event.is;
+delete Event.setDispatch;
+delete Event.stopped;
+for (const [k, v] of [['NONE', 0], ['CAPTURING_PHASE', 1], ['AT_TARGET', 2], ['BUBBLING_PHASE', 3]]) {
+  Object.defineProperty(Event, k, { value: v, writable: false, enumerable: true, configurable: false });
+}
+
+// node's internal/event_target symbols (listener options the streams pass).
+const kWeakHandler = Symbol('kWeak');
+// Registered: `events.addAbortListener` passes it too.
+const kResistStopPropagation = Symbol.for('js2wasi3.resistStopPropagation');
+
+class EventTarget {
+  // type → listener records `{ listener, once, capture, passive, removed, resist }`, in order.
+  #events = new Map();
+
+  static is(v) {
+    return typeof v === 'object' && v !== null && #events in v;
+  }
+
+  addEventListener(...args) {
+    if (!isEventTarget(this)) throw invalidThis('EventTarget');
+    if (args.length < 2) {
+      throw codeError(TypeError, 'ERR_MISSING_ARGS', 'The "type" and "listener" arguments must be specified');
+    }
+    let [type, listener, options] = args;
     if (listener === null || listener === undefined) return;
-    const once = typeof options === 'object' && options !== null && !!options.once;
-    const signal = typeof options === 'object' && options !== null ? options.signal : undefined;
+    if (typeof listener !== 'function' && typeof listener !== 'object') {
+      throw codeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+        `The "listener" argument must be an instance of EventListener. Received ${$$typeDescribe(listener)}`);
+    }
+    const opts = typeof options === 'boolean' ? { capture: options } : options || {};
+    const signal = opts.signal;
     if (signal !== undefined && signal.aborted) return;
-    let list = this[kEvents].get(type);
+    type = `${type}`;
+    const capture = !!opts.capture;
+    let list = this.#events.get(type);
     if (list === undefined) {
       list = [];
-      this[kEvents].set(type, list);
+      this.#events.set(type, list);
     }
-    for (const l of list) if (l.listener === listener) return;
-    const entry = { listener, once, removed: false };
-    list.push(entry);
+    for (const r of list) if (r.listener === listener && r.capture === capture) return;
+    list.push({ listener, once: !!opts.once, capture, passive: !!opts.passive, removed: false, resist: !!opts[kResistStopPropagation] });
     if (signal !== undefined) {
-      signal.addEventListener('abort', () => this.removeEventListener(type, listener), { once: true });
+      signal.addEventListener('abort', () => this.removeEventListener(type, listener, options), { once: true, [kResistStopPropagation]: true });
     }
   }
-  removeEventListener(type, listener) {
-    const list = this[kEvents].get(type);
+
+  removeEventListener(type, listener, options = undefined) {
+    if (!isEventTarget(this)) throw invalidThis('EventTarget');
+    const capture = typeof options === 'boolean' ? options : !!(options && options.capture);
+    const list = this.#events.get(`${type}`);
     if (list === undefined) return;
     for (let i = 0; i < list.length; i++) {
-      if (list[i].listener === listener) {
+      if (list[i].listener === listener && list[i].capture === capture) {
         list[i].removed = true;
         list.splice(i, 1);
         return;
       }
     }
   }
-  dispatchEvent(event) {
-    if (!(event instanceof Event)) {
-      const e = new TypeError('The "event" argument must be an instance of Event. Received ' + typeof event);
-      e.code = 'ERR_INVALID_ARG_TYPE';
-      throw e;
+
+  dispatchEvent(...args) {
+    if (!isEventTarget(this)) throw invalidThis('EventTarget');
+    if (args.length < 1) throw codeError(TypeError, 'ERR_MISSING_ARGS', 'The "event" argument must be specified');
+    const event = args[0];
+    if (!isEvent(event)) {
+      throw codeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+        `The "event" argument must be an instance of Event. Received ${$$typeDescribe(event)}`);
     }
-    event.target = this;
-    event.currentTarget = this;
-    const list = this[kEvents].get(event.type);
+    if (event.eventPhase !== 0) throw $$domException('The event is already being dispatched', 'InvalidStateError');
+    setDispatch(event, this, true);
+    const list = this.#events.get(event.type);
     if (list !== undefined) {
-      for (const entry of list.slice()) {
-        if (entry.removed) continue;
-        if (entry.once) this.removeEventListener(event.type, entry.listener);
-        const l = entry.listener;
+      for (const r of list.slice()) {
+        if (r.removed || (stopped(event) && !r.resist)) continue;
+        if (r.once) this.removeEventListener(event.type, r.listener, { capture: r.capture });
+        const l = r.listener;
         try {
-          if (typeof l === 'function') l.call(this, event);
-          else if (l !== null && typeof l.handleEvent === 'function') l.handleEvent(event);
+          let result;
+          if (typeof l === 'function') result = l.call(this, event);
+          else if (l !== null && typeof l.handleEvent === 'function') result = l.handleEvent(event);
+          // node: the dispatch flag is cleared after a listener (so later ones see phase 0).
+          setDispatch(event, undefined, false);
+          if (result !== undefined && result !== null && typeof result.then === 'function') {
+            result.then(undefined, (err) => process.nextTick(() => {
+              throw err;
+            }));
+          }
         } catch (err) {
           // node reports a listener's error as uncaught on the next tick.
           process.nextTick(() => {
             throw err;
           });
         }
-        if (event[kStop]) break;
       }
     }
-    event.currentTarget = null;
-    return !event.defaultPrevented;
+    setDispatch(event, undefined, false);
+    return event.defaultPrevented !== true;
+  }
+
+  [inspectCustom](depth, options, inspect) {
+    const name = this.constructor.name;
+    if (depth < 0) return name;
+    return `${name} {}`;
   }
 }
 
-const kAborted = Symbol('kAborted');
-const kReason = Symbol('kReason');
+const isEventTarget = EventTarget.is;
+delete EventTarget.is;
+
 const kCreate = Symbol('kCreate');
-const kSignal = Symbol('kSignal');
 
 function illegal() {
-  const e = new TypeError('Illegal constructor');
-  e.code = 'ERR_ILLEGAL_CONSTRUCTOR';
-  return e;
+  return codeError(TypeError, 'ERR_ILLEGAL_CONSTRUCTOR', 'Illegal constructor');
 }
 
 class AbortSignal extends EventTarget {
+  #aborted = false;
+  #reason = undefined;
+  #onabort = null;
+  #onabortListener = null;
+
   constructor(key) {
     if (key !== kCreate) throw illegal();
     super();
-    this[kAborted] = false;
-    this[kReason] = undefined;
-    this.onabort = null;
   }
+
+  static is(v) {
+    return typeof v === 'object' && v !== null && #aborted in v;
+  }
+
+  static set(s, reason) {
+    if (s.#aborted) return false;
+    s.#aborted = true;
+    s.#reason = reason;
+    return true;
+  }
+
   get aborted() {
-    return this[kAborted];
+    if (!isAbortSignal(this)) throw invalidThis('AbortSignal');
+    return this.#aborted;
   }
+
   get reason() {
-    return this[kReason];
+    if (!isAbortSignal(this)) throw invalidThis('AbortSignal');
+    return this.#reason;
   }
+
   throwIfAborted() {
-    if (this[kAborted]) throw this[kReason];
+    if (!isAbortSignal(this)) throw invalidThis('AbortSignal');
+    if (this.#aborted) throw this.#reason;
   }
-  static abort(reason) {
+
+  // An event handler attribute: its listener keeps the place where it was first set.
+  get onabort() {
+    if (!isAbortSignal(this)) throw invalidThis('AbortSignal');
+    return this.#onabort;
+  }
+
+  set onabort(value) {
+    if (!isAbortSignal(this)) throw invalidThis('AbortSignal');
+    this.#onabort = typeof value === 'function' || (typeof value === 'object' && value !== null) ? value : null;
+    if (this.#onabortListener === null && this.#onabort !== null) {
+      const self = this;
+      this.#onabortListener = function (event) {
+        const h = self.#onabort;
+        if (typeof h === 'function') return h.call(self, event);
+      };
+      this.addEventListener('abort', this.#onabortListener);
+    }
+  }
+
+  static abort(reason = abortError()) {
     const s = new AbortSignal(kCreate);
-    s[kAborted] = true;
-    s[kReason] = reason === undefined ? abortError() : reason;
+    setAborted(s, reason);
     return s;
   }
+
   static timeout(delay) {
     const s = new AbortSignal(kCreate);
-    setTimeout(() => abortSignal(s, $$domException('The operation was aborted due to timeout', 'TimeoutError')), delay);
+    // node's timer doesn't keep the process alive.
+    setTimeout(() => abortSignal(s, $$domException('The operation was aborted due to timeout', 'TimeoutError')), delay).unref();
     return s;
   }
+
   static any(signals) {
     const s = new AbortSignal(kCreate);
     for (const t of signals) {
       if (t.aborted) {
-        s[kAborted] = true;
-        s[kReason] = t.reason;
+        setAborted(s, t.reason);
         return s;
       }
     }
     for (const t of signals) t.addEventListener('abort', () => abortSignal(s, t.reason), { once: true });
     return s;
   }
+
+  [inspectCustom](depth, options, inspect) {
+    return `AbortSignal ${inspect({ aborted: this.#aborted }, options)}`;
+  }
 }
+
+const isAbortSignal = AbortSignal.is;
+const setAborted = AbortSignal.set;
+delete AbortSignal.is;
+delete AbortSignal.set;
 
 function abortError() {
   return $$domException('This operation was aborted', 'AbortError');
 }
 
 function abortSignal(signal, reason) {
-  if (signal[kAborted]) return;
-  signal[kAborted] = true;
-  signal[kReason] = reason;
-  const event = new Event('abort');
-  if (typeof signal.onabort === 'function') {
-    event.target = signal;
-    event.currentTarget = signal;
-    signal.onabort.call(signal, event);
-  }
-  signal.dispatchEvent(event);
+  if (!setAborted(signal, reason)) return;
+  signal.dispatchEvent(new Event('abort', { [kTrust]: true }));
 }
 
 class AbortController {
-  constructor() {
-    this[kSignal] = new AbortSignal(kCreate);
-  }
+  #signal = new AbortSignal(kCreate);
+
   get signal() {
-    return this[kSignal];
+    if (!(typeof this === 'object' && this !== null && #signal in this)) throw invalidThis('AbortController');
+    return this.#signal;
   }
-  abort(reason) {
-    abortSignal(this[kSignal], reason === undefined ? abortError() : reason);
+
+  abort(reason = abortError()) {
+    if (!(typeof this === 'object' && this !== null && #signal in this)) throw invalidThis('AbortController');
+    abortSignal(this.#signal, reason);
+  }
+
+  [inspectCustom](depth, options, inspect) {
+    return `AbortController ${inspect({ signal: this.#signal }, options)}`;
   }
 }
 
-// node's internal/event_target symbols (listener options the streams pass; ignored here).
-const kWeakHandler = Symbol('kWeak');
-const kResistStopPropagation = Symbol('kResistStopPropagation');
+for (const C of [Event, EventTarget, AbortSignal, AbortController]) {
+  Object.defineProperty(C.prototype, Symbol.toStringTag, { value: C.name, writable: false, enumerable: false, configurable: true });
+  Object.defineProperty(C.prototype, inspectCustom, { enumerable: false });
+}
 
-module.exports = { Event, EventTarget, AbortSignal, AbortController, kWeakHandler, kResistStopPropagation };
+// node's events.addAbortListener (also for the streams).
+const { addAbortListener } = require('node:events');
+
+module.exports = { Event, EventTarget, AbortSignal, AbortController, kWeakHandler, kResistStopPropagation, addAbortListener };

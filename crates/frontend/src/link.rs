@@ -755,11 +755,12 @@ struct Module<'a> {
     cjs_names: Vec<String>,
     /// Imported by an ES module (or by `import()`): its exports are read once it has run.
     esm_imported: bool,
-    /// T56: its references to node's `Buffer` global (unresolved `Buffer`), and the `node:buffer`
-    /// module they name (an ES module's are replaced by its export; a CommonJS module gets
-    /// `const Buffer = require("node:buffer").Buffer;` first).
-    buffer_refs: Vec<Span>,
-    buffer: Option<usize>,
+    /// T56/T61: its references to node's globals that are built-in modules' exports
+    /// (`node::GLOBALS`: the index there, and the unresolved references), and the modules they name
+    /// (the index, the module): an ES module's are replaced by the export; a CommonJS module gets
+    /// `const X = require("node:x").X;` first.
+    global_refs: Vec<(usize, Vec<Span>)>,
+    global_modules: Vec<(usize, usize)>,
 }
 
 struct Graph<'a, 'r> {
@@ -961,10 +962,15 @@ impl<'a> Graph<'a, '_> {
             cjs_requests: Vec::new(),
             cjs_names: Vec::new(),
             esm_imported: false,
-            buffer_refs: Vec::new(),
-            buffer: None,
+            global_refs: Vec::new(),
+            global_modules: Vec::new(),
         });
-        self.modules[m].buffer_refs = global_refs(&self.modules[m].p, "Buffer");
+        self.modules[m].global_refs = node::GLOBALS
+            .iter()
+            .enumerate()
+            .map(|(g, (name, ..))| (g, global_refs(&self.modules[m].p, name)))
+            .filter(|(_, refs)| !refs.is_empty())
+            .collect();
         if cjs {
             self.modules[m].cjs = true;
             if let Some(&span) = self.modules[m].meta.first() {
@@ -1011,9 +1017,10 @@ impl<'a> Graph<'a, '_> {
             self.modules[m].requests.push(target);
             self.modules[m].targets.insert(span.start, target);
         }
-        if let Some(&span) = self.modules[m].buffer_refs.first() {
-            // node's `Buffer` global (T56): like an import of `node:buffer`'s export.
-            if let Some(Request::File(path)) = self.resolve(m, "node:buffer", span) {
+        for (g, refs) in self.modules[m].global_refs.clone() {
+            // node's `Buffer` global (T56) and the others (T61): like an import of the export.
+            let (_, module, _) = node::GLOBALS[g];
+            if let Some(Request::File(path)) = self.resolve(m, module, refs[0]) {
                 let k = match self.index.get(&path) {
                     Some(&k) => k,
                     None => {
@@ -1021,8 +1028,10 @@ impl<'a> Graph<'a, '_> {
                         self.load(path, &text)?
                     }
                 };
-                self.modules[m].requests.push(k);
-                self.modules[m].buffer = Some(k);
+                if !self.modules[m].requests.contains(&k) {
+                    self.modules[m].requests.push(k);
+                }
+                self.modules[m].global_modules.push((g, k));
             }
         }
         self.dynamic_imports(m)?;
@@ -1035,9 +1044,9 @@ impl<'a> Graph<'a, '_> {
     fn cjs_requests(&mut self, m: usize) -> Result<(), Diagnostics> {
         let (mut statics, computed) = cjs_requires(&self.modules[m].p);
         self.cjs_computed(m, computed)?;
-        if let Some(&span) = self.modules[m].buffer_refs.first() {
-            // node's `Buffer` global (T56): the wrapper requires it first.
-            statics.push(("node:buffer".to_string(), span, false));
+        for (g, refs) in &self.modules[m].global_refs {
+            // node's `Buffer` global (T56) and the others (T61): the wrapper requires them first.
+            statics.push((node::GLOBALS[*g].1.to_string(), refs[0], false));
         }
         for (spec, span, always) in statics {
             let target = if is_relative(&spec) {
@@ -2236,8 +2245,9 @@ impl<'a> Graph<'a, '_> {
             // The wrapper becomes a (hoisted) function declaration.
             let end = source.len() as u32;
             let mut header = format!("function {}(exports, require, module, __filename, __dirname) {{", names[&Binding::Cjs(m)]);
-            if !module.buffer_refs.is_empty() {
-                header.push_str("const Buffer = require(\"node:buffer\").Buffer;");
+            for (g, _) in &module.global_refs {
+                let (name, module, export) = node::GLOBALS[*g];
+                header.push_str(&format!("const {name} = require(\"{module}\").{export};"));
             }
             edits.push(Edit::new(0, CJS_PRE.len() as u32, header));
             edits.push(Edit::new(end - CJS_POST.len() as u32, end, "\n}".into()));
@@ -2444,11 +2454,13 @@ impl<'a> Graph<'a, '_> {
         for span in &module.meta {
             edits.push(Edit::new(span.start, span.end, names[&Binding::Meta(m)].clone()));
         }
-        if let Some(k) = module.buffer {
-            let i = self.modules[k].cjs_names.iter().position(|n| n == "Buffer").expect("node:buffer exports Buffer");
+        for &(g, k) in &module.global_modules {
+            let (global, _, export) = node::GLOBALS[g];
+            let i = self.modules[k].cjs_names.iter().position(|n| n == export).expect("the built-in exports it");
             let name = &names[&Binding::CjsNamed(k, i)];
-            for &span in &module.buffer_refs {
-                ident(&mut edits, span, "Buffer", name, true);
+            let refs = &module.global_refs.iter().find(|(h, _)| *h == g).expect("its references").1;
+            for &span in refs {
+                ident(&mut edits, span, global, name, true);
             }
         }
         edits.sort_by_key(|e| (e.start, e.end));

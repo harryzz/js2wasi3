@@ -87,6 +87,9 @@ const SUBSET = [
   "built-ins/decodeURIComponent",
   "annexB/built-ins/escape",
   "annexB/built-ins/unescape",
+  // T61.
+  "built-ins/WeakMap",
+  "built-ins/WeakSet",
 ];
 // Features node 24.21.0 (the oracle, TOOLS.md) doesn't implement: proper tail calls and proposals it
 // doesn't ship yet. Tests using them are skipped.

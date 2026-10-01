@@ -162,3 +162,16 @@ function $$Console_info(...args) {
 function $$Console_error(...args) {
   __intrinsic_write_stderr($$consoleLine(args));
 }
+
+// `console.assert(value, ...args)` (T61): node's: `warn` with "Assertion failed" first.
+function $$console_assert(value, ...args) {
+  if (value) {
+    return;
+  }
+  if (+args.length > 0 && typeof args[0] === "string") {
+    args[0] = "Assertion failed: " + args[0];
+  } else {
+    args.unshift("Assertion failed");
+  }
+  __intrinsic_write_stderr($$consoleLine(args));
+}

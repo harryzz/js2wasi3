@@ -5004,6 +5004,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && let Expression::Identifier(obj) = m.object.without_parentheses()
             && self.is_global(&m.object, &obj.name)
             && self.prelude.has_statics(&obj.name)
+            // T61: `console`'s other methods are reported as `console.x` (only `assert` is a static).
+            && obj.name != "console"
             && !((self.prelude.ctor_values.contains(obj.name.as_str()) || obj.name == "Promise")
                 && builtins::inherited_prop(&obj.name, &m.property.name))
         {
@@ -7404,6 +7406,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if name == "console" {
             return self.console_value(Span::default()).ok();
+        }
+        if name == "process" {
+            // T61: commands only, as the name.
+            return (self.command && self.prelude.is_live(builtins::PROCESS))
+                .then(|| self.prelude_call(builtins::PROCESS, vec![]));
         }
         match name {
             "Promise" => {
