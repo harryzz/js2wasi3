@@ -8,7 +8,7 @@ MQTT_HOST=${Z2M_MQTT#mqtt://}; MQTT_HOST=${MQTT_HOST%:*}
 mosquitto_sub -h $MQTT_HOST -v -t 'zigbee2mqtt-js2wasi3/#' -t 'homeassistant-js2wasi3/#' > $S/mqtt-test-$L.log 2>&1 & W1=$!
 mosquitto_sub -h $MQTT_HOST -v -t 'zigbee2mqtt/#' -t 'homeassistant/#' 2>/dev/null | grep --line-buffered -iE 'js2wasi3|19004|0x4a3c' > $S/mqtt-prod-$L.log & W2=$!
 cd $S && timeout ${T69_TIMEOUT:-60} perf record -q -e cpu-clock -k CLOCK_REALTIME -F 1000 -g -o $S/perf-$L.data \
-  wasmtime run ${WT_OPTS} -Sp3 -S inherit-network -S allow-ip-name-lookup --profile=perfmap --allow-precompiled --dir $S::$S \
+  wasmtime run ${WT_OPTS} -Sp3 -S inherit-network -S allow-ip-name-lookup -S http --profile=perfmap --allow-precompiled --dir $S::$S \
   --env ZIGBEE2MQTT_DATA=$S/data-$L --env ZIGBEE2MQTT_CONFIG_SERIAL_PORT=$Z2M_SERIAL --env ZIGBEE2MQTT_CONFIG_MQTT_SERVER=$Z2M_MQTT \
   --env Z2M_ONBOARD_NO_SERVER=1 $S/${CWASM:-p67.cwasm} > $S/run-$L.log 2>&1
 echo "rc=$?"

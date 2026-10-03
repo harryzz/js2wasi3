@@ -52,6 +52,9 @@ const MODULES: &[(&str, &str)] = &[
     ("internal/http_errors", include_str!("../node/http_errors.js")),
     // `Headers`, `Request`, `Response`, `ReadableStream`, `Blob` (T71): node's web globals.
     ("internal/fetch", include_str!("../node/fetch.js")),
+    // `fetch` (T72): over `wasi:http`, non-blocking like `net`.
+    ("internal/fetch_client", include_str!("../node/fetch_client.js")),
+    ("internal/wasi_http", include_str!("../node/wasi_http.mjs")),
     ("http2", include_str!("../node/http2.js")),
     ("https", include_str!("../node/https.js")),
     ("module", include_str!("../node/module.js")),
@@ -131,6 +134,7 @@ pub(crate) const GLOBALS: &[(&str, &str, &str)] = &[
     ("ReadableStreamDefaultReader", "node:internal/fetch", "ReadableStreamDefaultReader"),
     ("ReadableStreamDefaultController", "node:internal/fetch", "ReadableStreamDefaultController"),
     ("Blob", "node:internal/fetch", "Blob"),
+    ("fetch", "node:internal/fetch_client", "fetch"),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if
@@ -274,6 +278,7 @@ pub(crate) fn is_esm(path: &str) -> bool {
         || path == "node:internal/wasi_random"
         || path == "node:internal/wasi_sockets"
         || path == "node:internal/wasi_udp"
+        || path == "node:internal/wasi_http"
 }
 
 /// Is this program path a built-in module's?

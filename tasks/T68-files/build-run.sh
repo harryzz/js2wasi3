@@ -23,5 +23,5 @@ if [ "${T68_BUILD:-1}" = 1 ]; then
 fi
 rm -rf $S/data && cp -r $S/t68/data $S/data
 WENV=(); for e in "${ENV[@]}"; do WENV+=(--env "$e"); done
-cd $S && echo "run: $($S/t62/measure.sh $S/run-p2.log timeout ${T68_TIMEOUT:-120} wasmtime run "${GC[@]}" -Sp3 -S inherit-network -S allow-ip-name-lookup --allow-precompiled --dir $S::$S --env ZIGBEE2MQTT_DATA=$S/data "${WENV[@]}" $S/p2.cwasm)"
+cd $S && echo "run: $($S/t62/measure.sh $S/run-p2.log timeout ${T68_TIMEOUT:-120} wasmtime run "${GC[@]}" -Sp3 -S inherit-network -S allow-ip-name-lookup -S http --allow-precompiled --dir $S::$S --env ZIGBEE2MQTT_DATA=$S/data "${WENV[@]}" $S/p2.cwasm)"
 grep -E 'info|warn|error|^\s+at ' $S/run-p2.log | grep -v 'zh:zstack:unpi' | sed "s|$S|\$S|g" | tail -30

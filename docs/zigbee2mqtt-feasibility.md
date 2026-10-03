@@ -1,7 +1,18 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## OTA downloads 2026-10-03 (T72: `fetch`)
+
+zigbee-herdsman's `dist/controller/helpers/ota.js` is the graph's only `fetch` user: the OTA index
+(`Koenkk/zigbee-OTA`'s `index.json`, ~600 KB) and firmware images. With `fetch` over `wasi:http`, the build imports
+`wasi:http/types` and `client` (herdsman's module loads at start), so runs need wasmtime's `-S http` (added to the
+T68/T69/T71 scripts); T68's live run builds (148 s) and starts like node. The live check
+(`bridge/request/device/ota_update/check`) can't reach `fetch` with the test device: the EFEKTA SNZB-02 has no `genOta`
+output cluster, so herdsman answers "No endpoint found with OTA cluster support" on node too (F316). Instead
+`tasks/T72-files/run-ota.sh` runs herdsman's helpers directly: `getOtaIndex`, `getOtaFirmware` of the smallest image
+(sha512 checked, `parseOtaImage`), a bad hash, a 404 index and a DNS failure print node's output.
 
 ## Frontend 2026-10-03 (T71: `http` server, `ws`, srvx)
 

@@ -402,6 +402,17 @@ read of `globalThis.X` for X in `node::GLOBALS` loads X's module like a bare `X`
 **`__intrinsic_species_mode()`**: a gate like the prelude's `__intrinsic_cjs_mode()`, allowed in node's built-in
 modules, true when the program outside them names `species` (`Buffer[Symbol.species]` for `ws`; dropped blocks may
 hold no functions: they would renumber every function).)
+(T72: **`fetch`** is `node:internal/fetch_client` (`node::GLOBALS`; it also defines `globalThis.fetch`) over the ES
+module `node:internal/wasi_http`, `wasi:http@0.3.0`'s `types` and `client` (vendored from wasmtime v49.0.1, its
+`use wasi:clocks/types@0.3.0` pointed at the vendored 0.3.1), non-blocking like `wasi:sockets`: `client.send` is a
+promise, `consume-body`'s stream an async iterable; the sync `request.new`/`consume-body` with future arguments and
+results needed nothing new. Apart from T71's classes so `Headers`/`Response`-only programs don't import `wasi:http`
+(wasmtime needs `-S http` for a program that does). The host does the connection, TLS and the hop-by-hop headers;
+the JS does undici's default headers (no `accept-encoding`: bodies aren't decoded), redirects (Fetch's
+HTTP-redirect fetch), `AbortSignal` (`__intrinsic_import_cancel` of the pending `send`, then the body stream's read),
+and undici's errors (`TypeError: fetch failed` whose `cause` is node's error for the `error-code`). The response body
+calls `consume-body` on its first read, so an unread body leaves nothing for the event loop to wait for (node exits
+with one too).)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

@@ -677,7 +677,7 @@ class Response {
     const headers = new Headers();
     headers[kGuard] = "response";
     if (init.headers !== undefined) fillHeaders(headers, init.headers, "Response constructor");
-    const st = { type: "default", url: "", status, statusText, headers, body: null, used: false };
+    const st = { type: "default", url: "", redirected: false, status, statusText, headers, body: null, used: false };
     Object.defineProperty(this, kState, { value: st });
     if (body !== null && body !== undefined) {
       if (nullBodyStatus(status)) throw new TypeError(`Response constructor: Invalid response status code ${status}`);
@@ -696,7 +696,7 @@ class Response {
   }
 
   get redirected() {
-    return false;
+    return this[kState].redirected;
   }
 
   get status() {
@@ -808,6 +808,9 @@ class Request {
         from.used = true;
       } else {
         const [b, type] = extractBody(body);
+        if (b instanceof ReadableStream && init.duplex === undefined) {
+          throw new TypeError("RequestInit: duplex option is required when sending a body.");
+        }
         st.body = b;
         if (type !== null && !headers.has("content-type")) headers.append("content-type", type);
       }
@@ -907,4 +910,7 @@ module.exports = {
   ReadableStreamDefaultReader,
   ReadableStreamDefaultController,
   Blob,
+  // For `fetch` (T72, `node:internal/fetch_client`).
+  kState,
+  kAppend,
 };

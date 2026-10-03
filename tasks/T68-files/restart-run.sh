@@ -12,7 +12,7 @@ if [ $W = node ]; then
   (cd $S/zp/package && exec env "${ENV[@]}" ZIGBEE2MQTT_DATA=$S/data-r-$W timeout 150 node index.js) >$L 2>&1 &
 else
   WENV=(); for e in "${ENV[@]}"; do WENV+=(--env "$e"); done
-  (cd $S && exec timeout 150 wasmtime run "${GC[@]}" -Sp3 -S inherit-network -S allow-ip-name-lookup --allow-precompiled --dir $S::$S --env ZIGBEE2MQTT_DATA=$S/data-r-$W "${WENV[@]}" $S/p2.cwasm) >$L 2>&1 &
+  (cd $S && exec timeout 150 wasmtime run "${GC[@]}" -Sp3 -S inherit-network -S allow-ip-name-lookup -S http --allow-precompiled --dir $S::$S --env ZIGBEE2MQTT_DATA=$S/data-r-$W "${WENV[@]}" $S/p2.cwasm) >$L 2>&1 &
 fi
 P=$!
 until [ $(grep -c 'Zigbee2MQTT started' $L) -ge 1 ] || ! kill -0 $P 2>/dev/null; do sleep 1; done; sleep 8

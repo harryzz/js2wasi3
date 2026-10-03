@@ -3,6 +3,11 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-03: T72 `fetch` (no run)
+
+- Compiler: `wasi:http@0.3.0` imports (non-blocking), `fetch` as a node global bound by the linker; `fetch` isn't
+  ECMAScript, so nothing reaches the subset (no local test262 checkout to grep). No run.
+
 ## 2026-10-03: T71 `http` server (targeted run)
 
 - Compiler: the `globalThis.X` rewrite for node's linker-bound globals (no test262 test reads one: 0 matches),

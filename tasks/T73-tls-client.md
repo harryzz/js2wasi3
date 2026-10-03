@@ -44,6 +44,12 @@ keep their bytes.
   `DEPTH_ZERO_SELF_SIGNED_CERT`) unless told otherwise: compare those errors. A successful handshake needs a server
   with a publicly trusted certificate: a fixture may reach a public host (user's decision); pick one whose reply is
   stable (e.g. an HTTPS server's status line), print only what doesn't change.
+- T72 (`wasi:http@0.3.0`, done 2026-10-03) did the same vendoring: wasmtime's p3 WIT files are `@0.3.0` and `use`
+  `wasi:clocks@0.3.0`; `crates/component/wit/wasi-http-0.3.0.wit` points such `use`s at the vendored 0.3.1 packages
+  and drops the file's worlds (they import 0.3.0 `wasi:cli`). The non-blocking partition in `main.rs` now lists
+  `wasi:sockets/` and `wasi:http/`. Sync functions taking and returning `stream`s and `future`s (`request.new`,
+  `consume-body`) worked as is in that boundary, so the connector's `send`/`receive` shapes should too.
+  `tasks/T72-files/probe.js` is a model for step 1's probe.
 - First check (not done): that wasmtime 49's CLI links the p3 `wasi:tls` imports under `-S tls` for a component
   (the p2 version exists too).
 

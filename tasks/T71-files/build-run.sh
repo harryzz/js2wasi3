@@ -40,7 +40,7 @@ if [ "${T71_BUILD:-1}" = 1 ]; then
 fi
 rm -rf $S/data && cp -r $S/t71/data $S/data
 WENV=(); for e in "${ENV[@]}"; do WENV+=(--env "$e"); done
-cd $S && run $S/run-p2.log $S/wasm-client.log timeout $T wasmtime run "${GC[@]}" -Sp3 -S inherit-network -S allow-ip-name-lookup --allow-precompiled --dir $S::$S --env ZIGBEE2MQTT_DATA=$S/data "${WENV[@]}" $S/p2.cwasm
+cd $S && run $S/run-p2.log $S/wasm-client.log timeout $T wasmtime run "${GC[@]}" -Sp3 -S inherit-network -S allow-ip-name-lookup -S http --allow-precompiled --dir $S::$S --env ZIGBEE2MQTT_DATA=$S/data "${WENV[@]}" $S/p2.cwasm
 echo "wasm client: $(tr '\n' '|' <$S/wasm-client.log | cut -c1-200)"
 diff $S/node-client.log $S/wasm-client.log && echo "client logs equal"
 grep -E 'info|warn|error|^\s+at ' $S/run-p2.log | grep -v 'zh:zstack:unpi' | sed "s|$S|\$S|g" | tail -30
