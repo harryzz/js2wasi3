@@ -2076,6 +2076,7 @@ impl Emitter<'_> {
                     Intrinsic::Map(op) => H::Map(mapset::Helper::Op(*op)),
                     Intrinsic::Typed(op) => H::Typed(typed::Helper::Op(*op)),
                     Intrinsic::Stream(op) => H::Abi(abi::Helper::Stream(*op)),
+                    Intrinsic::ImportCancel => H::Abi(abi::Helper::ImportCancel),
                     Intrinsic::MakeArguments => H::Obj(object::Helper::MakeArguments),
                     Intrinsic::SetFunctionName => H::Func(func::Helper::SetName),
                     Intrinsic::BuiltinCtor(b) => H::Func(func::Helper::BuiltinCtor(*b)),

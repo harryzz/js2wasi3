@@ -122,13 +122,16 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - `crypto` (T65): random values from `wasi:random` (`randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`,
   the `crypto` global), `createHash`/`createHmac` (md5, sha1, sha224/256/384/512), AES-128/192/256 in ECB, CBC,
   CTR and CCM (`createCipheriv`/`createDecipheriv`), `timingSafeEqual`. Built-ins that load with node's shape
-  while their facility is missing (T65): `http`, `https`, `http2`, `tls`, `dgram`, `dns`, `zlib` (`crc32`
+  while their facility is missing (T65): `http`, `https`, `http2`, `tls`, `dns`, `zlib` (`crc32`
   works), `perf_hooks`, `module` (`createRequire` fails with `MODULE_NOT_FOUND`), and `child_process` (every
   spawn fails with `ENOENT`, as for a missing program).
 - `net` (T66): TCP clients and servers over `wasi:sockets` on the event loop (`net.Socket` is a `stream.Duplex`;
   `connect`/`createConnection`, `createServer`/`listen`/`close`, `setTimeout`, `setKeepAlive`, node's errors such as
   `connect ECONNREFUSED 127.0.0.1:1`), and `dns.lookup` over `wasi:sockets/ip-name-lookup`. wasmtime needs
   `-S inherit-network` (and `-S allow-ip-name-lookup` for host names).
+- `dgram` (T67): UDP sockets over `wasi:sockets` (`createSocket`, `bind`, `send` with and without `connect`,
+  `message` with `rinfo`, `close`, `address()`/`remoteAddress()`, node's errors). No multicast or broadcast
+  (WASI 0.3 has neither).
 - `Error.captureStackTrace` (T68). With it, zigbee2mqtt 2.14.1 runs against a live Z-Stack coordinator and an MQTT
   broker like node: network start, coordinator backup, MQTT, Home Assistant discovery, its stop and restart (see
   [docs/zigbee2mqtt-feasibility.md](docs/zigbee2mqtt-feasibility.md), "Live coordinator").
@@ -140,7 +143,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
 Not yet: many built-ins (`Intl`, `WeakRef`), sloppy-mode CommonJS semantics, most of node's built-in
-modules (working `http`, `tls`, `dgram`, `zlib`, `worker_threads`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+modules (working `http`, `tls`, `zlib`, `worker_threads`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

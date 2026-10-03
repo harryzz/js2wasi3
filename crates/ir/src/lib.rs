@@ -1146,6 +1146,10 @@ pub enum Intrinsic {
     /// arguments can run user code (`valueOf`, `toString`). An `async func` (slice 5b) gives a
     /// promise instead, settled when the subtask returns (through [`Import::unwrap`]).
     CallImport(u32),
+    /// `(promise)` (T67): cancel the pending `async func` import call whose promise this is, if
+    /// any: a call that already returned settles now, a cancelled one's promise never settles.
+    /// Only a command waiting for non-blocking imports has such calls; elsewhere a no-op.
+    ImportCancel,
     /// Code unit `i` (`i32`, in range) of a JS value known to be a string (`i32`, T21).
     StrUnit,
     /// The code units `[start, end)` (`i32`s, in range) of a string, as a new string.
@@ -1454,6 +1458,7 @@ impl Intrinsic {
             Intrinsic::ModuleNew => (&[], Some(JsVal)),
             Intrinsic::ToPrimitive => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::CallImport(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::ImportCancel => (&[JsVal], None),
             Intrinsic::StrUnit => (&[JsVal, I32], Some(I32)),
             Intrinsic::StrSub => (&[JsVal, I32, I32], Some(JsVal)),
             Intrinsic::StrNew => (&[I32], Some(JsVal)),
@@ -1654,6 +1659,7 @@ impl Intrinsic {
             Intrinsic::MonotonicNow => "monotonic_now",
             Intrinsic::ProcessExit => "process_exit",
             Intrinsic::CallImport(_) => "call_import",
+            Intrinsic::ImportCancel => "import_cancel",
             Intrinsic::StrUnit => "str_unit",
             Intrinsic::StrSub => "str_sub",
             Intrinsic::StrNew => "str_new",
@@ -1765,6 +1771,7 @@ impl Intrinsic {
                 | Intrinsic::DelegateOpen
                 | Intrinsic::DelegateStep
                 | Intrinsic::CallImport(_)
+                | Intrinsic::ImportCancel
                 | Intrinsic::Stream(StreamOp::Write)
                 | Intrinsic::ToNumeric
                 | Intrinsic::Numeric(_)

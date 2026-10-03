@@ -34,6 +34,8 @@ const MODULES: &[(&str, &str)] = &[
     ("net", include_str!("../node/net.js")),
     ("internal/net", include_str!("../node/net_support.js")),
     ("internal/wasi_sockets", include_str!("../node/wasi_sockets.mjs")),
+    // `dgram` (T67): UDP over `wasi:sockets`.
+    ("internal/wasi_udp", include_str!("../node/wasi_udp.mjs")),
     // Built-ins that load with node's shape; their facility is missing (T65).
     ("child_process", include_str!("../node/child_process.js")),
     ("dgram", include_str!("../node/dgram.js")),
@@ -253,6 +255,7 @@ pub(crate) fn is_esm(path: &str) -> bool {
     path == "node:internal/wasi_fs"
         || path == "node:internal/wasi_random"
         || path == "node:internal/wasi_sockets"
+        || path == "node:internal/wasi_udp"
 }
 
 /// Is this program path a built-in module's?

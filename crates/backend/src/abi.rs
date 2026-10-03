@@ -72,6 +72,9 @@ pub enum Helper {
     /// `(promise: jsval, ret: i32)`: the user world's `async func` import `i` returned (T20
     /// slice 5b): lift its result from the return area `ret` and settle the call's promise.
     ImportDone(u32),
+    /// `(promise: jsval)`: cancel the pending `async func` import call whose promise this is
+    /// (T67, see [`ir::Intrinsic::ImportCancel`]).
+    ImportCancel,
     /// `(h: i32) -> jsval`: the readable end of future type `p` (T20 slice 6a) as a promise:
     /// start reading it; the value (lifted) fulfills the promise.
     FutureLift(u32),
@@ -147,6 +150,7 @@ impl Helper {
             Helper::CodePointAt0 => "code_point_at_0",
             Helper::Import(_) => "call_import",
             Helper::ImportDone(_) => "import_done",
+            Helper::ImportCancel => "import_cancel",
             Helper::FutureLift(_) => "future_lift",
             Helper::FutureRead(_) => "future_read",
             Helper::FutureLower(_) => "future_lower",
@@ -184,6 +188,7 @@ impl Helper {
             Helper::CodePointAt0 => (vec![runtime::string_ref()], vec![I32]),
             Helper::Import(_) => (vec![runtime::jsval()], vec![runtime::jsval()]),
             Helper::ImportDone(_) => (vec![runtime::jsval(), I32], vec![]),
+            Helper::ImportCancel => (vec![runtime::jsval()], vec![]),
             Helper::FutureLift(_) => (vec![I32], vec![runtime::jsval()]),
             Helper::FutureRead(_) => (vec![I32, runtime::jsval(), I32, I32], vec![]),
             Helper::FutureLower(_) => (vec![runtime::jsval()], vec![I32]),
@@ -223,6 +228,7 @@ impl Helper {
             Helper::Realloc => realloc(bump),
             Helper::Import(i) => import_adapter(cx, bump, i),
             Helper::ImportDone(i) => import_done(cx, i),
+            Helper::ImportCancel => import_cancel(cx),
             Helper::FutureLift(p) => future_lift(cx, p),
             Helper::FutureRead(p) => future_read(cx, p),
             Helper::FutureLower(p) => future_lower(cx, p),
@@ -1506,6 +1512,74 @@ fn stream_cancel_read(cx: &mut dyn Cx, id: u32) -> Function {
     s.local_get(H).i32_const(0).call(im.get(Import::WaitableJoin));
     s.local_get(H).call(cancel).local_set(ST);
     s.i32_const(EVENT_STREAM_READ).local_get(H).local_get(ST).call(event);
+    s.end();
+    f
+}
+
+/// `$import_cancel(promise)`: see [`Helper::ImportCancel`]. The pending table is searched for the
+/// call; a synchronous `subtask.cancel` (out of the waitable set) either finds it returned (handled
+/// as its event: the promise settles) or cancels it (its entry and count go, the promise stays
+/// pending). Without non-blocking imports there is nothing to cancel.
+fn import_cancel(cx: &mut dyn Cx) -> Function {
+    const P: u32 = 0;
+    const H: u32 = 1;
+    const N: u32 = 2;
+    const ST: u32 = 3;
+    const E: u32 = 4;
+    let mut f = Function::new([(3, ValType::I32), (1, runtime::jsval())]);
+    if !cx.command_waits() {
+        f.instructions().end();
+        return f;
+    }
+    let lib = cx.lib_globals();
+    let get = cx.helper(runtime::Helper::Obj(object::Helper::Get));
+    let set = cx.helper(runtime::Helper::Obj(object::Helper::Set));
+    let boxed = cx.helper(runtime::Helper::Box);
+    let event = cx.helper(runtime::Helper::Abi(Helper::Event));
+    let im = cx.imports();
+    let mut s = f.instructions();
+    s.global_get(lib + G_PENDING).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.global_get(lib + G_PENDING)
+        .ref_cast_non_null(array::array())
+        .struct_get(runtime::T_ARRAY, array::F_LENGTH)
+        .local_set(N);
+    // Subtask handles are table indices from 1.
+    s.i32_const(1).local_set(H);
+    s.block(BlockType::Empty);
+    s.loop_(BlockType::Empty);
+    s.local_get(H).local_get(N).i32_ge_u();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.global_get(lib + G_PENDING);
+    s.local_get(H).f64_convert_i32_u().call(boxed);
+    s.call(get).local_tee(E);
+    s.global_get(runtime::G_UNDEFINED).ref_eq().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(E).f64_const(0.0.into()).call(boxed).call(get);
+    s.local_get(P).ref_eq();
+    s.br_if(2);
+    s.end();
+    s.local_get(H).i32_const(1).i32_add().local_set(H);
+    s.br(0);
+    s.end();
+    s.end();
+    s.local_get(H).i32_const(0).call(im.get(Import::WaitableJoin));
+    s.local_get(H).call(im.get(Import::SubtaskCancel)).local_set(ST);
+    s.local_get(ST).i32_const(0xf).i32_and().i32_const(SUBTASK_RETURNED).i32_eq();
+    s.if_(BlockType::Empty);
+    s.i32_const(EVENT_SUBTASK).local_get(H).i32_const(SUBTASK_RETURNED).call(event);
+    s.return_();
+    s.end();
+    s.global_get(lib + G_PENDING);
+    s.local_get(H).f64_convert_i32_u().call(boxed);
+    s.global_get(runtime::G_UNDEFINED).call(set);
+    s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
+    s.global_set(lib + G_PENDING_N);
+    s.local_get(H).call(im.get(Import::SubtaskDrop));
     s.end();
     f
 }

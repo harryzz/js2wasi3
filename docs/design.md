@@ -355,7 +355,7 @@ as node does (`inspect.rs` `Reindent`).)
 `wasi:random/random` `get-random-bytes` through the ES module `node:internal/wasi_random` (as T59's `wasi_fs`),
 the hashes and AES over typed arrays (32-bit word pairs for SHA-512; AES T-tables built at load), CCM per
 RFC 3610; node's error codes and OpenSSL's messages. **Load-only built-ins** (`http`, `https`, `http2`, `tls`,
-`dgram`, `dns`, `zlib`, `perf_hooks`, `module`, `child_process`) are hand-written with node 24's exports: what can
+`dgram` until T67, `dns`, `zlib`, `perf_hooks`, `module`, `child_process`) are hand-written with node 24's exports: what can
 work without the facility does (`http.Agent`, header validation, `zlib.crc32`, `module._nodeModulePaths`), the rest
 throws `<module>.<name>() isn't available in js2wasi3 (<why>)` from `node:internal/unavailable`. Their constants
 come from `node:internal/builtin_data`, generated from node 24.21.0 by `tasks/T65-files/gen-data.mjs`.
@@ -371,7 +371,13 @@ pending; it also imports each boundary type's sync cancel-read. **`node:net`** i
 `node:internal/wasi_sockets`: `Socket` is node 24's `stream.Duplex` (writes go through a queue into the `send`
 stream; the `receive` stream is pushed with backpressure), `Server` binds, listens and wraps each accepted handle;
 `node:internal/net` has `isIP`, address formatting and node's errors for WASI error codes, and `lookupAll` for
-`net` and `dns.lookup`.)
+`net` and `dns.lookup`.
+T67: **`node:dgram`** follows node 24's lib/dgram.js over a JS `UDP` handle (node's `udp_wrap` shape) on
+`node:internal/wasi_udp` (apart from `wasi_sockets`, so `net`/`dns` programs don't import UDP): a receive loop is
+one pending `receive` call. A pending `async func` import call borrows its resource, so `close` first cancels it:
+`__intrinsic_import_cancel(promise)` (`abi.rs` `import_cancel`) finds the call in the pending table, takes it out of
+the waitable set and runs a sync `subtask.cancel`; a call that had returned is handled as its event, a cancelled
+one's entry and count go and its promise never settles. Multicast, broadcast and buffer sizes aren't in WASI 0.3.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

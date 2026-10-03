@@ -5880,6 +5880,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Some(op) = stream_op(name) {
             return self.map_intrinsic(cx, c, name, Intrinsic::Stream(op));
         }
+        if name == "import_cancel" {
+            // T67: `dgram`'s `close()` with a `receive` pending.
+            return self.map_intrinsic(cx, c, name, Intrinsic::ImportCancel);
+        }
         if name == "named" {
             // Does the user's code name this property (a string literal argument)? A constant
             // (T35): the prelude skips what can't happen, e.g. species without `species`.
