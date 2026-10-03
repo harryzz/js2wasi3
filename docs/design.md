@@ -37,7 +37,12 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   the sentinel; the first read makes it `${String(e)}\n    at <anonymous>` (the header as of that read; no source
   positions at run time) and a write replaces it, both as a hidden data property, which
   `Object.getOwnPropertyDescriptor` also shows (node: get/set functions). Printing an error ignores such a
-  one-frame `stack`, so `console.log(e)` and uncaught errors print as before.)
+  one-frame `stack`, so `console.log(e)` and uncaught errors print as before.
+  T68: `Error.captureStackTrace(o, fn)` is JS in the prelude (`builtins/object.js`): an own `stack` accessor like
+  V8's (get/set functions, not enumerable), made on its first read from `Error.prototype.toString`'s steps on `o`
+  then, plus the same one frame; `fn` hides nothing. Since `Error` has a prelude static, its `Object.prototype`
+  methods (`Error.isPrototypeOf`) count as inherited, as for constructor values. `Error.stackTraceLimit` and
+  `Error.prepareStackTrace` are plain properties nobody reads (F296).)
   (T14: functions are `$function` structs, a subtype of `$object` holding a `$code` funcref
   `(self, this, args) -> jsval` and an environment array. Captured variables are boxed in cells, one per
   variable (flat closures); direct calls stay typed, calls through values use one uniform `call_ref`.

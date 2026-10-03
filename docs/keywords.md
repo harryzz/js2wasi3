@@ -82,7 +82,7 @@ What's most needed, in order: the rest of the built-in library (`Intl`, `Float16
 | `switch` | ✅ | T24. |
 | `synchronized` | ➖ | Removed in ES5. |
 | `this` | ✅ | Methods, arrows, classes, derived-constructor checks, `call`/`apply`. |
-| `throw` | ✅ | Any value; uncaught exceptions print like node and exit 1 (without the throw's location: F275). T63: errors' `stack` is `Name: message` plus one `    at <anonymous>` frame, made on its first read (V8's lazy header). |
+| `throw` | ✅ | Any value; uncaught exceptions print like node and exit 1 (without the throw's location: F275). T63: errors' `stack` is `Name: message` plus one `    at <anonymous>` frame, made on its first read (V8's lazy header). T68: `Error.captureStackTrace(o, fn)` (an own `stack` accessor, node's descriptor and errors); `Error.stackTraceLimit`/`prepareStackTrace` have no default (F296). |
 | `throws` | ➖ | Removed in ES5. |
 | `transient` | ➖ | Removed in ES5. |
 | `true` | ✅ | |

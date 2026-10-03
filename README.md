@@ -129,6 +129,9 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   `connect`/`createConnection`, `createServer`/`listen`/`close`, `setTimeout`, `setKeepAlive`, node's errors such as
   `connect ECONNREFUSED 127.0.0.1:1`), and `dns.lookup` over `wasi:sockets/ip-name-lookup`. wasmtime needs
   `-S inherit-network` (and `-S allow-ip-name-lookup` for host names).
+- `Error.captureStackTrace` (T68). With it, zigbee2mqtt 2.14.1 runs against a live Z-Stack coordinator and an MQTT
+  broker like node: network start, coordinator backup, MQTT, Home Assistant discovery, its stop and restart (see
+  [docs/zigbee2mqtt-feasibility.md](docs/zigbee2mqtt-feasibility.md), "Live coordinator").
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,

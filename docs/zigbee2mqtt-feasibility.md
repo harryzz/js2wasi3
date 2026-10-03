@@ -1,7 +1,35 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Two sections: the measured survey of 2026-10-01 (T62, after T54–T61) first, then the original estimate of
-2026-09-29 (kept as written).
+Three sections: the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## Live coordinator 2026-10-03 (T68, js2wasi3 after T62–T66 and `Error.captureStackTrace`)
+
+**zigbee2mqtt 2.14.1 runs on wasmtime 49.0.1 against a real Z-Stack coordinator and MQTT broker, and does what node
+does.** Rig: a test-only CC2652P (Z-Stack 3.x.0 20230507) behind ESPHome's `stream_server` (`tcp://…:6638`) and an
+MQTT broker shared with a production instance, so the config ([`tasks/T68-files/data`](../tasks/T68-files/data)) uses
+only test topics (`zigbee2mqtt-js2wasi3`, `homeassistant-js2wasi3`) and its own network (PAN, extended PAN, key,
+channel 25). Build: T66's (no built-in stubs; T62's level-1/2 patches still in, F273), `T63_GLOBALS=0`, 105 s /
+725 MB, `wasmtime compile` 52 s / 2.1 GB. Scripts: [`tasks/T68-files/`](../tasks/T68-files) (`build-run.sh`,
+`restart-run.sh`, `watch.sh`, `mqtt-probe.js`); details in [T68](../tasks/T68-capture-stack-trace.md).
+
+What runs, node and js2wasi3 alike: socket connect, bootloader skip, `SYS ping`, version, every NV read, network
+start (`zigbee-herdsman started (reset)` on a new network, `(resumed)` after), the coordinator backup, `Currently 0
+devices are joined`, the MQTT connect, `bridge/state` online, `bridge/info`/`devices`/`groups`/… (retained), Home
+Assistant discovery (the same payloads, or "already discovered" from retained configs), and on an MQTT restart
+request the whole stop path (offline state, MQTT disconnect, herdsman stop, final backup, `closing`) and a second
+start. Normalized logs (timestamps, data paths, unpi frames stripped): 2,062 lines for a start and 4,094 for a
+start-restart-start equal node's apart from:
+- `Starting zigbee-herdsman (T62 stub)`: the version is read with `import()` of `${depend}/package.json`, still
+  patched (F273);
+- startup is slow: 3–5 s from the MQTT connect to `Zigbee2MQTT started!` (node: < 1 s), so mqtt.ts's 2 s
+  republish timer fires and `bridge/state` online is published twice. Compute, not I/O: mqtt.js round trips are
+  ~2× node's (F299);
+- the old socket's `close` on a restart is logged after the new socket opens (node: before the restart, F300);
+- SIGTERM/SIGINT don't reach the guest, so a host kill skips zigbee2mqtt's stop path (F298);
+- timestamps are UTC (node: local time, F182).
+Nothing reached the production topics (watched for the test instance's names and PAN); retained test topics were
+cleared afterwards.
 
 ## Survey 2026-10-01 (T62, js2wasi3 after T61)
 

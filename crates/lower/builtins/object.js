@@ -342,6 +342,39 @@ function $$Object_getOwnPropertyDescriptors(o) {
   return out;
 }
 
+// `Error.captureStackTrace(o, fn)` (T68): an own `stack` accessor like V8's, made on its first read
+// as an error's own `stack` is (T63): `Error.prototype.toString`'s steps on `o` then, and one frame
+// (there are no source positions at run time, so `fn` hides nothing).
+function $$Error_captureStackTrace(o, fn) {
+  if (o === null || (typeof o !== "object" && typeof o !== "function")) {
+    throw new TypeError("invalid_argument");
+  }
+  if (!Object.isExtensible(o)) {
+    throw new TypeError("Cannot define property stack, object is not extensible");
+  }
+  let made = false;
+  let stack;
+  Object.defineProperty(o, "stack", {
+    get() {
+      if (!made) {
+        const n = o.name;
+        const m = o.message;
+        const name = n === undefined ? "Error" : String(n);
+        const msg = m === undefined ? "" : String(m);
+        stack = (name === "" ? msg : msg === "" ? name : name + ": " + msg) + "\n    at <anonymous>";
+        made = true;
+      }
+      return stack;
+    },
+    set(v) {
+      stack = v;
+      made = true;
+    },
+    enumerable: false,
+    configurable: true,
+  });
+}
+
 // `Function.prototype[Symbol.hasInstance](v)` (T60): OrdinaryHasInstance, without a constructor's
 // own `@@hasInstance` (readable-stream's `FunctionPrototypeSymbolHasInstance`). Linked by naming
 // `hasInstance`. Not for bound functions (their target's prototype).

@@ -5092,7 +5092,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && self.prelude.has_statics(&obj.name)
             // T61: `console`'s other methods are reported as `console.x` (only `assert` is a static).
             && obj.name != "console"
-            && !((self.prelude.ctor_values.contains(obj.name.as_str()) || obj.name == "Promise")
+            // T68: `Error` has a static too (`captureStackTrace`), `Error.isPrototypeOf(…)` is inherited.
+            && !((self.prelude.ctor_values.contains(obj.name.as_str())
+                || obj.name == "Promise"
+                || obj.name == "Error")
                 && builtins::inherited_prop(&obj.name, &m.property.name))
         {
             // `Math.nope(…)`, `JSON.parse(…)`: a static the prelude doesn't implement. T63: where

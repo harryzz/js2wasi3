@@ -405,10 +405,12 @@ pub(crate) const OBJECT_PROTO_PROPS: &[&str] = &[
 
 /// Is `global.prop` inherited rather than a static of the prelude: `Function.prototype`'s
 /// properties of a constructor value, `Object.prototype`'s methods of a namespace or (T26) of a
-/// constructor value (`Date.hasOwnProperty(…)`)?
+/// constructor value (`Date.hasOwnProperty(…)`; T68: `Error.isPrototypeOf(…)`, `Error` has a static)?
 pub(crate) fn inherited_prop(global: &str, prop: &str) -> bool {
     FUNCTION_PROPS.contains(&prop)
-        || ((js2wasi3_ir::Namespace::parse(global).is_some() || CTOR_VALUES.contains(&global))
+        || ((js2wasi3_ir::Namespace::parse(global).is_some()
+            || CTOR_VALUES.contains(&global)
+            || global == "Error")
             && OBJECT_PROTO_PROPS.contains(&prop))
 }
 
