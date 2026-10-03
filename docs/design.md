@@ -77,6 +77,12 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   wrapper's indices and `length` are real read-only own properties. ToPrimitive unwraps through the built-in
   `valueOf`/`toString`; the prelude reads `prim` with `__intrinsic_unwrap` and wraps with `__intrinsic_to_object`.
   See `crates/backend/src/wrapper.rs`.)
+  (T69: wasmtime 49 compiles `ref.test`/`ref.cast` against a concrete non-final type (`$string`, `$object`) to an
+  inline compare only for the exact type; any other value calls its `is_subtype` libcall, even for "no". Value tests
+  of a local go through `runtime::JsTest` (`test_string`, `test_object`): the abstract `array`/`struct` kind and exact
+  final types first, the concrete test only where it's exact or rare; same results. Host side: the copying collector
+  grows its heap only once live data fills the active semi-space, so a program with a large live set collects
+  constantly: `-O gc-heap-initial-size` (README); upstream draft in `tasks/T69-files/wasmtime-issue.md`.)
   (T40: a BigInt is a `$bigint`, a final `(array (mut i32))`: the sign, then 32-bit magnitude limbs, little-endian,
   normalized; never changed once made, so `===`, `==`, SameValueZero and Map/Set hashing compare contents. The type
   (the last of the `rec` group) and the globals of `BigInt.prototype`/`BigInt` (after the runtime's; `Builtin::BigInt`

@@ -25,6 +25,7 @@
 //! ToPrimitive uses the built-in `valueOf`/`toString` (`Error.prototype.toString`, or
 //! `[object Object]` / `[object Error]`); a replaced one traps (calling values: T14).
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::{Builtin, ErrorKind};
 use wasm_encoder::{BlockType, Function, InstructionSink, ValType};
 
@@ -641,7 +642,7 @@ impl Helper {
                 const HD: u32 = 1;
                 let mut f = Function::new([(1, rt(true, T_OBJECT))]);
                 let mut s = f.instructions();
-                s.local_get(V).ref_test_non_null(object()).i32_eqz();
+                s.test_object(V).i32_eqz();
                 s.if_(BlockType::Empty);
                 s.i32_const(1).return_();
                 s.end();
@@ -668,7 +669,7 @@ impl Helper {
                 let tag = h(cx, Helper::BuiltinTag);
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
-                s.local_get(0).ref_test_non_null(object());
+                s.test_object(0);
                 s.if_(BlockType::Result(jsval()));
                 as_obj(&mut s, 0);
                 s.call(tag);
@@ -686,7 +687,7 @@ impl Helper {
                 let msg = cx.str("Cannot convert undefined or null to object");
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
-                s.local_get(0).ref_test_non_null(object());
+                s.test_object(0);
                 s.if_(BlockType::Empty);
                 as_obj(&mut s, 0);
                 s.i32_const(1).call(own).return_();
@@ -717,7 +718,7 @@ fn rh(cx: &mut dyn Cx, h: runtime::Helper) -> u32 {
 
 /// Push "local `v` (a jsval) is an error object".
 pub fn is_error(s: &mut InstructionSink, v: u32) {
-    s.local_get(v).ref_test_non_null(object());
+    s.test_object(v);
     s.if_(BlockType::Result(ValType::I32));
     s.local_get(v)
         .ref_cast_non_null(object())
@@ -1782,7 +1783,7 @@ fn to_key(cx: &mut dyn Cx) -> Function {
     let mut f = Function::new([]);
     let mut s = f.instructions();
     // An object: its ToPrimitive (hint string), which may be a symbol.
-    s.local_get(0).ref_test_non_null(runtime::object());
+    s.test_object(0);
     s.if_(BlockType::Empty);
     s.local_get(0)
         .ref_cast_non_null(runtime::object())
@@ -1933,7 +1934,7 @@ fn get(cx: &mut dyn Cx) -> Function {
                 .i31_get_s()
                 .i64_extend_i32_s();
             s.else_();
-            s.local_get(KEY).ref_test_non_null(string());
+            s.test_string(KEY);
             s.if_(BlockType::Result(ValType::I64));
             s.local_get(KEY).ref_cast_non_null(string()).call(index);
             s.else_();
@@ -1974,7 +1975,7 @@ fn get(cx: &mut dyn Cx) -> Function {
     s.unreachable();
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Result(jsval()));
     as_obj(&mut s, V);
     s.local_get(K).ref_as_non_null().call(lookup);
@@ -2027,7 +2028,7 @@ fn get(cx: &mut dyn Cx) -> Function {
 fn key_text(cx: &mut dyn Cx, s: &mut InstructionSink, key: u32, to_key: u32) {
     let desc = rh(cx, runtime::Helper::Prop(props::Helper::Desc));
     let inspect = rh(cx, runtime::Helper::Inspect);
-    s.local_get(key).ref_test_non_null(object());
+    s.test_object(key);
     s.if_(BlockType::Result(rt(false, T_STRING)));
     s.local_get(key).ref_cast_non_null(object()).call(desc);
     s.else_();
@@ -2157,7 +2158,7 @@ fn set(cx: &mut dyn Cx) -> Function {
     s.call(throw);
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     {
         // `o.__proto__ = p` runs Object.prototype's `__proto__` setter.
@@ -2275,7 +2276,7 @@ fn delete(cx: &mut dyn Cx) -> Function {
     s.i32_const(1).return_();
     s.end();
     s.end();
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     // A non-configurable property can't be deleted.
     as_obj(&mut s, V);
@@ -2388,7 +2389,7 @@ fn has(cx: &mut dyn Cx) -> Function {
     s.end();
     s.end();
     s.end();
-    s.local_get(V).ref_test_non_null(object()).i32_eqz();
+    s.test_object(V).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(search);
     s.local_get(KEY).call(to_key).call(concat);
@@ -2419,7 +2420,7 @@ fn has_own(cx: &mut dyn Cx) -> Function {
     s.global_get(convert).call(throw);
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
     s.local_get(K).ref_as_non_null().call(own);
@@ -2456,7 +2457,7 @@ fn set_proto() -> Function {
     s.if_(BlockType::Empty);
     s.i32_const(1).global_set(runtime::G_INDEX_PROTO);
     s.end();
-    s.local_get(P).ref_test_non_null(object());
+    s.test_object(P);
     s.if_(BlockType::Empty);
     as_obj(&mut s, O);
     s.local_get(P)
@@ -2493,7 +2494,7 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
         (1, jsval()),
     ]);
     let mut s = f.instructions();
-    s.local_get(SRC).ref_test_non_null(object());
+    s.test_object(SRC);
     s.if_(BlockType::Empty);
     {
         as_obj(&mut s, SRC);
@@ -2804,7 +2805,7 @@ fn for_in_keys(cx: &mut dyn Cx) -> Function {
         s.local_get(OUT).return_();
     }
     s.end();
-    s.local_get(V).ref_test_non_null(object()).i32_eqz();
+    s.test_object(V).i32_eqz();
     s.if_(BlockType::Empty);
     s.i32_const(0).array_new_default(T_KEYS).return_();
     s.end();
@@ -2895,7 +2896,7 @@ fn create(cx: &mut dyn Cx) -> Function {
     const P: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(P).ref_test_non_null(object());
+    s.test_object(P);
     s.if_(BlockType::Empty);
     s.i32_const(CLASS_PLAIN);
     as_obj(&mut s, P);
@@ -2943,7 +2944,7 @@ fn regexp_data(cx: &mut dyn Cx) -> Function {
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
     s.struct_get(T_OBJECT, F_CLASS)
@@ -3000,7 +3001,7 @@ fn state_data(cx: &mut dyn Cx, class: i32) -> Function {
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
     s.struct_get(T_OBJECT, F_CLASS).i32_const(CLASS_MASK).i32_and();
@@ -3025,7 +3026,7 @@ fn to_primitive_value(cx: &mut dyn Cx) -> Function {
     const HINT: u32 = 1;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
     s.local_get(HINT).call(to_primitive).return_();
@@ -3047,7 +3048,7 @@ fn get_prototype_of(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(convert).call(throw);
     s.end();
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
     s.struct_get(T_OBJECT, F_PROTO).local_tee(P).ref_is_null();
@@ -3068,7 +3069,7 @@ fn instance_of(cx: &mut dyn Cx, b: Builtin) -> Function {
     const P: u32 = 2;
     let mut f = Function::new([(2, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(object()).i32_eqz();
+    s.test_object(V).i32_eqz();
     s.if_(BlockType::Empty);
     s.i32_const(0).return_();
     s.end();
@@ -3129,7 +3130,7 @@ fn error_stack(cx: &mut dyn Cx) -> Function {
     let mut f = Function::new([(1, jsval())]);
     let mut s = f.instructions();
     s.local_get(R).call(to_string).global_get(frame).call(concat).local_set(S);
-    s.local_get(R).ref_test_non_null(object());
+    s.test_object(R);
     s.if_(BlockType::Empty);
     as_obj(&mut s, R);
     s.global_get(stack).local_get(S).i32_const(HIDDEN).call(define);
@@ -3191,7 +3192,7 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
         s.end();
         return f;
     }
-    s.local_get(opt).ref_test_non_null(object());
+    s.test_object(opt);
     s.if_(BlockType::Empty);
     as_obj(&mut s, opt);
     s.global_get(cause).call(lookup).ref_is_null().i32_eqz();
@@ -3488,7 +3489,7 @@ fn error_to_string(cx: &mut dyn Cx) -> Function {
     const T: u32 = 5;
     let mut f = Function::new([(2, rt(true, T_STRING)), (1, jsval())]);
     let mut s = f.instructions();
-    s.local_get(THIS).ref_test_non_null(object()).i32_eqz();
+    s.test_object(THIS).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(not_obj).call(throw);
     s.end();
@@ -3655,7 +3656,7 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(convert).call(throw);
     s.end();
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Result(rt(false, T_KEYS)));
     as_obj(&mut s, V);
     s.call(own_keys);
@@ -3669,7 +3670,7 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
     // `Object.getOwnPropertyNames` of a string: its indices, then `length`.
     let length = (which == 3).then(|| cx.str("length"));
     if length.is_some() {
-        s.local_get(V).ref_test_non_null(string()).i32_add();
+        s.test_string(V).i32_add();
     }
     s.array_new_default(T_VALS).local_set(OUT);
     count_loop(&mut s, I, N, |s| {
@@ -3691,7 +3692,7 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
         s.array_set(T_VALS);
     });
     if let Some(length) = length {
-        s.local_get(V).ref_test_non_null(string());
+        s.test_string(V);
         s.if_(BlockType::Empty);
         s.local_get(OUT).local_get(N).global_get(length).array_set(T_VALS);
         s.local_get(N).i32_const(1).i32_add().local_set(N);

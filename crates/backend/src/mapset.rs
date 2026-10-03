@@ -28,6 +28,7 @@
 //! symbols by content (symbols then compare by identity), objects by an identity hash kept in the
 //! high bits of `class` (assigned on first use from `G_ID_HASH`), anything else a constant.
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::{Builtin, MAP_KIND_SET, MapOp};
 use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
 
@@ -331,14 +332,14 @@ fn hash(cx: &mut dyn Cx) -> Function {
     hash_f64(&mut s, BITS);
     s.return_();
     s.end();
-    s.local_get(V).ref_test_non_null(runtime::string());
+    s.test_string(V);
     s.if_(BlockType::Empty);
     s.local_get(V)
         .ref_cast_non_null(runtime::string())
         .call(string_hash);
     s.return_();
     s.end();
-    s.local_get(V).ref_test_non_null(runtime::object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     s.local_get(V).ref_cast_non_null(runtime::object()).call(id);
     s.return_();

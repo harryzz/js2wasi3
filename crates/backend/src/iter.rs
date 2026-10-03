@@ -13,6 +13,7 @@
 //! Arrays and strings don't look at `Symbol.iterator` (a replaced `Array.prototype[Symbol.iterator]`
 //! isn't seen).
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::ErrorKind;
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, ValType};
 
@@ -172,8 +173,7 @@ impl Helper {
                 let (result, not_obj) = (cx.str("Iterator result "), cx.str(" is not an object"));
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
-                s.local_get(0)
-                    .ref_test_non_null(runtime::object())
+                s.test_object(0)
                     .i32_eqz();
                 s.if_(BlockType::Empty);
                 s.global_get(result);
@@ -701,8 +701,7 @@ fn close(cx: &mut dyn Cx) -> Function {
         empty_args(&mut s);
         s.global_get(ret).call(call_value).local_set(R);
         s.local_get(THROWING).i32_eqz();
-        s.local_get(R)
-            .ref_test_non_null(runtime::object())
+        s.test_object(R)
             .i32_eqz();
         s.i32_and();
         s.if_(BlockType::Empty);
@@ -788,7 +787,7 @@ fn proto_values(cx: &mut dyn Cx, kind: i32, typed: bool) -> Function {
     const O: u32 = 3;
     let mut f = Function::new([(1, rt(true, runtime::T_OBJECT))]);
     let mut s = f.instructions();
-    s.local_get(THIS).ref_test_non_null(runtime::object());
+    s.test_object(THIS);
     runtime::is_string(&mut s, THIS);
     s.i32_or().i32_eqz();
     s.if_(BlockType::Empty);
@@ -866,7 +865,7 @@ fn next(cx: &mut dyn Cx) -> Function {
     const MORE: u32 = 5;
     let mut f = Function::new([(2, jsval()), (1, ValType::I32)]);
     let mut s = f.instructions();
-    s.local_get(THIS).ref_test_non_null(runtime::object());
+    s.test_object(THIS);
     s.if_(BlockType::Empty);
     s.local_get(THIS)
         .ref_cast_non_null(runtime::object())

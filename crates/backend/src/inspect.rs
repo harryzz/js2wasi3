@@ -14,6 +14,7 @@
 //! Anything else traps (`inspect_object_not_implemented`, F24): other objects, arrays with extra
 //! properties or more than 100 elements, objects with symbol keys, nested errors.
 
+use crate::runtime::JsTest;
 use wasm_encoder::{BlockType, Function, InstructionSink, ValType};
 
 use crate::array::{self, F_ELEMS, F_LENGTH};
@@ -269,7 +270,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         // node's formatValue: a custom inspector's string is printed as is, another value is
         // formatted in its place; `v` itself means none. Its `depth` argument is what's left.
         let format_value = ih(cx, Helper::FormatValue);
-        s.local_get(V).ref_test_non_null(runtime::object());
+        s.test_object(V);
         s.if_(BlockType::Empty);
         s.local_get(V);
         s.i32_const(2).local_get(DEPTH).i32_sub().ref_i31();
@@ -478,7 +479,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         s.local_get(DEPTH).local_get(INDENT).call(f_iter).return_();
         s.end();
     }
-    s.local_get(V).ref_test_non_null(runtime::object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     object::is_error(&mut s, V);
     s.if_(BlockType::Empty);
@@ -2407,8 +2408,7 @@ fn format_checked(cx: &mut dyn Cx) -> Function {
             .local_get(NESTED)
             .call(value);
     };
-    s.local_get(V)
-        .ref_test_non_null(runtime::object())
+    s.test_object(V)
         .i32_eqz();
     s.if_(BlockType::Empty);
     call_value(&mut s);

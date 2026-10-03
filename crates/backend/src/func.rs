@@ -16,6 +16,7 @@
 //! Built like the other prototypes ([`crate::object`]), but a `$function` itself (F47): callable
 //! ([`Helper::Empty`]), not a constructor; `length: 0`, `name: ""`, real `call`, `apply`, `bind`.
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::{Builtin, ErrorKind};
 use wasm_encoder::{BlockType, Function, HeapType, ValType};
 
@@ -358,11 +359,11 @@ impl Helper {
                 let mut f = Function::new([(2, jsval())]);
                 let mut s = f.instructions();
                 s.local_get(0).local_get(NT).local_get(2).call(code).local_set(R);
-                s.local_get(NT).ref_test_non_null(runtime::object());
+                s.test_object(NT);
                 s.if_(BlockType::Empty);
                 s.local_get(NT).global_get(prototype).call(get).local_set(P);
                 // Not an object (`null` too): the built-in's own prototype stays.
-                s.local_get(P).ref_test_non_null(runtime::object());
+                s.test_object(P);
                 s.if_(BlockType::Empty);
                 s.local_get(R).local_get(P).call(set_proto);
                 s.end();
@@ -611,7 +612,7 @@ fn class_heritage(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     // How node shows the value: objects as `#<Name>`.
     let show = |s: &mut wasm_encoder::InstructionSink, v: u32| {
-        s.local_get(v).ref_test_non_null(runtime::object());
+        s.test_object(v);
         s.if_(BlockType::Result(runtime::string_ref()));
         s.local_get(v)
             .ref_cast_non_null(runtime::object())
@@ -672,7 +673,7 @@ fn class_setup(cx: &mut dyn Cx) -> Function {
     s.struct_set(T_OBJECT, object::F_PROTO);
     s.end();
     s.i32_const(object::CLASS_PLAIN);
-    s.local_get(PP).ref_test_non_null(runtime::object());
+    s.test_object(PP);
     s.if_(BlockType::Result(rt(true, T_OBJECT)));
     s.local_get(PP).ref_cast_non_null(runtime::object());
     s.else_();
@@ -716,7 +717,7 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
             js2wasi3_ir::well_known_symbol("hasInstance").expect("well-known"),
         ));
         let what = cx.str("[Symbol.hasInstance]");
-        s.local_get(F).ref_test_non_null(runtime::object());
+        s.test_object(F);
         s.if_(BlockType::Empty);
         s.local_get(F).call(sym).call(get).local_tee(P);
         s.call(is_nullish).i32_eqz();
@@ -748,8 +749,7 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
         .array_get(T_VALS)
         .local_set(F);
     s.br(0).end().end();
-    s.local_get(V)
-        .ref_test_non_null(runtime::object())
+    s.test_object(V)
         .i32_eqz();
     s.if_(BlockType::Empty);
     s.i32_const(0).return_();
@@ -791,7 +791,7 @@ fn ctor_return(cx: &mut dyn Cx, derived: bool) -> Function {
     const THIS: u32 = 1;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(runtime::object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     s.local_get(V).return_();
     s.end();
@@ -1005,8 +1005,7 @@ fn list_from_array_like(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.i32_const(0).array_new_default(T_VALS).return_();
     s.end();
-    s.local_get(V)
-        .ref_test_non_null(runtime::object())
+    s.test_object(V)
         .i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(not_obj).call(throw);

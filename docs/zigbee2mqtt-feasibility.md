@@ -24,7 +24,9 @@ start-restart-start equal node's apart from:
   patched (F273);
 - startup is slow: 3–5 s from the MQTT connect to `Zigbee2MQTT started!` (node: < 1 s), so mqtt.ts's 2 s
   republish timer fires and `bridge/state` online is published twice. Compute, not I/O: mqtt.js round trips are
-  ~2× node's (F299);
+  ~2× node's (F299). **T69**: half of it was wasmtime's copying GC thrashing (the live set, ~30 MiB, fills the
+  semi-space before the heap grows); with `-O gc-heap-initial-size=268435456` (now in `tasks/T68-files/`) and T69's
+  type tests, connect → started is 1 s with one `online` publish, as in node;
 - the old socket's `close` on a restart is logged after the new socket opens (node: before the restart, F300);
 - SIGTERM/SIGINT don't reach the guest, so a host kill skips zigbee2mqtt's stop path (F298);
 - timestamps are UTC (node: local time, F182).

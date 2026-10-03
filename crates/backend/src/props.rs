@@ -16,6 +16,7 @@
 //! Arrays: attributes of indices and `length` other than the defaults (or those of a sealed /
 //! frozen array) aren't representable: `defineProperty` traps on them.
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::{ErrorKind, PrivateKind};
 use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
 
@@ -812,13 +813,13 @@ fn define_property(cx: &mut dyn Cx) -> Function {
         s.local_get(K).ref_as_non_null().call(concat);
         s.call(throw);
     };
-    s.local_get(OV).ref_test_non_null(object()).i32_eqz();
+    s.test_object(OV).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(non_object).call(throw);
     s.end();
     s.local_get(OV).ref_cast_non_null(object()).local_set(O);
     s.local_get(KEY).call(to_key).local_set(K);
-    s.local_get(D).ref_test_non_null(object()).i32_eqz();
+    s.test_object(D).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(not_desc);
     s.local_get(D).call(to_string).call(concat);
@@ -1307,7 +1308,7 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(convert).call(throw);
     s.end();
-    s.local_get(V).ref_test_non_null(object()).i32_eqz();
+    s.test_object(V).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(G_UNDEFINED).return_();
     s.end();
@@ -1448,7 +1449,7 @@ fn integrity(op: u8) -> Function {
     const A: u32 = 4;
     let mut f = Function::new([(1, rt(true, T_OBJECT)), (3, ValType::I32)]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(object()).i32_eqz();
+    s.test_object(V).i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(V).return_();
     s.end();
@@ -1511,7 +1512,7 @@ fn test_integrity(op: u8, module: bool) -> Function {
     const A: u32 = 4;
     let mut f = Function::new([(1, rt(true, T_OBJECT)), (3, ValType::I32)]);
     let mut s = f.instructions();
-    s.local_get(V).ref_test_non_null(object()).i32_eqz();
+    s.test_object(V).i32_eqz();
     s.if_(BlockType::Empty);
     s.i32_const((op != 0) as i32).return_();
     s.end();
@@ -1656,7 +1657,7 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
             .call(throw_read);
         s.end();
     }
-    s.local_get(O).ref_test_non_null(object());
+    s.test_object(O);
     s.if_(BlockType::Result(ValType::I32));
     as_obj(&mut s, O);
     s.local_get(SYM).ref_cast_non_null(string()).call(find);
@@ -1741,7 +1742,7 @@ fn private_has(cx: &mut dyn Cx) -> Function {
     const O: u32 = 1;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(O).ref_test_non_null(object()).i32_eqz();
+    s.test_object(O).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(search);
     s.local_get(SYM).ref_cast_non_null(string()).call(concat);

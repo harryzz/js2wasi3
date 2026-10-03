@@ -23,6 +23,7 @@
 //! Not modelled: subclassing through species (`then` and the statics always make `%Promise%`
 //! promises), `Symbol.toStringTag`, `Promise.any` (AggregateError).
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::{Builtin, ErrorKind};
 use wasm_encoder::{BlockType, Catch, Function, HeapType, InstructionSink, ValType};
 
@@ -458,7 +459,7 @@ impl Helper {
                     s.return_();
                     s.end();
                 }
-                s.local_get(V).ref_test_non_null(runtime::object());
+                s.test_object(V);
                 s.if_(BlockType::Empty);
                 s.local_get(V)
                     .ref_cast_non_null(runtime::object())
@@ -491,7 +492,7 @@ impl Helper {
                 s.local_get(V).call(to_string);
                 s.else_();
                 s.local_get(V).call(typeof_string);
-                s.local_get(V).ref_test_non_null(runtime::object());
+                s.test_object(V);
                 s.if_(BlockType::Result(string_ref()));
                 s.global_get(tail);
                 s.else_();
@@ -558,8 +559,7 @@ pub(crate) fn native(
 
 /// Throw TypeError `msg` unless `this` is an object.
 fn check_object(s: &mut InstructionSink, msg: u32, throw: u32) {
-    s.local_get(THIS)
-        .ref_test_non_null(runtime::object())
+    s.test_object(THIS)
         .i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(msg).call(throw);
@@ -827,8 +827,7 @@ fn resolve(cx: &mut dyn Cx) -> Function {
     s.global_get(cycle).global_get(G_UNDEFINED).call(new_error);
     s.call(reject).return_();
     s.end();
-    s.local_get(X)
-        .ref_test_non_null(runtime::object())
+    s.test_object(X)
         .i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(P).local_get(X).call(fulfill).return_();
@@ -1683,7 +1682,7 @@ fn check_callback(cx: &mut dyn Cx) -> Function {
         s.if_(BlockType::Result(string_ref()));
         s.local_get(CB).call(to_string);
         s.else_();
-        s.local_get(CB).ref_test_non_null(runtime::object());
+        s.test_object(CB);
         s.if_(BlockType::Result(string_ref()));
         s.local_get(CB)
             .ref_cast_non_null(runtime::object())

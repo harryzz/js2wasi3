@@ -9,6 +9,7 @@
 //! algorithm D for division (Hacker's Delight's `divmnu`), and `& | ^` on two's-complement copies.
 //! Results over 2^30 bits throw V8's RangeError.
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::{BinOp, ErrorKind, NumericOp};
 use wasm_encoder::{
     BlockType, ConstExpr, Function, GlobalSection, GlobalType, HeapType, InstructionSink, ValType,
@@ -1880,7 +1881,7 @@ fn to_numeric(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(V).return_();
     s.end();
-    s.local_get(V).ref_test_non_null(runtime::object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     s.local_get(V)
         .ref_cast_non_null(runtime::object())

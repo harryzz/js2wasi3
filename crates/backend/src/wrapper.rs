@@ -8,6 +8,7 @@
 //! (enumerable, read-only, non-configurable) and `length` (hidden too), so keys, `for-in`,
 //! `hasOwnProperty` and failed writes need nothing new.
 
+use crate::runtime::JsTest;
 use js2wasi3_ir::{Builtin, ErrorKind};
 use wasm_encoder::{BlockType, Function, HeapType, ValType};
 
@@ -182,7 +183,7 @@ fn to_object(cx: &mut dyn Cx) -> Function {
         crate::bigint::is_bigint(&mut s, V);
         wrap(&mut s, proto);
     }
-    s.local_get(V).ref_test_non_null(string());
+    s.test_string(V);
     wrap(&mut s, protos[1]);
     s.local_get(V).call(is_number);
     wrap(&mut s, protos[2]);
@@ -273,7 +274,7 @@ fn tag(cx: &mut dyn Cx) -> Function {
     s.global_get(names[3]);
     s.local_get(P).call(is_number);
     s.typed_select(jsval());
-    s.local_get(P).ref_test_non_null(string());
+    s.test_string(P);
     s.typed_select(jsval());
     s.local_get(P).ref_test_non_null(symbol());
     s.typed_select(jsval());

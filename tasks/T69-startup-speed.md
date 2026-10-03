@@ -1,6 +1,6 @@
 # T69: zigbee2mqtt start-up speed under js2wasi3: profile, then fix the top costs (F299)
 
-Status: todo (handoff written 2026-10-03) | Depends on: T68, T67
+Status: done (2026-10-03) | Depends on: T68, T67
 
 ## Goal
 Find out where js2wasi3's zigbee2mqtt spends the 3–5 s that node does in under a second, and make the largest
@@ -66,17 +66,103 @@ of the command fixtures against HEAD for each fix (explain every change); the li
 Progress.
 
 ## Acceptance
-- [ ] A profile of the slow window, summarized (top functions, where the time goes) in Notes / Result.
-- [ ] At least the largest compiler/runtime cost reduced, with its before/after numbers.
-- [ ] The live start measured again; follow-ups for what's left.
+- [x] A profile of the slow window, summarized (top functions, where the time goes) in Notes / Result.
+- [x] At least the largest compiler/runtime cost reduced, with its before/after numbers.
+- [x] The live start measured again; follow-ups for what's left.
 
 ## Notes / Result
-(to be written)
+**Profile** (`perf record -e cpu-clock -k CLOCK_REALTIME -g` + `wasmtime --profile=perfmap`, live start, debug log level):
+the 4 s from `Connected to MQTT server` to `Zigbee2MQTT started!` were ~70% wasmtime's copying GC
+(`CopyingHeap::forward` 21.8%, memmove 13.1%, `scan_field` 11.3%, `collect_increment` 11.0%) and ~20% js2wasi3's
+code; over the whole run GC 51%, guest 41%. With the GC heap fixed, guest code is 80%: property access (`find_own`,
+`get`, `string_eq`, `own_get`, `string_hash`, `to_property_key` ≈ 27%), RegExp (`$$reRun` 4%), and (before the fix
+below) wasmtime's `is_subtype` libcall, 14.4%.
+
+**What changed**
+- Host: wasmtime 49's copying collector only grows once live data fills the active semi-space (`should_collect_first`:
+  `usage < capacity / 2`, capacity = both spaces; unchanged on `main`). zigbee2mqtt's ~30 MiB live set then sits in a
+  64 MiB heap: 54 collections copying ~32 MiB and freeing ≤ 1.5 KiB each. `tasks/T68-files/build-run.sh` and
+  `restart-run.sh` pass `-O gc-heap-initial-size=${Z2M_GC_HEAP:-268435456}` to `compile` and `run` (64 MiB isn't
+  enough); README shows the flag. Not in `diff.sh`/test262 (user's choice: GC-timing bugs like F157 stay visible).
+  Standalone reproducer `tasks/T69-files/gc-thrash.wat` (1,837 ms / 249 collections → 284 ms / 1) and a wasmtime issue
+  draft `tasks/T69-files/wasmtime-issue.md`, **not posted** (F304).
+- Compiler: `runtime::JsTest` (`test_string(v)`, `test_object(v)`): value tests of a local check the abstract
+  `array`/`struct` kind and exact final types before the concrete `$string`/`$object` test, which wasmtime compiles to
+  an `is_subtype` libcall for every non-exact type. 77 sites in 10 backend files; same results.
+  `props.mjs` micro-benchmark ~10% faster (419–478 → 375–417 ms), `is_subtype` 10.6% → 0; zigbee2mqtt 14.4% → 1.7%
+  of samples. Size: +2.4% `hello.js`, +0.4% `node/net.js`, +0.02% zigbee2mqtt.
+- Fixture `tests/fixtures/objects/value-kinds.js` (every kind of value through truthiness, `===`/`==`, `+`, `typeof`,
+  conversions, property reads/writes, `in`, `instanceof`, keys).
+
+**Live result** (256 MiB heap + `JsTest`, zigbee2mqtt rebuilt from this tree): connect 08:21:08 → started 08:21:09,
+**one** `bridge/state` online (node's behaviour); production capture empty. One-second log stamps are too coarse to
+time the window further; the deterministic no-coordinator start is ~0.2 s with the big heap.
+
+**Commands run**: `diff.sh` on objects, classes, arrays, builtins, exceptions, `values.js`, the new fixture (all pass);
+`cargo test --release --no-fail-fast` (pass); live runs `$S/perf-run.sh` (dbg, big, m64, t69), GC traces
+(`WASMTIME_LOG=wasmtime::runtime::vm::gc=trace`), micro-benchmarks `gc.mjs`, `props.mjs`, `gc-thrash.wat`.
+Bytes: every program changes (the runtime's type tests); explained above.
+
+**Left** (follow-ups): F302 `Symbol.prototype.constructor` traps; F303 property access (constant-key hashes at build
+time, hash in the index, identity fast path), the 19 stack-value tests, 61k GC-root globals; F304 the upstream issue.
+
+**Next smallest step**: T70 (`fs.promises` after a turn, F300); a speed task for F303 when start-up matters again.
 
 ## Checklist
-- [ ] profile
-- [ ] fix(es) + fixtures
-- [ ] live rerun, docs, follow-ups
+- [x] profile
+- [x] fix(es) + fixtures
+- [x] live rerun, docs, follow-ups
 
 ## Progress
 - 2026-10-03: handoff written after T67 (`main` at `0bf597c`); `--profile=guest` and `perf` + `--profile=perfmap` checked on a small component.
+- 2026-10-03: started; tools unchanged. perf needs `-e cpu-clock` (WSL: no PMU) for `-k CLOCK_REALTIME`; with
+  `--profile=perfmap` a `.cwasm` keeps its names (`wasm[0]::function[N]::name`). Live run under perf
+  (`$S/perf-run.sh`: T68's flags, MQTT watched, production capture empty): connect 07:37:45 → started 07:37:49, two
+  `bridge/state` online. **The slow window is ~70% wasmtime's copying GC** (`CopyingHeap::forward` 21.8%, memmove
+  13.1%, `scan_field` 11.3%, `collect_increment` 11.0%, `is_subtype_cached` 5.6%, roots ~6%); guest code ~20%
+  (`find_own` 1.9, `string_hash` 1.5, `get` 1.5, `to_number` 1.2, `box_number` 1.2, `js_less` 1.1). Whole run: GC
+  51%, guest 41%.
+- 2026-10-03: same `.cwasm` compiled and run with `-O gc-heap-initial-size=268435456`: connect 07:40:12 → started
+  07:40:13, **one** `bridge/state` online (node's behaviour); GC 19% of the run, guest 68%. Heap size alone meets the
+  goal; the component can't set it.
+- 2026-10-03: why: `WASMTIME_LOG=wasmtime::runtime::vm::gc=trace` on a 200k-iteration allocation loop: the GC heap
+  stays at 64 KiB (`capacity = 0x00010000`) for all 6,241 collections; utilization after each is ~26%, too low for
+  wasmtime 49's copying collector to grow it. Micro-benchmark (`gc.mjs`: optional live set N, then 2M short-lived
+  objects; node 25 ms): N=0 default 12.9–15.0 s, `drc` collector 13.9 s, initial heap 1 MiB 2.3 s, 16 MiB 1.8 s,
+  256 MiB 2.8 s; N=200k (heap grows with the live set) default 4.9 s ≈ 256 MiB 5.3 s. Per collection with a small live
+  set the fixed cost is root tracing (`trace_vmctx_roots` + `RegisteredType::root`/drop + `from_wasm_type` ≈ 57% of
+  N=0's time; 628 ref globals there, **61,442 in zigbee2mqtt**, 60,276 of them string constants). A live "ballast"
+  array to force growth is worse (1 MiB: 30 s, 4 MiB: 136 s: copied every collection). 20k extra string globals made
+  N=0 faster (10.7 s): the bigger live set grew the heap.
+- 2026-10-03: user decision: pass the GC heap size in the zigbee2mqtt scripts and document it (not in `diff.sh` or the
+  test262 runner: GC-timing bugs such as F157 stay visible), then compiler-side GC cost; draft a wasmtime issue for
+  review (nothing posted). 64 MiB initial heap does **not** help zigbee2mqtt (window 5 s, two online publishes, GC
+  49%); 256 MiB does.
+- 2026-10-03: why (wasmtime 49.0.1 source, `store/gc.rs` `should_collect_first`; unchanged on `main` 3be9345 of
+  2026-10-02): on a failed allocation wasmtime collects instead of growing while `last post-GC bytes + needed <
+  capacity / 2`. For the copying collector `capacity` is both semi-spaces, so the threshold is a **full** active
+  semi-space: it grows only when live data alone fills it. zigbee2mqtt (trace, run without coordinator): live data
+  after each collection doubles 32 KiB → 32 MiB, then stays at 0x1fff9f0–0x2000000 in a 64 MiB heap: 54 collections,
+  each ~110 ms (copying ~32 MiB) and freeing a few hundred bytes to ~1.5 KiB. Upstream context: wasmtime#13470 (the
+  heuristic from #12942 regresses allocation-heavy workloads; maintainers keep it for RSS ∝ live set and would
+  accept a tunable ratio; not landed). Our case is the copying collector's own bound, not #13470's small-live-set one.
+- 2026-10-03: standalone reproducer `tasks/T69-files/gc-thrash.wat` (no js2wasi3: a live list of 29,000 × 1 KiB
+  just under a 32 MiB semi-space, then 8M small garbage structs): default 1,837 ms / 249 collections (live stuck at
+  0x1e17230 in a 64 MiB heap), `-O gc-heap-initial-size=536870912` 284 ms / 1 collection.
+- 2026-10-03: scripts: `tasks/T68-files/build-run.sh` and `restart-run.sh` pass `-O gc-heap-initial-size=${Z2M_GC_HEAP:-268435456}`
+  to `wasmtime compile` and `run` (they must agree; `Z2M_GC_HEAP=0` is wasmtime's default). Issue draft for review:
+  `tasks/T69-files/wasmtime-issue.md` (not posted).
+- 2026-10-03: with a big heap the guest is 68% of the run; top: property access (`find_own` 6.7%, `get` 4.6%,
+  `string_eq` 3.7%, `string_hash` 3.0%, `own_get` 2.7%, `to_property_key` 2.3%, `property_value` 1.9%) and RegExp
+  (`$$reRun` 3.8%). Micro-benchmark `props.mjs` (1,000 instances with 10 fields, a method through the prototype,
+  option reads, a missing property; 300 rounds) has the same profile plus wasmtime's `is_subtype_cached` +
+  `is_subtype` libcall 10.6%. Cause (cranelift `func_environ/gc.rs`): `ref.test`/`ref.cast` against a concrete
+  non-final type (`$string` = 2, `$object` = 4) is inline only for the exact type; anything else (oddballs,
+  number boxes, arrays, functions, symbols) calls `is_subtype`, even for "no". `to_boolean`, `strict_eq`, `js_add`,
+  `get`, `set`, `to_string`, `to_number`, `to_property_key` all test values against `$string`/`$object`.
+- 2026-10-03: fix: `runtime::JsTest` (`test_string(v)`, `test_object(v)` on `InstructionSink`): the abstract
+  `array`/`struct` kind first (header, inline), exact final types (number, oddball; function, array), then the
+  concrete test only where it is exact or rare; same results. 77 `local_get(x).ref_test_non_null(object()/string())`
+  sites rewritten (19 tests of values on the stack left as they are). `props.mjs` 419–478 ms → 375–417 ms (~10%),
+  `is_subtype` 10.6% → 0. `diff.sh` on objects, classes, arrays, builtins, exceptions, `values.js`: 106 pass.
+- 2026-10-03: live run with the new build (256 MiB): connect → started 1 s, one online publish. Fixture `objects/value-kinds.js` equals node (found F302 on the way: pre-existing, same trap at HEAD). Docs (README flag, design.md D3 note, feasibility), follow-ups F299 ticked, F302–F304. Done.

@@ -441,9 +441,63 @@ pub fn symbol() -> HeapType {
 
 /// Push "local `v` is a string" (a `$string` that isn't a `$symbol`).
 pub fn is_string(s: &mut InstructionSink, v: u32) {
-    s.local_get(v).ref_test_non_null(string());
+    s.test_string(v);
     s.local_get(v).ref_test_non_null(symbol()).i32_eqz();
     s.i32_and();
+}
+
+/// Type tests of a local that avoid wasmtime's `is_subtype` libcall (T69). A `ref.test` against a
+/// concrete type that isn't `final` (`$string`, `$object`) is an inline compare only when the value's
+/// type is that exact type; any other value (a number box, an oddball, an array, a function) costs a
+/// call into the runtime, even when the answer is no. These first test the abstract `array` /
+/// `struct` kinds (in the object header, inline) and exact `final` types, so the concrete test runs
+/// only where it's cheap or rare. The results are those of the plain `ref.test`.
+pub trait JsTest {
+    /// Push "local `v` is a `$string`" (a string or a symbol).
+    fn test_string(&mut self, v: u32) -> &mut Self;
+    /// Push "local `v` is an `$object`" (any object, including arrays and functions).
+    fn test_object(&mut self, v: u32) -> &mut Self;
+}
+
+impl JsTest for InstructionSink<'_> {
+    fn test_string(&mut self, v: u32) -> &mut Self {
+        self.local_get(v).ref_test_non_null(HeapType::Abstract {
+            shared: false,
+            ty: wasm_encoder::AbstractHeapType::Array,
+        });
+        self.if_(BlockType::Result(ValType::I32));
+        self.local_get(v).ref_test_non_null(string());
+        self.else_();
+        self.i32_const(0);
+        self.end()
+    }
+
+    fn test_object(&mut self, v: u32) -> &mut Self {
+        self.local_get(v).ref_test_non_null(HeapType::Abstract {
+            shared: false,
+            ty: wasm_encoder::AbstractHeapType::Struct,
+        });
+        self.if_(BlockType::Result(ValType::I32));
+        // The non-object structs a value can be, then the commonest objects, all exact final types.
+        self.local_get(v).ref_test_non_null(number());
+        self.local_get(v).ref_test_non_null(oddball());
+        self.i32_or();
+        self.if_(BlockType::Result(ValType::I32));
+        self.i32_const(0);
+        self.else_();
+        self.local_get(v).ref_test_non_null(HeapType::Concrete(T_FUNCTION));
+        self.local_get(v).ref_test_non_null(HeapType::Concrete(T_ARRAY));
+        self.i32_or();
+        self.if_(BlockType::Result(ValType::I32));
+        self.i32_const(1);
+        self.else_();
+        self.local_get(v).ref_test_non_null(object());
+        self.end();
+        self.end();
+        self.else_();
+        self.i32_const(0);
+        self.end()
+    }
 }
 
 pub fn object() -> HeapType {
@@ -1251,7 +1305,7 @@ fn to_number(cx: &mut dyn Cx) -> Function {
     }
     // ToNumber of a string: the prelude's StringToNumber (T21). It's linked when the IR converts a
     // JS value to a number; a runtime-only conversion in a module without one traps (F85).
-    s.local_get(V).ref_test_non_null(string());
+    s.test_string(V);
     s.if_(BlockType::Empty);
     match str_to_num {
         Some(f) => s.local_get(V).call(f).return_(),
@@ -1260,7 +1314,7 @@ fn to_number(cx: &mut dyn Cx) -> Function {
     s.end();
     // An object's ToPrimitive is a string: "" is 0; one starting with `[` ("[object Object]") or a
     // letter other than `I` (an error's "Name: message") can't be numeric, so NaN. Others: parsed.
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     s.local_get(V)
         .ref_cast_non_null(object())
@@ -1323,7 +1377,7 @@ fn to_boolean(cx: &mut dyn Cx) -> Function {
     s.array_len().i32_const(0).i32_ne();
     s.else_();
     // Objects and symbols are truthy.
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.local_get(V).ref_test_non_null(symbol());
     s.i32_or();
     s.if_(BlockType::Result(ValType::I32));
@@ -1372,8 +1426,8 @@ fn is_nullish() -> Function {
 
 /// Push "locals `a` and `b` are both strings".
 fn both_strings(s: &mut InstructionSink, a: u32, b: u32) {
-    s.local_get(a).ref_test_non_null(string());
-    s.local_get(b).ref_test_non_null(string());
+    s.test_string(a);
+    s.test_string(b);
     s.i32_and();
 }
 
@@ -1434,8 +1488,8 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
     let mut f = Function::new([(2, ValType::I32)]);
     let mut s = f.instructions();
     // Two objects compare by identity; one object compares as its ToPrimitive.
-    s.local_get(0).ref_test_non_null(object());
-    s.local_get(1).ref_test_non_null(object());
+    s.test_object(0);
+    s.test_object(1);
     s.i32_and();
     s.if_(BlockType::Empty);
     s.local_get(0).local_get(1).ref_eq().return_();
@@ -1447,7 +1501,7 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
     s.local_get(NA).local_get(NB).i32_and().return_();
     s.end();
     for v in [0, 1] {
-        s.local_get(v).ref_test_non_null(object());
+        s.test_object(v);
         s.if_(BlockType::Empty);
         s.local_get(v)
             .ref_cast_non_null(object())
@@ -1509,7 +1563,7 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Symbol));
     s.else_();
-    s.local_get(V).ref_test_non_null(string());
+    s.test_string(V);
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::String));
     s.else_();
@@ -1524,7 +1578,7 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
         s.i32_const(typeof_code(TypeofTag::BigInt));
         s.else_();
     }
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Object));
     s.else_();
@@ -1674,7 +1728,7 @@ fn to_string(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(no_str).call(throw);
     s.end();
-    s.local_get(V).ref_test_non_null(string());
+    s.test_string(V);
     s.if_(BlockType::Empty);
     as_string(&mut s, V);
     s.return_();
@@ -1694,7 +1748,7 @@ fn to_string(cx: &mut dyn Cx) -> Function {
         s.i32_const(10).call(big_to_string).return_();
         s.end();
     }
-    s.local_get(V).ref_test_non_null(object());
+    s.test_object(V);
     s.if_(BlockType::Empty);
     s.local_get(V)
         .ref_cast_non_null(object())
@@ -1727,7 +1781,7 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     let mut f = Function::new([]);
     let mut s = f.instructions();
     for v in [0, 1] {
-        s.local_get(v).ref_test_non_null(object());
+        s.test_object(v);
         s.if_(BlockType::Empty);
         s.local_get(v)
             .ref_cast_non_null(object())
@@ -1736,8 +1790,8 @@ fn js_add(cx: &mut dyn Cx) -> Function {
             .local_set(v);
         s.end();
     }
-    s.local_get(0).ref_test_non_null(string());
-    s.local_get(1).ref_test_non_null(string());
+    s.test_string(0);
+    s.test_string(1);
     s.i32_or();
     s.if_(BlockType::Result(jsval()));
     s.local_get(0).call(to_string);
@@ -2097,7 +2151,7 @@ fn js_less(cx: &mut dyn Cx, swap: bool, or_equal: bool) -> Function {
     let mut f = Function::new([(3, ValType::I32)]);
     let mut s = f.instructions();
     for v in [A, B] {
-        s.local_get(v).ref_test_non_null(object());
+        s.test_object(v);
         s.if_(BlockType::Empty);
         s.local_get(v)
             .ref_cast_non_null(object())
