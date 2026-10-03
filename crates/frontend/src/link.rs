@@ -2786,9 +2786,9 @@ mod tests {
         let pj = ("/w/node_modules/p/package.json", r#"{"exports": {"./a": "./a.js"}}"#);
         let e = err("import 'p/b';\n", &[pj]);
         assert!(e.contains("Package subpath './b' is not defined by \"exports\" in /w/node_modules/p/package.json imported from /w/app/main.js (ERR_PACKAGE_PATH_NOT_EXPORTED)"), "{e}");
-        let e = err("import 'nope';\nimport 'zlib';\n", &[]);
+        let e = err("import 'nope';\nimport 'worker_threads';\n", &[]);
         assert!(e.contains("main.js:1:8: error: Cannot find package 'nope' imported from /w/app/main.js (ERR_MODULE_NOT_FOUND)"), "{e}");
-        assert!(e.contains("main.js:2:8: error: unsupported: node's built-in module `zlib`"), "{e}");
+        assert!(e.contains("main.js:2:8: error: unsupported: node's built-in module `worker_threads`"), "{e}");
         // A package without `"type"` whose file has no ESM syntax is CommonJS (T54).
         let l = join(&[
             ("/w/app/main.js", "import c from 'c';\nconsole.log(c);\n"),
@@ -2823,8 +2823,8 @@ mod tests {
         let at = l.source.find("$$errInvalidArgType").unwrap() as u32;
         assert!(map.is_node_module(at) && !map.is_node_module(l.source.find("console.log(").unwrap() as u32));
         // `require` of one js2wasi3 lacks: a build error where it always runs, else node's error.
-        let e = join(&[("/w/main.js", "import 'zlib';\n")]).err().unwrap().to_string();
-        assert!(e.contains("unsupported: node's built-in module `zlib` (planned: F238)"), "{e}");
+        let e = join(&[("/w/main.js", "import 'worker_threads';\n")]).err().unwrap().to_string();
+        assert!(e.contains("unsupported: node's built-in module `worker_threads` (planned: F238)"), "{e}");
         let l = join(&[("/w/main.cjs", "try { require('node:nope'); } catch {}\n")]).unwrap();
         assert!(l.source.contains("No such built-in module: node:nope"), "{}", l.source);
     }
@@ -2879,8 +2879,8 @@ mod tests {
         // Offsets in a wrapper map back to the file.
         let at = s.find("exports.a").unwrap() as u32;
         assert_eq!(map.locate(at), ("/w/a.js", 2, 1));
-        let e = join(&[("/w/main.js", "require('zlib');\n")]).err().unwrap().to_string();
-        assert!(e.contains("main.js:1:9: error: unsupported: node's built-in module `zlib`"), "{e}");
+        let e = join(&[("/w/main.js", "require('worker_threads');\n")]).err().unwrap().to_string();
+        assert!(e.contains("main.js:1:9: error: unsupported: node's built-in module `worker_threads`"), "{e}");
         // T60: only node's exact built-in names: `process/` is a package (readable-stream's).
         let l = join(&[("/w/main.js", "require('process/');\n")]).unwrap();
         assert!(l.source.contains(r#"["process/", -1]"#), "{}", l.source);

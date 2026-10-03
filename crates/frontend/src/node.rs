@@ -26,6 +26,22 @@ const MODULES: &[(&str, &str)] = &[
     ("querystring", include_str!("../node/querystring.js")),
     // `fs`'s `wasi:filesystem` imports (T59): an ES module (a CommonJS file can't `import`).
     ("internal/wasi_fs", include_str!("../node/wasi_fs.mjs")),
+    // `crypto` (T65): random bytes from `wasi:random`, hashes and AES in JS.
+    ("crypto", include_str!("../node/crypto.js")),
+    ("internal/wasi_random", include_str!("../node/wasi_random.mjs")),
+    // Built-ins that load with node's shape; their facility is missing (T65).
+    ("child_process", include_str!("../node/child_process.js")),
+    ("dgram", include_str!("../node/dgram.js")),
+    ("dns", include_str!("../node/dns.js")),
+    ("http", include_str!("../node/http.js")),
+    ("http2", include_str!("../node/http2.js")),
+    ("https", include_str!("../node/https.js")),
+    ("module", include_str!("../node/module.js")),
+    ("perf_hooks", include_str!("../node/perf_hooks.js")),
+    ("tls", include_str!("../node/tls.js")),
+    ("zlib", include_str!("../node/zlib.js")),
+    ("internal/builtin_data", include_str!("../node/builtin_data.js")),
+    ("internal/unavailable", include_str!("../node/unavailable.js")),
     // `stream` (T60): node 24's lib (`scripts/gen-node-streams.mjs`) over support modules partly from
     // readable-stream 4.7.0 (`errors`, `primordials`, `util`, `util/inspect`, `validators`).
     ("stream", include_str!("../node/stream/stream.js")),
@@ -89,6 +105,7 @@ pub(crate) const GLOBALS: &[(&str, &str, &str)] = &[
     ("TextDecoder", "node:internal/encoding", "TextDecoder"),
     ("URL", "node:internal/url", "URL"),
     ("URLSearchParams", "node:internal/url", "URLSearchParams"),
+    ("crypto", "node:crypto", "webcrypto"),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if
@@ -175,6 +192,45 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
             "notDeepStrictEqual", "notEqual", "notStrictEqual", "ok", "partialDeepStrictEqual", "rejects", "strict",
             "strictEqual", "throws",
         ]),
+        // T65's modules that build `module.exports` in loops or with accessors: node 24's enumerable keys.
+        "node:dns" => Some(&[
+            "ADDRCONFIG", "ADDRGETNETWORKPARAMS", "ALL", "BADFAMILY", "BADFLAGS", "BADHINTS", "BADNAME", "BADQUERY",
+            "BADRESP", "BADSTR", "CANCELLED", "CONNREFUSED", "DESTRUCTION", "EOF", "FILE", "FORMERR", "LOADIPHLPAPI",
+            "NODATA", "NOMEM", "NONAME", "NOTFOUND", "NOTIMP", "NOTINITIALIZED", "REFUSED", "Resolver", "SERVFAIL",
+            "TIMEOUT", "V4MAPPED", "getDefaultResultOrder", "getServers", "lookup", "lookupService", "promises",
+            "resolve", "resolve4", "resolve6", "resolveAny", "resolveCaa", "resolveCname", "resolveMx",
+            "resolveNaptr", "resolveNs", "resolvePtr", "resolveSoa", "resolveSrv", "resolveTlsa", "resolveTxt",
+            "reverse", "setDefaultResultOrder", "setServers",
+        ]),
+        "node:http" => Some(&[
+            "Agent", "ClientRequest", "CloseEvent", "IncomingMessage", "METHODS", "MessageEvent", "OutgoingMessage",
+            "STATUS_CODES", "Server", "ServerResponse", "WebSocket", "_connectionListener", "createServer", "get",
+            "globalAgent", "maxHeaderSize", "request", "setGlobalProxyFromEnv", "setMaxIdleHTTPParsers",
+            "validateHeaderName", "validateHeaderValue",
+        ]),
+        "node:module" => Some(&[
+            "Module", "SourceMap", "_cache", "_debug", "_extensions", "_findPath", "_initPaths", "_load",
+            "_nodeModulePaths", "_pathCache", "_preloadModules", "_resolveFilename", "_resolveLookupPaths",
+            "builtinModules", "constants", "createRequire", "enableCompileCache", "findPackageJSON", "findSourceMap",
+            "flushCompileCache", "getCompileCacheDir", "getSourceMapsSupport", "globalPaths", "isBuiltin", "register",
+            "registerHooks", "runMain", "setSourceMapsSupport", "stripTypeScriptTypes", "syncBuiltinESMExports",
+        ]),
+        "node:perf_hooks" => Some(&[
+            "Performance", "PerformanceEntry", "PerformanceMark", "PerformanceMeasure", "PerformanceObserver",
+            "PerformanceObserverEntryList", "PerformanceResourceTiming", "constants", "createHistogram",
+            "eventLoopUtilization", "monitorEventLoopDelay", "performance", "timerify",
+        ]),
+        "node:zlib" => Some(&[
+            "BrotliCompress", "BrotliDecompress", "Deflate", "DeflateRaw", "Gunzip", "Gzip", "Inflate", "InflateRaw",
+            "Unzip", "ZstdCompress", "ZstdDecompress", "brotliCompress", "brotliCompressSync", "brotliDecompress",
+            "brotliDecompressSync", "codes", "constants", "crc32", "createBrotliCompress", "createBrotliDecompress",
+            "createDeflate", "createDeflateRaw", "createGunzip", "createGzip", "createInflate", "createInflateRaw",
+            "createUnzip", "createZstdCompress", "createZstdDecompress", "deflate", "deflateRaw", "deflateRawSync",
+            "deflateSync", "gunzip", "gunzipSync", "gzip", "gzipSync", "inflate", "inflateRaw", "inflateRawSync",
+            "inflateSync", "unzip", "unzipSync", "zstdCompress", "zstdCompressSync", "zstdDecompress",
+            "zstdDecompressSync",
+        ]),
+
         _ => None,
     }
 }
@@ -182,7 +238,7 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
 /// Is this built-in an ES module? Only js2wasi3's own that import WASI interfaces (T59); the others,
 /// `node:internal/…` ones included, are CommonJS.
 pub(crate) fn is_esm(path: &str) -> bool {
-    path == "node:internal/wasi_fs"
+    path == "node:internal/wasi_fs" || path == "node:internal/wasi_random"
 }
 
 /// Is this program path a built-in module's?

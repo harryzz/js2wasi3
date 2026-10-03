@@ -346,6 +346,17 @@ the setters are the basic parser with a state override. IDNA is reduced (ASCII l
 `internal/querystring` are node 24.21.0's lib ported by `tasks/T64-files/port-url.py` (primordials become local
 functions, node's errors local ones). A `[util.inspect.custom]` method's string result is re-indented when nested,
 as node does (`inspect.rs` `Reindent`).)
+(T65: `crypto` is a global too, `node:crypto`'s `webcrypto`. **`node:crypto`** is JS: random bytes from
+`wasi:random/random` `get-random-bytes` through the ES module `node:internal/wasi_random` (as T59's `wasi_fs`),
+the hashes and AES over typed arrays (32-bit word pairs for SHA-512; AES T-tables built at load), CCM per
+RFC 3610; node's error codes and OpenSSL's messages. **Load-only built-ins** (`http`, `https`, `http2`, `tls`,
+`dgram`, `dns`, `zlib`, `perf_hooks`, `module`, `child_process`) are hand-written with node 24's exports: what can
+work without the facility does (`http.Agent`, header validation, `zlib.crc32`, `module._nodeModulePaths`), the rest
+throws `<module>.<name>() isn't available in js2wasi3 (<why>)` from `node:internal/unavailable`. Their constants
+come from `node:internal/builtin_data`, generated from node 24.21.0 by `tasks/T65-files/gen-data.mjs`.
+`child_process` behaves as if no program existed (`spawn <file> ENOENT`, node's event order): WASI has no
+processes. `createRequire` returns a `require` that throws `MODULE_NOT_FOUND`: modules are linked at build time.
+Modules that build `module.exports` in loops list their names in `node::exports` for ES named imports.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

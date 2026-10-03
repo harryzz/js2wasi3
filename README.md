@@ -119,6 +119,12 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - Web globals node has (T64): `URL`/`URLSearchParams` (the WHATWG parser, written from the URL Standard) and
   node's `url` (`parse`, `format`, `resolve`, `fileURLToPath`, `pathToFileURL`, `urlToHttpOptions`) and
   `querystring`; `TextEncoder`/`TextDecoder` (UTF-8, UTF-16, windows-1252); `DataView`.
+- `crypto` (T65): random values from `wasi:random` (`randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`,
+  the `crypto` global), `createHash`/`createHmac` (md5, sha1, sha224/256/384/512), AES-128/192/256 in ECB, CBC,
+  CTR and CCM (`createCipheriv`/`createDecipheriv`), `timingSafeEqual`. Built-ins that load with node's shape
+  while their facility is missing (T65): `http`, `https`, `http2`, `tls`, `dgram`, `dns`, `zlib` (`crc32`
+  works), `perf_hooks`, `module` (`createRequire` fails with `MODULE_NOT_FOUND`), and `child_process` (every
+  spawn fails with `ENOENT`, as for a missing program).
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
@@ -127,7 +133,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
 Not yet: many built-ins (`Intl`, `WeakRef`), sloppy-mode CommonJS semantics, most of node's built-in
-modules (`crypto`, `url`, `child_process`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+modules (`net`, working `http`, `zlib`, `worker_threads`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

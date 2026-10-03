@@ -101,6 +101,8 @@ real ones are winston, winston-syslog, safe-stable-stringify (item 6) and srvx (
    `net.Socket` stub, as with the stubs.
 3. **node built-ins that only need to load** (`child_process`, `dns`, `dgram`, `tls`, `http(s)`, `http2`, `zlib`,
    `perf_hooks`, `module`) and a **`crypto` subset** (`randomBytes`, `randomUUID`, `createHash`, AES).
+   *Done in T65 (2026-10-02)*: with only `net` stubbed (`T63_GLOBALS=0 tasks/T65-files/build-run.sh`) the graph
+   builds (89.0 s, 32.5 MB) and runs to `Opening TCP socket with 127.0.0.1:6638`, then the `net.Socket` stub.
 4. **`net.Socket` over `wasi:sockets`** in the event loop: the milestone's blocker.
 5. **Compiler speed**: fewer inference rounds; `wasmtime compile` memory.
 6. **Milestone**: zigbee2mqtt patches (ajv standalone, srvx lazy, version lookup, external JS off, native addons)
