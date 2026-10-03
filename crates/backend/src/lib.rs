@@ -172,7 +172,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     // A user world's imports come after the host's (T20 slice 5).
     let user_imports = import_list.len() as u32 + lifted.len() as u32;
     let payload_base = user_imports + module.imports.len() as u32;
-    let func_base = payload_base + abi::PAYLOAD_OPS * payloads.len() as u32;
+    // A command with non-blocking imports (T66: `wasi:sockets`) also imports each boundary
+    // type's cancel-read, after the other intrinsics.
+    let command_waits = command.is_some() && module.imports.iter().any(|x| !x.sig.blocking);
+    let cancel_base = payload_base + abi::PAYLOAD_OPS * payloads.len() as u32;
+    let cancels = if command_waits { payloads.len() as u32 } else { 0 };
+    let func_base = cancel_base + cancels;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let runtime_globals = runtime::runtime_globals(
         module.bigint,
@@ -181,8 +186,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         module.big_typed,
     );
     let host_base = runtime_globals + abi as u32;
+    // A command with non-blocking imports (T66: `wasi:sockets`) keeps a library's pending
+    // imports and streams ([`abi::LIB_GLOBALS`]) after its host globals.
+    let command_host = host::GLOBALS + exits as u32 * host::EXIT_GLOBALS;
+    let lib_base = if command.is_some() { host_base + command_host } else { host_base };
     let host_globals = if command.is_some() {
-        host::GLOBALS + exits as u32 * host::EXIT_GLOBALS
+        command_host + command_waits as u32 * abi::LIB_GLOBALS
     } else if module.init.is_some() || module.exports.iter().any(|x| x.sig.is_async) {
         abi::LIB_GLOBALS
     } else {
@@ -219,8 +228,11 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         bump: runtime_globals,
         user_imports,
         payload_base,
+        cancel_base: command_waits.then_some(cancel_base),
         payloads: payloads.clone(),
         host_base,
+        lib_base,
+        command_waits,
         func_base,
         type_ids: HashMap::new(),
         helper_base: func_base + n + adapted.len() as u32 + 3 * lifted.len() as u32,
@@ -274,6 +286,13 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
                 &op.name(p),
                 wasm_encoder::EntityType::Function(ty),
             );
+        }
+    }
+    if command_waits {
+        let ty = e.type_id(vec![ValType::I32], vec![ValType::I32]);
+        for p in &payloads {
+            let name = abi::cancel_read_name(p);
+            imports.import(&p.module, &name, wasm_encoder::EntityType::Function(ty));
         }
     }
     // The exception tag (`runtime::TAG`) comes with the JS runtime.
@@ -384,7 +403,17 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             &ConstExpr::i32_const(abi::HEAP_BASE),
         );
     }
-    if command.is_none() && host_globals == abi::LIB_GLOBALS {
+    for _ in 0..if command.is_some() { command_host } else { 0 } {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
+        );
+    }
+    if (command.is_none() && host_globals == abi::LIB_GLOBALS) || command_waits {
         // `abi::LIB_GLOBALS`: `init`'s state and error, an async call's state (T20).
         for ty in abi::lib_global_types() {
             let init = if ty == ValType::I32 {
@@ -404,16 +433,6 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
                 &init,
             );
         }
-    }
-    for _ in 0..if command.is_some() { host_globals } else { 0 } {
-        globals.global(
-            GlobalType {
-                val_type: ValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i32_const(0),
-        );
     }
     for g in &module.globals {
         let init = match (g.ty, g.init) {
@@ -524,6 +543,12 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         for (k, op) in abi::PayloadOp::ALL.iter().enumerate() {
             let at = payload_base + (i as u32) * abi::PAYLOAD_OPS + k as u32;
             fnames.append(at, &format!("{}#{}", p.module, op.name(p)));
+        }
+    }
+    if command_waits {
+        for (i, p) in payloads.iter().enumerate() {
+            let at = cancel_base + i as u32;
+            fnames.append(at, &format!("{}#{}", p.module, abi::cancel_read_name(p)));
         }
     }
     for (i, f) in module.functions.iter().enumerate() {
@@ -846,9 +871,16 @@ struct Emitter<'m> {
     user_imports: u32,
     /// The intrinsics of the boundary's futures (T20 slice 6a).
     payload_base: u32,
+    /// The cancel-read imports, one per boundary type (T66: a command waiting for imports).
+    cancel_base: Option<u32>,
     payloads: Vec<ir::Payload>,
     /// Global index of the first host global (commands).
     host_base: u32,
+    /// Global index of the first of [`abi::LIB_GLOBALS`] (a library's, or a command's after its
+    /// host globals, T66).
+    lib_base: u32,
+    /// A command waits for non-blocking imports in its event loop (T66).
+    command_waits: bool,
     /// Number of imported functions: the IR function `i` has index `func_base + i`.
     func_base: u32,
     type_ids: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
@@ -888,6 +920,14 @@ impl runtime::Cx for Emitter<'_> {
 
     fn host_globals(&mut self) -> u32 {
         self.host_base
+    }
+
+    fn lib_globals(&mut self) -> u32 {
+        self.lib_base
+    }
+
+    fn command_waits(&mut self) -> bool {
+        self.command_waits
     }
 
     fn to_int32(&mut self) -> u32 {
@@ -1092,6 +1132,10 @@ impl runtime::Cx for Emitter<'_> {
 
     fn payload_count(&mut self) -> u32 {
         self.payloads.len() as u32
+    }
+
+    fn payload_cancel(&mut self, id: u32) -> Option<u32> {
+        self.cancel_base.map(|b| b + id)
     }
 
     fn payload_is_stream(&mut self, id: u32) -> bool {

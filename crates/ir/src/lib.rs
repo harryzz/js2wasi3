@@ -1244,6 +1244,9 @@ pub enum StreamOp {
     /// `(chunk, w, id) -> jsval`: [`StreamOp::Write`] blocking until it's all written (T59):
     /// `true`, or `false` if the reader dropped its end.
     WriteSync,
+    /// `(h, id)`: cancel the read in progress on the readable end `h`, if any (T66): its promise
+    /// settles now. Only a command waiting for non-blocking imports cancels; elsewhere a no-op.
+    CancelRead,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1467,7 +1470,9 @@ impl Intrinsic {
             Intrinsic::Stream(op) => match op {
                 StreamOp::Read | StreamOp::ReadSync => (&[I32, I32], Some(JsVal)),
                 StreamOp::Write | StreamOp::WriteSync => (&[JsVal, I32, I32], Some(JsVal)),
-                StreamOp::DropReadable | StreamOp::DropWritable => (&[I32, I32], None),
+                StreamOp::DropReadable | StreamOp::DropWritable | StreamOp::CancelRead => {
+                    (&[I32, I32], None)
+                }
             },
             Intrinsic::Map(op) => match op {
                 MapOp::New(_) => (&[], Some(JsVal)),
@@ -1685,6 +1690,7 @@ impl Intrinsic {
                 StreamOp::WriteSync => "stream_write_sync",
                 StreamOp::DropReadable => "stream_drop_readable",
                 StreamOp::DropWritable => "stream_drop_writable",
+                StreamOp::CancelRead => "stream_cancel_read",
             },
             Intrinsic::Typed(op) => match op {
                 TypedOp::New => "typed_new",

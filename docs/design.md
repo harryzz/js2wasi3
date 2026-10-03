@@ -357,6 +357,16 @@ come from `node:internal/builtin_data`, generated from node 24.21.0 by `tasks/T6
 `child_process` behaves as if no program existed (`spawn <file> ENOENT`, node's event order): WASI has no
 processes. `createRequire` returns a `require` that throws `MODULE_NOT_FOUND`: modules are linked at build time.
 Modules that build `module.exports` in loops list their names in `node::exports` for ES named imports.)
+(T66: **`wasi:sockets/*` imports are non-blocking** in a command, unlike T59's other WASI imports: an `async func`
+gives a promise, a returned `stream<u8>` is an async iterable of `Uint8Array`s (`$$StreamReader`, with a `cancel()`
+for a read in progress: `__intrinsic_stream_cancel_read`), a `stream<u8>` argument is pumped from an async iterable,
+a `future` is a promise. Such a command (`command_waits` in the backend) keeps a library's pending-call globals after
+its host globals, waits in `run`'s waitable set, applies their events in its callback and waits while any are
+pending; it also imports each boundary type's sync cancel-read. **`node:net`** is JS over the ES module
+`node:internal/wasi_sockets`: `Socket` is node 24's `stream.Duplex` (writes go through a queue into the `send`
+stream; the `receive` stream is pushed with backpressure), `Server` binds, listens and wraps each accepted handle;
+`node:internal/net` has `isIP`, address formatting and node's errors for WASI error codes, and `lookupAll` for
+`net` and `dns.lookup`.)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),

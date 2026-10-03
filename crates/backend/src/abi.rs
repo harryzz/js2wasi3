@@ -123,6 +123,9 @@ pub enum Helper {
     /// readable end; `v` (one `list<T>`-shaped chunk) is written after the call returns
     /// (`$$StreamDefer`, `$$StreamFlush`).
     StreamLowerSync(u32),
+    /// `(h: i32)` (T66): cancel the read in progress on the readable end `h` of stream type `p`,
+    /// if there is one, and handle its end like its event (the promise settles now).
+    StreamCancelRead(u32),
 }
 
 impl Helper {
@@ -160,6 +163,7 @@ impl Helper {
             Helper::StreamReadSync(_) => "stream_read_sync",
             Helper::StreamWriteSync(_) => "stream_write_sync",
             Helper::StreamLowerSync(_) => "stream_lower_sync",
+            Helper::StreamCancelRead(_) => "stream_cancel_read",
         }
     }
 
@@ -189,6 +193,7 @@ impl Helper {
             }
             Helper::StreamLower(_) | Helper::StreamLowerSync(_) => (vec![runtime::jsval()], vec![I32]),
             Helper::BlockOn => (vec![I32], vec![I32]),
+            Helper::StreamCancelRead(_) => (vec![I32], vec![]),
             Helper::FutureLiftSync(_) | Helper::StreamReadSync(_) => (vec![I32], vec![runtime::jsval()]),
             Helper::StreamWriteSync(_) => (vec![runtime::jsval(), I32], vec![runtime::jsval()]),
             Helper::StreamRead(_) => (vec![I32], vec![runtime::jsval()]),
@@ -234,6 +239,7 @@ impl Helper {
             Helper::StreamReadSync(p) => stream_read_sync(cx, p),
             Helper::StreamWriteSync(p) => stream_write_sync(cx, p),
             Helper::StreamLowerSync(p) => stream_lower_sync(cx, p),
+            Helper::StreamCancelRead(p) => stream_cancel_read(cx, p),
             Helper::Utf8ToString => utf8_to_string(),
             Helper::StringToUtf8 => {
                 let realloc = cx.helper(runtime::Helper::Abi(Helper::Realloc));
@@ -244,7 +250,7 @@ impl Helper {
             Helper::Utf8Len => utf8_len(),
             Helper::Utf8Encode => utf8_encode(),
             Helper::Init => {
-                let base = cx.host_globals();
+                let base = cx.lib_globals();
                 let (init, fails, jobs) = cx.init_func();
                 let settle = jobs.then(|| cx.helper(runtime::Helper::Abi(Helper::Settle)));
                 module_init(base, init, fails, settle)
@@ -321,7 +327,7 @@ impl Helper {
             Helper::FromCodePoint => from_code_point(),
             Helper::CodePointAt0 => code_point_at_0(),
             Helper::Tick => {
-                let lib = cx.host_globals();
+                let lib = cx.lib_globals();
                 let im = cx.imports();
                 let run_due = cx.helper(runtime::Helper::Timer(timers::Helper::RunDue));
                 const R: u32 = 0;
@@ -354,9 +360,10 @@ impl Helper {
                 const INDEX: u32 = 1;
                 const PAYLOAD: u32 = 2;
                 const ENTRY: u32 = 3;
-                let lib = cx.host_globals();
+                let lib = cx.lib_globals();
                 let im = cx.imports();
-                let timers = im.list.contains(&Import::ClockNow);
+                // A command's timers are the host loop's (T66).
+                let timers = im.list.contains(&Import::ClockNow) && !cx.command_waits();
                 let asyncs: Vec<u32> = (0..cx.user_import_count())
                     .filter(|i| cx.user_import(*i).1.is_async)
                     .collect();
@@ -502,7 +509,7 @@ impl Helper {
                 f
             }
             Helper::End => {
-                let lib = cx.host_globals();
+                let lib = cx.lib_globals();
                 let im = cx.imports();
                 let timers = im.list.contains(&Import::ClockNow);
                 let disarm = timers.then(|| cx.helper(runtime::Helper::Host(host::Helper::Disarm)));
@@ -770,7 +777,7 @@ fn add_pending(
     extra: &[u32],
     count: bool,
 ) {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let im = cx.imports();
     let set = cx.helper(runtime::Helper::Obj(object::Helper::Set));
     let boxed = cx.helper(runtime::Helper::Box);
@@ -851,6 +858,12 @@ impl PayloadOp {
             PayloadOp::DropReadable | PayloadOp::DropWritable => (vec![I32], vec![]),
         }
     }
+}
+
+/// The (synchronous) cancel-read intrinsic of a boundary type, as wit-component names it (T66).
+pub fn cancel_read_name(p: &Payload) -> String {
+    let k = if p.stream { "stream" } else { "future" };
+    format!("[{k}-cancel-read-{}]{}", p.index, p.func)
 }
 
 /// The future and stream types at a module's boundary (its exports' and imports' signatures),
@@ -975,7 +988,7 @@ fn future_read(cx: &mut dyn Cx, id: u32) -> Function {
 
 /// `$future_lower(v) -> i32`: see [`Helper::FutureLower`].
 fn future_lower(cx: &mut dyn Cx, id: u32) -> Function {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let new = cx.payload_import(id, PayloadOp::New);
     let func_new = cx.helper(runtime::Helper::Func(crate::func::Helper::New));
     let resolve = cx.helper(runtime::Helper::Prom(promise::Helper::PromiseResolve));
@@ -1023,7 +1036,7 @@ fn writable_end(cx: &mut dyn Cx, s: &mut InstructionSink) {
 /// stored (it converts like a result; one that doesn't fit traps), then written; a write that
 /// doesn't finish at once waits in the pending table.
 fn future_write(cx: &mut dyn Cx, id: u32) -> Function {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let elem = cx.payload_elem(id);
     let write = cx.payload_import(id, PayloadOp::Write);
     let drop = cx.payload_import(id, PayloadOp::DropWritable);
@@ -1083,7 +1096,7 @@ fn stream_elem(cx: &mut dyn Cx, id: u32) -> (WitType, u64, u64, u64) {
 
 /// `$stream_lower(v) -> i32`: see [`Helper::StreamLower`].
 fn stream_lower(cx: &mut dyn Cx, id: u32) -> Function {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let new = cx.payload_import(id, PayloadOp::New);
     let (_, pump) = cx.stream_funcs();
     let boxed = cx.helper(runtime::Helper::Box);
@@ -1439,6 +1452,12 @@ fn stream_lower_sync(cx: &mut dyn Cx, id: u32) -> Function {
     let mut f = Function::new([(1, ValType::I64)]);
     let mut s = f.instructions();
     s.call(new).local_set(PAIR);
+    if cx.command_waits() {
+        // Counted like a pump (T66): `stream_dispatch` uncounts every dropped writable end.
+        let lib = cx.lib_globals();
+        s.global_get(lib + G_PENDING_N).i32_const(1).i32_add();
+        s.global_set(lib + G_PENDING_N);
+    }
     s.local_get(V);
     s.local_get(PAIR)
         .i64_const(32)
@@ -1456,9 +1475,44 @@ fn stream_lower_sync(cx: &mut dyn Cx, id: u32) -> Function {
     f
 }
 
+/// `$stream_cancel_read(h)`: see [`Helper::StreamCancelRead`]. Without the import (nothing waits
+/// for imports) there is nothing to cancel.
+fn stream_cancel_read(cx: &mut dyn Cx, id: u32) -> Function {
+    const H: u32 = 0;
+    const ST: u32 = 1;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let Some(cancel) = cx.payload_cancel(id) else {
+        f.instructions().end();
+        return f;
+    };
+    let lib = cx.lib_globals();
+    let get = cx.helper(runtime::Helper::Obj(object::Helper::Get));
+    let boxed = cx.helper(runtime::Helper::Box);
+    let event = cx.helper(runtime::Helper::Abi(Helper::Event));
+    let im = cx.imports();
+    let mut s = f.instructions();
+    s.global_get(lib + G_PENDING).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.global_get(lib + G_PENDING);
+    s.local_get(H).f64_convert_i32_u().call(boxed);
+    s.call(get).global_get(runtime::G_UNDEFINED).ref_eq();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    // A synchronous cancel (out of the waitable set) gives the read's end status: handled as
+    // its event.
+    s.local_get(H).i32_const(0).call(im.get(Import::WaitableJoin));
+    s.local_get(H).call(cancel).local_set(ST);
+    s.i32_const(EVENT_STREAM_READ).local_get(H).local_get(ST).call(event);
+    s.end();
+    f
+}
+
 /// `$stream_<op>(…, id)`: see [`Helper::Stream`]. `id` is one of the module's stream types.
 fn stream_dispatch(cx: &mut dyn Cx, op: StreamOp) -> Function {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let (params, _) = Helper::Stream(op).signature();
     let id = params.len() as u32 - 1;
     let streams: Vec<u32> = (0..cx.payload_count())
@@ -1474,6 +1528,7 @@ fn stream_dispatch(cx: &mut dyn Cx, op: StreamOp) -> Function {
             StreamOp::WriteSync => cx.helper(runtime::Helper::Abi(Helper::StreamWriteSync(p))),
             StreamOp::DropReadable => cx.payload_import(p, PayloadOp::DropReadable),
             StreamOp::DropWritable => cx.payload_import(p, PayloadOp::DropWritable),
+            StreamOp::CancelRead => cx.helper(runtime::Helper::Abi(Helper::StreamCancelRead(p))),
         };
         s.local_get(id).i32_const(p as i32).i32_eq();
         s.if_(BlockType::Empty);
@@ -1481,8 +1536,11 @@ fn stream_dispatch(cx: &mut dyn Cx, op: StreamOp) -> Function {
             s.local_get(i);
         }
         s.call(callee);
-        // (A command's blocking streams aren't counted: T59.)
-        if op == StreamOp::DropWritable && !cx.imports().list.contains(&Import::TaskReturn) {
+        // (A command's blocking streams aren't counted, T59, unless it waits for non-blocking
+        // imports, T66: then they are, see `stream_lower_sync`.)
+        if op == StreamOp::DropWritable
+            && (!cx.imports().list.contains(&Import::TaskReturn) || cx.command_waits())
+        {
             // The pump is over.
             s.global_get(lib + G_PENDING_N).i32_const(1).i32_sub();
             s.global_set(lib + G_PENDING_N);
@@ -1556,7 +1614,7 @@ const CALLBACK_WAIT: i32 = 2;
 
 /// `$async_step() -> i32`: see [`Helper::Step`].
 fn step(cx: &mut dyn Cx) -> Function {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let im = cx.imports();
     let timers = im.list.contains(&Import::ClockNow);
     // Something to wait for: timers, or (T20 slice 5b) `async func` imports.
@@ -1708,12 +1766,12 @@ const G_INIT_ERROR: u32 = 1;
 const G_PROMISE: u32 = 2;
 const G_FAILED: u32 = 3;
 const G_ERROR: u32 = 4;
-const G_WS: u32 = 5;
+pub(crate) const G_WS: u32 = 5;
 const G_BP: u32 = 6;
 /// The pending `async func` imports (T20 slice 5b): subtask handle → `[promise, ret, import]`
 /// (a JS array, made on first use), and how many there are.
 const G_PENDING: u32 = 7;
-const G_PENDING_N: u32 = 8;
+pub(crate) const G_PENDING_N: u32 = 8;
 /// The async call `task.return`ed and waits for its future writes (T20 slice 6a).
 const G_RETURNED: u32 = 9;
 
@@ -1905,7 +1963,7 @@ pub fn flat_result(sig: &AbiSig) -> Vec<ValType> {
 /// property if it has one, else the thrown value unless it's an Error (then the call traps), as
 /// in jco (T20). Without `throws` an exception (or an unhandled rejection) traps.
 pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode) -> Function {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let memory = needs_memory(sig);
     let has = |f: &dyn Fn(&AbiType) -> bool| sig.params.iter().any(f);
     let utf8_to_string = has(&|p| *p == AbiType::String)
@@ -2378,7 +2436,7 @@ pub fn async_callback(cx: &mut dyn Cx, finish: u32) -> Function {
 /// With futures at the boundary (T20 slice 6a), the call goes on after `task.return` until its
 /// future writes ended (the callback steps it again).
 fn complete(cx: &mut dyn Cx, s: &mut InstructionSink, finish: u32, code: u32) {
-    let lib = cx.host_globals();
+    let lib = cx.lib_globals();
     let step = cx.helper(runtime::Helper::Abi(Helper::Step));
     let end = cx.helper(runtime::Helper::Abi(Helper::End));
     let futures = cx.payload_count() > 0;

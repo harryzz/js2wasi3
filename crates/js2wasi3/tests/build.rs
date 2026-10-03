@@ -1056,7 +1056,7 @@ fn module_errors_are_diagnostics() {
     write("a.js", "export const x = 1;\n");
     write(
         "main.js",
-        "import { y } from './a.js';\nimport './b';\nimport 'lodash';\nimport 'node:net';\n",
+        "import { y } from './a.js';\nimport './b';\nimport 'lodash';\nimport 'node:worker_threads';\n",
     );
     let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
     assert!(!b.status.success());
@@ -1065,7 +1065,7 @@ fn module_errors_are_diagnostics() {
         "main.js:2:8: error: cannot find module `./b`",
         "help: node needs the file's extension: `./b.js`?",
         "main.js:3:8: error: Cannot find package 'lodash' imported from",
-        "main.js:4:8: error: unsupported: node's built-in module `node:net`",
+        "main.js:4:8: error: unsupported: node's built-in module `node:worker_threads`",
     ] {
         assert!(err.contains(want), "missing {want:?} in:\n{err}");
     }

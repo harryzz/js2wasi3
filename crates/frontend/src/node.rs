@@ -29,6 +29,11 @@ const MODULES: &[(&str, &str)] = &[
     // `crypto` (T65): random bytes from `wasi:random`, hashes and AES in JS.
     ("crypto", include_str!("../node/crypto.js")),
     ("internal/wasi_random", include_str!("../node/wasi_random.mjs")),
+    // `net` (T66): TCP over `wasi:sockets`, non-blocking on the event loop; `dns.lookup` uses its
+    // name lookup.
+    ("net", include_str!("../node/net.js")),
+    ("internal/net", include_str!("../node/net_support.js")),
+    ("internal/wasi_sockets", include_str!("../node/wasi_sockets.mjs")),
     // Built-ins that load with node's shape; their facility is missing (T65).
     ("child_process", include_str!("../node/child_process.js")),
     ("dgram", include_str!("../node/dgram.js")),
@@ -158,6 +163,13 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
             "getDefaultHighWaterMark", "isDestroyed", "isDisturbed", "isErrored", "isReadable", "isWritable",
             "pipeline", "promises", "setDefaultHighWaterMark",
         ]),
+        // `node/net.js` (T66): its methods aren't plain properties.
+        "node:net" => Some(&[
+            "BlockList", "BoundSocket", "Server", "Socket", "SocketAddress", "Stream", "_createServerHandle",
+            "_normalizeArgs", "connect", "createConnection", "createServer", "getDefaultAutoSelectFamily",
+            "getDefaultAutoSelectFamilyAttemptTimeout", "isIP", "isIPv4", "isIPv6", "setDefaultAutoSelectFamily",
+            "setDefaultAutoSelectFamilyAttemptTimeout",
+        ]),
         "node:events" => Some(&[
             "EventEmitter", "EventEmitterAsyncResource", "addAbortListener", "captureRejectionSymbol",
             "captureRejections", "defaultMaxListeners", "errorMonitor", "getEventListeners", "getMaxListeners", "init",
@@ -238,7 +250,9 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
 /// Is this built-in an ES module? Only js2wasi3's own that import WASI interfaces (T59); the others,
 /// `node:internal/…` ones included, are CommonJS.
 pub(crate) fn is_esm(path: &str) -> bool {
-    path == "node:internal/wasi_fs" || path == "node:internal/wasi_random"
+    path == "node:internal/wasi_fs"
+        || path == "node:internal/wasi_random"
+        || path == "node:internal/wasi_sockets"
 }
 
 /// Is this program path a built-in module's?

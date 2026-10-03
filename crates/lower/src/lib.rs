@@ -159,6 +159,8 @@ pub struct WorldImport {
 pub struct Boundary {
     pub exports: HashMap<String, WorldSig>,
     pub imports: HashMap<String, Vec<WorldImport>>,
+    /// A command's boundary (T66): its event loop waits for `async func` imports.
+    pub waits: bool,
 }
 
 impl Boundary {
@@ -1634,7 +1636,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 result = Err(Unsupported);
                 continue;
             }
-            if w.is_async && !self.boundary.is_some_and(|b| b.exports.values().any(|e| e.is_async)) {
+            if w.is_async && !self.boundary.is_some_and(|b| b.waits || b.exports.values().any(|e| e.is_async)) {
                 let what = format!(
                     "importing the `async func` `{}` in a world without an `async func` export (nothing would wait for it)",
                     w.wit_name
@@ -8385,6 +8387,7 @@ fn stream_op(name: &str) -> Option<ir::StreamOp> {
         "stream_drop_writable" => S::DropWritable,
         "stream_read_sync" => S::ReadSync,
         "stream_write_sync" => S::WriteSync,
+        "stream_cancel_read" => S::CancelRead,
         _ => return None,
     })
 }

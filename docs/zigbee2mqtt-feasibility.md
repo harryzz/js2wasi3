@@ -104,6 +104,9 @@ real ones are winston, winston-syslog, safe-stable-stringify (item 6) and srvx (
    *Done in T65 (2026-10-02)*: with only `net` stubbed (`T63_GLOBALS=0 tasks/T65-files/build-run.sh`) the graph
    builds (89.0 s, 32.5 MB) and runs to `Opening TCP socket with 127.0.0.1:6638`, then the `net.Socket` stub.
 4. **`net.Socket` over `wasi:sockets`** in the event loop: the milestone's blocker.
+   *Done in T66 (2026-10-02)*: with no built-in stubs (`T63_GLOBALS=0 tasks/T66-files/build-run.sh`) the graph
+   builds (93.8 s, 32.6 MB) and, with no coordinator listening, ends like node: `Socket error Error: connect
+   ECONNREFUSED 127.0.0.1:6638`, `Error while opening socket`, exit 1.
 5. **Compiler speed**: fewer inference rounds; `wasmtime compile` memory.
 6. **Milestone**: zigbee2mqtt patches (ajv standalone, srvx lazy, version lookup, external JS off, native addons)
    and the device modules (`--include`), run against a TCP coordinator stand-in and mosquitto.

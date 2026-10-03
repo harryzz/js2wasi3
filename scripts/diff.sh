@@ -71,7 +71,8 @@ one() {
     cat "$d/build.err" >"$diff"
     return
   fi
-  timeout "$TIMEOUT" wasmtime run -Sp3 "${wenv[@]}" "${wdir[@]}" "$d/x.wasm" "${args[@]}" >"$d/wasm.out" 2>"$d/wasm.err"
+  # Sockets (T66): TCP and name lookup on the host network, like node.
+  timeout "$TIMEOUT" wasmtime run -Sp3 -S inherit-network -S allow-ip-name-lookup "${wenv[@]}" "${wdir[@]}" "$d/x.wasm" "${args[@]}" >"$d/wasm.out" 2>"$d/wasm.err"
   echo $? >"$d/wasm.status"
   local ms=$(($(now_ms) - t0))
   local what=()

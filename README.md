@@ -125,6 +125,10 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   while their facility is missing (T65): `http`, `https`, `http2`, `tls`, `dgram`, `dns`, `zlib` (`crc32`
   works), `perf_hooks`, `module` (`createRequire` fails with `MODULE_NOT_FOUND`), and `child_process` (every
   spawn fails with `ENOENT`, as for a missing program).
+- `net` (T66): TCP clients and servers over `wasi:sockets` on the event loop (`net.Socket` is a `stream.Duplex`;
+  `connect`/`createConnection`, `createServer`/`listen`/`close`, `setTimeout`, `setKeepAlive`, node's errors such as
+  `connect ECONNREFUSED 127.0.0.1:1`), and `dns.lookup` over `wasi:sockets/ip-name-lookup`. wasmtime needs
+  `-S inherit-network` (and `-S allow-ip-name-lookup` for host names).
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,
@@ -133,7 +137,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
 Not yet: many built-ins (`Intl`, `WeakRef`), sloppy-mode CommonJS semantics, most of node's built-in
-modules (`net`, working `http`, `zlib`, `worker_threads`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+modules (working `http`, `tls`, `dgram`, `zlib`, `worker_threads`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

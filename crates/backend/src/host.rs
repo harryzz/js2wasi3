@@ -335,6 +335,9 @@ pub enum Helper {
     Tick,
     /// `()`: cancel the outstanding wait, if any.
     Disarm,
+    /// `()` (T66): a non-blocking import's event was applied: run the jobs and the `nextTick`
+    /// queue (catching exceptions), then report an unhandled rejection.
+    Jobs,
     /// `() -> i32`: the `run` export (async lift with callback).
     Run,
     /// `(event, index, payload: i32) -> i32`: its callback.
@@ -369,6 +372,7 @@ impl Helper {
             Helper::Loop => "event_loop",
             Helper::Tick => "timers_tick",
             Helper::Disarm => "cancel_wait",
+            Helper::Jobs => "import_jobs",
             Helper::Run => "run",
             Helper::Callback => "run_callback",
             Helper::Environment(0) => "wasi_environment",
@@ -389,7 +393,7 @@ impl Helper {
             Helper::Pump(_) | Helper::Step(_) | Helper::Flush | Helper::Loop | Helper::Run => {
                 (vec![], vec![I32])
             }
-            Helper::Tick | Helper::Disarm | Helper::AtExit => (vec![], vec![]),
+            Helper::Tick | Helper::Disarm | Helper::AtExit | Helper::Jobs => (vec![], vec![]),
             Helper::Callback => (vec![I32; 3], vec![I32]),
             Helper::Environment(_) => (vec![], vec![runtime::string_ref()]),
             Helper::Exit => (vec![ValType::F64], vec![]),
@@ -570,6 +574,26 @@ impl Helper {
                         .return_();
                 }
                 s.end();
+                if cx.command_waits() {
+                    // Non-blocking imports or stream copies pending (T66): wait for them.
+                    let lib = cx.lib_globals();
+                    s.global_get(err).i32_eqz();
+                    if exits {
+                        s.global_get(base + G_EXITED).i32_eqz().i32_and();
+                    }
+                    s.global_get(lib + abi::G_PENDING_N).i32_eqz().i32_eqz().i32_and();
+                    s.if_(BlockType::Empty);
+                    for p in &pumps {
+                        s.call(*p).drop();
+                    }
+                    s.global_get(ws)
+                        .i32_const(4)
+                        .i32_shl()
+                        .i32_const(CALLBACK_WAIT)
+                        .i32_or()
+                        .return_();
+                    s.end();
+                }
                 s.end();
                 if let Some(at_exit) = at_exit {
                     s.call(at_exit);
@@ -611,6 +635,45 @@ impl Helper {
                 s.end();
                 f
             }
+            Helper::Jobs => {
+                let drain = cx.helper(runtime::Helper::Prom(promise::Helper::Drain));
+                let ticks = cx
+                    .names("$ticks")
+                    .then(|| cx.helper(runtime::Helper::Timer(timers::Helper::RunTicks)));
+                let unhandled = cx.helper(runtime::Helper::Prom(promise::Helper::Unhandled));
+                let uncaught = cx.helper(runtime::Helper::Host(Helper::Uncaught));
+                let text = cx.helper(runtime::Helper::Prom(promise::Helper::UnhandledText));
+                let report = cx.helper(runtime::Helper::Host(Helper::Report));
+                let exits = cx.exits();
+                const R: u32 = 0;
+                let mut f = Function::new([(1, runtime::jsval())]);
+                let mut s = f.instructions();
+                s.block(BlockType::Result(runtime::jsval()));
+                if exits {
+                    s.block(BlockType::Empty);
+                }
+                s.try_table(BlockType::Empty, catches(exits));
+                s.call(drain);
+                if let Some(ticks) = ticks {
+                    s.call(ticks);
+                }
+                s.call(unhandled).local_tee(R).ref_is_null().i32_eqz();
+                s.if_(BlockType::Empty);
+                s.local_get(R).call(text).call(report);
+                s.end();
+                s.return_();
+                s.end();
+                s.unreachable();
+                if exits {
+                    // `process.exit` in a callback.
+                    s.end();
+                    s.return_();
+                }
+                s.end();
+                s.call(uncaught);
+                s.end();
+                f
+            }
             Helper::Disarm => {
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
@@ -644,6 +707,11 @@ impl Helper {
                 let mut f = Function::new([(1, runtime::jsval())]);
                 let mut s = f.instructions();
                 s.call(im.get(Import::WaitableSetNew)).global_set(ws);
+                if cx.command_waits() {
+                    // Non-blocking imports (T66) wait in the same set.
+                    let lib = cx.lib_globals();
+                    s.global_get(ws).global_set(lib + abi::G_WS);
+                }
                 s.block(BlockType::Result(runtime::jsval()));
                 if exits {
                     s.block(BlockType::Empty);
@@ -748,6 +816,14 @@ impl Helper {
                 let tick = cx.helper(runtime::Helper::Host(Helper::Tick));
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
+                if cx.command_waits() {
+                    // A non-blocking import returned or a stream copy ended (T66): settle it
+                    // (as a library's async call does, `abi::Helper::Event`), run the jobs.
+                    let event = cx.helper(runtime::Helper::Abi(abi::Helper::Event));
+                    let jobs = cx.helper(runtime::Helper::Host(Helper::Jobs));
+                    s.local_get(EVENT).local_get(INDEX).local_get(PAYLOAD).call(event);
+                    s.call(jobs);
+                }
                 // The wait ended: run the due timers.
                 s.local_get(EVENT).i32_const(EVENT_SUBTASK).i32_eq();
                 s.local_get(INDEX).global_get(G_WAIT).i32_eq().i32_and();

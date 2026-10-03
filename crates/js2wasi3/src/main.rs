@@ -569,8 +569,13 @@ fn main() -> anyhow::Result<()> {
                     let plain = i.module.split_once('@').map_or(i.module.as_str(), |(p, _)| p);
                     named.contains(&i.module.as_str()) || named.contains(&plain)
                 });
-                let mut b = js2wasi3_lower::Boundary::default();
-                import_boundary(&mut b, &ifaces, true);
+                let mut b = js2wasi3_lower::Boundary { waits: true, ..Default::default() };
+                // `wasi:sockets` (T66) is non-blocking: its `async func`s return promises, its
+                // streams are async iterables, waited for by `run`'s event loop. The others block.
+                let (sockets, others): (Vec<_>, Vec<_>) =
+                    ifaces.into_iter().partition(|i| i.module.starts_with("wasi:sockets/"));
+                import_boundary(&mut b, &others, true);
+                import_boundary(&mut b, &sockets, false);
                 Some(b)
             } else {
                 None

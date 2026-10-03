@@ -6,14 +6,25 @@
 // `ir::StreamOp` and crates/backend/src/abi.rs).
 
 // The stream's chunks, one per read, until the writer drops its end. Leaving early (`break`,
-// `return()`) drops the readable end, so the writer sees the stream end.
-async function* $$StreamReader(h, id) {
+// `return()`) drops the readable end, so the writer sees the stream end. Its `cancel()` (T66) also
+// cancels a read in progress (in a command waiting for imports: else a read in progress ends first).
+function $$StreamReader(h, id) {
+  const state = [false];
+  const chunks = $$StreamChunks(h, id, state);
+  chunks.cancel = function () {
+    state[0] = true;
+    __intrinsic_stream_cancel_read(h, id);
+  };
+  return chunks;
+}
+
+async function* $$StreamChunks(h, id, state) {
   try {
     let ended = false;
-    while (!ended) {
+    while (!ended && !state[0]) {
       const r = await __intrinsic_stream_read(h, id);
       ended = r[1];
-      if (r[0] !== undefined) {
+      if (r[0] !== undefined && !state[0]) {
         yield r[0];
       }
     }

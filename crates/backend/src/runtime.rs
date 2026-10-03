@@ -260,6 +260,10 @@ pub trait Cx {
     fn bump_global(&mut self) -> u32;
     /// Global index of the first host global (commands only, see [`crate::host`]).
     fn host_globals(&mut self) -> u32;
+    /// Global index of the first of `abi::LIB_GLOBALS` (T66: in a command, after the host's).
+    fn lib_globals(&mut self) -> u32;
+    /// A command whose event loop waits for non-blocking imports (T66).
+    fn command_waits(&mut self) -> bool;
     /// Function index of `$to_int32` (JS ToInt32 of an `f64`).
     fn to_int32(&mut self) -> u32;
     /// The host imports (commands; libraries with async exports, T20).
@@ -276,6 +280,8 @@ pub trait Cx {
     /// Its value type.
     fn payload_elem(&mut self, id: u32) -> Option<js2wasi3_ir::WitType>;
     fn payload_count(&mut self) -> u32;
+    /// The cancel-read import of boundary type `id` (T66: only a command waiting for imports).
+    fn payload_cancel(&mut self, id: u32) -> Option<u32>;
     /// Is it a `stream` (T20 slice 6b)?
     fn payload_is_stream(&mut self, id: u32) -> bool;
     /// Function indices of the prelude's `$$StreamReader` and `$$StreamPump` (T20 slice 6b):
