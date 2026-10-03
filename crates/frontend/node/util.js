@@ -230,7 +230,7 @@ function toUSVString(input) {
   return String(input).toWellFormed();
 }
 
-// `util.types`: from the runtime's built-in tags (no Proxy, DataView, WeakMap/WeakSet,
+// `util.types`: from the runtime's built-in tags (no Proxy, WeakMap/WeakSet,
 // SharedArrayBuffer or external values in js2wasi3).
 function tagOf(v) {
   return (typeof v === "object" && v !== null) || typeof v === "function" ? __intrinsic_builtin_tag(v) : undefined;
@@ -276,8 +276,8 @@ const types = {
     const t = tagOf(v);
     return t === "Number" || t === "String" || t === "Boolean" || t === "BigInt" || t === "Symbol";
   },
-  isArrayBufferView: (v) => typedNames.includes(tagOf(v)),
-  isDataView: no,
+  isArrayBufferView: (v) => typedNames.includes(tagOf(v)) || tagOf(v) === "DataView",
+  isDataView: isTag("DataView"),
   isTypedArray: (v) => typedNames.includes(tagOf(v)),
   isUint8Array: isTyped("Uint8Array"),
   isUint8ClampedArray: isTyped("Uint8ClampedArray"),

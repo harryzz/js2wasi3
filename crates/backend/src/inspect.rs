@@ -55,6 +55,9 @@ pub enum Helper {
     Group,
     /// `(n: i32) -> (ref $string)`: `n` spaces.
     Spaces,
+    /// `(s: (ref $string), n: i32) -> (ref $string)`: `n` spaces after each newline (T64: a custom
+    /// inspector's string, as node's formatValue indents it).
+    Reindent,
     /// `(s, width: i32, start: i32) -> (ref $string)`: `padStart` (start = 1) / `padEnd` with spaces.
     Pad,
     /// `(entries, n, sep) -> (ref $string)`.
@@ -89,6 +92,7 @@ impl Helper {
             Helper::Layout => "inspect_layout",
             Helper::Group => "inspect_group",
             Helper::Spaces => "spaces",
+            Helper::Reindent => "reindent",
             Helper::Pad => "pad",
             Helper::Join => "join_strings",
             Helper::MapSet => "inspect_map",
@@ -117,6 +121,7 @@ impl Helper {
             Helper::Layout => (vec![k, I32, I32, s, s, I32, I32], vec![s]),
             Helper::Group => (vec![k, I32, I32, I32], vec![rt(true, T_KEYS)]),
             Helper::Spaces => (vec![I32], vec![s]),
+            Helper::Reindent => (vec![s, I32], vec![s]),
             Helper::Pad => (vec![s, I32, I32], vec![s]),
             Helper::Join => (vec![k, I32, s], vec![s]),
             Helper::Props => (vec![rt(false, runtime::T_OBJECT), I32, I32, I32], vec![k]),
@@ -152,6 +157,7 @@ impl Helper {
             Helper::Layout => layout(cx),
             Helper::Group => group(cx),
             Helper::Spaces => spaces(),
+            Helper::Reindent => reindent(),
             Helper::Pad => pad(cx),
             Helper::Join => join(cx),
             Helper::MapSet => format_mapset(cx),
@@ -272,7 +278,8 @@ fn format(cx: &mut dyn Cx) -> Function {
         s.if_(BlockType::Empty);
         runtime::is_string(&mut s, R);
         s.if_(BlockType::Empty);
-        s.local_get(R).ref_cast_non_null(string()).return_();
+        let reindent = ih(cx, Helper::Reindent);
+        s.local_get(R).ref_cast_non_null(string()).local_get(INDENT).call(reindent).return_();
         s.end();
         s.local_get(R).local_get(DEPTH).local_get(INDENT).local_get(NESTED).call(format_value).return_();
         s.end();
@@ -2103,6 +2110,48 @@ fn spaces() -> Function {
     let mut f = Function::new([]);
     let mut s = f.instructions();
     s.i32_const(' ' as i32).local_get(0).array_new(T_STRING);
+    s.end();
+    f
+}
+
+fn reindent() -> Function {
+    const S: u32 = 0;
+    const IND: u32 = 1;
+    const N: u32 = 2;
+    const I: u32 = 3;
+    const J: u32 = 4;
+    const C: u32 = 5;
+    const OUT: u32 = 6;
+    let mut f = Function::new([(4, ValType::I32), (1, string_ref())]);
+    let mut s = f.instructions();
+    // The newlines.
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(S).array_len().i32_ge_u().br_if(1);
+    s.local_get(S).local_get(I).array_get_u(T_STRING).i32_const('\n' as i32).i32_eq();
+    s.local_get(N).i32_add().local_set(N);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(N).i32_eqz().local_get(IND).i32_eqz().i32_or();
+    s.if_(BlockType::Empty);
+    s.local_get(S).return_();
+    s.end();
+    s.i32_const(' ' as i32);
+    s.local_get(S).array_len().local_get(N).local_get(IND).i32_mul().i32_add();
+    s.array_new(T_STRING).local_set(OUT);
+    s.i32_const(0).local_set(I);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(S).array_len().i32_ge_u().br_if(1);
+    s.local_get(S).local_get(I).array_get_u(T_STRING).local_set(C);
+    s.local_get(OUT).local_get(J).local_get(C).array_set(T_STRING);
+    s.local_get(J).i32_const(1).i32_add().local_set(J);
+    // After a newline: skip `IND` (already spaces).
+    s.local_get(C).i32_const('\n' as i32).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(J).local_get(IND).i32_add().local_set(J);
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(OUT);
     s.end();
     f
 }

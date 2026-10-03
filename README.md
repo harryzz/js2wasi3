@@ -116,6 +116,9 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   node globals js2wasi3 lacks (`navigator`, `URL`, …) and missing statics (`Reflect.decorate`) are build errors
   only where they always run, else run-time errors (`typeof` gives `"undefined"`); `Object.getOwnPropertyDescriptors`,
   a rest parameter with `arguments`, `arguments` in class constructors, `delete a?.[b]`, `console._stdout`.
+- Web globals node has (T64): `URL`/`URLSearchParams` (the WHATWG parser, written from the URL Standard) and
+  node's `url` (`parse`, `format`, `resolve`, `fileURLToPath`, `pathToFileURL`, `urlToHttpOptions`) and
+  `querystring`; `TextEncoder`/`TextDecoder` (UTF-8, UTF-16, windows-1252); `DataView`.
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,

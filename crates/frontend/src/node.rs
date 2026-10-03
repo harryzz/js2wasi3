@@ -21,6 +21,9 @@ const MODULES: &[(&str, &str)] = &[
     ("fs", include_str!("../node/fs.js")),
     ("constants", include_str!("../node/constants.js")),
     ("fs/promises", "module.exports = require(\"node:fs\").promises;\n"),
+    // `url`, `querystring` (T64): node 24's lib, ported by `tasks/T64-files/port-url.py`.
+    ("url", include_str!("../node/url.js")),
+    ("querystring", include_str!("../node/querystring.js")),
     // `fs`'s `wasi:filesystem` imports (T59): an ES module (a CommonJS file can't `import`).
     ("internal/wasi_fs", include_str!("../node/wasi_fs.mjs")),
     // `stream` (T60): node 24's lib (`scripts/gen-node-streams.mjs`) over support modules partly from
@@ -35,6 +38,14 @@ const MODULES: &[(&str, &str)] = &[
     ("internal/abort", include_str!("../node/abort.js")),
     // `WeakMap`, `WeakSet` (T61): node's globals, bound by the linker (`GLOBALS`).
     ("internal/weak", include_str!("../node/weak.js")),
+    // `DataView` (T64): an ECMAScript built-in, provided the same way.
+    ("internal/dataview", include_str!("../node/dataview.js")),
+    // `TextEncoder`, `TextDecoder` (T64): node's globals.
+    ("internal/encoding", include_str!("../node/encoding.js")),
+    // `URL`, `URLSearchParams` (T64): node's globals; the parser node has in C++ is `url_binding`.
+    ("internal/url", include_str!("../node/internal_url.js")),
+    ("internal/url_binding", include_str!("../node/url_binding.js")),
+    ("internal/querystring", include_str!("../node/internal_querystring.js")),
     ("internal/fs/streams", include_str!("../node/stream/fs_streams.js")),
     ("internal/fs_support", include_str!("../node/fs_support.js")),
     ("internal/errors", include_str!("../node/stream/errors.js")),
@@ -73,6 +84,11 @@ pub(crate) const GLOBALS: &[(&str, &str, &str)] = &[
     ("AbortSignal", "node:internal/abort", "AbortSignal"),
     ("EventTarget", "node:internal/abort", "EventTarget"),
     ("Event", "node:internal/abort", "Event"),
+    ("DataView", "node:internal/dataview", "DataView"),
+    ("TextEncoder", "node:internal/encoding", "TextEncoder"),
+    ("TextDecoder", "node:internal/encoding", "TextDecoder"),
+    ("URL", "node:internal/url", "URL"),
+    ("URLSearchParams", "node:internal/url", "URLSearchParams"),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if

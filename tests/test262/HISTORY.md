@@ -3,6 +3,19 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-02: T63 small gaps, T64 `URL`/`TextEncoder`/`DataView` (targeted run)
+
+- Compiler: T63's `error.stack`, guarded node globals, `arguments`/rest, `delete a?.[b]`; T64's `DataView` (a node
+  global from `node:internal/dataview`), `ArrayBuffer.isView` of a `DataView`. Runner: `built-ins/DataView`,
+  `built-ins/ArrayBuffer/isView`, `language/arguments-object`, `built-ins/Error`,
+  `Object/getOwnPropertyDescriptors`, `TypedArray/prototype/Symbol.toStringTag` added to the sparse checkout.
+- Targeted run (`DataView`, `ArrayBuffer/isView`, `expressions/{delete,typeof,optional-chaining,class}`,
+  `statements/{class,for,variable}`, `Promise/any`; 9,784 tests, 1,289 s, -j 4, `--update`): DataView 426 of 521
+  run pass (78 failures need `$262.detachArrayBuffer`, which the runner doesn't provide; 11 use
+  `transferToImmutable`, which node 24 lacks; 3 a `newTarget`'s prototype, F106); 7 unsupported → pass in `class`
+  (`arguments` in class constructors, subclassing `DataView`), 7 unsupported → fail (they now reach `Proxy`, F152). 9,299 of 9,488 run
+  pass (98.0% without DataView), 0 regressions.
+
 ## 2026-10-01: T61 `WeakMap`/`WeakSet`, abort/event globals (full run)
 
 - Compiler: `WeakMap`/`WeakSet` and `AbortController`/`AbortSignal`/`EventTarget`/`Event` as node globals bound by

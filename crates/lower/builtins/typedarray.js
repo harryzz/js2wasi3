@@ -897,8 +897,31 @@ function $$ArrayBuffer$resizable(length, options) {
   return __intrinsic_buffer_new(n);
 }
 
+// T64: `DataView`s (`node:internal/dataview`, loaded only by programs naming it) register their
+// brand check with `$$setDataViewCheck`.
+let $$isDataView = undefined;
+function $$setDataViewCheck(f) {
+  $$isDataView = f;
+}
+// For `DataView` (T64; node modules can't use the mode intrinsics): `buffer`'s byte length, -1 if
+// detached; whether it's resizable.
+function $$bufferState(buffer) {
+  if (__intrinsic_rab_mode()) {
+    if (__intrinsic_buffer_detached(buffer)) {
+      return -1;
+    }
+  }
+  return __intrinsic_buffer_length(buffer);
+}
+function $$bufferResizable(buffer) {
+  if (__intrinsic_rab_mode()) {
+    return __intrinsic_buffer_max(buffer) !== undefined;
+  }
+  return false;
+}
+
 function $$ArrayBuffer_isView(arg) {
-  return __intrinsic_typed_kind(arg) >= 0;
+  return __intrinsic_typed_kind(arg) >= 0 || ($$isDataView !== undefined && $$isDataView(arg));
 }
 
 function $$bufferThis(v, name) {

@@ -335,6 +335,17 @@ functions are called directly.)
 `WeakMap`/`WeakSet` are JS classes over a `Map` with private-field brand checks, not native: weakness isn't
 observable without `WeakRef`/`FinalizationRegistry`. They aren't global-object properties (`globalThis.WeakMap`);
 `process` is.)
+(T64: more of them. `DataView` (`node:internal/dataview`) is a class over a `Uint8Array` view of its buffer and an
+8-byte scratch buffer; `ArrayBuffer.isView` asks it through a hook the module sets (`$$setDataViewCheck`), so
+programs without it keep their bytes. `TextEncoder`/`TextDecoder` (`node:internal/encoding`) are JS (UTF-8 with
+the WHATWG decoder's replacement and streaming, UTF-16LE/BE, windows-1252). `URL`/`URLSearchParams` are node's
+`internal/url.js` over `node:internal/url_binding`, a WHATWG URL parser written from the URL Standard that stands
+in for node's C++ binding (ada): it returns the `href` and fills ada's component offsets, which node's getters slice;
+the setters are the basic parser with a state override. IDNA is reduced (ASCII lower-casing, full-width forms,
+`toLowerCase` + NFC, Punycode; no UTS #46 table). node's `url`, `querystring`, `internal/url` and
+`internal/querystring` are node 24.21.0's lib ported by `tasks/T64-files/port-url.py` (primordials become local
+functions, node's errors local ones). A `[util.inspect.custom]` method's string result is re-indented when nested,
+as node does (`inspect.rs` `Reindent`).)
 
 ### D5. Built-ins
 A small core runtime emitted by the backend (allocation-free helpers, equality, `typeof`, string ops),
