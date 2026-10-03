@@ -14,7 +14,10 @@ rm -rf $S/data-node && cp -r $S/t68/data $S/data-node
 echo "node: rc=$? $(grep -cE 'error' $S/node-run.log) error lines"
 if [ "${T68_BUILD:-1}" = 1 ]; then
   T62_LEVEL=2 $S/t66/patch.sh >/dev/null || exit 1
-  (cd $S/zp/patched && echo "build: $($S/t62/measure.sh $S/build-p2.log ${JS2WASI3:-js2wasi3} build --command main.js -o $S/p2.wasm)")
+  # Z2M_DEVICES=1: with zigbee-herdsman-converters' 390 device modules (F272: needed once a device is joined, else
+  # the start fails with "Cannot find module './devices/<vendor>'"); ~4.5 min, 60 MB, compile ~2 min / 9 GB.
+  INC=(); [ "${Z2M_DEVICES:-0}" = 1 ] && INC=(--include 'node_modules/zigbee-herdsman-converters/dist/devices/*.js')
+  (cd $S/zp/patched && echo "build: $($S/t62/measure.sh $S/build-p2.log ${JS2WASI3:-js2wasi3} build --command main.js "${INC[@]}" -o $S/p2.wasm)")
   grep -E "error:|panicked" $S/build-p2.log | head -5
   echo "compile: $($S/t62/measure.sh $S/wt-compile.log wasmtime compile "${GC[@]}" $S/p2.wasm -o $S/p2.cwasm)"
 fi

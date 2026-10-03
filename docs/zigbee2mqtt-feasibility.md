@@ -35,7 +35,29 @@ start-restart-start equal node's apart from:
 Nothing reached the production topics (watched for the test instance's names and PAN); retained test topics were
 cleared afterwards.
 
-## Survey 2026-10-01 (T62, js2wasi3 after T61)
+## Live device 2026-10-03 (after T70: a temperature/humidity sensor on the test network)
+
+A real end device, a SONOFF SNZB-02 with EFEKTA firmware (`SNZB-02_EFEKTA`, a sleepy battery device, taken from the
+production network for the test), joined the test coordinator under **node** (permit join for 254 s on the test topic
+`zigbee2mqtt-js2wasi3/bridge/request/permit_join`, closed right after): interview 2 s, identified from
+zigbee-herdsman-converters' `devices/efekta.js`. Configuring fails on node too: the firmware never answers
+`genPowerCfg.configReport` (battery reporting, 10 s timeout), and that aborts the configure before temperature and
+humidity are bound (production's record of the same device: three bindings, no configured reporting). Binding them
+by hand (`bridge/request/device/bind`, the device woken by a button press) made it report: 21.95 °C, 45.54 %.
+
+Then **js2wasi3** on a copy of node's data directory (the device in `database.db`):
+- The usual build (no device modules) **fails to start**: `Error: Cannot find module './devices/efekta'`. Definitions
+  of known devices are resolved at start-up, so F272 stops zigbee2mqtt as soon as one device is joined.
+- Built with `--include 'node_modules/zigbee-herdsman-converters/dist/devices/*.js'` (`Z2M_DEVICES=1` in
+  `tasks/T68-files/build-run.sh`; 261 s and 1.6 GB peak memory to build, a 60 MB module, `wasmtime compile` 133 s and
+  9.3 GB peak) it starts like node (`Currently 1 devices are joined`, the device identified), and decodes the reports
+  like node (`msTemperatureMeasurement {"measuredValue":2065}` → `"temperature":20.65`); the state payloads have the
+  same fields and values. The configure retries and `Data confirm error (…,240,…)` (0xF0 MAC transaction expired: a
+  message queued for the sleeping device that it didn't poll for in time) are the device's, as under node. Not
+  checked: a humidity report (none came in 3 minutes), whether node's first state publish after a restart also has
+  `linkquality: null`.
+Nothing reached the production topics; the retained test topics were cleared afterwards.
+
 
 Same release: zigbee2mqtt 2.14.1 (master `3c3d8c1`, still the latest), from the npm tarball (`dist/` included),
 `npm install --omit=dev --ignore-scripts`: 99 packages, ~34 MB of `.js`/`.json` (with inline source maps).
