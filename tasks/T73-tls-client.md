@@ -1,13 +1,13 @@
-# T71: `tls.connect` over `wasi:tls` (TLS client, F281)
+# T73: `tls.connect` over `wasi:tls` (TLS client, F281)
 
-Status: todo (handoff written 2026-10-03) | Depends on: T66 (net), T65 (tls shape)
+Status: todo (handoff written 2026-10-03; renumbered from T71 after the user put the HTTP server and `fetch` first) | Depends on: T66 (net), T65 (tls shape); after T71, T72
 
 ## Goal
 `node:tls` client connections (F281, next in F288's order) over the host's TLS: wasmtime 49's experimental
 `wasi:tls@0.3.0-draft` client (`-S tls`), on top of T66's TCP sockets. `tls.connect(port, host[, options][, cb])` /
 `tls.connect(options)`, `TLSSocket` as a `stream.Duplex` (data, `end`, `close`, `secureConnect`, `error`),
 `servername`, `authorized`/`authorizationError` where the host tells us, node's errors for a failed handshake.
-Then `https`/`mqtts`/`wss` can follow (the HTTP client is F286, the next task). Programs that don't use `tls`
+Then `mqtts`/`wss` clients can follow (`fetch` doesn't need it: T72 uses `wasi:http`, where the host does HTTPS). Programs that don't use `tls`
 keep their bytes.
 
 ## What we know (at handoff)
@@ -39,11 +39,11 @@ keep their bytes.
   WASI streams.
 - wasmtime needs `-S tls` (with `-S inherit-network` for the TCP part); `scripts/diff.sh` passes the network flags
   since T66: add `-S tls` there.
-- Testing: a local TLS server (node's own `tls.createServer` with a self-signed certificate) can only test the
+- Testing (user, 2026-10-03: a fixture may reach a public host): a local TLS server (node's own `tls.createServer` with a self-signed certificate) can only test the
   *failure* path: wasmtime won't trust it, and node's client rejects it too (`self-signed certificate`,
   `DEPTH_ZERO_SELF_SIGNED_CERT`) unless told otherwise: compare those errors. A successful handshake needs a server
-  with a publicly trusted certificate, i.e. the network: decide with the user whether a fixture may reach a public
-  host (e.g. an HTTPS server whose response status line is stable), or keep that as a manual probe.
+  with a publicly trusted certificate: a fixture may reach a public host (user's decision); pick one whose reply is
+  stable (e.g. an HTTPS server's status line), print only what doesn't change.
 - First check (not done): that wasmtime 49's CLI links the p3 `wasi:tls` imports under `-S tls` for a component
   (the p2 version exists too).
 
@@ -54,9 +54,9 @@ keep their bytes.
 2. `node:tls` client: `TLSSocket` (Duplex) over `net.Socket`'s TCP plus a connector; `tls.connect` forms, events,
    `getProtocol()`/`authorized` as far as the host tells us; node's errors (map the host's handshake errors to node's
    codes where it's clear, else `ERR_SSL_*`-style with the host's text); unsupported options documented.
-3. Fixtures: the local failure path in `tests/fixtures/node/` (`diff.sh` with `-S tls`); the public-host success path
-   as agreed with the user. `cargo test`, bytes check (programs without `tls` unchanged).
-4. Docs (README, design.md D4/T66 paragraph, keywords.md), follow-ups, next handoff (the HTTP client, F286).
+3. Fixtures: the local failure path and the public-host success path in `tests/fixtures/node/` (`diff.sh` with
+   `-S tls`). `cargo test`, bytes check (programs without `tls` unchanged).
+4. Docs (README, design.md D4/T66 paragraph, keywords.md), follow-ups, next handoff (F288's order is then done).
 
 ## Read first
 - `tasks/T66-net-socket.md` (Notes / Result), `tasks/T67-dgram.md` (Notes / Result: `import_cancel`),
@@ -68,7 +68,7 @@ The new fixtures with `scripts/diff.sh`; `node/net.js`, `node/tls-dns-dgram.js`;
 + wasmtime; bytes check against HEAD for programs without `tls`.
 
 ## Acceptance
-- [ ] `tls.connect` to a host with a publicly trusted certificate exchanges data like node (as agreed: fixture or probe).
+- [ ] `tls.connect` to a host with a publicly trusted certificate exchanges data like node (a fixture).
 - [ ] A handshake failure (self-signed local server) gives node's error shape.
 - [ ] Unsupported options (no CA/verification override, no client certs, no ALPN, no server) documented; follow-ups.
 
