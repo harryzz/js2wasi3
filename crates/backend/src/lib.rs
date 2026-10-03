@@ -1777,6 +1777,11 @@ impl Emitter<'_> {
                         s.call(self.helper_index(Helper::Js(H::Arr(array::Helper::FromArgs))));
                         return Ok(true);
                     }
+                    Intrinsic::ArrayRest(i) => {
+                        s.i32_const(*i as i32);
+                        s.call(self.helper_index(Helper::Js(H::Arr(array::Helper::Rest))));
+                        return Ok(true);
+                    }
                     Intrinsic::IterValue => {
                         s.struct_get(runtime::T_ITER, 4);
                         return Ok(true);
@@ -1912,6 +1917,7 @@ impl Emitter<'_> {
                     | Intrinsic::EnvGet(_)
                     | Intrinsic::ArgGet(_)
                     | Intrinsic::ArgsRest(_)
+                    | Intrinsic::ArrayRest(_)
                     | Intrinsic::IterValue
                     | Intrinsic::SymbolIterator
                     | Intrinsic::IsArray

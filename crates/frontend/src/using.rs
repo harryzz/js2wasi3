@@ -5,7 +5,7 @@
 //! `switch`'s cases, the module's top level) gets a disposal environment and a `try`:
 //!
 //! ```text
-//! { const env = { stack: [], error: undefined, has: false }; try { …
+//! { const env = { list: [], error: undefined, has: false }; try { …
 //!     const x = v, r1 = add(env, x, false); …
 //! } catch (e) { env.error = e; env.has = true; } finally { dispose(env); } }
 //! ```
@@ -223,7 +223,7 @@ pub(crate) fn rewrite<'a>(
     for (k, (_, s)) in scopes.iter().enumerate() {
         let env = format!("{prefix}env{k}");
         let mut open = format!(
-            "{}const {env} = {{ stack: [], error: undefined, has: false }}; try {{ ",
+            "{}const {env} = {{ list: [], error: undefined, has: false }}; try {{ ",
             if s.braces { "{ " } else { "" }
         );
         if let Some(name) = &s.loop_binding {
@@ -289,7 +289,7 @@ pub(crate) fn rewrite<'a>(
 /// The `finally` of a scope with an `await using`: DisposeResources with its `await`s.
 fn disposal_loop(env: &str) -> String {
     format!(
-        "const s = {env}.stack; let n = false, w = false, h = {env}.has, r = {env}.error; \
+        "const s = {env}.list; let n = false, w = false, h = {env}.has, r = {env}.error; \
          for (let i = s.length - 1; i >= 0; i--) {{ const [v, m, a] = s[i]; \
          if (!a && n && !w) {{ await undefined; n = false; }} \
          if (m !== undefined) {{ try {{ const x = m.call(v); if (a) {{ await x; w = true; }} }} \
@@ -304,7 +304,7 @@ fn disposal_loop(env: &str) -> String {
 fn helpers(add: &str, dispose: &str) -> String {
     format!(
         "\nfunction {add}(env, v, a) {{ \
-         if (v === null || v === undefined) {{ if (a) env.stack.push([v, undefined, true]); return; }} \
+         if (v === null || v === undefined) {{ if (a) env.list.push([v, undefined, true]); return; }} \
          if (typeof v !== \"object\" && typeof v !== \"function\") \
          throw new TypeError(\"An object is expected with `using` declarations\"); \
          let m; \
@@ -314,8 +314,8 @@ fn helpers(add: &str, dispose: &str) -> String {
          m = async function () {{ d.call(this); }}; }} }} \
          else m = v[Symbol.dispose]; \
          if (typeof m !== \"function\") throw new TypeError(a ? \"Symbol(Symbol.asyncDispose) is not a function\" : \"Symbol(Symbol.dispose) is not a function\"); \
-         env.stack.push([v, m, a]); }}\n\
-         function {dispose}(env) {{ const s = env.stack; let h = env.has, r = env.error; \
+         env.list.push([v, m, a]); }}\n\
+         function {dispose}(env) {{ const s = env.list; let h = env.has, r = env.error; \
          for (let i = s.length - 1; i >= 0; i--) {{ const [v, m] = s[i]; \
          try {{ m.call(v); }} catch (e) {{ r = h ? new SuppressedError(e, r, \"An error was suppressed during disposal\") : e; h = true; }} }} \
          if (h) throw r; }}\n"

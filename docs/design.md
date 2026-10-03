@@ -32,7 +32,12 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.)
   (T13: objects are `$object` dictionaries: entries in insertion order in GC arrays, a hash index past 8 entries, a
   prototype. Built-in prototypes are created lazily; their methods are sentinels that trap when read until functions
-  exist (T14/T21). Errors are objects of class `error`. See `crates/backend/src/object.rs`.)
+  exist (T14/T21). Errors are objects of class `error`. See `crates/backend/src/object.rs`.
+  T63: an error's own `stack` is lazy like V8's: when the code names `stack`, a hidden accessor whose get/set are
+  the sentinel; the first read makes it `${String(e)}\n    at <anonymous>` (the header as of that read; no source
+  positions at run time) and a write replaces it, both as a hidden data property, which
+  `Object.getOwnPropertyDescriptor` also shows (node: get/set functions). Printing an error ignores such a
+  one-frame `stack`, so `console.log(e)` and uncaught errors print as before.)
   (T14: functions are `$function` structs, a subtype of `$object` holding a `$code` funcref
   `(self, this, args) -> jsval` and an environment array. Captured variables are boxed in cells, one per
   variable (flat closures); direct calls stay typed, calls through values use one uniform `call_ref`.
@@ -527,6 +532,15 @@ properties) or, since T54, a CommonJS module (a function: top-level `this` is `m
   HasProperty + Get on it (else node's ReferenceError), `typeof x` gives `"undefined"` if absent, an assignment
   (strict) Sets an existing property and throws the ReferenceError otherwise. Without it, reads throw as before
   (F139) and writes throw the same ReferenceError at run time.
+- **node's globals js2wasi3 lacks** (`navigator`, `URL`, `fetch`, `Blob`, … in `NODE_GLOBALS` but not
+  implemented; T63, T54's rule for built-in modules): a build error only where the read always runs when its module
+  does (top level, or a CommonJS module's wrapper, outside functions, classes, `try`, branches of
+  `if`/`?:`/`switch`/`&&`/`||`/`??` and loop bodies: `lower` `may_skip`); elsewhere it throws
+  `ReferenceError: node's global \`X\` isn't available in js2wasi3 (planned: T21)` when it runs, and `typeof X`
+  is `"undefined"` (node: `"object"`/`"function"`), so feature tests take their fallback, as on a host without it.
+  Likewise a missing static of a built-in namespace (`Reflect.decorate(…)`, `Math.nope(…)`, `Math.NOPE`): a build
+  error where it always runs, else node's `TypeError: Reflect.decorate is not a function` when called (the
+  arguments aren't evaluated) and `undefined` when read.
 - **`eval`/`Function` of code known at build time** (string literals and substitution-free templates): compiled
   ahead of time. `frontend::eval` splices each module's calls into its text before the linker parses it (so the
   linker's renames reach the eval'd code): direct `eval("S")` → `((() => { S' })())`, strict eval code in the
@@ -554,7 +568,7 @@ properties) or, since T54, a CommonJS module (a function: top-level `this` is `m
 ### D7. Explicit resource management (T45)
 - **`using` is a source rewrite** (`frontend::using`, after the eval splicing, one more `EvalMap` layer), as
   TypeScript's downlevel emit: each statement list (block, function body, static block, `switch`, the module's top
-  level) or loop with a `using` declaration gets `const env = { stack, error, has }; try { … } catch (e) { record }
+  level) or loop with a `using` declaration gets `const env = { list, error, has }; try { … } catch (e) { record }
   finally { dispose }`, so `break`/`continue`/`return`/`yield` leave through the existing `finally` lowering. A
   declaration becomes `const x = v, r = add(env, x, async)` (names still inferred); `for (using x of it)` binds
   `const x` and its body gets the environment (per iteration). The helpers are plain JS generated once per module;

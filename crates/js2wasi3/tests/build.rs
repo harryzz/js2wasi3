@@ -1077,11 +1077,11 @@ fn module_errors_are_diagnostics() {
         "{err}"
     );
     // A diagnostic of the lowering points into the module it's in.
-    write("a.js", "// a\nexport function f() {\n  return Proxy;\n}\n");
+    write("a.js", "// a\nexport function f() {}\nnew Proxy({}, {});\n");
     write("main.js", "import { f } from './a.js';\nf();\n");
     let b = build(&dir.join("main.js"), &dir.join("x.wasm"), &[]);
     let err = String::from_utf8_lossy(&b.stderr);
-    assert!(err.contains("a.js:3:10: error: unsupported:"), "{err}");
+    assert!(err.contains("a.js:3:5: error: unsupported:"), "{err}");
     // A library can't wait for a dependency's top-level `await` (its `init` is synchronous).
     write("a.js", "await 0;\nexport const x = 1;\n");
     write("main.js", "import { x } from './a.js';\nexport function f() { return x; }\n");
@@ -1162,15 +1162,4 @@ fn errors_of_every_module_are_reported() {
     ] {
         assert!(err.contains(want), "missing {want:?} in:\n{err}");
     }
-}
-
-#[test]
-fn rest_parameter_with_arguments_is_a_diagnostic() {
-    // T62: was a panic when the function is a value (a method).
-    let out = out_dir("rest-arguments").join("x.wasm");
-    let b = build(&fixture("unsupported/report-all/rest.cjs"), &out, &["--command"]);
-    assert!(!b.status.success());
-    let err = String::from_utf8_lossy(&b.stderr);
-    assert!(!err.contains("panicked"), "{err}");
-    assert!(err.contains("rest.cjs:3:6: error: unsupported: a rest parameter with `arguments`"), "{err}");
 }

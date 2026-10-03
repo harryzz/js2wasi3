@@ -225,6 +225,7 @@ impl Printer<'_> {
                     crate::Intrinsic::EnvGet(i)
                     | crate::Intrinsic::ArgGet(i)
                     | crate::Intrinsic::ArgsRest(i)
+                    | crate::Intrinsic::ArrayRest(i)
                     | crate::Intrinsic::GenLoad(i)
                     | crate::Intrinsic::GenStore(i)
                     | crate::Intrinsic::CallImport(i) => {

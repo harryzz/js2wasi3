@@ -78,6 +78,8 @@ pub enum Helper {
     ProtoToString,
     /// `(args: jsval (a `$vals`), k: i32) -> jsval`: a new array of `args[k..]` (rest parameters).
     FromArgs,
+    /// `(a: jsval (an array), k: i32) -> jsval`: a new array of `a`'s elements from `k` on (T63).
+    Rest,
     /// `(a: (ref $array), i: i32) -> i32`: element `i`'s attribute bits, `SEALED`/`FROZEN` included.
     Attrs,
     /// `(a: (ref $array), i: i32, attrs: i32)`: set element `i`'s attribute bits.
@@ -105,6 +107,7 @@ impl Helper {
             Helper::ProtoJoin => "Array.prototype.join",
             Helper::ProtoToString => "Array.prototype.toString",
             Helper::FromArgs => "array_from_args",
+            Helper::Rest => "array_rest",
             Helper::Attrs => "array_attrs",
             Helper::SetAttrs => "array_set_attrs",
             Helper::Resize => "array_resize",
@@ -126,7 +129,7 @@ impl Helper {
             Helper::ProtoPush | Helper::ProtoPop | Helper::ProtoJoin | Helper::ProtoToString => {
                 (vec![v, v, v], vec![v])
             }
-            Helper::FromArgs => (vec![v, ValType::I32], vec![v]),
+            Helper::FromArgs | Helper::Rest => (vec![v, ValType::I32], vec![v]),
             Helper::Attrs => (vec![a, ValType::I32], vec![ValType::I32]),
             Helper::SetAttrs => (vec![a, ValType::I32, ValType::I32], vec![]),
             Helper::Resize => (vec![a, ValType::I32], vec![]),
@@ -149,6 +152,7 @@ impl Helper {
             Helper::ProtoJoin => proto_join(cx),
             Helper::ProtoToString => proto_to_string(cx),
             Helper::FromArgs => from_args(cx),
+            Helper::Rest => rest(cx),
             Helper::Attrs => attrs(),
             Helper::SetAttrs => set_attrs(),
             Helper::Resize => resize(cx),
@@ -1316,6 +1320,35 @@ fn proto_to_string(cx: &mut dyn Cx) -> Function {
     this_array(cx, &mut s, "toString");
     s.local_get(1).ref_cast_non_null(array());
     s.global_get(comma).call(join);
+    s.end();
+    f
+}
+
+/// `$array_rest(a, k)` (T63), see [`Helper::Rest`]: `a`'s store up to its length.
+fn rest(cx: &mut dyn Cx) -> Function {
+    let new = ah(cx, Helper::New);
+    const A: u32 = 0;
+    const K: u32 = 1;
+    const N: u32 = 2;
+    const E: u32 = 3;
+    let mut f = Function::new([(1, ValType::I32), (1, rt(true, T_VALS))]);
+    let mut s = f.instructions();
+    // n = max(length - k, 0)
+    s.i32_const(0);
+    s.local_get(A).ref_cast_non_null(array()).struct_get(T_ARRAY, F_LENGTH);
+    s.local_get(K).i32_sub();
+    s.local_get(A).ref_cast_non_null(array()).struct_get(T_ARRAY, F_LENGTH);
+    s.local_get(K).i32_le_u();
+    s.select().local_tee(N);
+    s.array_new_default(T_VALS).local_set(E);
+    s.local_get(N);
+    s.if_(BlockType::Empty);
+    s.local_get(E).ref_as_non_null().i32_const(0);
+    s.local_get(A).ref_cast_non_null(array()).struct_get(T_ARRAY, F_ELEMS);
+    s.local_get(K).local_get(N);
+    s.array_copy(T_VALS, T_VALS);
+    s.end();
+    s.local_get(E).ref_as_non_null().local_get(N).call(new);
     s.end();
     f
 }

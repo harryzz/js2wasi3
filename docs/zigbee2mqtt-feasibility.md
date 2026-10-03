@@ -92,7 +92,10 @@ real ones are winston, winston-syslog, safe-stable-stringify (item 6) and srvx (
    guards), missing statics read as `undefined` (`Reflect.decorate`), `Object.getOwnPropertyDescriptors`,
    `%TypedArray%.prototype[@@toStringTag]`, a rest parameter with `arguments`, `delete a?.[b]`, `var` read before its
    declaration in a loop, `console._stdout`/`_stderr`, error locations in uncaught errors.
-2. **`URL`/`URLSearchParams` and node's `url`; `TextEncoder`/`TextDecoder`; `DataView`.**
+   *Done in T63 (2026-10-01)* except error locations (F275): 7 patch blocks of `tasks/T62-files/patch.sh` went
+   away (`tasks/T63-files/`), and without the web-global stubs the graph builds with no errors; it then stops at
+   herdsman's `new URL(path)` (`Invalid TCP path`).
+2. **`URL`/`URLSearchParams` and node's `url`; `TextEncoder`/`TextDecoder`; `DataView`.** (T64)
 3. **node built-ins that only need to load** (`child_process`, `dns`, `dgram`, `tls`, `http(s)`, `http2`, `zlib`,
    `perf_hooks`, `module`) and a **`crypto` subset** (`randomBytes`, `randomUUID`, `createHash`, AES).
 4. **`net.Socket` over `wasi:sockets`** in the event loop: the milestone's blocker.

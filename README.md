@@ -112,6 +112,10 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   `createWriteStream`, `fs.opendir`, with node's event order; `graceful-fs` and `fs-extra` match node.
 - node's other globals that are built-in modules' exports (T61): `WeakMap`, `WeakSet`, `AbortController`,
   `AbortSignal`, `EventTarget`, `Event`; `console.assert`. Packages bundling npm's `readable-stream` build.
+- From the zigbee2mqtt survey (T63): `error.stack` (one `at <anonymous>` frame, made on first read);
+  node globals js2wasi3 lacks (`navigator`, `URL`, …) and missing statics (`Reflect.decorate`) are build errors
+  only where they always run, else run-time errors (`typeof` gives `"undefined"`); `Object.getOwnPropertyDescriptors`,
+  a rest parameter with `arguments`, `arguments` in class constructors, `delete a?.[b]`, `console._stdout`.
 - Explicit resource management: `using`/`await using` declarations, `DisposableStack`, `AsyncDisposableStack`,
   `SuppressedError`.
 - `globalThis` (and node's `global`): the built-ins as its properties, undeclared names through it. `eval("…")`,

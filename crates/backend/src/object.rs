@@ -325,6 +325,9 @@ pub enum Helper {
     InstanceOf(Builtin),
     /// `(message, options: jsval) -> jsval`: `new E(message, options)`.
     NewError(ErrorKind),
+    /// `(receiver) -> jsval`: an error's `stack` on its first read (T63): the header and a frame,
+    /// then an own data property of the receiver.
+    ErrorStack,
     /// `(o: (ref $object), hint: i32) -> jsval`: ToPrimitive (hint 0 default, 1 number, 2 string).
     ToPrimitive,
     /// `(o: (ref $object)) -> f64`: ToNumber of an object.
@@ -449,6 +452,7 @@ impl Helper {
             Helper::GetPrototypeOf => "get_prototype_of",
             Helper::InstanceOf(_) => "instanceof",
             Helper::NewError(_) => "new_error",
+            Helper::ErrorStack => "error_stack",
             Helper::ToPrimitive => "to_primitive",
             Helper::ObjectToNumber => "object_to_number",
             Helper::ErrorToString => "Error.prototype.toString",
@@ -513,6 +517,7 @@ impl Helper {
                 (vec![v, v, v], vec![v])
             }
             Helper::NewError(_) => (vec![v, v], vec![v]),
+            Helper::ErrorStack => (vec![v], vec![v]),
             Helper::ToPrimitive => (vec![o, I32], vec![v]),
             Helper::ObjectToNumber => (vec![o], vec![F64]),
             Helper::ErrorToString => (vec![v, v, v], vec![v]),
@@ -603,6 +608,7 @@ impl Helper {
             Helper::GetPrototypeOf => get_prototype_of(cx),
             Helper::InstanceOf(b) => instance_of(cx, b),
             Helper::NewError(k) => new_error(cx, k),
+            Helper::ErrorStack => error_stack(cx),
             Helper::ToPrimitive => to_primitive(cx),
             Helper::ObjectToNumber => object_to_number(cx),
             Helper::ErrorToString => error_to_string(cx),
@@ -1500,8 +1506,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     // Methods written in the prelude (T21). T25: `Map.prototype[Symbol.iterator]` is `entries`,
     // `Set.prototype[Symbol.iterator]` and `keys` are `values`; `size` is a getter. T27: a key
     // `$name` is the well-known symbol `Symbol.name` (`$$RegExp_prototype_$match`).
-    // (symbol, name, code, length, attributes)
-    let mut sym_methods: Vec<(u32, u32, u32, i32, i32)> = Vec::new();
+    // (symbol, name, code, length, attributes, getter)
+    let mut sym_methods: Vec<(u32, u32, u32, i32, i32, bool)> = Vec::new();
     for (key, code, len) in cx.builtin_methods(b) {
         cx.declare_func(code);
         if let Some(k) = key
@@ -1509,11 +1515,13 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             .and_then(js2wasi3_ir::well_known_symbol)
         {
             let sym = cx.helper(runtime::Helper::WellKnownSymbol(k));
-            let name = cx.str(&format!("[Symbol.{}]", &key[1..]));
+            // T63: `%TypedArray%.prototype[Symbol.toStringTag]` is a getter.
+            let getter = b == Builtin::TypedArray && key == "$toStringTag";
+            let name = cx.str(&format!("{}[Symbol.{}]", if getter { "get " } else { "" }, &key[1..]));
             // `Date.prototype[Symbol.toPrimitive]` (T26) and `Function.prototype[Symbol.hasInstance]`
             // (T60) are read-only.
             let attrs = if key == "$toPrimitive" || key == "$hasInstance" { HIDDEN | READONLY } else { HIDDEN };
-            sym_methods.push((sym, name, code, len as i32, attrs));
+            sym_methods.push((sym, name, code, len as i32, attrs, getter));
             continue;
         }
         let getter = (matches!(b, Builtin::Map | Builtin::Set) && key == "size")
@@ -1540,9 +1548,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         }
         real.push((keys, name, code, len as i32, getter, 0));
     }
-    let define_accessor = real
-        .iter()
-        .any(|r| r.4)
+    let define_accessor = (real.iter().any(|r| r.4) || sym_methods.iter().any(|m| m.5))
         .then(|| cx.helper(runtime::Helper::Prop(props::Helper::DefineAccessor)));
     let new_function = cx.helper(runtime::Helper::Func(func::Helper::New));
     // `length: 0` (Function.prototype, Array.prototype).
@@ -1603,7 +1609,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.i32_const(0).ref_i31();
         s.i32_const(HIDDEN).call(define);
     }
-    for (sym, name, code, len, attrs) in sym_methods {
+    for (sym, name, code, len, attrs, getter) in sym_methods {
         s.local_get(O).ref_as_non_null();
         s.call(sym)
             .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
@@ -1614,7 +1620,10 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             .i32_const(len)
             .i32_const(0)
             .call(new_function);
-        s.i32_const(attrs).call(define);
+        match define_accessor.filter(|_| getter) {
+            Some(define_accessor) => s.i32_const(0).i32_const(attrs).call(define_accessor),
+            None => s.i32_const(attrs).call(define),
+        };
     }
     let exec = (b == Builtin::RegExp).then(|| cx.str("exec"));
     for (keys, name, code, len, getter, flags) in real {
@@ -3082,10 +3091,57 @@ fn instance_of(cx: &mut dyn Cx, b: Builtin) -> Function {
     f
 }
 
-/// `$new_error(message, options)`: own `stack` (a sentinel: reading it traps, F31), `message`
-/// unless it's `undefined`, and `cause` if `options` is an object that has one.
+/// `$new_error(message, options)`: own `stack`, `message` unless it's `undefined`, and `cause` if
+/// `options` is an object that has one. T63 (F261): `stack` is made on its first read, as V8 does
+/// ([`error_stack`]); defined first, so it stays the first own key.
 /// `AggregateError` (T25): `(errors, message, options)`, then an own `errors`: the iterable
 /// `errors` as a new array.
+/// Pushes whether local `stk` (an error `v`'s own `stack`, any value) is a `stack` without frames:
+/// a string equal to the error's header (`Promise.any`'s error, T25). Since T63 every other error's
+/// `stack` can be a string too (when the code names `stack`), with a frame.
+pub fn frameless_stack(cx: &mut dyn Cx, s: &mut InstructionSink, v: u32, stk: u32) {
+    if !cx.names("stack") {
+        // Only the prelude's `Promise.any` error has a string `stack`.
+        runtime::is_string(s, stk);
+        return;
+    }
+    let to_string = rh(cx, runtime::Helper::ToString);
+    let str_eq = rh(cx, runtime::Helper::StrEq);
+    runtime::is_string(s, stk);
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(stk).ref_cast_non_null(runtime::string());
+    s.local_get(v).call(to_string).call(str_eq);
+    s.else_();
+    s.i32_const(0);
+    s.end();
+}
+
+/// `$error_stack(receiver)`: V8's `stack` on its first read: the header (`Error.prototype.toString`
+/// of the receiver then: a `name` set after construction counts) and one frame, `    at <anonymous>`
+/// (no source positions at run time). It replaces the lazy slot as a writable, hidden data property.
+fn error_stack(cx: &mut dyn Cx) -> Function {
+    let define = h(cx, Helper::Define);
+    let to_string = rh(cx, runtime::Helper::ToString);
+    let concat = rh(cx, runtime::Helper::Concat);
+    let (stack, frame) = (cx.str("stack"), cx.str(STACK_FRAME));
+    const R: u32 = 0;
+    const S: u32 = 1;
+    let mut f = Function::new([(1, jsval())]);
+    let mut s = f.instructions();
+    s.local_get(R).call(to_string).global_get(frame).call(concat).local_set(S);
+    s.local_get(R).ref_test_non_null(object());
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, R);
+    s.global_get(stack).local_get(S).i32_const(HIDDEN).call(define);
+    s.end();
+    s.local_get(S);
+    s.end();
+    f
+}
+
+/// The one frame of an error's `stack` (T63, [`error_stack`]).
+pub const STACK_FRAME: &str = "\n    at <anonymous>";
+
 fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     let alloc = h(cx, Helper::Alloc);
     let proto = h(cx, Helper::Proto(Builtin::Error(k)));
@@ -3106,11 +3162,19 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
         .call(proto)
         .call(alloc)
         .local_set(o);
-    s.local_get(o)
-        .ref_as_non_null()
-        .global_get(stack)
-        .global_get(G_BUILTIN);
-    s.i32_const(HIDDEN).call(define);
+    s.local_get(o).ref_as_non_null().global_get(stack);
+    if cx.names("stack") {
+        // Made on its first read (T63): an accessor slot whose getter and setter are the
+        // built-in sentinel, which `property_value`, the setters and `getOwnPropertyDescriptor`
+        // recognize. Programs that never name `stack` keep the sentinel (reading it traps).
+        s.global_get(G_BUILTIN)
+            .global_get(G_BUILTIN)
+            .struct_new(runtime::T_ACCESSOR);
+        s.i32_const(HIDDEN | ACCESSOR).call(define);
+    } else {
+        s.global_get(G_BUILTIN);
+        s.i32_const(HIDDEN).call(define);
+    }
     s.local_get(m).global_get(G_UNDEFINED).ref_eq().i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(o).ref_as_non_null().global_get(message);

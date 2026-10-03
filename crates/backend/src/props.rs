@@ -230,6 +230,15 @@ fn value(cx: &mut dyn Cx) -> Function {
         .ref_cast_non_null(accessor())
         .struct_get(T_ACCESSOR, 0)
         .local_tee(G);
+    if cx.names("stack") {
+        // An error's `stack` before its first read (T63).
+        let error_stack = oh(cx, object::Helper::ErrorStack);
+        s.global_get(G_BUILTIN).ref_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(RCV).call(error_stack).return_();
+        s.end();
+        s.local_get(G);
+    }
     s.global_get(G_UNDEFINED).ref_eq();
     s.if_(BlockType::Empty);
     s.global_get(G_UNDEFINED).return_();
@@ -275,6 +284,26 @@ fn throw_read_only(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, k: u32) {
     s.call(throw);
 }
 
+/// An error's `stack` before its first read (T63): a write makes it a data property holding `v`
+/// (on `o`, the receiver) and returns from the function being emitted.
+fn lazy_stack_set(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u32, v: u32) {
+    if !cx.names("stack") {
+        return;
+    }
+    let define = oh(cx, object::Helper::Define);
+    s.local_get(acc)
+        .ref_cast_non_null(accessor())
+        .struct_get(T_ACCESSOR, 1)
+        .global_get(G_BUILTIN)
+        .ref_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(o).ref_cast_non_null(runtime::object());
+    s.local_get(k).ref_as_non_null();
+    s.local_get(v).i32_const(object::HIDDEN).call(define);
+    s.return_();
+    s.end();
+}
+
 /// Call the setter of accessor `acc` (a local) with `this` = local `o` and argument local `v`, or
 /// throw node's TypeError if it has none.
 fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u32, v: u32) {
@@ -296,6 +325,7 @@ fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u3
         throw_read_only(cx, s, o, k);
         s.end();
     }
+    lazy_stack_set(cx, s, acc, o, k, v);
     s.local_get(acc)
         .ref_cast_non_null(accessor())
         .struct_get(T_ACCESSOR, 1)
@@ -1341,6 +1371,22 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
         .array_get(T_VALS)
         .local_set(X);
     s.end();
+    if cx.names("stack") {
+        // T63: an error's `stack` before its first read looks like the data property it becomes.
+        let error_stack = oh(cx, object::Helper::ErrorStack);
+        s.local_get(A).i32_const(ACCESSOR).i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(X)
+            .ref_cast_non_null(accessor())
+            .struct_get(T_ACCESSOR, 0)
+            .global_get(G_BUILTIN)
+            .ref_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(O).call(error_stack).local_set(X);
+        s.local_get(A).i32_const(!ACCESSOR & 0xff).i32_and().local_set(A);
+        s.end();
+        s.end();
+    }
     if cx.names("$module") {
         // T41: a namespace's export (a getter) is a writable data property holding its value.
         let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
@@ -1852,6 +1898,7 @@ fn call_setter_on(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k:
         throw_read_only_nullable(cx, s, o, k);
         s.end();
     }
+    lazy_stack_set(cx, s, acc, o, k, v);
     s.local_get(acc)
         .ref_cast_non_null(accessor())
         .struct_get(T_ACCESSOR, 1)

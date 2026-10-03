@@ -485,6 +485,14 @@ fn format(cx: &mut dyn Cx) -> Function {
         let (errors_key, brace, rbrace) = (cx.str("[errors]: "), cx.str(" {"), cx.str("}"));
         s.local_get(V).ref_cast_non_null(runtime::object());
         s.global_get(stack).call(own_get).local_set(STK);
+        if cx.names("stack") {
+            // T63: only a `stack` without frames counts (every error's can be a string then).
+            object::frameless_stack(cx, &mut s, V, STK);
+            s.i32_eqz();
+            s.if_(BlockType::Empty);
+            s.global_get(runtime::G_UNDEFINED).local_set(STK);
+            s.end();
+        }
         runtime::is_string(&mut s, STK);
         s.i32_eqz().local_get(NESTED).i32_and();
         s.if_(BlockType::Empty);

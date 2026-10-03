@@ -1891,7 +1891,7 @@ fn describe(cx: &mut dyn Cx) -> Function {
         let stack = cx.str("stack");
         s.local_get(V).ref_cast_non_null(object());
         s.global_get(stack).call(own_get).local_set(T);
-        is_string(&mut s, T);
+        object::frameless_stack(cx, &mut s, V, T);
         s.if_(BlockType::Empty);
         s.local_get(V).call(inspect).return_();
         s.end();

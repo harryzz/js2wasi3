@@ -160,6 +160,9 @@ fn next_tick(p: &Program, id: oxc_semantic::NodeId) -> bool {
         if !m.optional && m.property.name == "nextTick")
 }
 
+/// `console._stdout`/`_stderr` (T63, winston): node's streams, `process.stdout`/`stderr`.
+pub(crate) const CONSOLE_STREAMS: &[&str] = &["_stdout", "_stderr"];
+
 /// The `console` methods lowered directly when called (T53): `Some(stderr)`.
 pub(crate) fn console_stream(method: &str) -> Option<bool> {
     match method {
@@ -424,6 +427,8 @@ pub(crate) const GATED: &[&str] = &[
     // T45: `Symbol.dispose`/`asyncDispose` (the well-known symbols' array has their slots then).
     "dispose",
     "asyncDispose",
+    // T63: errors' `stack` is made on its first read (else it stays a trapping sentinel).
+    "stack",
 ];
 
 /// The built-in constructors that can be values (T25): their prelude function (`$$Array`) is what
@@ -670,8 +675,9 @@ impl Prelude {
                 // `Date.prototype[Symbol.toPrimitive]` (T26) is reached by naming `toPrimitive`.
                 // T45: `[Symbol.dispose]`/`[Symbol.asyncDispose]` by naming `dispose`/`asyncDispose`.
                 // T60: `Function.prototype[Symbol.hasInstance]` by naming `hasInstance`.
+                // T63: `get %TypedArray%.prototype[Symbol.toStringTag]` by naming `toStringTag`.
                 let m = match m {
-                    "$toPrimitive" | "$dispose" | "$asyncDispose" | "$hasInstance" => &m[1..],
+                    "$toPrimitive" | "$dispose" | "$asyncDispose" | "$hasInstance" | "$toStringTag" => &m[1..],
                     _ => m,
                 };
                 methods.entry(m.to_string()).or_default().push(item_of[sym]);
@@ -838,6 +844,7 @@ impl Prelude {
                             && m.object.span() == r.span
                             && console_stream(&m.property.name).is_none()
                             && m.property.name != "assert"
+                            && !CONSOLE_STREAMS.contains(&m.property.name.as_str())
                             && !OBJECT_PROTO_PROPS.contains(&m.property.name.as_str())
                         {
                             out.console_members.push((m.span, m.property.name.to_string()));
@@ -852,8 +859,14 @@ impl Prelude {
                         }
                         // T55: `process` other than `process.nextTick` is `$$Process()`,
                         // `performance` is `$$Performance()`.
+                        // T63: `console._stdout`/`_stderr` are `process.stdout`/`stderr`.
+                        let streams = r.name == "console"
+                            && matches!(p.semantic.nodes().parent_kind(node.id()),
+                                AstKind::StaticMemberExpression(m) if m.object.span() == r.span
+                                    && CONSOLE_STREAMS.contains(&m.property.name.as_str()));
                         let made = match r.name.as_str() {
                             "process" if !next_tick(p, node.id()) => Some(PROCESS),
+                            "console" if streams => Some(PROCESS),
                             "performance" => Some(PERFORMANCE),
                             _ => None,
                         };

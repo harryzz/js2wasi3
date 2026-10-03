@@ -353,6 +353,15 @@ function $$TypedArray_prototype_buffer() {
   return __intrinsic_typed_buffer(this);
 }
 
+// `get %TypedArray%.prototype[Symbol.toStringTag]` (T63): the type's name, else `undefined`.
+function $$TypedArray_prototype_$toStringTag() {
+  const kind = __intrinsic_typed_kind(this);
+  if (kind < 0) {
+    return undefined;
+  }
+  return $$typedName(kind);
+}
+
 // ---- %TypedArray%.prototype methods ------------------------------------------------------
 
 function $$TypedArray_prototype_at(index) {

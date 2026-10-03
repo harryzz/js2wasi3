@@ -957,6 +957,9 @@ pub enum Intrinsic {
     ArraySpread,
     /// The arguments from index `i` on of an argument array, as a new array (rest parameters).
     ArgsRest(u32),
+    /// The elements from index `i` on of an array, as a new array (T63: a rest parameter beside
+    /// `arguments`, from the array of all arguments).
+    ArrayRest(u32),
     /// Start iterating `v` (args: v, the TypeError message if it isn't iterable): an internal
     /// iteration state (a `jsval` that never reaches JS).
     IterOpen,
@@ -1380,6 +1383,7 @@ impl Intrinsic {
             Intrinsic::ArrayPush => (&[JsVal, JsVal], None),
             Intrinsic::ArraySpread => (&[JsVal, JsVal, JsVal], None),
             Intrinsic::ArgsRest(_)
+            | Intrinsic::ArrayRest(_)
             | Intrinsic::IterValue
             | Intrinsic::IterRest
             | Intrinsic::NewSymbol
@@ -1561,6 +1565,7 @@ impl Intrinsic {
             Intrinsic::ArrayPush => "array_push",
             Intrinsic::ArraySpread => "array_spread",
             Intrinsic::ArgsRest(_) => "args_rest",
+            Intrinsic::ArrayRest(_) => "array_rest",
             Intrinsic::IterOpen => "iter_open",
             Intrinsic::IterStep => "iter_step",
             Intrinsic::IterValue => "iter_value",

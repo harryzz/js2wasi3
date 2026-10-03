@@ -56,8 +56,8 @@ fn arity_and_callee() {
     // T36: `Reflect` is a namespace; `Proxy` isn't implemented.
     lowers("export function f() { return Reflect.ownKeys({}); }");
     assert_eq!(
-        one("export function f() { return new Proxy({}, {}); }"),
-        "1:34 unsupported: global `Proxy` (planned: T21)"
+        one("new Proxy({}, {});"),
+        "1:5 unsupported: global `Proxy` (planned: T21)"
     );
 }
 
@@ -66,9 +66,11 @@ fn arity_and_callee() {
 fn builtins_prelude() {
     lowers("export function f(x) { return Math.floor(x) + Math.max(x, 2) + Math.PI; }");
     assert_eq!(
-        one("export function f() { return Math.nope(1); }"),
-        "1:30 unsupported: `Math.nope` (planned: T21)"
+        one("Math.nope(1);"),
+        "1:1 unsupported: `Math.nope` (planned: T21)"
     );
+    // T63: where it may not run, a call of `undefined` (node's TypeError when it does).
+    lowers("export function f() { return Math.nope(1); }");
     // Prelude names and intrinsics aren't globals of the user's code.
     assert_eq!(
         one("export function f() { return $$Math_abs(1); }"),
@@ -111,8 +113,8 @@ fn builtins_prelude() {
     // T25 slice 1: JSON.parse.
     lowers("export function f(s) { return JSON.parse(s, (k, v) => v).length; }");
     assert_eq!(
-        one("export function f(s) { return JSON.rawJSON(s); }"),
-        "1:31 unsupported: `JSON.rawJSON` (planned: T21)"
+        one("JSON.rawJSON('1');"),
+        "1:1 unsupported: `JSON.rawJSON` (planned: T21)"
     );
     lowers("export function f(v) { const j = JSON; return j.stringify(v).length; }");
     // T25 slice 2: Map and Set (subclassing not yet).
@@ -201,9 +203,22 @@ fn declarations_and_functions() {
     );
     lowers("export function f() { return Reflect; }");
     assert_eq!(
-        one("export function f() { return Proxy; }"),
-        "1:30 unsupported: global `Proxy` (planned: T21)"
+        one("const p = Proxy;"),
+        "1:11 unsupported: global `Proxy` (planned: T21)"
     );
+    // T63: node's globals js2wasi3 lacks: a build error only where it always runs; elsewhere
+    // thrown when it runs, and `typeof` reads them as absent.
+    let ir = lowers("export function f() { return Proxy; }");
+    assert!(ir.contains("global `Proxy` isn"), "{ir}");
+    for src in [
+        "if (typeof navigator !== 'undefined') navigator.userAgent;",
+        "typeof URL === 'function' && new URL('x');",
+        "const t = typeof TextEncoder != 'undefined' ? new TextEncoder() : null;",
+        "try { fetch('x'); } catch {}",
+        "for (const x of []) new Blob(x);",
+    ] {
+        lowers(src);
+    }
     // A name that isn't a global in node either throws a ReferenceError when read (F139).
     lowers("export function f() { return x; }");
     assert_eq!(
@@ -219,14 +234,14 @@ fn declarations_and_functions() {
 #[test]
 fn all_errors_are_reported() {
     let e = errors(
-        "export function f() {\n  let s = Proxy;\n  new WeakMap();\n  return new WeakSet();\n}",
+        "let s = Proxy;\nnew WeakMap();\nnew WeakSet();\n",
     );
     assert_eq!(
         e,
         vec![
-            "2:11 unsupported: global `Proxy` (planned: T21)",
-            "3:7 unsupported: global `WeakMap` (planned: T21)",
-            "4:14 unsupported: global `WeakSet` (planned: T21)",
+            "1:9 unsupported: global `Proxy` (planned: T21)",
+            "2:5 unsupported: global `WeakMap` (planned: T21)",
+            "3:5 unsupported: global `WeakSet` (planned: T21)",
         ]
     );
 }
@@ -320,8 +335,8 @@ fn exceptions() {
     assert!(!ir.contains("$init"), "{ir}");
 
     assert_eq!(
-        one("export function f() { return new WeakMap(); }"),
-        "1:34 unsupported: global `WeakMap` (planned: T21)"
+        one("new WeakMap();"),
+        "1:5 unsupported: global `WeakMap` (planned: T21)"
     );
     lowers("export function f() { try { } catch ({ a }) { } }");
 }
@@ -342,8 +357,8 @@ fn objects() {
         lowers(src);
     }
     assert_eq!(
-        one("export function f(o) { return o instanceof WeakMap; }"),
-        "1:44 unsupported: global `WeakMap` (planned: T21)"
+        one("const o = {}; o instanceof WeakMap;"),
+        "1:28 unsupported: global `WeakMap` (planned: T21)"
     );
     // T55: with property descriptors too.
     lowers("export function f(o) { return Object.create(o, {}); }");
@@ -387,8 +402,8 @@ fn closures() {
     ] {
         lowers(src);
     }
-    // T25: `arguments` in ordinary functions and methods (T43: and arrows); not in class
-    // constructors, with a rest parameter, or in an exported function (a WIT `list`, F55).
+    // T25: `arguments` in ordinary functions and methods (T43: and arrows; T63: class
+    // constructors, with a rest parameter); not in an exported function (a WIT `list`, F55).
     lowers("export function f(a) { function g() { return arguments.length; } return g(a, 1); }");
     lowers("export function f(a) { return { m() { return arguments[0]; } }.m(a); }");
     assert_eq!(
@@ -397,10 +412,8 @@ fn closures() {
     );
     // T43: arrow functions use the enclosing function's.
     lowers("export function f(a) { function g() { return () => arguments; } return 1; }");
-    assert_eq!(
-        one("export function f(a) { function g(...r) { return arguments; } return 1; }"),
-        "1:24 unsupported: a rest parameter with `arguments` (planned: later)"
-    );
+    lowers("export function f(a) { function g(...r) { return arguments; } return 1; }");
+    lowers("export function f(a) { class C { constructor() { this.n = arguments.length; } } return 1; }");
     assert_eq!(
         one("export function f() { function g() {} g = 1; return 0; }"),
         "1:39 unsupported: assignment to function `g` (planned: later)"

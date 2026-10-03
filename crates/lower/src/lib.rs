@@ -262,6 +262,9 @@ pub fn lower_with(
             main: None,
             module_bodies: Vec::new(),
             lexical_end: HashMap::new(),
+            may_skip: may_skip(program),
+            in_typeof: false,
+            lacked: false,
             tdz_flags: HashMap::new(),
             an: &an,
             nested: HashMap::new(),
@@ -412,6 +415,13 @@ struct Lowerer<'p, 'a> {
     /// Top-level `let`/`const` of a command: where the declaration ends. `main` reading one
     /// before that is a TDZ error.
     lexical_end: HashMap<SymbolId, u32>,
+    /// Code that may not run when its module does (T63): functions (not a CommonJS module's
+    /// wrapper), `try`, branches, loop bodies. See [`may_skip`].
+    may_skip: Vec<Span>,
+    /// Lowering `typeof x` (T63): a node global js2wasi3 lacks isn't an error there.
+    in_typeof: bool,
+    /// Set when such a global was read as absent (see [`Self::typeof_operand`]).
+    lacked: bool,
     /// Top-level `let`/`const` that a function may access before `main` initializes it: a `bool`
     /// global, set once it is (F22). Functions check it on every access.
     tdz_flags: HashMap<SymbolId, GlobalId>,
@@ -1720,10 +1730,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .get()
             .is_some_and(|s| self.an.uses_arguments.contains(&s));
         if uses_arguments {
-            // `function f(...arguments)`: the parameters are bound in the prologue (T25).
-            if f.params.rest.is_some() {
-                return Err(self.unsupported(f.span, "a rest parameter with `arguments`", "later"));
-            }
+            // `function f(...arguments)`: the parameters are bound in the prologue (T25), a rest
+            // parameter too (T63).
             params.clear();
         }
         // A function has a result if it returns a value, or if its (undefined) result is used.
@@ -2426,10 +2434,6 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             let mut params = Vec::new();
             let uses_arguments = self.an.uses_arguments.contains(&scope);
-            if uses_arguments && f.params().rest.is_some() {
-                let _ = self.unsupported(f.span(), "a rest parameter with `arguments`", "later");
-                continue;
-            }
             for p in &f.params().items {
                 if uses_arguments {
                     break; // bound in the prologue from the rest parameter (T25)
@@ -2546,6 +2550,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let mut params = Vec::new();
         match ctor {
+            // T63: with `arguments`, every parameter is bound in the prologue (T25).
+            Some(_) if self.an.uses_arguments.contains(&scope) => {
+                sig.push(("rest".to_string(), Type::JsVal));
+                self.rest_param.insert(id);
+            }
             Some(f) => {
                 for p in &f.params.items {
                     let (name, sym) = match (&p.pattern, &p.initializer) {
@@ -2705,8 +2714,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Expr::intrinsic(Intrinsic::NewCell(ty), vec![v]),
                 ));
                 cx.cells.insert(sym, (cell, false));
+            } else if self.scoping.symbol_flags(sym).is_function_scoped_declaration()
+                && !skip(sym)
+                && !self.nested_decl.contains_key(&sym)
+                && !self.globals.contains_key(&sym)
+                && self.read_before_declaration(sym)
+            {
+                // T63: a `var` read before its declaration (`for (; !o; ) { var o = … }`) is
+                // `undefined` until assigned: its local starts so.
+                let slot = Slot::Var(sym);
+                let ty = self.slot_ty(slot);
+                let v = self.undefined_val();
+                let v = self.store(slot, ty, v);
+                let l = self.local_for(cx, sym, ty);
+                prologue.push(Stmt::Set(l, v));
             }
         }
+    }
+
+    /// Is `var` `sym` read somewhere before (in the text) its first declaration (T63)?
+    fn read_before_declaration(&self, sym: SymbolId) -> bool {
+        let at = self.scoping.symbol_span(sym).start;
+        let nodes = self.p.semantic.nodes();
+        self.scoping
+            .get_resolved_references(sym)
+            .any(|r| r.is_read() && nodes.get_node(r.node_id()).span().start < at)
     }
 
     /// The start of a function (`scope`: the function, or a class): the hidden params, the
@@ -2812,6 +2844,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         prologue,
                     ),
                 };
+            }
+            if let Some(rest) = params.and_then(|ps| ps.rest.as_ref()) {
+                // T63: the rest parameter is a new array of the arguments after the others.
+                param_syms.extend(rest.rest.argument.get_binding_identifiers().iter().filter_map(|b| b.symbol_id.get()));
+                let n = params.map_or(0, |ps| ps.items.len()) as u32;
+                let v = Expr::intrinsic(Intrinsic::ArrayRest(n), vec![Expr::Local(all)]);
+                let _ = self.pattern(
+                    cx,
+                    Pat::Bind(&rest.rest.argument),
+                    v,
+                    Mode::Decl { fresh: false },
+                    None,
+                    prologue,
+                );
             }
             let l = cx.func.add_local("arguments", Type::JsVal);
             prologue.push(Stmt::Set(
@@ -4096,6 +4142,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if self.undeclared(id) {
                     return Ok(self.global_read(id));
                 }
+                if self.node_global(id) && (self.in_typeof || !self.always_runs(id.span)) {
+                    // T63: a node global js2wasi3 lacks: `typeof` reads it as absent; elsewhere
+                    // thrown when it runs, like T54's built-in modules (a build error where it
+                    // always runs).
+                    self.lacked = true;
+                    return Ok(Val::js(lacks_global(&id.name), Kind::Any));
+                }
                 let var = self.resolve(cx, id)?;
                 Ok(self.read_var(&var))
             }
@@ -4125,7 +4178,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         let e = Expr::intrinsic(Intrinsic::TypeofString, vec![v]);
                         return Ok(Val::js(e, Kind::Str));
                     }
-                    let v = self.expr(cx, &u.argument)?;
+                    let Some(v) = self.typeof_operand(cx, &u.argument)? else {
+                        return Ok(Val::js(Expr::str("undefined"), Kind::Str));
+                    };
                     let known = match v.kind {
                         Kind::Num | Kind::Bottom => Some("number"),
                         Kind::Bool => Some("boolean"),
@@ -4157,6 +4212,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                             Expr::intrinsic(Intrinsic::DeleteProp, vec![obj, key]),
                             Type::Bool,
                         ))
+                    }
+                    Expression::ChainExpression(c)
+                        if let Some(m) = c.expression.as_member_expression()
+                            && !matches!(m, MemberExpression::PrivateFieldExpression(_)) =>
+                    {
+                        self.delete_chain(cx, m)
                     }
                     Expression::ChainExpression(_) | Expression::PrivateFieldExpression(_) => {
                         Err(self.unsupported(
@@ -4428,6 +4489,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 Ok(Val::js(self.func_value(func), Kind::Any))
             }
             Expression::StaticMemberExpression(sm)
+                if self.is_global(&sm.object, "console")
+                    && builtins::CONSOLE_STREAMS.contains(&sm.property.name.as_str())
+                    && self.prelude.is_live(builtins::PROCESS) =>
+            {
+                // T63: node's `console._stdout` is `process.stdout` (winston writes to it).
+                if !self.command {
+                    return Err(self.unsupported(span, "`console` in a module with exports", "T20"));
+                }
+                let process = self.prelude_call(builtins::PROCESS, vec![]);
+                let key = Expr::str(&sm.property.name[1..]);
+                Ok(Val::js(Expr::intrinsic(Intrinsic::GetProp, vec![process, key]), Kind::Any))
+            }
+            Expression::StaticMemberExpression(sm)
                 if !sm.optional
                     && self.is_global(&sm.object, "process")
                     && sm.property.name == "nextTick" =>
@@ -4444,6 +4518,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
                 let p = sm.property.name.as_str();
                 let Some(&(_, v)) = ir::MATH_CONSTANTS.iter().find(|(n, _)| *n == p) else {
+                    if !self.always_runs(span) {
+                        // T63: where it may not run, absent (as a missing static's call).
+                        return Ok(Val::js(Expr::undefined(), Kind::Any));
+                    }
                     return Err(self.unsupported(span, &format!("`Math.{p}`"), "T21"));
                 };
                 Ok(Val::num(Expr::f64(v)))
@@ -4831,7 +4909,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             // `typeof x` is `"undefined"` without reading `x` (F139): the general comparison.
             return Ok(None);
         }
-        let v = self.expr(cx, &u.argument)?;
+        let Some(v) = self.typeof_operand(cx, &u.argument)? else {
+            return Ok(None);
+        };
         let tag = TypeofTag::parse(s.value.as_str());
         let known = match v.kind {
             Kind::Num | Kind::Bottom => Some(TypeofTag::Number),
@@ -5013,9 +5093,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && !((self.prelude.ctor_values.contains(obj.name.as_str()) || obj.name == "Promise")
                 && builtins::inherited_prop(&obj.name, &m.property.name))
         {
-            // `Math.nope(…)`, `JSON.parse(…)`: a static the prelude doesn't implement.
-            let what = format!("`{}.{}`", obj.name, m.property.name);
-            return Err(self.unsupported(m.span, &what, "T21"));
+            // `Math.nope(…)`, `JSON.parse(…)`: a static the prelude doesn't implement. T63: where
+            // it may not run (tsc's `typeof Reflect.decorate === "function"` guard), node's
+            // TypeError for calling `undefined` when it does (the arguments aren't evaluated).
+            let what = format!("{}.{}", obj.name, m.property.name);
+            if self.always_runs(m.span) {
+                return Err(self.unsupported(m.span, &format!("`{what}`"), "T21"));
+            }
+            let e = Expr::Seq {
+                body: vec![Stmt::Throw(Expr::intrinsic(
+                    Intrinsic::NewError(ErrorKind::TypeError),
+                    vec![Expr::str(&format!("{what} is not a function")), Expr::undefined()],
+                ))],
+                value: Box::new(Expr::undefined()),
+            };
+            return Ok((e, Call::Value));
         }
         if let Expression::Identifier(id) = callee
             && let Some(sym) = self.scoping.get_reference(id.reference_id()).symbol_id()
@@ -6456,6 +6548,37 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         ))
     }
 
+    /// `delete a?.b`, `delete a?.[k].c` (T63): `true` when the chain stops at a nullish value.
+    fn delete_chain(&mut self, cx: &mut FnCx, m: &'a MemberExpression<'a>) -> R<Val> {
+        let exit = cx.label();
+        let res = cx.func.add_local("deleted", Type::Bool);
+        let mut body = Vec::new();
+        let obj = self.chain_expr(cx, m.object(), exit, &mut body)?;
+        let mut obj = jsval_of(obj);
+        if m.optional() {
+            let t = cx.func.add_local("tmp", Type::JsVal);
+            body.push(Stmt::Set(t, obj));
+            body.push(Stmt::If {
+                cond: Expr::binary(BinOp::LooseEq, Type::JsVal, Expr::Local(t), Expr::Const(Const::Null)),
+                then: vec![Stmt::Break(exit)],
+                els: vec![],
+            });
+            obj = Expr::Local(t);
+        }
+        let key = match m {
+            MemberExpression::ComputedMemberExpression(cm) => jsval_of(self.expr(cx, &cm.expression)?),
+            _ => Expr::str(m.static_property_name().unwrap_or_default()),
+        };
+        body.push(Stmt::Set(res, Expr::intrinsic(Intrinsic::DeleteProp, vec![obj, key])));
+        Ok(Val::new(
+            Expr::Seq {
+                body: vec![Stmt::Set(res, Expr::Const(Const::Bool(true))), Stmt::Block { label: exit, body }],
+                value: Box::new(Expr::Local(res)),
+            },
+            Type::Bool,
+        ))
+    }
+
     fn chain_link(
         &mut self,
         cx: &mut FnCx,
@@ -7264,6 +7387,32 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && NODE_GLOBALS.binary_search(&id.name.as_str()).is_err()
     }
 
+    /// Is `id` one of node's globals, unresolved, in the user's code (T63)? Reaching
+    /// [`Self::resolve`], it's one js2wasi3 lacks: the lowering handles the others before.
+    fn node_global(&self, id: &IdentifierReference<'a>) -> bool {
+        self.scoping.get_reference(id.reference_id()).symbol_id().is_none()
+            && id.name != "arguments"
+            && !self.p.in_prelude(id.span.start)
+            && !self.p.is_generated(id.span.start)
+            && NODE_GLOBALS.binary_search(&id.name.as_str()).is_ok()
+    }
+
+    /// `typeof`'s operand (T63): `None` for a node global js2wasi3 lacks (it reads as absent).
+    fn typeof_operand(&mut self, cx: &mut FnCx, e: &'a Expression<'a>) -> R<Option<Val>> {
+        let (typeof_, lacked) = (self.in_typeof, self.lacked);
+        self.in_typeof = matches!(e.without_parentheses(), Expression::Identifier(_));
+        self.lacked = false;
+        let v = self.expr(cx, e);
+        let hit = self.lacked;
+        (self.in_typeof, self.lacked) = (typeof_, lacked);
+        Ok((!hit).then_some(v?))
+    }
+
+    /// Does the code at `span` run whenever its module does (T63, as T54's `require`)?
+    fn always_runs(&self, span: Span) -> bool {
+        !self.may_skip.iter().any(|r| r.start <= span.start && span.end <= r.end)
+    }
+
     /// An assignment target that is a name no scope declares (T42): an undeclared name, or the
     /// read-only `NaN`/`Infinity`/`undefined`.
     fn global_target<'b>(&self, t: &'b SimpleAssignmentTarget<'a>) -> Option<&'b IdentifierReference<'a>> {
@@ -7693,6 +7842,60 @@ const NODE_GLOBALS: &[&str] = &[
     "process", "queueMicrotask", "setImmediate", "setInterval", "setTimeout", "structuredClone",
     "undefined", "unescape",
 ];
+
+/// Reading a node global js2wasi3 lacks where it may not run (T63): a ReferenceError naming it.
+fn lacks_global(name: &str) -> Expr {
+    Expr::Seq {
+        body: vec![Stmt::Throw(Expr::intrinsic(
+            Intrinsic::NewError(ErrorKind::ReferenceError),
+            vec![
+                Expr::str(&format!("node's global `{name}` isn't available in js2wasi3 (planned: T21)")),
+                Expr::undefined(),
+            ],
+        ))],
+        value: Box::new(Expr::undefined()),
+    }
+}
+
+/// Code that may not run when its module does (T63): bodies of functions (except a CommonJS
+/// module's wrapper, a top-level function with its five parameters), classes, `try`
+/// statements, branches of `if`/`?:`/`switch`, the right of `&&`/`||`/`??`, and loop bodies.
+fn may_skip(p: &Program) -> Vec<Span> {
+    let wrapper = |f: &Function| {
+        let names = ["exports", "require", "module", "__filename", "__dirname"];
+        f.is_declaration()
+            && f.params.items.len() == 5
+            && f.params.items.iter().zip(names).all(|(b, n)| {
+                b.pattern.get_binding_identifier().is_some_and(|i| i.name == n)
+            })
+    };
+    let mut out = Vec::new();
+    for n in p.semantic.nodes().iter() {
+        match n.kind() {
+            AstKind::Function(f) if !wrapper(f) => out.push(f.span),
+            AstKind::ArrowFunctionExpression(f) => out.push(f.span),
+            AstKind::Class(c) => out.push(c.span),
+            AstKind::TryStatement(t) => out.push(t.span),
+            AstKind::IfStatement(i) => {
+                out.push(i.consequent.span());
+                out.extend(i.alternate.as_ref().map(|a| a.span()));
+            }
+            AstKind::ConditionalExpression(c) => {
+                out.push(c.consequent.span());
+                out.push(c.alternate.span());
+            }
+            AstKind::LogicalExpression(l) => out.push(l.right.span()),
+            AstKind::SwitchCase(c) => out.push(c.span),
+            AstKind::ForStatement(f) => out.push(f.body.span()),
+            AstKind::ForInStatement(f) => out.push(f.body.span()),
+            AstKind::ForOfStatement(f) => out.push(f.body.span()),
+            AstKind::WhileStatement(w) => out.push(w.body.span()),
+            AstKind::DoWhileStatement(w) => out.push(w.body.span()),
+            _ => {}
+        }
+    }
+    out
+}
 
 /// Reading an unresolvable name: `throw new ReferenceError("x is not defined")` (node's message).
 fn not_defined(name: &str) -> Expr {

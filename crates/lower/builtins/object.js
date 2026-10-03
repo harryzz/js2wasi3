@@ -324,6 +324,24 @@ function $$Object_defineProperties(o, props) {
   return o;
 }
 
+// `Object.getOwnPropertyDescriptors(o)` (T63): every own key's descriptor, defined (a `__proto__`
+// key is an own property, not the prototype).
+function $$Object_getOwnPropertyDescriptors(o) {
+  if (o === undefined || o === null) {
+    throw new TypeError("Cannot convert undefined or null to object");
+  }
+  const from = Object(o);
+  const keys = Reflect.ownKeys(from);
+  const out = {};
+  for (let i = 0; i < keys.length; i++) {
+    const d = Object.getOwnPropertyDescriptor(from, keys[i]);
+    if (d !== undefined) {
+      Object.defineProperty(out, keys[i], { value: d, writable: true, enumerable: true, configurable: true });
+    }
+  }
+  return out;
+}
+
 // `Function.prototype[Symbol.hasInstance](v)` (T60): OrdinaryHasInstance, without a constructor's
 // own `@@hasInstance` (readable-stream's `FunctionPrototypeSymbolHasInstance`). Linked by naming
 // `hasInstance`. Not for bound functions (their target's prototype).

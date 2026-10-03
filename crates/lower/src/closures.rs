@@ -272,7 +272,8 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
 
     let mut captures: HashMap<ScopeId, BTreeSet<Cap>> = HashMap::new();
 
-    // `arguments` (T25): the nearest function's, if it isn't an arrow function or a class.
+    // `arguments` (T25): the nearest function's, if it isn't an arrow function. T63: a class's is
+    // its constructor's (a field initializer can't name it: a syntax error).
     for node in nodes.iter() {
         let AstKind::IdentifierReference(r) = node.kind() else {
             continue;
@@ -297,14 +298,9 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
         let Some(f) = f else {
             continue; // the module level: an unknown global
         };
-        if an.classes.contains_key(&f) {
-            an.unsupported
-                .push((r.span, "`arguments` in a class constructor or field"));
-        } else {
-            an.uses_arguments.insert(f);
-            for a in chain {
-                captures.entry(a).or_default().insert(Cap::Arguments);
-            }
+        an.uses_arguments.insert(f);
+        for a in chain {
+            captures.entry(a).or_default().insert(Cap::Arguments);
         }
     }
 
