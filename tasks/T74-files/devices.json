@@ -1,0 +1,1921 @@
+[
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_zzoangmc",
+"modelID": "TS0011",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4098,
+"applicationVersion": 66,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 256,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6,
+57344,
+57345
+],
+"outputClusters": [
+25,
+10
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "yl3zuyaw",
+"modelID": "TS0001-QS-custom",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4417,
+"applicationVersion": 3,
+"stackVersion": 2,
+"hardwareVersion": 0,
+"dateCode": "20260211",
+"softwareBuildID": "1.1.2-32867eac",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+0,
+7,
+18
+],
+"outputClusters": [
+25,
+6,
+8
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+6,
+4
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_au1rjicn",
+"modelID": "TS0203",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 70,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+1,
+3,
+1280,
+0
+],
+"outputClusters": [
+3,
+4,
+5,
+6,
+8,
+4096,
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "Espressif",
+"modelID": "ESP32H2.Light",
+"powerSource": "DC Source",
+"manufacturerID": 4660,
+"applicationVersion": null,
+"stackVersion": null,
+"hardwareVersion": null,
+"dateCode": null,
+"softwareBuildID": null,
+"zclVersion": 4,
+"endpoints": [
+{
+"ID": 10,
+"profileID": 260,
+"deviceID": 2,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "IKEA of Sweden",
+"modelID": "VALLHORN Wireless Motion Sensor",
+"powerSource": "Battery",
+"manufacturerID": 4476,
+"applicationVersion": 1,
+"stackVersion": 113,
+"hardwareVersion": 1,
+"dateCode": "20240123",
+"softwareBuildID": "1.0.64",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 2128,
+"inputClusters": [
+0,
+1,
+3,
+32,
+2821,
+4096,
+64636,
+64641
+],
+"outputClusters": [
+3,
+4,
+6,
+25,
+4096
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 263,
+"inputClusters": [
+0,
+3,
+1030
+],
+"outputClusters": [
+3
+]
+},
+{
+"ID": 3,
+"profileID": 260,
+"deviceID": 262,
+"inputClusters": [
+0,
+3,
+1024
+],
+"outputClusters": [
+3
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "_TZ3000_okaz9tjs",
+"modelID": "TS011F",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4660,
+"applicationVersion": 100,
+"stackVersion": 1,
+"hardwareVersion": 2,
+"dateCode": "20210625",
+"softwareBuildID": "500+TZSKT31BS102",
+"zclVersion": 2,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+0,
+6,
+3,
+4,
+5,
+57345,
+2820,
+1794
+],
+"outputClusters": [
+25
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "IKEA of Sweden",
+"modelID": "TRADFRI bulb E27 WS globe 1055lm",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4476,
+"applicationVersion": 3,
+"stackVersion": 113,
+"hardwareVersion": 1,
+"dateCode": "20240716",
+"softwareBuildID": "3.0.23",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 268,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6,
+8,
+768,
+4096,
+64636
+],
+"outputClusters": [
+25
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [
+33
+],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "zzoangmc",
+"modelID": "TS0011-MS-104ZL",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 0,
+"applicationVersion": 3,
+"stackVersion": 2,
+"hardwareVersion": 0,
+"dateCode": "20260215",
+"softwareBuildID": "1.1.2-32867eac",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+0,
+7,
+18
+],
+"outputClusters": [
+25,
+6,
+8
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+6,
+4
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "_TZ3000_ktuoyvt5",
+"modelID": "TS110F",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4098,
+"applicationVersion": 72,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 257,
+"inputClusters": [
+0,
+4,
+5,
+6,
+8
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZE200_rtrmfadk",
+"modelID": "TS0601",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 72,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+4,
+5,
+61184,
+0
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_4js9lo5d",
+"modelID": "TS0012",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4098,
+"applicationVersion": 66,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 256,
+"inputClusters": [
+0,
+4,
+5,
+6
+],
+"outputClusters": [
+25,
+10
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 256,
+"inputClusters": [
+4,
+5,
+6
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "TH01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 5,
+"stackVersion": null,
+"hardwareVersion": 1,
+"dateCode": "20201026",
+"softwareBuildID": null,
+"zclVersion": 1,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 770,
+"inputClusters": [
+0,
+3,
+1026,
+1029,
+1
+],
+"outputClusters": [
+3
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_4fjiwweb",
+"modelID": "TS004F",
+"powerSource": "Battery",
+"manufacturerID": 4098,
+"applicationVersion": 67,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 260,
+"inputClusters": [
+0,
+1,
+3,
+4,
+6,
+4096
+],
+"outputClusters": [
+25,
+10,
+3,
+4,
+5,
+6,
+8,
+4096
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "WB01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 5,
+"stackVersion": null,
+"hardwareVersion": 0,
+"dateCode": "20211103",
+"softwareBuildID": null,
+"zclVersion": 0,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 0,
+"inputClusters": [
+0,
+3,
+1
+],
+"outputClusters": [
+6,
+3
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_4fjiwweb",
+"modelID": "TS004F",
+"powerSource": "Battery",
+"manufacturerID": 4098,
+"applicationVersion": 67,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 260,
+"inputClusters": [
+0,
+1,
+3,
+4,
+6,
+4096
+],
+"outputClusters": [
+25,
+10,
+3,
+4,
+5,
+6,
+8,
+4096
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "WB01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 5,
+"stackVersion": null,
+"hardwareVersion": 0,
+"dateCode": "20211103",
+"softwareBuildID": null,
+"zclVersion": 0,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 0,
+"inputClusters": [
+0,
+3,
+1
+],
+"outputClusters": [
+6,
+3
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "TH01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 5,
+"stackVersion": null,
+"hardwareVersion": 1,
+"dateCode": "20201026",
+"softwareBuildID": null,
+"zclVersion": 1,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 770,
+"inputClusters": [
+0,
+3,
+1026,
+1029,
+1
+],
+"outputClusters": [
+3
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "_TZ3000_okaz9tjs",
+"modelID": "TS011F",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4660,
+"applicationVersion": 100,
+"stackVersion": 1,
+"hardwareVersion": 2,
+"dateCode": "20210625",
+"softwareBuildID": "500+TZSKT31BS102",
+"zclVersion": 2,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+0,
+6,
+3,
+4,
+5,
+57345,
+2820,
+1794
+],
+"outputClusters": [
+25
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZE200_rtrmfadk",
+"modelID": "TS0601",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 72,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+4,
+5,
+61184,
+0
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZE200_rtrmfadk",
+"modelID": "TS0601",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 72,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+4,
+5,
+61184,
+0
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZE200_rtrmfadk",
+"modelID": "TS0601",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 72,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+4,
+5,
+61184,
+0
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "TH01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 5,
+"stackVersion": null,
+"hardwareVersion": 1,
+"dateCode": "20201026",
+"softwareBuildID": null,
+"zclVersion": 1,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 770,
+"inputClusters": [
+0,
+3,
+1026,
+1029,
+1
+],
+"outputClusters": [
+3
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "TH01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 5,
+"stackVersion": null,
+"hardwareVersion": 1,
+"dateCode": "20201026",
+"softwareBuildID": null,
+"zclVersion": 1,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 770,
+"inputClusters": [
+0,
+3,
+1026,
+1029,
+1
+],
+"outputClusters": [
+3
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_au1rjicn",
+"modelID": "TS0203",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 70,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+1,
+3,
+1280,
+0
+],
+"outputClusters": [
+3,
+4,
+5,
+6,
+8,
+4096,
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_au1rjicn",
+"modelID": "TS0203",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 70,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+1,
+3,
+1280,
+0
+],
+"outputClusters": [
+3,
+4,
+5,
+6,
+8,
+4096,
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_au1rjicn",
+"modelID": "TS0203",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 70,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+1,
+3,
+1280,
+0
+],
+"outputClusters": [
+3,
+4,
+5,
+6,
+8,
+4096,
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_au1rjicn",
+"modelID": "TS0203",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 70,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+1,
+3,
+1280,
+0
+],
+"outputClusters": [
+3,
+4,
+5,
+6,
+8,
+4096,
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_zzoangmc",
+"modelID": "TS0011",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4098,
+"applicationVersion": 66,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 256,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6,
+57344,
+57345
+],
+"outputClusters": [
+25,
+10
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "IKEA of Sweden",
+"modelID": "TRADFRI Signal Repeater",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4476,
+"applicationVersion": 33,
+"stackVersion": 98,
+"hardwareVersion": 1,
+"dateCode": "20190311",
+"softwareBuildID": "2.3.086",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 8,
+"inputClusters": [
+0,
+3,
+9,
+2821,
+4096,
+64636
+],
+"outputClusters": [
+25,
+32,
+4096
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "IKEA of Sweden",
+"modelID": "VINDSTYRKA",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4476,
+"applicationVersion": 1,
+"stackVersion": 106,
+"hardwareVersion": 1,
+"dateCode": "20230202",
+"softwareBuildID": "1.0.11",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 770,
+"inputClusters": [
+0,
+3,
+4,
+1026,
+1029,
+64599,
+64636,
+1066,
+64638
+],
+"outputClusters": [
+3,
+25,
+32,
+514
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "_TZ3000_lepzuhto",
+"modelID": "TS011F",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4098,
+"applicationVersion": 69,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 266,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6,
+1794,
+2820,
+1026,
+57344,
+57345
+],
+"outputClusters": [
+25,
+10
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "_TZ3000_92chsky7",
+"modelID": "TS110F",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4098,
+"applicationVersion": 66,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 257,
+"inputClusters": [
+0,
+4,
+5,
+6,
+8
+],
+"outputClusters": [
+25,
+10
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 257,
+"inputClusters": [
+4,
+5,
+6,
+8
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "DS01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 4,
+"stackVersion": null,
+"hardwareVersion": 1,
+"dateCode": "20201026",
+"softwareBuildID": null,
+"zclVersion": 1,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+0,
+3,
+1280,
+1
+],
+"outputClusters": [
+3
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "TexasInstruments",
+"modelID": "ti.router",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 0,
+"applicationVersion": null,
+"stackVersion": null,
+"hardwareVersion": 1,
+"dateCode": null,
+"softwareBuildID": "20221102",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 8,
+"profileID": 260,
+"deviceID": 255,
+"inputClusters": [
+0,
+3
+],
+"outputClusters": [
+0
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "EfektaLab",
+"modelID": "SNZB-02_EFEKTA",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 3,
+"stackVersion": 4,
+"hardwareVersion": 1,
+"dateCode": "12/07/2023 23:43",
+"softwareBuildID": "12/07/2023 23:43",
+"zclVersion": 1,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 12,
+"inputClusters": [
+0,
+1,
+1026,
+1029
+],
+"outputClusters": [
+6,
+1026,
+1029
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "yl3zuyaw",
+"modelID": "TS0001-QS-custom",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4417,
+"applicationVersion": 3,
+"stackVersion": 2,
+"hardwareVersion": 0,
+"dateCode": "20260211",
+"softwareBuildID": "1.1.2-32867eac",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+0,
+7,
+18
+],
+"outputClusters": [
+25,
+6,
+8
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+6,
+4
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "Tuya",
+"modelID": "TY0201-z",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 52,
+"stackVersion": 2,
+"hardwareVersion": 1,
+"dateCode": "20260131",
+"softwareBuildID": "3001-0134",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 770,
+"inputClusters": [
+0,
+1,
+3,
+32,
+516,
+1026,
+1029
+],
+"outputClusters": [
+25
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZE284_ltwbm23f",
+"modelID": "TS0601",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 77,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+4,
+5,
+61184,
+0,
+60672
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZE284_ltwbm23f",
+"modelID": "TS0601",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 77,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+4,
+5,
+61184,
+0,
+60672
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZE284_ltwbm23f",
+"modelID": "TS0601",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 77,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 81,
+"inputClusters": [
+4,
+5,
+61184,
+0,
+60672
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "LUMI",
+"modelID": "lumi.remote.cagl02",
+"powerSource": "Battery",
+"manufacturerID": 4447,
+"applicationVersion": 25,
+"stackVersion": 2,
+"hardwareVersion": 1,
+"dateCode": "20220602",
+"softwareBuildID": "0.0.0_0025",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 259,
+"inputClusters": [
+0,
+3,
+1,
+18,
+6
+],
+"outputClusters": [
+0,
+3,
+25
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 259,
+"inputClusters": [
+18
+],
+"outputClusters": [
+18
+]
+},
+{
+"ID": 3,
+"profileID": 260,
+"deviceID": 259,
+"inputClusters": [
+12
+],
+"outputClusters": [
+12
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "IKEA of Sweden",
+"modelID": "INSPELNING Smart plug",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4476,
+"applicationVersion": 2,
+"stackVersion": 114,
+"hardwareVersion": 1,
+"dateCode": "20240801",
+"softwareBuildID": "2.4.45",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 266,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6,
+8,
+1794,
+2820,
+4096,
+64636,
+64645
+],
+"outputClusters": [
+25
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [
+33
+],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "IKEA of Sweden",
+"modelID": "INSPELNING Smart plug",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4476,
+"applicationVersion": 2,
+"stackVersion": 114,
+"hardwareVersion": 1,
+"dateCode": "20240801",
+"softwareBuildID": "2.4.45",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 266,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6,
+8,
+1794,
+2820,
+4096,
+64636,
+64645
+],
+"outputClusters": [
+25
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [
+33
+],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_au1rjicn",
+"modelID": "TS0203",
+"powerSource": "Battery",
+"manufacturerID": 4417,
+"applicationVersion": 70,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+1,
+3,
+1280,
+0
+],
+"outputClusters": [
+3,
+4,
+5,
+6,
+8,
+4096,
+25,
+10
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "IKEA of Sweden",
+"modelID": "INSPELNING Smart plug",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4476,
+"applicationVersion": 2,
+"stackVersion": 114,
+"hardwareVersion": 1,
+"dateCode": "20240801",
+"softwareBuildID": "2.4.45",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 266,
+"inputClusters": [
+0,
+3,
+4,
+5,
+6,
+8,
+1794,
+2820,
+4096,
+64636,
+64645
+],
+"outputClusters": [
+25
+]
+},
+{
+"ID": 242,
+"profileID": 41440,
+"deviceID": 97,
+"inputClusters": [
+33
+],
+"outputClusters": [
+33
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "qmi1cfuq",
+"modelID": "TS0011-custom",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4417,
+"applicationVersion": 3,
+"stackVersion": 2,
+"hardwareVersion": 0,
+"dateCode": "20260209",
+"softwareBuildID": "1.1.2-32867eac",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+0,
+7,
+18
+],
+"outputClusters": [
+25,
+6,
+8
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+6,
+4
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "jl7qyupf",
+"modelID": "TS0012-custom",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4417,
+"applicationVersion": 3,
+"stackVersion": 2,
+"hardwareVersion": 0,
+"dateCode": "20260208",
+"softwareBuildID": "1.1.2-48b92fa2",
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+0,
+7,
+18
+],
+"outputClusters": [
+25,
+6,
+8
+]
+},
+{
+"ID": 2,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+7,
+18
+],
+"outputClusters": [
+6,
+8
+]
+},
+{
+"ID": 3,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+6,
+4
+],
+"outputClusters": []
+},
+{
+"ID": 4,
+"profileID": 260,
+"deviceID": 65535,
+"inputClusters": [
+6,
+4
+],
+"outputClusters": []
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "_TZ3000_msxs2bv5",
+"modelID": "TS0011",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4417,
+"applicationVersion": 68,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 256,
+"inputClusters": [
+3,
+4,
+5,
+6,
+57344,
+57345,
+0
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "Router",
+"manufacturerName": "_TZ3000_ktuoyvt5",
+"modelID": "TS110F",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4098,
+"applicationVersion": 72,
+"stackVersion": 0,
+"hardwareVersion": 1,
+"dateCode": "",
+"softwareBuildID": null,
+"zclVersion": 3,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 257,
+"inputClusters": [
+0,
+4,
+5,
+6,
+8
+],
+"outputClusters": [
+25,
+10
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "SONOFF",
+"modelID": "ZBMINIL2",
+"powerSource": "Mains (single phase)",
+"manufacturerID": 4742,
+"applicationVersion": null,
+"stackVersion": null,
+"hardwareVersion": null,
+"dateCode": "20230505",
+"softwareBuildID": "1.0.14",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 2,
+"inputClusters": [
+0,
+1,
+3,
+6,
+7,
+2821,
+64599
+],
+"outputClusters": [
+25
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "Shelly",
+"modelID": "BLU Remote Control ZB",
+"powerSource": "Battery",
+"manufacturerID": 4098,
+"applicationVersion": 0,
+"stackVersion": 0,
+"hardwareVersion": 0,
+"dateCode": "20250505",
+"softwareBuildID": "0.0.1",
+"zclVersion": 8,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1,
+"inputClusters": [
+0,
+1,
+3,
+32
+],
+"outputClusters": [
+3,
+6,
+8
+]
+}
+]
+},
+{
+"type": "EndDevice",
+"manufacturerName": "eWeLink",
+"modelID": "MS01",
+"powerSource": "Battery",
+"manufacturerID": 0,
+"applicationVersion": 5,
+"stackVersion": null,
+"hardwareVersion": 1,
+"dateCode": "20210125",
+"softwareBuildID": null,
+"zclVersion": 1,
+"endpoints": [
+{
+"ID": 1,
+"profileID": 260,
+"deviceID": 1026,
+"inputClusters": [
+0,
+3,
+1280,
+1
+],
+"outputClusters": [
+3
+]
+}
+]
+}
+]

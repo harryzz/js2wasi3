@@ -103,6 +103,17 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   function whose compile time grows superlinearly with their count and length (10k short strings: 11 s; now
   ~20 µs per constant). Uses are unchanged (`global.get`, non-null), and so is identity: each constant is made once,
   at instantiation, as before. Every program with strings changed (uniformly); no run-time cost measured.)
+  (T74: **constant-key property access**. The backend routes `GetProp`/`SetProp`/`DefineProp` whose key is a
+  string constant other than an array index or `length` (`object::named_key`; and not `__proto__` for sets) to
+  named helpers that take the key's FNV-1a hash computed at build time (`object::key_hash`): no ToPropertyKey, no
+  element paths, no rehashing per prototype level (`GetNamed` → `LookupNamed` → `FindOwnNamed`; `SetNamed` →
+  `ordinary_set_named`, a new property through `AppendNamed` without a second search; `DefineNamed` for object
+  literals). `v.length` is `GetLength` (an array's field, a string's length). Key compares in every scan are
+  inline: identity, length, first and last unit, then `string_eq`. Each constant-key read site has an **inline
+  cache** entry in `G_IC` (a growable `$i32s`): the entry index where it last found an own property, used when
+  that entry's key is identical to the site's (constant strings are interned per module, so objects built by
+  the same code hit); prototype hits and keys built at run time miss and take the lookup. The lowering keeps a
+  constant key in place in `o.k = v`/`o.k op= v` (`key_temp`). Shapes/hidden classes remain undone (F321).)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
 - Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
   inline caches only after T12 works and a benchmark justifies them.

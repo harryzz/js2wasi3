@@ -42,6 +42,9 @@ pub enum Helper {
     Value,
     /// `(o: (ref $object), k: (ref $string), v: jsval)`: OrdinarySet with receiver `o`.
     Set,
+    /// `(o, k, v, hash: i32)`: [`Helper::Set`] for a key that is neither an array index nor `length`,
+    /// with its hash (T74): no array paths, one search per level, a new property appended directly.
+    SetNamed,
     /// `(o: (ref null $object)) -> (ref null $string)`: the name of the first `constructor` found
     /// on the chain from `o` (a function with a non-empty name whose `prototype` is on `o`'s
     /// chain, like node's `getConstructorName`), else null.
@@ -88,6 +91,7 @@ impl Helper {
         match self {
             Helper::Value => "property_value",
             Helper::Set => "ordinary_set",
+            Helper::SetNamed => "ordinary_set_named",
             Helper::CtorName => "constructor_name",
             Helper::Desc => "object_desc",
             Helper::Put => "put",
@@ -122,6 +126,7 @@ impl Helper {
         match self {
             Helper::Value => (vec![v, v], vec![v]),
             Helper::Set => (vec![o, s, v], vec![]),
+            Helper::SetNamed => (vec![o, s, v, I32], vec![]),
             Helper::CtorName => (vec![rt(true, T_OBJECT)], vec![rt(true, T_STRING)]),
             Helper::Desc => (vec![o], vec![s]),
             Helper::Put => (vec![o, s, v, I32], vec![]),
@@ -143,7 +148,8 @@ impl Helper {
     pub fn body(self, cx: &mut dyn Cx) -> Function {
         match self {
             Helper::Value => value(cx),
-            Helper::Set => set(cx),
+            Helper::Set => set(cx, false),
+            Helper::SetNamed => set(cx, true),
             Helper::CtorName => ctor_name(cx),
             Helper::Desc => desc(cx),
             Helper::Put => put(cx),
@@ -349,9 +355,10 @@ fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u3
     s.call(call_value).drop();
 }
 
-fn set(cx: &mut dyn Cx) -> Function {
-    let find = oh(cx, object::Helper::FindOwn);
-    let define = oh(cx, object::Helper::Define);
+/// `ordinary_set(o, k, v)`; with `named`, `ordinary_set_named(o, k, v, hash)` (see [`Helper::SetNamed`]).
+fn set(cx: &mut dyn Cx, named: bool) -> Function {
+    let find = oh(cx, if named { object::Helper::FindOwnNamed } else { object::Helper::FindOwn });
+    let define = oh(cx, if named { object::Helper::AppendNamed } else { object::Helper::Define });
     let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define { set: true }));
     let array_own = cx.helper(runtime::Helper::Arr(array::Helper::OwnGet));
     let concat = cx.helper(runtime::Helper::Concat);
@@ -363,38 +370,47 @@ fn set(cx: &mut dyn Cx) -> Function {
     const O: u32 = 0;
     const K: u32 = 1;
     const V: u32 = 2;
-    const E: u32 = 3;
-    const A: u32 = 4;
-    const P: u32 = 5;
-    const X: u32 = 6;
+    // With `named`, param 3 is the hash and the locals start one later.
+    const HV: u32 = 3;
+    let n = named as u32;
+    let (e, a, p, x) = (3 + n, 4 + n, 5 + n, 6 + n);
+    let find_k = |s: &mut InstructionSink| {
+        s.local_get(K);
+        if named {
+            s.local_get(HV);
+        }
+    };
     let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_OBJECT)), (1, jsval())]);
     let mut s = f.instructions();
     // An own property.
-    s.local_get(O).local_get(K).call(find).local_tee(E);
+    s.local_get(O);
+    find_k(&mut s);
+    s.call(find).local_tee(e);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
     {
-        attrs(&mut s, O, E);
-        s.local_tee(A).i32_const(ACCESSOR).i32_and();
+        attrs(&mut s, O, e);
+        s.local_tee(a).i32_const(ACCESSOR).i32_and();
         s.if_(BlockType::Empty);
-        slot(&mut s, O, E);
-        s.local_set(X);
-        call_setter(cx, &mut s, X, O, K, V);
+        slot(&mut s, O, e);
+        s.local_set(x);
+        call_setter(cx, &mut s, x, O, K, V);
         s.return_();
         s.end();
-        s.local_get(A).i32_const(READONLY).i32_and();
+        s.local_get(a).i32_const(READONLY).i32_and();
         s.if_(BlockType::Empty);
         throw_read_only(cx, &mut s, O, K);
         s.end();
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
-            .local_get(E)
+            .local_get(e)
             .local_get(V)
             .array_set(T_VALS);
         s.return_();
     }
     s.end();
     // An array's index or `length` (its own checks).
+    if !named {
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
     s.local_get(O)
@@ -406,56 +422,57 @@ fn set(cx: &mut dyn Cx) -> Function {
     s.return_();
     s.end();
     s.end();
+    }
     // The prototype chain: a setter, or a read-only property, forbids a new own property.
-    s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(P);
+    s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(p);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
-    s.local_get(P).ref_is_null().br_if(1);
-    s.local_get(P).ref_test_non_null(array::array());
-    s.if_(BlockType::Empty);
-    s.local_get(P)
-        .ref_cast_non_null(array::array())
-        .local_get(K)
-        .call(array_own)
-        .ref_is_null()
-        .i32_eqz()
-        .br_if(2);
-    s.end();
-    s.local_get(P)
-        .ref_as_non_null()
-        .local_get(K)
-        .call(find)
-        .local_tee(E);
+    s.local_get(p).ref_is_null().br_if(1);
+    if !named {
+        s.local_get(p).ref_test_non_null(array::array());
+        s.if_(BlockType::Empty);
+        s.local_get(p)
+            .ref_cast_non_null(array::array())
+            .local_get(K)
+            .call(array_own)
+            .ref_is_null()
+            .i32_eqz()
+            .br_if(2);
+        s.end();
+    }
+    s.local_get(p).ref_as_non_null();
+    find_k(&mut s);
+    s.call(find).local_tee(e);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
     {
-        s.local_get(P)
+        s.local_get(p)
             .ref_as_non_null()
             .struct_get(T_OBJECT, F_ATTRS)
-            .local_get(E)
+            .local_get(e)
             .array_get_u(T_BYTES)
-            .local_tee(A);
+            .local_tee(a);
         s.i32_const(ACCESSOR).i32_and();
         s.if_(BlockType::Empty);
-        s.local_get(P)
+        s.local_get(p)
             .ref_as_non_null()
             .struct_get(T_OBJECT, F_VALS)
-            .local_get(E)
+            .local_get(e)
             .array_get(T_VALS)
-            .local_set(X);
-        call_setter(cx, &mut s, X, O, K, V);
+            .local_set(x);
+        call_setter(cx, &mut s, x, O, K, V);
         s.return_();
         s.end();
-        s.local_get(A).i32_const(READONLY).i32_and();
+        s.local_get(a).i32_const(READONLY).i32_and();
         s.if_(BlockType::Empty);
         throw_read_only(cx, &mut s, O, K);
         s.end();
         s.br(2);
     }
     s.end();
-    s.local_get(P)
+    s.local_get(p)
         .ref_as_non_null()
         .struct_get(T_OBJECT, F_PROTO)
-        .local_set(P);
+        .local_set(p);
     s.br(0).end().end();
     s.local_get(O)
         .struct_get(T_OBJECT, F_CLASS)
@@ -467,11 +484,11 @@ fn set(cx: &mut dyn Cx) -> Function {
     s.global_get(not_ext).call(concat);
     s.call(throw);
     s.end();
-    s.local_get(O)
-        .local_get(K)
-        .local_get(V)
-        .i32_const(0)
-        .call(define);
+    s.local_get(O).local_get(K).local_get(V).i32_const(0);
+    if named {
+        s.local_get(HV);
+    }
+    s.call(define);
     s.end();
     f
 }

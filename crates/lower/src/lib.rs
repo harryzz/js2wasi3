@@ -6873,6 +6873,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Ok(())
     }
 
+    /// The member key as an expression to use twice: a constant string as is, anything else
+    /// evaluated once into a `key` local (its `Set` pushed to `body`).
+    fn key_temp(&mut self, cx: &mut FnCx, key: Expr, body: &mut Vec<Stmt>) -> Expr {
+        if matches!(key, Expr::Str(_)) {
+            return key;
+        }
+        let tk = cx.func.add_local("key", Type::JsVal);
+        body.push(Stmt::Set(tk, key));
+        Expr::Local(tk)
+    }
+
     /// `o.k = v` / `o[k] op= v`: the stored value.
     fn member_assign(&mut self, cx: &mut FnCx, a: &'a AssignmentExpression<'a>) -> R<Val> {
         let m = a
@@ -6881,13 +6892,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .expect("checked by the caller");
         let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
-        let tk = cx.func.add_local("key", Type::JsVal);
         let tv = cx.func.add_local("value", Type::JsVal);
-        let mut body = vec![Stmt::Set(to, obj), Stmt::Set(tk, key)];
+        let mut body = vec![Stmt::Set(to, obj)];
+        // T74: a constant key stays in place (no side effects), so the backend sees it.
+        let key_of = self.key_temp(cx, key, &mut body);
         let rhs = self.expr(cx, &a.right)?;
         let old = (a.operator != AssignmentOperator::Assign).then(|| {
             Val::js(
-                member_get(&private, Expr::Local(to), Expr::Local(tk)),
+                member_get(&private, Expr::Local(to), key_of.clone()),
                 Kind::Any,
             )
         });
@@ -6899,7 +6911,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         body.push(Stmt::Expr(member_set(
             &private,
             Expr::Local(to),
-            Expr::Local(tk),
+            key_of,
             Expr::Tee(tv, Box::new(jsval_of(value))),
         )));
         Ok(Val::js(

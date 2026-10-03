@@ -3,10 +3,19 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-03: T74 property access (targeted run)
+
+- Compiler: constant-key gets/sets/defines through named helpers with build-time key hashes, inline key compares,
+  `v.length`, own-property inline caches (`G_IC`); the lowering keeps a constant key in place in `o.k = v`.
+- On `a-03` (wasmtime 49.0.2, -j 36, 306 s): `language/expressions/{object,assignment,property-accessors,
+  compound-assignment,postfix-increment,prefix-increment,class,delete,in}`, `language/statements/class`,
+  `built-ins/JSON`, `built-ins/Reflect`: 11,050 tests, 10,397 pass, 132 fail, 112 unsupported, 409 skip (97.7%);
+  no changes since the baseline.
+
 ## 2026-10-03: T72 `fetch` (no run)
 
 - Compiler: `wasi:http@0.3.0` imports (non-blocking), `fetch` as a node global bound by the linker; `fetch` isn't
-  ECMAScript, so nothing reaches the subset (no local test262 checkout to grep). No run.
+  ECMAScript: no test in the checkout (31,970 files) names it, so nothing reaches the subset. No run.
 
 ## 2026-10-03: T71 `http` server (targeted run)
 

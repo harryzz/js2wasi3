@@ -242,6 +242,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         tables: false,
         shared,
         declared: Vec::new(),
+        ic_sites: 0,
     };
     if js {
         // Functions with the `$code` signature use the runtime's type (`call_ref` needs it).
@@ -898,6 +899,8 @@ struct Emitter<'m> {
     shared: Vec<ir::FuncId>,
     /// Functions used by `ref.func` (a declarative element segment).
     declared: Vec<u32>,
+    /// T74: the next inline-cache site of a constant-key read (`object::Helper::GetNamed`).
+    ic_sites: u32,
 }
 
 impl runtime::Cx for Emitter<'_> {
@@ -1692,6 +1695,53 @@ impl Emitter<'_> {
                     };
                     s.call(self.helper_index(Helper::Js(H::Big(h))));
                     return Ok(true);
+                }
+                if let (Intrinsic::GetProp, [obj, Expr::Str(units)]) = (op, args.as_slice())
+                    && object::named_key(units)
+                {
+                    // T74: a constant key: no ToPropertyKey, no element paths, the hash from the build.
+                    self.expr(s, frames, obj)?;
+                    let g = runtime::Cx::string(self, units);
+                    s.global_get(g);
+                    s.i32_const(object::key_hash(units));
+                    s.i32_const(self.ic_sites as i32);
+                    self.ic_sites += 1;
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::GetNamed))));
+                    return Ok(true);
+                }
+                if let (Intrinsic::GetProp, [obj, Expr::Str(units)]) = (op, args.as_slice())
+                    && units.as_slice() == "length".encode_utf16().collect::<Vec<_>>().as_slice()
+                {
+                    // T74: `v.length`.
+                    self.expr(s, frames, obj)?;
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::GetLength))));
+                    return Ok(true);
+                }
+                if let (Intrinsic::DefineProp, [obj, Expr::Str(units), value]) =
+                    (op, args.as_slice())
+                    && object::named_key(units)
+                {
+                    // T74: an object literal's constant key.
+                    self.expr(s, frames, obj)?;
+                    let g = runtime::Cx::string(self, units);
+                    s.global_get(g);
+                    self.expr(s, frames, value)?;
+                    s.i32_const(object::key_hash(units));
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::DefineNamed))));
+                    return Ok(false);
+                }
+                if let (Intrinsic::SetProp, [obj, Expr::Str(units), value]) = (op, args.as_slice())
+                    && object::named_key(units)
+                    && units != "__proto__".encode_utf16().collect::<Vec<_>>().as_slice()
+                {
+                    // T74: `o.k = v` with a constant key, as `GetNamed`.
+                    self.expr(s, frames, obj)?;
+                    let g = runtime::Cx::string(self, units);
+                    s.global_get(g);
+                    self.expr(s, frames, value)?;
+                    s.i32_const(object::key_hash(units));
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
+                    return Ok(false);
                 }
                 if let Intrinsic::F64FromWords = op {
                     // (hi << 32) | (lo as u32)

@@ -177,8 +177,11 @@ pub const G_INDEX_PROTO: u32 = G_TIMER_ID + 1;
 /// `(mut (ref null $object))` (T27): the built-in `RegExp.prototype.exec` as installed, so the
 /// prelude can skip the lookup-and-call of RegExpExec while it's still in place.
 pub const G_REGEXP_EXEC: u32 = G_INDEX_PROTO + 1;
+/// `(mut (ref null $i32s))` (T74): the inline caches of constant-key property reads, one entry index
+/// per site (`object::Helper::GetNamed`), grown on demand.
+pub const G_IC: u32 = G_REGEXP_EXEC + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_REGEXP_EXEC + 1;
+pub const GLOBALS: u32 = G_IC + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -936,7 +939,24 @@ pub fn globals(
     // T45: `SuppressedError.prototype` and its constructor.
     // T48: the BigInt arrays' prototypes and constructors.
     let extra = runtime_globals(bigint, suppressed, stacks, big_typed) - GLOBALS;
-    for _ in 0..1 + extra {
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_OBJECT),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(object()),
+    );
+    // T74: the inline caches.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_I32S),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_I32S)),
+    );
+    for _ in 0..extra {
         globals.global(
             GlobalType {
                 val_type: rt(true, T_OBJECT),

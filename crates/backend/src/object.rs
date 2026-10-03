@@ -277,8 +277,33 @@ pub enum Helper {
     Lookup,
     /// `(o: (ref null $object), k) -> (ref null $object)`: the object on the chain that has `k`.
     Holder,
+    /// `(o: (ref $object), k: (ref $string), hash: i32) -> i32`: [`Helper::FindOwn`] with `k`'s hash
+    /// given (T74: a constant key's, computed at build time).
+    FindOwnNamed,
+    /// `(o: (ref null $object), k, hash: i32) -> jsval`: [`Helper::Lookup`] for a key that is neither an
+    /// array index nor `length` (so no array own-get), with its hash given (T74).
+    LookupNamed,
+    /// `(v: jsval, k: (ref $string), hash: i32, site: i32) -> jsval`: `v.k` for a constant key that is
+    /// neither an array index nor `length` (T74): an object first tries the entry its site's inline cache
+    /// remembers (`G_IC[site]`, valid when that entry's key is `k` itself), then
+    /// [`Helper::FindOwnNamed`] (remembered) and [`Helper::LookupNamed`] on the prototype; other values
+    /// [`Helper::Get`].
+    GetNamed,
+    /// `(site: i32, e: i32)`: remember entry `e` for site `site` (T74), growing `G_IC`.
+    IcStore,
+    /// `(v: jsval) -> jsval`: `v.length` (T74): an array's or a string's directly, else [`Helper::Get`].
+    GetLength,
     /// `(o, k, v: jsval, attrs: i32)`: set an own property (attributes only for a new one).
     Define,
+    /// `(o, k, v, attrs, hash)`: a new own property `k` known to be absent, neither an array index nor
+    /// `length`, with its hash (T74).
+    AppendNamed,
+    /// `(v, k: (ref $string), value, hash: i32)`: `v.k = value` for a constant key that is neither an
+    /// array index, `length` nor `__proto__` (T74): objects through `ordinary_set_named`, others [`Helper::Set`].
+    SetNamed,
+    /// `(o: jsval (an object), k, v, hash)`: [`Helper::DefineProp`] for a constant key that is neither an
+    /// array index nor `length` (T74; object literals).
+    DefineNamed,
     /// `(o, k)`: delete an own property.
     Remove,
     /// `(o)`: make room for one more entry (compacting deleted ones).
@@ -394,7 +419,15 @@ impl Helper {
             Helper::OwnGet => "own_get",
             Helper::Lookup => "lookup",
             Helper::Holder => "holder",
+            Helper::FindOwnNamed => "find_own_named",
+            Helper::LookupNamed => "lookup_named",
+            Helper::GetNamed => "get_named",
+            Helper::IcStore => "ic_store",
+            Helper::GetLength => "get_length",
             Helper::Define => "define",
+            Helper::AppendNamed => "append_named",
+            Helper::DefineNamed => "define_named",
+            Helper::SetNamed => "set_named",
             Helper::Remove => "remove",
             Helper::Grow => "grow",
             Helper::Reindex => "reindex",
@@ -498,7 +531,15 @@ impl Helper {
             Helper::OwnGet => (vec![o, s], vec![v]),
             Helper::Lookup => (vec![on, s], vec![v]),
             Helper::Holder => (vec![on, s], vec![on]),
+            Helper::FindOwnNamed => (vec![o, s, I32], vec![I32]),
+            Helper::LookupNamed => (vec![on, s, I32], vec![v]),
+            Helper::GetNamed => (vec![v, s, I32, I32], vec![v]),
+            Helper::IcStore => (vec![I32, I32], vec![]),
+            Helper::GetLength => (vec![v], vec![v]),
             Helper::Define => (vec![o, s, v, I32], vec![]),
+            Helper::AppendNamed => (vec![o, s, v, I32, I32], vec![]),
+            Helper::DefineNamed => (vec![v, s, v, I32], vec![]),
+            Helper::SetNamed => (vec![v, s, v, I32], vec![]),
             Helper::Remove => (vec![o, s], vec![]),
             Helper::Grow => (vec![o], vec![]),
             Helper::Reindex => (vec![o, I32], vec![]),
@@ -549,11 +590,19 @@ impl Helper {
     pub fn body(self, cx: &mut dyn Cx) -> Function {
         match self {
             Helper::Hash => hash(),
-            Helper::FindOwn => find_own(cx),
+            Helper::FindOwn => find_own(cx, false),
+            Helper::FindOwnNamed => find_own(cx, true),
+            Helper::LookupNamed => lookup_named(cx),
+            Helper::GetNamed => get_named(cx),
+            Helper::IcStore => ic_store(),
+            Helper::GetLength => get_length(cx),
             Helper::OwnGet => own_get(cx),
             Helper::Lookup => lookup(cx, false),
             Helper::Holder => lookup(cx, true),
-            Helper::Define => define(cx),
+            Helper::Define => define(cx, false),
+            Helper::AppendNamed => define(cx, true),
+            Helper::DefineNamed => define_named(cx),
+            Helper::SetNamed => set_named(cx),
             Helper::Remove => remove(cx),
             Helper::Grow => grow(cx),
             Helper::Reindex => reindex(cx),
@@ -777,83 +826,414 @@ fn hash() -> Function {
     f
 }
 
-fn find_own(cx: &mut dyn Cx) -> Function {
+/// `define_named(o, k, v, hash)`: CreateDataProperty on object `o` (see [`Helper::DefineNamed`]).
+fn define_named(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwnNamed);
+    let append = h(cx, Helper::AppendNamed);
+    const O: u32 = 0;
+    const K: u32 = 1;
+    const V: u32 = 2;
+    const H: u32 = 3;
+    const E: u32 = 4;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    as_obj(&mut s, O);
+    s.local_get(K).local_get(H).call(find).local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Empty);
+    // An existing property: now a data property with this value (the other attributes stay).
+    as_obj(&mut s, O);
+    s.struct_get(T_OBJECT, F_VALS).local_get(E).local_get(V).array_set(T_VALS);
+    as_obj(&mut s, O);
+    s.struct_get(T_OBJECT, F_ATTRS).local_get(E);
+    as_obj(&mut s, O);
+    s.struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .array_get_u(T_BYTES)
+        .i32_const(!ACCESSOR)
+        .i32_and();
+    s.array_set(T_BYTES);
+    s.return_();
+    s.end();
+    as_obj(&mut s, O);
+    s.local_get(K).local_get(V).i32_const(0).local_get(H).call(append);
+    s.end();
+    f
+}
+
+/// `set_named(v, k, value, hash)`: `v.k = value` (see [`Helper::SetNamed`]).
+fn set_named(cx: &mut dyn Cx) -> Function {
+    let ordinary = rh(cx, runtime::Helper::Prop(props::Helper::SetNamed));
+    let set = h(cx, Helper::Set);
+    const V: u32 = 0;
+    const K: u32 = 1;
+    const X: u32 = 2;
+    const H: u32 = 3;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.test_object(V);
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.local_get(K).local_get(X).local_get(H).call(ordinary);
+    s.else_();
+    s.local_get(V).local_get(K).local_get(X).call(set);
+    s.end();
+    s.end();
+    f
+}
+
+/// The runtime's key hash ([`Helper::Hash`], FNV-1a over the UTF-16 units), at build time (T74).
+pub fn key_hash(units: &[u16]) -> i32 {
+    let mut h: u32 = 0x811c9dc5;
+    for &u in units {
+        h = (h ^ u as u32).wrapping_mul(16777619);
+    }
+    h as i32
+}
+
+/// Can `v[k]` with this constant key take [`Helper::GetNamed`] (T74)? Not for an array index (elements,
+/// typed arrays, string characters) or `length` (arrays and strings have it outside the dictionary).
+pub fn named_key(units: &[u16]) -> bool {
+    let is_index = !units.is_empty()
+        && units.iter().all(|&u| (b'0' as u16..=b'9' as u16).contains(&u))
+        && (units.len() == 1 || units[0] != b'0' as u16)
+        && units.len() <= 10
+        && String::from_utf16_lossy(units).parse::<u64>().is_ok_and(|n| n < u32::MAX as u64);
+    !is_index && units != "length".encode_utf16().collect::<Vec<_>>().as_slice()
+}
+
+/// Does the key in local `kk` (a `(ref null $string)`, null: a deleted entry) equal `k`? Leaves an
+/// i32. Identity first, then the lengths, before calling `string_eq` (T74).
+fn key_matches(s: &mut InstructionSink, kk: u32, k: u32, str_eq: u32) {
+    s.local_get(kk).ref_is_null();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(kk).local_get(k).ref_eq();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(1);
+    s.else_();
+    s.local_get(kk).array_len().local_get(k).array_len().i32_ne();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    // Same length: the first and the last unit decide most mismatches (`value_min`/`value_max`).
+    // (Empty keys go to `string_eq`: a symbol, a `$string` subtype, equals only itself.)
+    s.local_get(k).array_len().i32_eqz();
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(kk).ref_as_non_null().local_get(k).call(str_eq);
+    s.else_();
+    s.local_get(kk).i32_const(0).array_get_u(T_STRING);
+    s.local_get(k).i32_const(0).array_get_u(T_STRING);
+    s.i32_ne();
+    s.local_get(kk).local_get(kk).array_len().i32_const(1).i32_sub().array_get_u(T_STRING);
+    s.local_get(k).local_get(k).array_len().i32_const(1).i32_sub().array_get_u(T_STRING);
+    s.i32_ne();
+    s.i32_or();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(kk).ref_as_non_null().local_get(k).call(str_eq);
+    s.end();
+    s.end();
+    s.end();
+    s.end();
+    s.end();
+}
+
+/// `find_own` (`(o, k)`), or with `hashed` `find_own_named` (`(o, k, hash)`: the hash given).
+fn find_own(cx: &mut dyn Cx, hashed: bool) -> Function {
     let str_eq = rh(cx, runtime::Helper::StrEq);
     let hash = h(cx, Helper::Hash);
     const O: u32 = 0;
     const K: u32 = 1;
-    const E: u32 = 2;
-    const N: u32 = 3;
-    const MASK: u32 = 4;
-    const I: u32 = 5;
-    const KK: u32 = 6;
-    const IDX: u32 = 7;
+    // With `hashed`, param 2 is the hash and the locals start one later.
+    let p = hashed as u32;
+    let hv = 2;
+    let e = 2 + p;
+    let n = 3 + p;
+    let mask = 4 + p;
+    let i = 5 + p;
+    let kk = 6 + p;
+    let idx = 7 + p;
     let mut f = Function::new([
         (4, ValType::I32),
         (1, rt(true, T_STRING)),
         (1, rt(true, T_I32S)),
     ]);
     let mut s = f.instructions();
-    // Is entry E's key K? (leaves i32)
+    // Is entry `e`'s key `k`? (leaves i32)
     let matches = |s: &mut InstructionSink| {
         s.local_get(O)
             .struct_get(T_OBJECT, F_KEYS)
-            .local_get(E)
+            .local_get(e)
             .array_get(T_KEYS)
-            .local_tee(KK)
-            .ref_is_null();
-        s.if_(BlockType::Result(ValType::I32));
-        s.i32_const(0);
-        s.else_();
-        s.local_get(KK).ref_as_non_null().local_get(K).call(str_eq);
-        s.end();
+            .local_set(kk);
+        key_matches(s, kk, K, str_eq);
     };
     s.local_get(O)
         .struct_get(T_OBJECT, F_INDEX)
-        .local_tee(IDX)
+        .local_tee(idx)
         .ref_is_null();
     s.if_(BlockType::Empty);
     {
-        s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(N);
-        count_loop(&mut s, E, N, |s| {
+        s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(n);
+        count_loop(&mut s, e, n, |s| {
             matches(s);
             s.if_(BlockType::Empty);
-            s.local_get(E).return_();
+            s.local_get(e).return_();
             s.end();
         });
         s.i32_const(-1).return_();
     }
     s.end();
-    s.local_get(IDX)
+    s.local_get(idx)
         .array_len()
         .i32_const(1)
         .i32_sub()
-        .local_set(MASK);
-    s.local_get(K)
-        .call(hash)
-        .local_get(MASK)
-        .i32_and()
-        .local_set(I);
+        .local_set(mask);
+    if hashed {
+        s.local_get(hv);
+    } else {
+        s.local_get(K).call(hash);
+    }
+    s.local_get(mask).i32_and().local_set(i);
     s.loop_(BlockType::Empty);
-    s.local_get(IDX).local_get(I).array_get(T_I32S).local_tee(E);
+    s.local_get(idx).local_get(i).array_get(T_I32S).local_tee(e);
     s.i32_eqz();
     s.if_(BlockType::Empty);
     s.i32_const(-1).return_();
     s.end();
-    s.local_get(E).i32_const(1).i32_sub().local_set(E);
+    s.local_get(e).i32_const(1).i32_sub().local_set(e);
     matches(&mut s);
     s.if_(BlockType::Empty);
-    s.local_get(E).return_();
+    s.local_get(e).return_();
     s.end();
-    s.local_get(I)
+    s.local_get(i)
         .i32_const(1)
         .i32_add()
-        .local_get(MASK)
+        .local_get(mask)
         .i32_and()
-        .local_set(I);
+        .local_set(i);
     s.br(0);
     s.end();
     s.unreachable();
+    s.end();
+    f
+}
+
+/// `lookup_named(o, k, hash)`: the prototype chain walk of [`lookup`] for a key that no array
+/// element or `length` can have, so each level is a dictionary lookup with the given hash.
+fn lookup_named(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwnNamed);
+    const O: u32 = 0;
+    const K: u32 = 1;
+    const H: u32 = 2;
+    const E: u32 = 3;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(O).ref_is_null().br_if(1);
+    s.local_get(O)
+        .ref_as_non_null()
+        .local_get(K)
+        .local_get(H)
+        .call(find)
+        .local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .array_get(T_VALS)
+        .return_();
+    s.end();
+    s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(O);
+    s.br(0).end().end();
+    s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
+    s.end();
+    f
+}
+
+/// `get_named(v, k, hash, site)`: `v.k` (see [`Helper::GetNamed`]); the same steps as [`get`] for such a
+/// key. A cached entry index is only a guess: it's used when that entry's key is `k` (keys are unique
+/// within an object, and a deleted entry's key is null).
+fn get_named(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwnNamed);
+    let lookup = h(cx, Helper::LookupNamed);
+    let store = h(cx, Helper::IcStore);
+    let get = h(cx, Helper::Get);
+    let sproto = h(cx, Helper::Proto(Builtin::String));
+    let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
+    const V: u32 = 0;
+    const K: u32 = 1;
+    const H: u32 = 2;
+    const SITE: u32 = 3;
+    const O: u32 = 4;
+    const IC: u32 = 5;
+    const E: u32 = 6;
+    const R: u32 = 7;
+    let mut f = Function::new([
+        (1, rt(true, T_OBJECT)),
+        (1, rt(true, T_I32S)),
+        (1, ValType::I32),
+        (1, jsval()),
+    ]);
+    let mut s = f.instructions();
+    s.test_object(V);
+    s.if_(BlockType::Result(jsval()));
+    {
+        as_obj(&mut s, V);
+        s.local_set(O);
+        // The cached entry.
+        s.global_get(runtime::G_IC).local_tee(IC).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(SITE).local_get(IC).array_len().i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(IC).local_get(SITE).array_get(T_I32S).local_tee(E);
+        s.local_get(O).struct_get(T_OBJECT, F_COUNT).i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(E)
+            .array_get(T_KEYS)
+            .local_get(K)
+            .ref_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .array_get(T_VALS)
+            .local_tee(R);
+        // A plain value as is; an accessor or a built-in sentinel through `property_value`.
+        s.ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
+        s.local_get(R).global_get(runtime::G_BUILTIN).ref_eq();
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.local_get(R).local_get(V).call(value).return_();
+        s.end();
+        s.local_get(R).return_();
+        s.end();
+        s.end();
+        s.end();
+        s.end();
+        // An own property: remember it.
+        s.local_get(O)
+            .ref_as_non_null()
+            .local_get(K)
+            .local_get(H)
+            .call(find)
+            .local_tee(E);
+        s.i32_const(0).i32_ge_s();
+        s.if_(BlockType::Result(jsval()));
+        s.local_get(SITE).local_get(E).call(store);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .array_get(T_VALS);
+        s.else_();
+        s.local_get(O).struct_get(T_OBJECT, F_PROTO);
+        s.local_get(K).local_get(H).call(lookup);
+        s.end();
+        s.local_get(V);
+        s.call(value);
+    }
+    s.else_();
+    // A string's methods: `String.prototype` (a constant key is never `length` or an index).
+    runtime::is_string(&mut s, V);
+    s.if_(BlockType::Result(jsval()));
+    s.call(sproto);
+    s.local_get(K).local_get(H).call(lookup);
+    s.local_get(V);
+    s.call(value);
+    s.else_();
+    s.local_get(V).local_get(K).call(get);
+    s.end();
+    s.end();
+    s.end();
+    f
+}
+
+/// `get_length(v)`: `v.length` (see [`Helper::GetLength`]).
+fn get_length(cx: &mut dyn Cx) -> Function {
+    let get = h(cx, Helper::Get);
+    let box_ = rh(cx, runtime::Helper::Box);
+    let length = cx.str("length");
+    const V: u32 = 0;
+    const N: u32 = 1;
+    let mut f = Function::new([(1, ValType::I32)]);
+    let mut s = f.instructions();
+    let number = |s: &mut InstructionSink| {
+        // An i31 below 2^30 (the runtime's small integers), else a boxed number.
+        s.local_tee(N).i32_const(0x4000_0000).i32_lt_u();
+        s.if_(BlockType::Result(jsval()));
+        s.local_get(N).ref_i31();
+        s.else_();
+        s.local_get(N).f64_convert_i32_u().call(box_);
+        s.end();
+    };
+    s.local_get(V).ref_test_non_null(array::array());
+    s.if_(BlockType::Result(jsval()));
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_LENGTH);
+    number(&mut s);
+    s.else_();
+    runtime::is_string(&mut s, V);
+    s.if_(BlockType::Result(jsval()));
+    s.local_get(V).ref_cast_non_null(string()).array_len();
+    number(&mut s);
+    s.else_();
+    s.local_get(V).global_get(length).call(get);
+    s.end();
+    s.end();
+    s.end();
+    f
+}
+
+/// `ic_store(site, e)`: `G_IC[site] = e`, growing the array (doubling, at least 1,024) when needed.
+fn ic_store() -> Function {
+    const SITE: u32 = 0;
+    const E: u32 = 1;
+    const IC: u32 = 2;
+    const N: u32 = 3;
+    const NEW: u32 = 4;
+    let mut f = Function::new([(1, rt(true, T_I32S)), (1, ValType::I32), (1, rt(true, T_I32S))]);
+    let mut s = f.instructions();
+    s.global_get(runtime::G_IC).local_set(IC);
+    s.local_get(IC).ref_is_null();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(IC).array_len();
+    s.end();
+    s.local_tee(N);
+    s.local_get(SITE).i32_le_u();
+    s.if_(BlockType::Empty);
+    {
+        // max(2 * n, site + 1, 1024)
+        s.local_get(N).i32_const(1).i32_shl().local_tee(N);
+        s.local_get(SITE).i32_const(1).i32_add();
+        s.local_get(N).local_get(SITE).i32_const(1).i32_add().i32_gt_u();
+        s.select().local_tee(N);
+        s.i32_const(1024);
+        s.local_get(N).i32_const(1024).i32_gt_u();
+        s.select();
+        s.array_new_default(T_I32S).local_set(NEW);
+        s.local_get(IC).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(NEW)
+            .i32_const(0)
+            .local_get(IC)
+            .i32_const(0)
+            .local_get(IC)
+            .array_len()
+            .array_copy(T_I32S, T_I32S);
+        s.end();
+        s.local_get(NEW).local_tee(IC).global_set(runtime::G_IC);
+    }
+    s.end();
+    s.local_get(IC).local_get(SITE).local_get(E).array_set(T_I32S);
     s.end();
     f
 }
@@ -927,7 +1307,9 @@ fn lookup(cx: &mut dyn Cx, holder: bool) -> Function {
     f
 }
 
-fn define(cx: &mut dyn Cx) -> Function {
+/// `define(o, k, v, attrs)`; with `named`, `append_named(o, k, v, attrs, hash)` (T74): `k` is absent and
+/// neither an array index nor `length` (the caller checked), so no array part, no search, the hash given.
+fn define(cx: &mut dyn Cx, named: bool) -> Function {
     let find = h(cx, Helper::FindOwn);
     let index = h(cx, Helper::ArrayIndex);
     let grow = h(cx, Helper::Grow);
@@ -937,13 +1319,14 @@ fn define(cx: &mut dyn Cx) -> Function {
     const K: u32 = 1;
     const V: u32 = 2;
     const A: u32 = 3;
-    const E: u32 = 4;
-    const MASK: u32 = 5;
-    const I: u32 = 6;
-    const IDX: u32 = 7;
+    // With `named`, param 4 is the hash and the locals start one later.
+    const HV: u32 = 4;
+    let p = named as u32;
+    let (e, mask, i, idx) = (4 + p, 5 + p, 6 + p, 7 + p);
     let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define { set: false }));
     let mut f = Function::new([(3, ValType::I32), (1, rt(true, T_I32S))]);
     let mut s = f.instructions();
+    if !named {
     // An array's index or `length`.
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
@@ -956,19 +1339,19 @@ fn define(cx: &mut dyn Cx) -> Function {
     s.return_();
     s.end();
     s.end();
-    s.local_get(O).local_get(K).call(find).local_tee(E);
+    s.local_get(O).local_get(K).call(find).local_tee(e);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
     s.local_get(O)
         .struct_get(T_OBJECT, F_VALS)
-        .local_get(E)
+        .local_get(e)
         .local_get(V)
         .array_set(T_VALS);
     // Now a data property (the other attributes stay).
-    s.local_get(O).struct_get(T_OBJECT, F_ATTRS).local_get(E);
+    s.local_get(O).struct_get(T_OBJECT, F_ATTRS).local_get(e);
     s.local_get(O)
         .struct_get(T_OBJECT, F_ATTRS)
-        .local_get(E)
+        .local_get(e)
         .array_get_u(T_BYTES)
         .i32_const(!ACCESSOR)
         .i32_and();
@@ -986,6 +1369,7 @@ fn define(cx: &mut dyn Cx) -> Function {
     s.i32_const(1).global_set(runtime::G_INDEX_PROTO);
     s.end();
     s.end();
+    }
     // A new entry at `count`.
     s.local_get(O).struct_get(T_OBJECT, F_COUNT);
     s.local_get(O).struct_get(T_OBJECT, F_KEYS).array_len();
@@ -993,82 +1377,85 @@ fn define(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(O).call(grow);
     s.end();
-    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(E);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(e);
     s.local_get(O)
         .struct_get(T_OBJECT, F_KEYS)
-        .local_get(E)
+        .local_get(e)
         .local_get(K)
         .array_set(T_KEYS);
     s.local_get(O)
         .struct_get(T_OBJECT, F_VALS)
-        .local_get(E)
+        .local_get(e)
         .local_get(V)
         .array_set(T_VALS);
     s.local_get(O)
         .struct_get(T_OBJECT, F_ATTRS)
-        .local_get(E)
+        .local_get(e)
         .local_get(A)
         .array_set(T_BYTES);
     s.local_get(O)
-        .local_get(E)
+        .local_get(e)
         .i32_const(1)
         .i32_add()
         .struct_set(T_OBJECT, F_COUNT);
     // Index it: start an index past SMALL entries, grow it past half full.
     s.local_get(O)
         .struct_get(T_OBJECT, F_INDEX)
-        .local_tee(IDX)
+        .local_tee(idx)
         .ref_is_null();
     s.if_(BlockType::Empty);
-    s.local_get(E).i32_const(SMALL).i32_ge_s();
+    s.local_get(e).i32_const(SMALL).i32_ge_s();
     s.if_(BlockType::Empty);
     s.local_get(O).i32_const(64).call(reindex);
     s.end();
     s.return_();
     s.end();
-    s.local_get(E)
+    s.local_get(e)
         .i32_const(1)
         .i32_add()
         .i32_const(1)
         .i32_shl()
-        .local_get(IDX)
+        .local_get(idx)
         .array_len()
         .i32_gt_u();
     s.if_(BlockType::Empty);
     s.local_get(O)
-        .local_get(IDX)
+        .local_get(idx)
         .array_len()
         .i32_const(1)
         .i32_shl()
         .call(reindex);
     s.return_();
     s.end();
-    s.local_get(IDX)
+    s.local_get(idx)
         .array_len()
         .i32_const(1)
         .i32_sub()
-        .local_set(MASK);
-    s.local_get(K)
-        .call(hash)
-        .local_get(MASK)
+        .local_set(mask);
+    if named {
+        s.local_get(HV);
+    } else {
+        s.local_get(K).call(hash);
+    }
+    s.local_get(mask)
         .i32_and()
-        .local_set(I);
+        .local_set(i);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
-    s.local_get(IDX)
-        .local_get(I)
+    s.local_get(idx)
+        .local_get(i)
         .array_get(T_I32S)
         .i32_eqz()
         .br_if(1);
-    s.local_get(I)
+    s.local_get(i)
         .i32_const(1)
         .i32_add()
-        .local_get(MASK)
+        .local_get(mask)
         .i32_and()
-        .local_set(I);
+        .local_set(i);
     s.br(0).end().end();
-    s.local_get(IDX)
-        .local_get(I)
-        .local_get(E)
+    s.local_get(idx)
+        .local_get(i)
+        .local_get(e)
         .i32_const(1)
         .i32_add()
         .array_set(T_I32S);
