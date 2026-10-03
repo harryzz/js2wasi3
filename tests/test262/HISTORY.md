@@ -3,6 +3,18 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-03: T62–T66 merged (full run)
+
+- Compiler: T62's link-error reporting and `require(".")`; T63's `error.stack`, node globals and missing statics as
+  run-time errors where the code may not run, `arguments`/rest, `delete a?.[b]`; T64's `URL`, `TextEncoder`/
+  `TextDecoder`, `DataView`; T65's `crypto` subset and load-only built-ins; T66's `net`/`dns.lookup` over
+  `wasi:sockets`. Runner: unchanged (T64's directories aren't in the sparse checkout or `SUBSET`: F294).
+- Full run on `a-03` (31,461 tests, 884 s, -j 36): 28,073 of 28,984 run pass (96.9%), 36 changes, 0 regressions.
+  14 unsupported → pass (`super(...spread)` 8, `Array.fromAsync` 3, `concat` 2, `toLocaleString` 1). 22 unsupported
+  → fail: they built as unsupported before T63's rule and now fail at run time: `Proxy` 7 (F152); the rest F293
+  (`Math` as a value, read-only statics written, `Math.f16round`, `JSON.rawJSON`, `Array.fromAsync` reading
+  `@@asyncIterator` twice, `Array.of`, a `Promise` constructor called twice).
+
 ## 2026-10-02: T63 small gaps, T64 `URL`/`TextEncoder`/`DataView` (targeted run)
 
 - Compiler: T63's `error.stack`, guarded node globals, `arguments`/rest, `delete a?.[b]`; T64's `DataView` (a node
