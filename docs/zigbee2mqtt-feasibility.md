@@ -1,7 +1,72 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## Production trial 2026-10-03 (after T72, wasmtime 49.0.2)
+
+The user's production installation, for two 5-minute runs (production zigbee2mqtt stopped for the trial, restarted
+after), js2wasi3 against node on the same data. Scripts, logs and the data copy stay outside the repository.
+
+**Setup**
+- Production: zigbee2mqtt 2.14.2 (zigbee-herdsman 10.10.0, zigbee-herdsman-converters 26.115.1) in a container on an
+  aarch64 board. Coordinator: **SMLIGHT SLZB-06P7** (CC2652P7, Z-Stack 3.x.0 firmware 20240710) over TCP; MQTT
+  without TLS; Home Assistant discovery on; frontend on; 3 external converters (a 435 KB generated converter for
+  custom-firmware switches, a TRV override, a TY0201 sensor) and an `external_extensions/` file without a `.js`
+  name (not loaded, on node either).
+- Network: **52 devices**: 18 routers (mains), 34 end devices (28 battery, 5 mains, 1 DC); by manufacturer: Tuya 26,
+  eWeLink (SONOFF) 8, IKEA 7, custom-firmware switches 5, and one each of SONOFF, Aqara (LUMI), Shelly, EfektaLab,
+  Espressif, Texas Instruments (a CC2652 router). One group.
+- Trial host: an x86-64 laptop (Intel Core i7-8565U, 4 cores / 8 threads, WSL2), wasmtime 49.0.2, node 24.21.0.
+- Both sides ran **zigbee2mqtt 2.14.1** (zigbee-herdsman 10.9.2, zigbee-herdsman-converters 26.105.0,
+  zigbee2mqtt-windfront 2.15.0; T62's npm copy) on a copy of production's data directory (configuration, database,
+  coordinator backup, state, external converters, OTA files), against production's coordinator and MQTT broker.
+  Overrides in the copy: frontend on `0.0.0.0:18080` without its auth token (port 80 needs root), log level `info`.
+  RSS and CPU sampled every 5 s from `/proc`.
+
+**Patches for the js2wasi3 build** (outside the compiler; node ran zigbee2mqtt unpatched):
+- T62/T66 (`tasks/T66-files/patch.sh`, level 2, `T63_GLOBALS=0`): ajv's settings validators generated ahead of time
+  (ajv standalone: no `new Function` at run time, F191), the dependency-version `import()` in `dist/util/utils.js`
+  stubbed, native addons stubbed (`@serialport/bindings-cpp`, `unix-dgram`: TCP coordinators and no syslog only),
+  `zemismart.js`'s `TextEncoder` line; T62's `main.js` driver (`index.js`'s `start()` with static requires, so the whole graph is linked at build time,
+  and its git hash check; no dist rebuild).
+- T71 (`tasks/T71-files/patch.sh`): srvx real, the frontend package imported by name (`zigbee2mqtt-windfront`).
+- Trial only: `dist/extension/externalJS.js` imports an external converter from `ext/<name>` (the 3 files copied
+  there and built with `--include 'ext/*.js'`) instead of `import()` of a temporary copy.
+- Build: `--command main.js --include 'node_modules/zigbee-herdsman-converters/dist/devices/*.js' --include
+  'ext/*.js'`: 5.6 min, 62 MB; `wasmtime compile -O gc-heap-initial-size=268435456`: 3.4 min, 9.6 GB peak (334 MB).
+  Run: `wasmtime run -O gc-heap-initial-size=268435456 -Sp3 -S inherit-network -S allow-ip-name-lookup -S http`.
+
+**Results** (5 minutes each)
+
+| | node | js2wasi3 + wasmtime |
+|---|---|---|
+| network | resumed | resumed |
+| "Zigbee2MQTT started!" after | 2 s | 24 s |
+| CPU, first minute | a few s in total | ~45 s at 100% of a core (from ~10 s to ~50 s) |
+| CPU, total in 5 min | 8.0 s | 78.2 s |
+| CPU after the first minute, mean | 1.5% of a core | 11.6% (an earlier 10-minute run: ~13% at 9 min) |
+| RSS peak / mean | 286 / 209 MB | 496 / 490 MB (256 MiB of it the initial GC heap, T69) |
+| MQTT messages seen under the base topic | 8,288 | 8,168 |
+| errors | none | 2 (below) |
+
+What works like node: the network resume (no new network formed), the 52 devices with zigbee-herdsman-converters'
+definitions, MQTT, Home Assistant discovery (~4,200 publishes), the frontend, live reports (switch actions,
+metering, TRVs, sensors) and commands. What doesn't:
+1. **External converters** fail to start: zigbee2mqtt symlinks its `node_modules` into `external_converters/` with
+   an absolute target, which wasmtime's sandbox refuses (`EPERM: operation not permitted, symlink`). 9 devices then
+   have other definitions than under node: the 5 custom-firmware switches fall back to generic ones (4–6 Home
+   Assistant entities instead of 15–25), the TY0201 sensor (8 instead of 5), the 3 TRVs keep the built-in TRV801Z
+   definition instead of the override (28 instead of 26) (F317). The build has the converters; the symlink isn't needed.
+2. **Commands during the startup burst time out**: the broker holds retained `…/set` messages (an installation
+   detail: for two switches and a bulb), which every start executes; node sends them fine, js2wasi3 failed one per
+   run (`SRSP - AF - dataRequest after 6000ms`), as its single core is busy for ~45 s and the coordinator's reply
+   is read too late (F318, with F303's property-access speed).
+3. **Local time is UTC** (F184): `last_seen` reads `…+00:00` where production writes `…+03:00` (same instant).
+4. Stopping it with a signal (`timeout`) ends wasmtime without zigbee2mqtt's shutdown, so `bridge/state` stays
+   `online` (retained) until the next start (F319: WASI has no signals).
+Not tried: the production version (2.14.2), an aarch64 host (the board has ~3 GB free; `wasmtime compile` needs
+~9.6 GB, so a cross-compiled `.cwasm` would be needed), OTA updates, runs longer than 10 minutes.
 
 ## OTA downloads 2026-10-03 (T72: `fetch`)
 
