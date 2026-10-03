@@ -1908,8 +1908,65 @@ fn numeric(cx: &mut dyn Cx, op: NumericOp) -> Function {
     let binary = matches!(op, NumericOp::Binary(_));
     // A scratch `f64` after the params.
     let scratch = if binary { 2 } else { 1 };
-    let mut f = Function::new([(1, ValType::F64)]);
+    // An `i32` scratch after it (T75).
+    let r = scratch + 1;
+    let mut f = Function::new([(1, ValType::F64), (1, ValType::I32)]);
     let mut s = f.instructions();
+    let i31 = HeapType::I31;
+    let number = HeapType::Concrete(runtime::T_NUMBER);
+    // T75: i31 operands whose result is an exact i32: computed as i32s, an i31 when in range.
+    let int_op = match op {
+        NumericOp::Binary(
+            b @ (BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr),
+        ) => Some(Some(b)),
+        NumericOp::Inc | NumericOp::Dec => Some(None),
+        _ => None,
+    };
+    if let Some(bop) = int_op {
+        s.local_get(A).ref_test_non_null(i31);
+        if binary {
+            s.local_get(B).ref_test_non_null(i31).i32_and();
+        }
+        s.if_(BlockType::Empty);
+        s.local_get(A).ref_cast_non_null(i31).i31_get_s();
+        match bop {
+            Some(b) => {
+                s.local_get(B).ref_cast_non_null(i31).i31_get_s();
+                match b {
+                    BinOp::Sub => s.i32_sub(),
+                    BinOp::And => s.i32_and(),
+                    BinOp::Or => s.i32_or(),
+                    BinOp::Xor => s.i32_xor(),
+                    BinOp::Shl => s.i32_shl(),
+                    _ => s.i32_shr_s(),
+                };
+            }
+            None => {
+                s.i32_const(if op == NumericOp::Inc { 1 } else { -1 })
+                    .i32_add();
+            }
+        }
+        s.local_tee(r).i32_const(-(1 << 30)).i32_ge_s();
+        s.local_get(r).i32_const(1 << 30).i32_lt_s().i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(r).ref_i31().return_();
+        s.end();
+        s.local_get(r)
+            .f64_convert_i32_s()
+            .struct_new(runtime::T_NUMBER)
+            .return_();
+        s.end();
+    }
+    // T75: numbers need no ToNumeric and aren't BigInts.
+    s.local_get(A).ref_test_non_null(i31);
+    s.local_get(A).ref_test_non_null(number).i32_or();
+    if binary {
+        s.local_get(B).ref_test_non_null(i31);
+        s.local_get(B).ref_test_non_null(number).i32_or();
+        s.i32_and();
+    }
+    s.i32_eqz();
+    s.if_(BlockType::Empty);
     s.local_get(A).call(to_numeric).local_set(A);
     if binary {
         s.local_get(B).call(to_numeric).local_set(B);
@@ -1948,6 +2005,7 @@ fn numeric(cx: &mut dyn Cx, op: NumericOp) -> Function {
         s.return_();
         s.end();
     }
+    s.end();
     // Numbers.
     s.local_get(A).call(to_number);
     if binary {

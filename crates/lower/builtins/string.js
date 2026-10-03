@@ -9,6 +9,9 @@
 
 // RequireObjectCoercible(this) + ToString.
 function $$thisString(v, name) {
+  if (typeof v === "string") {
+    return v;
+  }
   if (v === undefined || v === null) {
     throw new TypeError("String.prototype." + name + " called on null or undefined");
   }
@@ -17,11 +20,12 @@ function $$thisString(v, name) {
 
 // ToIntegerOrInfinity.
 function $$toInteger(x) {
-  x = +x;
-  if (x !== x) {
+  // A new local: a number, so no boxing (T75).
+  const n = +x;
+  if (n !== n) {
     return 0;
   }
-  return __intrinsic_trunc(x) + 0;
+  return __intrinsic_trunc(n) + 0;
 }
 
 // Clamp an integer (or ±Infinity) to [0, len].

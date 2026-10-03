@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-03: T75 conversions, operators, number boxing (full run)
+
+- Compiler: `===` against constants and `typeof` tests inline, `strict_eq` with `ref.eq` first, i31 fast paths in
+  `js_add`/`js_less`/`numeric`, `to_boolean` order, integers to strings directly, cached keys for i31s in [0, 1024),
+  `$$toInteger`/`$$thisString` in the prelude. Runner: unchanged.
+- Full run on `a-03` (31,461 tests, 1,171 s, -j 36; the host was busy): 28,075 of 28,984 run pass (96.9%), 2 changes,
+  0 regressions: timeout → pass `built-ins/Array/prototype/map/15.4.4.19-8-c-ii-1.js`, fail → pass
+  `language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-rtrn-close-null.js`. Baseline not updated.
+
 ## 2026-10-03: T74 property access (targeted run)
 
 - Compiler: constant-key gets/sets/defines through named helpers with build-time key hashes, inline key compares,

@@ -94,13 +94,19 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     if let Some(f) = module.inspect_custom {
         let f = module.function(f);
-        if f.params != 2 || f.locals[..2].iter().any(|l| l.ty != Type::JsVal) || f.result != Some(Type::JsVal) {
+        if f.params != 2
+            || f.locals[..2].iter().any(|l| l.ty != Type::JsVal)
+            || f.result != Some(Type::JsVal)
+        {
             bail!("internal error: the prelude's $$inspectCustom must be (jsval, jsval) -> jsval");
         }
     }
     if let Some(f) = module.process_at_exit {
         let f = module.function(f);
-        if f.params != 1 || f.locals[0].ty != Type::JsVal || f.result.is_some_and(|t| t != Type::JsVal) {
+        if f.params != 1
+            || f.locals[0].ty != Type::JsVal
+            || f.result.is_some_and(|t| t != Type::JsVal)
+        {
             bail!("internal error: the prelude's $$processAtExit must be (jsval) -> jsval?");
         }
     }
@@ -176,7 +182,11 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     // type's cancel-read, after the other intrinsics.
     let command_waits = command.is_some() && module.imports.iter().any(|x| !x.sig.blocking);
     let cancel_base = payload_base + abi::PAYLOAD_OPS * payloads.len() as u32;
-    let cancels = if command_waits { payloads.len() as u32 } else { 0 };
+    let cancels = if command_waits {
+        payloads.len() as u32
+    } else {
+        0
+    };
     let func_base = cancel_base + cancels;
     // Globals: runtime, ABI bump pointer, host globals, then the module's own.
     let runtime_globals = runtime::runtime_globals(
@@ -189,7 +199,11 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     // A command with non-blocking imports (T66: `wasi:sockets`) keeps a library's pending
     // imports and streams ([`abi::LIB_GLOBALS`]) after its host globals.
     let command_host = host::GLOBALS + exits as u32 * host::EXIT_GLOBALS;
-    let lib_base = if command.is_some() { host_base + command_host } else { host_base };
+    let lib_base = if command.is_some() {
+        host_base + command_host
+    } else {
+        host_base
+    };
     let host_globals = if command.is_some() {
         command_host + command_waits as u32 * abi::LIB_GLOBALS
     } else if module.init.is_some() || module.exports.iter().any(|x| x.sig.is_async) {
@@ -216,6 +230,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     };
     let mut e = Emitter {
         scratch_f64: 0,
+        scratch_js: 0,
         m: module,
         exits,
         imports: host::Imports {
@@ -637,6 +652,40 @@ fn cell_type(t: Type) -> u32 {
     }
 }
 
+/// T75: an operand of `===` that is a constant with no effects.
+enum EqOperand<'a> {
+    Oddball(u32),
+    Str(&'a [u16]),
+    Num(f64),
+}
+
+fn eq_const(e: &Expr) -> Option<EqOperand<'_>> {
+    Some(match e {
+        Expr::Const(Const::Undefined) => EqOperand::Oddball(runtime::G_UNDEFINED),
+        Expr::Const(Const::Null) => EqOperand::Oddball(runtime::G_NULL),
+        Expr::Str(units) => EqOperand::Str(units),
+        Expr::Convert {
+            from: Type::Bool,
+            to: Type::JsVal,
+            arg,
+        } => match **arg {
+            Expr::Const(Const::Bool(b)) => {
+                EqOperand::Oddball(if b { runtime::G_TRUE } else { runtime::G_FALSE })
+            }
+            _ => return None,
+        },
+        Expr::Convert {
+            from: Type::F64,
+            to: Type::JsVal,
+            arg,
+        } => match **arg {
+            Expr::Const(Const::F64(v)) => EqOperand::Num(v),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
 fn val_type(t: Type) -> ValType {
     match t {
         Type::F64 => ValType::F64,
@@ -860,6 +909,8 @@ struct Emitter<'m> {
     exits: bool,
     /// The current function's scratch `f64` local (the inline ToInt32 fast path).
     scratch_f64: u32,
+    /// A `jsval` local for inline sequences (T75).
+    scratch_js: u32,
     imports: host::Imports,
     types: TypeSection,
     /// Runtime globals that come before the module's own (see `global_base`).
@@ -1300,6 +1351,20 @@ impl Emitter<'_> {
         t
     }
 
+    /// T75: `v === c` for the `jsval` `v` on the stack.
+    fn strict_eq_const(&mut self, s: &mut InstructionSink, c: EqOperand) {
+        let c = match c {
+            EqOperand::Oddball(g) => runtime::EqConst::Oddball(g),
+            EqOperand::Str(units) => runtime::EqConst::Str {
+                global: runtime::Cx::string(self, units),
+                len: units.len() as u32,
+            },
+            EqOperand::Num(v) => runtime::EqConst::Num(v),
+        };
+        let str_eq = self.helper_index(Helper::Js(runtime::Helper::StrEq));
+        runtime::strict_eq_const(s, self.scratch_js, c, str_eq);
+    }
+
     fn helper_index(&mut self, h: Helper) -> u32 {
         let k = match self.helpers.iter().position(|x| *x == h) {
             Some(k) => k,
@@ -1317,7 +1382,9 @@ impl Emitter<'_> {
             .map(|l| (1, val_type(l.ty)))
             .collect();
         locals.push((1, ValType::F64));
+        locals.push((1, runtime::jsval()));
         self.scratch_f64 = f.locals.len() as u32;
+        self.scratch_js = self.scratch_f64 + 1;
         let mut func = Function::new(locals);
         let mut frames = Vec::new();
         {
@@ -1528,6 +1595,23 @@ impl Emitter<'_> {
                     };
                 }
             },
+            Expr::Binary {
+                op: op @ (BinOp::Eq | BinOp::Ne),
+                ty: Type::JsVal,
+                lhs,
+                rhs,
+            } if eq_const(lhs).is_some() || eq_const(rhs).is_some() => {
+                // T75: `===`/`!==` with a constant operand, inline (the constant has no effects).
+                let (other, c) = match eq_const(rhs) {
+                    Some(c) => (lhs, c),
+                    None => (rhs, eq_const(lhs).unwrap()),
+                };
+                self.expr(s, frames, other)?;
+                self.strict_eq_const(s, c);
+                if *op == BinOp::Ne {
+                    s.i32_eqz();
+                }
+            }
             Expr::Binary { op, ty, lhs, rhs } => {
                 self.expr(s, frames, lhs)?;
                 self.expr(s, frames, rhs)?;
@@ -1609,6 +1693,28 @@ impl Emitter<'_> {
                 };
                 runtime::push_number(s, v);
             }
+            Expr::Convert {
+                from: Type::F64,
+                to: Type::JsVal,
+                arg,
+            } if matches!(
+                **arg,
+                Expr::Convert {
+                    from: Type::JsVal,
+                    to: Type::F64,
+                    ..
+                }
+            ) =>
+            {
+                // T75: `+v` as a JS value: a number is itself, others are converted and boxed.
+                let Expr::Convert { arg: v, .. } = &**arg else {
+                    unreachable!()
+                };
+                self.expr(s, frames, v)?;
+                let to_number = self.helper_index(Helper::Js(runtime::Helper::ToNumber));
+                let box_ = self.helper_index(Helper::Js(runtime::Helper::Box));
+                runtime::as_number_value(s, self.scratch_js, to_number, box_);
+            }
             Expr::Convert { from, to, arg } => {
                 self.expr(s, frames, arg)?;
                 let js = |h| Helper::Js(h);
@@ -1650,8 +1756,11 @@ impl Emitter<'_> {
             }
             Expr::TypeofIs { arg, tag } => {
                 self.expr(s, frames, arg)?;
-                s.call(self.helper_index(Helper::Js(runtime::Helper::Typeof)));
-                s.i32_const(runtime::typeof_code(*tag)).i32_eq();
+                // T75: the tests that need no call, inline.
+                if !runtime::typeof_is(s, self.scratch_js, *tag) {
+                    s.call(self.helper_index(Helper::Js(runtime::Helper::Typeof)));
+                    s.i32_const(runtime::typeof_code(*tag)).i32_eq();
+                }
             }
             Expr::Seq { body, value } => {
                 for x in body {
@@ -1765,8 +1874,10 @@ impl Emitter<'_> {
                     {
                         s.ref_cast_non_null(runtime::string());
                     }
-                    if matches!(op, Intrinsic::I32Get | Intrinsic::I32Set | Intrinsic::I32Len)
-                        && i == 0
+                    if matches!(
+                        op,
+                        Intrinsic::I32Get | Intrinsic::I32Set | Intrinsic::I32Len
+                    ) && i == 0
                     {
                         s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_I32S));
                     }
@@ -1920,7 +2031,8 @@ impl Emitter<'_> {
                         return Ok(true);
                     }
                     Intrinsic::MonotonicNow => {
-                        s.call(self.imports.get(host::Import::ClockNow)).f64_convert_i64_u();
+                        s.call(self.imports.get(host::Import::ClockNow))
+                            .f64_convert_i64_u();
                         return Ok(true);
                     }
                     Intrinsic::DateNow => {
@@ -1940,7 +2052,10 @@ impl Emitter<'_> {
                             align: 2,
                             memory_index: 0,
                         });
-                        s.i32_const(1_000_000).i32_div_u().f64_convert_i32_u().f64_add();
+                        s.i32_const(1_000_000)
+                            .i32_div_u()
+                            .f64_convert_i32_u()
+                            .f64_add();
                         return Ok(true);
                     }
                     Intrinsic::CallImport(i) => {

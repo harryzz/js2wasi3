@@ -180,8 +180,13 @@ pub const G_REGEXP_EXEC: u32 = G_INDEX_PROTO + 1;
 /// `(mut (ref null $i32s))` (T74): the inline caches of constant-key property reads, one entry index
 /// per site (`object::Helper::GetNamed`), grown on demand.
 pub const G_IC: u32 = G_REGEXP_EXEC + 1;
+/// `(mut (ref null $keys))` (T75): the property keys of the integers 0 to [`NUM_KEYS`] − 1, made on
+/// first use (`object::Helper::ToKey`).
+pub const G_NUM_KEYS: u32 = G_IC + 1;
+/// How many integer keys `G_NUM_KEYS` holds.
+pub const NUM_KEYS: i32 = 1024;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_IC + 1;
+pub const GLOBALS: u32 = G_NUM_KEYS + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -956,6 +961,15 @@ pub fn globals(
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_I32S)),
     );
+    // T75: the integer keys.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_KEYS),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_KEYS)),
+    );
     for _ in 0..extra {
         globals.global(
             GlobalType {
@@ -1363,6 +1377,34 @@ fn to_boolean(cx: &mut dyn Cx) -> Function {
     const V: u32 = 0;
     let mut f = Function::new([]);
     let mut s = f.instructions();
+    // T75: the commonest first: oddballs (`true` only), numbers, strings.
+    s.local_get(V).ref_test_non_null(oddball());
+    s.if_(BlockType::Empty);
+    kind(&mut s, V);
+    s.i32_const(K_TRUE).i32_eq().return_();
+    s.end();
+    s.local_get(V).ref_test_non_null(i31());
+    s.if_(BlockType::Empty);
+    s.local_get(V).ref_cast_non_null(i31()).i31_get_s();
+    s.i32_const(0).i32_ne().return_();
+    s.end();
+    s.local_get(V).ref_test_non_null(number());
+    s.if_(BlockType::Empty);
+    // false for ±0 and NaN.
+    s.local_get(V)
+        .ref_cast_non_null(number())
+        .struct_get(T_NUMBER, 0)
+        .f64_abs()
+        .f64_const(0.0.into())
+        .f64_gt()
+        .return_();
+    s.end();
+    is_string(&mut s, V);
+    s.if_(BlockType::Empty);
+    // false only for "".
+    as_string(&mut s, V);
+    s.array_len().i32_const(0).i32_ne().return_();
+    s.end();
     if cx.bigint() {
         // T40: false only for 0n.
         bigint::is_bigint(&mut s, V);
@@ -1375,40 +1417,8 @@ fn to_boolean(cx: &mut dyn Cx) -> Function {
             .return_();
         s.end();
     }
-    s.local_get(V).ref_test_non_null(i31());
-    s.if_(BlockType::Result(ValType::I32));
-    s.local_get(V).ref_cast_non_null(i31()).i31_get_s();
-    s.i32_const(0).i32_ne();
-    s.else_();
-    s.local_get(V).ref_test_non_null(number());
-    s.if_(BlockType::Result(ValType::I32));
-    // false for ±0 and NaN.
-    s.local_get(V)
-        .ref_cast_non_null(number())
-        .struct_get(T_NUMBER, 0)
-        .f64_abs()
-        .f64_const(0.0.into())
-        .f64_gt();
-    s.else_();
-    is_string(&mut s, V);
-    s.if_(BlockType::Result(ValType::I32));
-    // false only for "".
-    as_string(&mut s, V);
-    s.array_len().i32_const(0).i32_ne();
-    s.else_();
     // Objects and symbols are truthy.
-    s.test_object(V);
-    s.local_get(V).ref_test_non_null(symbol());
-    s.i32_or();
-    s.if_(BlockType::Result(ValType::I32));
     s.i32_const(1);
-    s.else_();
-    kind(&mut s, V);
-    s.i32_const(K_TRUE).i32_eq();
-    s.end();
-    s.end();
-    s.end();
-    s.end();
     s.end();
     f
 }
@@ -1454,45 +1464,202 @@ fn both_strings(s: &mut InstructionSink, a: u32, b: u32) {
 /// `$strict_eq(a, b) -> i32`: JS `===`. Numbers compare by value (NaN ≠ NaN, +0 = -0),
 /// strings by content, everything else by identity.
 fn strict_eq(cx: &mut dyn Cx) -> Function {
-    let is_number = cx.helper(Helper::IsNumber);
-    let to_number = cx.helper(Helper::ToNumber);
     let str_eq = cx.helper(Helper::StrEq);
+    const A: u32 = 0;
+    const B: u32 = 1;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(0).call(is_number);
-    s.local_get(1).call(is_number);
-    s.i32_and();
+    // T75: the same value is equal unless it's a NaN; then numbers (i31 or boxed) inline.
+    s.local_get(A).local_get(B).ref_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(A).ref_test_non_null(number());
+    s.if_(BlockType::Empty);
+    s.local_get(A)
+        .ref_cast_non_null(number())
+        .struct_get(T_NUMBER, 0);
+    s.local_get(A)
+        .ref_cast_non_null(number())
+        .struct_get(T_NUMBER, 0);
+    s.f64_eq().return_();
+    s.end();
+    s.i32_const(1).return_();
+    s.end();
+    let as_f64 = |s: &mut InstructionSink, v: u32| {
+        s.local_get(v).ref_test_non_null(i31());
+        s.if_(BlockType::Result(ValType::F64));
+        s.local_get(v)
+            .ref_cast_non_null(i31())
+            .i31_get_s()
+            .f64_convert_i32_s();
+        s.else_();
+        s.local_get(v)
+            .ref_cast_non_null(number())
+            .struct_get(T_NUMBER, 0);
+        s.end();
+    };
+    let is_num = |s: &mut InstructionSink, v: u32| {
+        s.local_get(v).ref_test_non_null(i31());
+        s.local_get(v).ref_test_non_null(number());
+        s.i32_or();
+    };
+    is_num(&mut s, A);
+    s.if_(BlockType::Empty);
+    // Two different i31s differ; else compare as f64s if both are numbers.
+    is_num(&mut s, B);
+    s.if_(BlockType::Empty);
+    as_f64(&mut s, A);
+    as_f64(&mut s, B);
+    s.f64_eq().return_();
+    s.end();
+    s.i32_const(0).return_();
+    s.end();
+    both_strings(&mut s, A, B);
     s.if_(BlockType::Result(ValType::I32));
-    s.local_get(0).call(to_number);
-    s.local_get(1).call(to_number);
-    s.f64_eq();
-    s.else_();
-    both_strings(&mut s, 0, 1);
-    s.if_(BlockType::Result(ValType::I32));
-    as_string(&mut s, 0);
-    as_string(&mut s, 1);
+    as_string(&mut s, A);
+    as_string(&mut s, B);
     s.call(str_eq);
     s.else_();
     if cx.bigint() {
         // T40: BigInts compare by value.
-        bigint::is_bigint(&mut s, 0);
-        bigint::is_bigint(&mut s, 1);
+        bigint::is_bigint(&mut s, A);
+        bigint::is_bigint(&mut s, B);
         s.i32_and();
         s.if_(BlockType::Result(ValType::I32));
         let cmp = cx.helper(Helper::Big(bigint::Helper::Cmp));
-        s.local_get(0).ref_cast_non_null(bigint::bigint());
-        s.local_get(1).ref_cast_non_null(bigint::bigint());
+        s.local_get(A).ref_cast_non_null(bigint::bigint());
+        s.local_get(B).ref_cast_non_null(bigint::bigint());
         s.call(cmp).i32_eqz();
         s.else_();
-        s.local_get(0).local_get(1).ref_eq();
+        s.i32_const(0);
         s.end();
     } else {
-        s.local_get(0).local_get(1).ref_eq();
+        // Not the same reference (checked above).
+        s.i32_const(0);
     }
     s.end();
     s.end();
-    s.end();
     f
+}
+
+/// T75: replace the `jsval` on the stack by its ToNumber as a JS value: a number (i31 or `$number`)
+/// stays as it is; `t` is a `jsval` scratch local.
+pub fn as_number_value(s: &mut InstructionSink, t: u32, to_number: u32, box_: u32) {
+    s.local_tee(t).ref_test_non_null(i31());
+    s.local_get(t).ref_test_non_null(number()).i32_or();
+    s.if_(BlockType::Result(jsval()));
+    s.local_get(t);
+    s.else_();
+    s.local_get(t).call(to_number).call(box_);
+    s.end();
+}
+
+/// T75: push `typeof v === tag` for the `jsval` `v` on the stack if it needs no call (`t` is a
+/// `jsval` scratch local); false (nothing emitted) for `object` and `bigint`.
+pub fn typeof_is(s: &mut InstructionSink, t: u32, tag: TypeofTag) -> bool {
+    match tag {
+        TypeofTag::Number => {
+            s.local_tee(t).ref_test_non_null(i31());
+            s.local_get(t).ref_test_non_null(number()).i32_or();
+        }
+        TypeofTag::String => {
+            s.local_set(t);
+            is_string(s, t);
+        }
+        TypeofTag::Symbol => {
+            s.ref_test_non_null(symbol());
+        }
+        TypeofTag::Function => {
+            s.ref_test_non_null(func::function());
+        }
+        TypeofTag::Undefined => {
+            s.global_get(G_UNDEFINED).ref_eq();
+        }
+        TypeofTag::Boolean => {
+            s.local_tee(t).global_get(G_TRUE).ref_eq();
+            s.local_get(t).global_get(G_FALSE).ref_eq().i32_or();
+        }
+        TypeofTag::Object | TypeofTag::BigInt => return false,
+    }
+    true
+}
+
+/// T75: the constant operand of an inline `===`.
+pub enum EqConst {
+    /// An oddball (`undefined`, `null`, `true`, `false`) in this global: equal only to itself.
+    Oddball(u32),
+    /// A string constant in global `global`, `len` code units long.
+    Str { global: u32, len: u32 },
+    /// A number.
+    Num(f64),
+}
+
+/// Push `v === c` for the `jsval` `v` on the stack; `t` is a `jsval` scratch local and `str_eq`
+/// the `$string_eq` function.
+pub fn strict_eq_const(s: &mut InstructionSink, t: u32, c: EqConst, str_eq: u32) {
+    match c {
+        EqConst::Oddball(g) => {
+            s.global_get(g).ref_eq();
+        }
+        EqConst::Str { global, len } => {
+            // Identity (the same constant), else a string of the same length and units.
+            s.local_tee(t).global_get(global).ref_eq();
+            s.if_(BlockType::Result(ValType::I32));
+            s.i32_const(1);
+            s.else_();
+            s.test_string(t);
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(t)
+                .ref_cast_non_null(string())
+                .array_len()
+                .i32_const(len as i32)
+                .i32_eq();
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(t).ref_cast_non_null(string());
+            s.global_get(global).call(str_eq);
+            s.else_();
+            s.i32_const(0);
+            s.end();
+            s.else_();
+            s.i32_const(0);
+            s.end();
+            s.end();
+        }
+        EqConst::Num(x) if x.is_nan() => {
+            s.drop().i32_const(0);
+        }
+        EqConst::Num(x) => {
+            s.local_tee(t).ref_test_non_null(i31());
+            s.if_(BlockType::Result(ValType::I32));
+            match small_int(x) {
+                Some(i) => {
+                    s.local_get(t).ref_cast_non_null(i31()).i31_get_s();
+                    s.i32_const(i).i32_eq();
+                }
+                // -0 is an i31 0; other non-i31 constants never equal an i31.
+                None if x == 0.0 => {
+                    s.local_get(t)
+                        .ref_cast_non_null(i31())
+                        .i31_get_s()
+                        .i32_eqz();
+                }
+                None => {
+                    s.i32_const(0);
+                }
+            }
+            s.else_();
+            s.local_get(t).ref_test_non_null(number());
+            s.if_(BlockType::Result(ValType::I32));
+            s.local_get(t)
+                .ref_cast_non_null(number())
+                .struct_get(T_NUMBER, 0)
+                .f64_const(x.into())
+                .f64_eq();
+            s.else_();
+            s.i32_const(0);
+            s.end();
+            s.end();
+        }
+    }
 }
 
 /// `$loose_eq(a, b) -> i32`: JS `==`. Two objects compare by identity. `null == undefined`; a
@@ -1570,12 +1737,12 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
 
 /// `$typeof(v) -> i32`: a [`typeof_code`].
 fn typeof_(cx: &mut dyn Cx) -> Function {
-    let is_number = cx.helper(Helper::IsNumber);
     const V: u32 = 0;
     const K: u32 = 1;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
-    s.local_get(V).call(is_number);
+    s.local_get(V).ref_test_non_null(i31());
+    s.local_get(V).ref_test_non_null(number()).i32_or();
     s.if_(BlockType::Result(ValType::I32));
     s.i32_const(typeof_code(TypeofTag::Number));
     s.else_();
@@ -1798,8 +1965,48 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     let to_number = cx.helper(Helper::ToNumber);
     let box_ = cx.helper(Helper::Box);
     let to_primitive = cx.helper(Helper::Obj(object::Helper::ToPrimitive));
-    let mut f = Function::new([]);
+    const I: u32 = 2;
+    let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
+    // T75: two i31s add as i32s (no overflow: each is in [-2^30, 2^30)); two numbers as f64s.
+    s.local_get(0).ref_test_non_null(i31());
+    s.local_get(1).ref_test_non_null(i31());
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(0).ref_cast_non_null(i31()).i31_get_s();
+    s.local_get(1).ref_cast_non_null(i31()).i31_get_s();
+    s.i32_add().local_tee(I);
+    s.i32_const(I31_MIN).i32_ge_s();
+    s.local_get(I).i32_const(I31_END).i32_lt_s().i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(I).ref_i31().return_();
+    s.end();
+    s.local_get(I)
+        .f64_convert_i32_s()
+        .struct_new(T_NUMBER)
+        .return_();
+    s.end();
+    s.local_get(0).ref_test_non_null(i31());
+    s.local_get(0).ref_test_non_null(number());
+    s.i32_or();
+    s.local_get(1).ref_test_non_null(i31());
+    s.local_get(1).ref_test_non_null(number());
+    s.i32_or();
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(0).call(to_number);
+    s.local_get(1).call(to_number);
+    s.f64_add().call(box_).return_();
+    s.end();
+    // Two strings: concatenated as they are.
+    is_string(&mut s, 0);
+    is_string(&mut s, 1);
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    as_string(&mut s, 0);
+    as_string(&mut s, 1);
+    s.call(concat).return_();
+    s.end();
     for v in [0, 1] {
         s.test_object(v);
         s.if_(BlockType::Empty);
@@ -2170,6 +2377,20 @@ fn js_less(cx: &mut dyn Cx, swap: bool, or_equal: bool) -> Function {
     let (x, y) = if swap { (B, A) } else { (A, B) };
     let mut f = Function::new([(3, ValType::I32)]);
     let mut s = f.instructions();
+    // T75: two i31s compare as i32s.
+    s.local_get(A).ref_test_non_null(i31());
+    s.local_get(B).ref_test_non_null(i31());
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(x).ref_cast_non_null(i31()).i31_get_s();
+    s.local_get(y).ref_cast_non_null(i31()).i31_get_s();
+    if or_equal {
+        s.i32_ge_s();
+    } else {
+        s.i32_lt_s();
+    }
+    s.return_();
+    s.end();
     for v in [A, B] {
         s.test_object(v);
         s.if_(BlockType::Empty);

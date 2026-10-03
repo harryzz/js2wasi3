@@ -68,6 +68,11 @@ metering, TRVs, sensors) and commands. What doesn't:
 Not tried: the production version (2.14.2), an aarch64 host (the board has ~3 GB free; `wasmtime compile` needs
 ~9.6 GB, so a cross-compiled `.cwasm` would be needed), OTA updates, runs longer than 10 minutes.
 
+**Speed work since the trial** (zigbee-herdsman-converters' definitions and exposes for the trial's 52 device types,
+`tasks/T74-files/bench.sh`; exposes ×200, node 62–73 ms): T74 property access 3,602–3,712 → 2,529–2,732 ms (−29%); T75
+operators, conversions and boxing 2,438 → 1,941 ms (−20%). Not yet re-measured on the live installation; next: T76
+(the compiled program, JSON, regex).
+
 ## OTA downloads 2026-10-03 (T72: `fetch`)
 
 zigbee-herdsman's `dist/controller/helpers/ota.js` is the graph's only `fetch` user: the OTA index

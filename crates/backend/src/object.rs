@@ -2167,8 +2167,49 @@ fn array_index() -> Function {
 fn to_key(cx: &mut dyn Cx) -> Function {
     let to_string = rh(cx, runtime::Helper::ToString);
     let to_primitive = h(cx, Helper::ToPrimitive);
-    let mut f = Function::new([]);
+    const I: u32 = 1;
+    const KEYS: u32 = 2;
+    const K: u32 = 3;
+    let keys = ValType::Ref(wasm_encoder::RefType {
+        nullable: true,
+        heap_type: wasm_encoder::HeapType::Concrete(runtime::T_KEYS),
+    });
+    let key = ValType::Ref(wasm_encoder::RefType {
+        nullable: true,
+        heap_type: string(),
+    });
+    let mut f = Function::new([(1, ValType::I32), (1, keys), (1, key)]);
     let mut s = f.instructions();
+    // T75: an integer in [0, NUM_KEYS): the key made the first time.
+    s.local_get(0)
+        .ref_test_non_null(wasm_encoder::HeapType::I31);
+    s.if_(BlockType::Empty);
+    s.local_get(0)
+        .ref_cast_non_null(wasm_encoder::HeapType::I31)
+        .i31_get_s()
+        .local_tee(I);
+    s.i32_const(runtime::NUM_KEYS).i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.global_get(runtime::G_NUM_KEYS)
+        .local_tee(KEYS)
+        .ref_is_null();
+    s.if_(BlockType::Empty);
+    s.i32_const(runtime::NUM_KEYS)
+        .array_new_default(runtime::T_KEYS)
+        .local_tee(KEYS)
+        .global_set(runtime::G_NUM_KEYS);
+    s.end();
+    s.local_get(KEYS)
+        .local_get(I)
+        .array_get(runtime::T_KEYS)
+        .local_tee(K);
+    s.br_on_non_null(2);
+    s.local_get(KEYS).local_get(I);
+    s.local_get(0).call(to_string).local_tee(K);
+    s.array_set(runtime::T_KEYS);
+    s.local_get(K).ref_as_non_null().return_();
+    s.end();
+    s.end();
     // An object: its ToPrimitive (hint string), which may be a symbol.
     s.test_object(0);
     s.if_(BlockType::Empty);

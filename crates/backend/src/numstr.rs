@@ -755,6 +755,32 @@ fn number_to_string(cx: &mut dyn Cx) -> Function {
         .f64_const(0.0.into())
         .f64_lt()
         .local_set(SIGN);
+    // T75: an integer below 2^53 is its decimal digits (no shortest-digits search).
+    s.local_get(X).f64_trunc().local_get(X).f64_eq();
+    s.local_get(X)
+        .f64_abs()
+        .f64_const(9007199254740992.0.into())
+        .f64_lt()
+        .i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(X).f64_abs().i64_trunc_f64_u().local_tee(OUT);
+    s.call(dec_len).local_get(SIGN).i32_add().local_tee(LEN);
+    s.array_new_default(T_STRING).local_set(R);
+    s.local_get(SIGN);
+    s.if_(BlockType::Empty);
+    s.local_get(R)
+        .ref_as_non_null()
+        .i32_const(0)
+        .i32_const('-' as i32)
+        .array_set(T_STRING);
+    s.end();
+    s.local_get(R)
+        .ref_as_non_null()
+        .local_get(LEN)
+        .local_get(OUT)
+        .call(write);
+    s.local_get(R).ref_as_non_null().return_();
+    s.end();
     s.local_get(X).f64_abs().i64_reinterpret_f64().call(d2d);
     s.local_set(E).local_set(OUT);
     s.local_get(OUT).call(dec_len).local_set(K);

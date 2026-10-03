@@ -114,6 +114,16 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   that entry's key is identical to the site's (constant strings are interned per module, so objects built by
   the same code hit); prototype hits and keys built at run time miss and take the lookup. The lowering keeps a
   constant key in place in `o.k = v`/`o.k op= v` (`key_temp`). Shapes/hidden classes remain undone (F321).)
+  (T75: **operators and conversions on `jsval`s**. `===`/`!==` with a constant operand are inline in the backend
+  (`runtime::strict_eq_const`: an oddball is `ref.eq`; a string constant is identity, then a string of the same
+  length and `string_eq`; a number compares an i31 or a `$number`); `strict_eq` itself tries `ref.eq` first and
+  compares numbers without calls. `typeof v === "<tag>"` is inline except for `object`/`bigint`
+  (`runtime::typeof_is`). Two i31s add, subtract, compare and do bitwise ops as `i32`s (`js_add`, `js_less`,
+  `numeric`), giving an i31 when in range; numbers skip the object/string/BigInt tests. `f64->jsval(jsval->f64(v))`
+  (`+v` as a value) keeps a number as it is (`runtime::as_number_value`): an integer may stay a `$number`, which
+  every consumer accepts (an i31 is the usual form, not an invariant). `number_to_string` writes integers below
+  2^53 directly (no shortest-digits search), and ToPropertyKey of an i31 in [0, 1024) returns a key string made
+  once (`G_NUM_KEYS`). `to_boolean` tests oddballs, numbers and strings before BigInts.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
 - Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
   inline caches only after T12 works and a benchmark justifies them.
