@@ -127,7 +127,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   CTR and CCM (`createCipheriv`/`createDecipheriv`), `timingSafeEqual`. Built-ins that load with node's shape
   while their facility is missing (T65): `http`, `https`, `http2`, `tls`, `dns`, `zlib` (`crc32`
   works), `perf_hooks`, `module` (`createRequire` fails with `MODULE_NOT_FOUND`), and `child_process` (every
-  spawn fails with `ENOENT`, as for a missing program).
+  spawn fails with `ENOENT`, as for a missing program; T70: shell commands fail as with a `/bin/sh` that finds no
+  program, exit code 127).
 - `net` (T66): TCP clients and servers over `wasi:sockets` on the event loop (`net.Socket` is a `stream.Duplex`;
   `connect`/`createConnection`, `createServer`/`listen`/`close`, `setTimeout`, `setKeepAlive`, node's errors such as
   `connect ECONNREFUSED 127.0.0.1:1`), and `dns.lookup` over `wasi:sockets/ip-name-lookup`. wasmtime needs

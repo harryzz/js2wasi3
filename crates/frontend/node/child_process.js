@@ -1,7 +1,10 @@
 // node's `child_process` (T65): WASI has no processes, so every spawn fails as node's does when the program
 // doesn't exist: `spawn` returns a `ChildProcess` that emits `error` (`spawn <file> ENOENT`) then `close`,
-// `exec`/`execFile` call back with that error, and the sync forms throw it (or return it, `spawnSync`).
-// A shell command runs `/bin/sh -c` (or `options.shell`), which is just as absent.
+// `execFile` calls back with that error, and the sync forms throw it (or return it, `spawnSync`).
+// T70: a shell command (`exec`, `execSync`, `shell: true`) runs as on a system whose `/bin/sh` (dash) finds no
+// program: it starts, writes `/bin/sh: 1: <program>: not found` to its stderr and exits with 127 after a turn of
+// the event loop, so `exec` calls back with node's `Command failed: …` error (zigbee2mqtt's `git rev-parse`).
+// (Shell built-ins such as `echo` are "not found" too.)
 "use strict";
 
 const EventEmitter = require("events");
@@ -9,6 +12,13 @@ const { Readable, Writable } = require("stream");
 const { Buffer } = require("buffer");
 
 const UV_ENOENT = -2;
+// The exit status and the stderr line of a shell command whose program isn't found.
+const SHELL_NOT_FOUND = 127;
+
+function shellNotFound(shell, command) {
+  const program = command.trim().split(/\s+/)[0] || command;
+  return `${shell === true ? "/bin/sh" : shell}: 1: ${program}: not found\n`;
+}
 
 function argValue(name, reason, value) {
   const e = new TypeError(`The argument '${name}' ${reason}. Received ${$$inspectValue(value)}`);
@@ -42,12 +52,15 @@ function normalize(file, args, options) {
   }
   if (options === undefined) options = {};
   else if (options === null || typeof options !== "object") throw $$errInvalidArgType("options", "of type object", options);
+  let command = null;
   if (options.shell) {
-    const command = args.length > 0 ? `${file} ${args.join(" ")}` : file;
+    const line = args.length > 0 ? `${file} ${args.join(" ")}` : file;
     file = typeof options.shell === "string" ? options.shell : "/bin/sh";
-    args = ["-c", command];
+    args = ["-c", line];
+    // Only `/bin/sh` exists (T70); another shell is a missing program like any other.
+    if (file === "/bin/sh" || file === "sh") command = line;
   }
-  return { file, args, options };
+  return { file, args, options, command };
 }
 
 function pipes(stdio) {
@@ -82,6 +95,26 @@ class ChildProcess extends EventEmitter {
     this.stdout = outPipe ? new Readable({ read() {} }) : null;
     this.stderr = errPipe ? new Readable({ read() {} }) : null;
     this.stdio = [this.stdin, this.stdout, this.stderr];
+    if (options.command != null) {
+      // The shell starts, finds no program and exits.
+      this.pid = 1000;
+      process.nextTick(() => {
+        this.emit("spawn");
+        setImmediate(() => {
+          if (this.stderr !== null) this.stderr.push(shellNotFound(options.shell, options.command));
+          for (const s of [this.stdout, this.stderr]) if (s !== null) s.push(null);
+          this.exitCode = SHELL_NOT_FOUND;
+          this.emit("exit", this.exitCode, this.signalCode);
+          // node's `flushStdio`: pipes nobody reads are resumed, so they end.
+          for (const s of [this.stdout, this.stderr]) if (s !== null && !s.readableFlowing) s.resume();
+          setImmediate(() => {
+            this.emit("close", this.exitCode, this.signalCode);
+            for (const s of this.stdio) if (s !== null) s.destroy();
+          });
+        });
+      });
+      return 0;
+    }
     const err = enoent("spawn", file, args);
     process.nextTick(() => {
       this.exitCode = UV_ENOENT;
@@ -107,7 +140,7 @@ class ChildProcess extends EventEmitter {
 function spawn(file, args, options) {
   const n = normalize(file, args, options);
   const child = new ChildProcess();
-  child.spawn({ ...n.options, file: n.file, args: [n.file, ...n.args] });
+  child.spawn({ ...n.options, file: n.file, args: [n.file, ...n.args], command: n.command });
   return child;
 }
 
@@ -132,14 +165,27 @@ function execFile(file, args, options, callback) {
   options = { ...options };
   const child = spawn(file, args, options);
   const encoding = options.encoding === undefined ? "utf8" : options.encoding;
+  const list = Array.isArray(args) ? args : [];
+  const cmd = list.length > 0 ? `${file} ${list.join(" ")}` : file;
+  const text = (s) => (encoding === "buffer" || !Buffer.isEncoding(encoding) ? Buffer.from(s) : s);
   child.on("error", (e) => {
-    const list = Array.isArray(args) ? args : [];
-    e.cmd = list.length > 0 ? `${file} ${list.join(" ")}` : file;
-    if (typeof callback === "function") {
-      const empty = encoding === "buffer" || !Buffer.isEncoding(encoding) ? Buffer.alloc(0) : "";
-      callback(e, empty, empty);
-    }
+    e.cmd = cmd;
+    if (typeof callback === "function") callback(e, text(""), text(""));
   });
+  if (child.pid !== undefined) {
+    // A shell that ran (T70). node's `exithandler`: the shell's stderr, then a `Command failed` error on `close`.
+    let stderr = "";
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("close", (code, signal) => {
+      if (typeof callback !== "function") return;
+      const e = new Error(`Command failed: ${cmd}\n${stderr}`);
+      e.code = code;
+      e.killed = false;
+      e.signal = signal;
+      e.cmd = cmd;
+      callback(e, text(""), text(stderr));
+    });
+  }
   return child;
 }
 
@@ -155,6 +201,14 @@ function exec(command, options, callback) {
 
 function syncResult(file, args, options) {
   const n = normalize(file, args, options);
+  if (n.command != null) {
+    // T70: the shell runs, finds no program and exits with 127 (no `error`).
+    const stderr = Buffer.from(shellNotFound(n.options.shell, n.command));
+    const stdout = Buffer.alloc(0);
+    const enc = n.options.encoding;
+    const out = (b) => (enc && enc !== "buffer" && Buffer.isEncoding(enc) ? b.toString(enc) : b);
+    return { status: SHELL_NOT_FOUND, signal: null, output: [null, out(stdout), out(stderr)], pid: 1000, stdout: out(stdout), stderr: out(stderr), command: n.command };
+  }
   return {
     error: enoent("spawnSync", n.file, n.args),
     status: null,
@@ -167,10 +221,19 @@ function syncResult(file, args, options) {
 }
 
 function spawnSync(file, args, options) {
-  return syncResult(file, args, options);
+  const r = syncResult(file, args, options);
+  delete r.command;
+  return r;
 }
 
 function syncError(ret) {
+  if (ret.error === undefined) {
+    // A shell command that exited with 127: node's `checkExecSyncError`.
+    const { command, ...rest } = ret;
+    const err = new Error(`Command failed: ${command}\n${String(ret.stderr)}`);
+    Object.assign(err, rest);
+    return err;
+  }
   const err = ret.error;
   Object.assign(err, ret);
   return err;
@@ -181,7 +244,10 @@ function execFileSync(file, args, options) {
 }
 
 function execSync(command, options) {
-  throw syncError(syncResult(command, [], { ...options, shell: options && typeof options.shell === "string" ? options.shell : true }));
+  const ret = syncResult(command, [], { ...options, shell: options && typeof options.shell === "string" ? options.shell : true });
+  // node: without `stdio`, the child's stderr goes to the parent's too.
+  if (ret.error === undefined && (!options || options.stdio === undefined)) process.stderr.write(ret.stderr);
+  throw syncError(ret);
 }
 
 function fork(modulePath, args, options) {

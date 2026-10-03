@@ -1042,51 +1042,77 @@ class FileHandle {
   constructor(fd) {
     this.fd = fd;
   }
-  async readFile(options) {
-    return readFileSync(this.fd, options);
+  readFile(options) {
+    return later(() => readFileSync(this.fd, options));
   }
-  async writeFile(data, options) {
-    return writeFileSync(this.fd, data, options);
+  writeFile(data, options) {
+    return later(() => writeFileSync(this.fd, data, options));
   }
-  async appendFile(data, options) {
-    return writeFileSync(this.fd, data, options);
+  appendFile(data, options) {
+    return later(() => writeFileSync(this.fd, data, options));
   }
-  async read(buffer, offset, length, position) {
-    if (buffer === undefined) {
-      buffer = Buffer.alloc(16384);
-    }
-    const bytesRead = readSync(this.fd, buffer, offset, length, position);
-    return { bytesRead, buffer };
+  read(buffer, offset, length, position) {
+    return later(() => {
+      if (buffer === undefined) {
+        buffer = Buffer.alloc(16384);
+      }
+      const bytesRead = readSync(this.fd, buffer, offset, length, position);
+      return { bytesRead, buffer };
+    });
   }
-  async write(data, ...rest) {
-    const bytesWritten = writeSync(this.fd, data, ...rest);
-    return { bytesWritten, buffer: data };
+  write(data, ...rest) {
+    return later(() => {
+      const bytesWritten = writeSync(this.fd, data, ...rest);
+      return { bytesWritten, buffer: data };
+    });
   }
-  async stat(options) {
-    return fstatSync(this.fd, options);
+  stat(options) {
+    return later(() => fstatSync(this.fd, options));
   }
-  async truncate(len) {
-    return ftruncateSync(this.fd, len);
+  truncate(len) {
+    return later(() => ftruncateSync(this.fd, len));
   }
-  async sync() {
-    return fsyncSync(this.fd);
+  sync() {
+    return later(() => fsyncSync(this.fd));
   }
-  async datasync() {
-    return fdatasyncSync(this.fd);
+  datasync() {
+    return later(() => fdatasyncSync(this.fd));
   }
-  async chmod(mode) {
-    return fchmodSync(this.fd, mode);
+  chmod(mode) {
+    return later(() => fchmodSync(this.fd, mode));
   }
-  async close() {
-    if (this.fd !== -1) {
-      closeSync(this.fd);
-      this.fd = -1;
-    }
+  close() {
+    return later(() => {
+      if (this.fd !== -1) {
+        closeSync(this.fd);
+        this.fd = -1;
+      }
+    });
   }
 }
 
+// A promise of `run()`'s result, settled in a later turn of the event loop like the callbacks (T70: node runs
+// the call on its thread pool, so `setImmediate` callbacks and a closed socket's `close` come first). node's
+// errors of the call itself (`syscall` set) reject later too; argument errors reject at once.
+function later(run) {
+  return new Promise((resolve, reject) => {
+    let result;
+    try {
+      result = run();
+    } catch (e) {
+      if (e === null || typeof e !== "object" || e.syscall === undefined) {
+        reject(e);
+      } else {
+        setImmediate(reject, e);
+      }
+      return;
+    }
+    setImmediate(resolve, result);
+  });
+}
+
 function promisify(sync) {
-  return async (...args) => sync(...args);
+  return (...args) => later(() => sync(...args));
 }
 
 // ---- streams (T60): node 24's lib/internal/fs/streams.js, loaded on first use ----------------
@@ -1165,9 +1191,9 @@ for (const key of Object.keys(sync)) {
   }
 }
 callbacks.realpath.native = callbacks.realpath;
-promises.open = async (path, flags, mode) => new FileHandle(openSync(path, flags, mode));
+promises.open = (path, flags, mode) => later(() => new FileHandle(openSync(path, flags, mode)));
 promises.constants = constants;
-promises.opendir = async (path) => openDir(path, pathString(path));
+promises.opendir = (path) => later(() => openDir(path, pathString(path)));
 
 module.exports = {
   ...sync,

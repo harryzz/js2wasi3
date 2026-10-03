@@ -27,7 +27,9 @@ start-restart-start equal node's apart from:
   ~2× node's (F299). **T69**: half of it was wasmtime's copying GC thrashing (the live set, ~30 MiB, fills the
   semi-space before the heap grows); with `-O gc-heap-initial-size=268435456` (now in `tasks/T68-files/`) and T69's
   type tests, connect → started is 1 s with one `online` publish, as in node;
-- the old socket's `close` on a restart is logged after the new socket opens (node: before the restart, F300);
+- the old socket's `close` on a restart is logged after the new socket opens (node: before the restart, F300).
+  **T70**: T62's driver now does `index.js`'s git hash check (`exec`), and shell commands fail as with a real
+  `/bin/sh` (exit 127 after a turn): `Port closed` is where node logs it;
 - SIGTERM/SIGINT don't reach the guest, so a host kill skips zigbee2mqtt's stop path (F298);
 - timestamps are UTC (node: local time, F182).
 Nothing reached the production topics (watched for the test instance's names and PAN); retained test topics were
