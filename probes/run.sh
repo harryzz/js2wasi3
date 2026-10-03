@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M0 feasibility probes. Tools: wasmtime 49.0.1, wasm-tools 1.259.0, wkg 0.16.1, WASI 0.3.1
+# M0 feasibility probes. Tools: wasmtime 49.0.2, wasm-tools 1.259.0, wkg 0.16.1, WASI 0.3.1
 set -e; cd "$(dirname "$0")"; mkdir -p out
 echo "1) GC + EH + async-lifted export";      wasm-tools parse p.wat -o out/p.wasm && wasmtime run --invoke 'run()' out/p.wasm
 echo "2) P3 command: stream stdout + timer + GC/EH (callback loop)"

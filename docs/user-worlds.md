@@ -277,7 +277,7 @@ has a provider and an app that use streams both ways, composed with `wac plug`.
   (`import { "[method]blob.read" as read } from "acme:demo/store"`, `self` first) and `[resource-drop]blob` drops
   one. Exported resources and jco's resource classes: not yet.
 - Composed components with async calls between them (timers, async imports, streams) can fail when wasmtime
-  49.0.1 collects garbage (a wasmtime internal error or crash with the default collector); running with
+  49 (49.0.1, 49.0.2) collects garbage (a wasmtime internal error or crash with the default collector); running with
   `-O gc-heap-initial-size=64MiB` avoids it for short calls (F134).
 - A received stream that is never read to its end or dropped stays open, so its writer waits (F137). Memory
   used while streaming `string`s isn't reclaimed until the next call (F138).

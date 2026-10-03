@@ -1,11 +1,11 @@
 # Pinned tools
 
-Checked 2026-09-25 against the latest GitHub releases (node: 2026-09-26, latest LTS). Rule: always the latest
+Checked 2026-09-25 against the latest GitHub releases (node: 2026-09-26, latest LTS; wasmtime: 2026-10-03). Rule: always the latest
 version of every tool. Verify with `scripts/check-tools.sh`.
 
 | Tool | Version | Used for |
 |---|---|---|
-| wasmtime | 49.0.1 | the only test host (WASI 0.3 via `-Sp3`) |
+| wasmtime | 49.0.2 | the only test host (WASI 0.3 via `-Sp3`; 49.0.2 since 2026-10-03: security fixes, among them GC rooting across `try_call`, F224) |
 | wasm-tools | 1.259.0 | validate, print, `component embed/new/wit` |
 | wasm crates | 0.259.0 | `wasm-encoder`, `wasmparser`, `wit-parser`, `wit-component` (same code as wasm-tools 1.259) |
 | oxc crates | 0.151.0 | JS/TS parser and semantic analysis |
@@ -18,7 +18,7 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 | node | 24.21.0 | differential oracle for JS behaviour (latest LTS; was 20.19.2 until 2026-09-26) |
 | test262 | `7ab7fafa0003f73fc85c1b95d88094d33f7eb8bd` | conformance subset (`scripts/fetch-test262.sh`, `scripts/test262.mjs`; `main` on 2026-09-27) |
 
-## Wasm feature status on wasmtime 49.0.1 (verified by `probes/run.sh`)
+## Wasm feature status on wasmtime 49.0.2 (verified by `probes/run.sh`; same output as on 49.0.1)
 
 | Feature | Default? | Notes |
 |---|---|---|

@@ -795,7 +795,7 @@ fn async_imports_compose_with_wac() {
 /// promise settles, the call going on after `task.return`) and reads one it takes; the app
 /// reads the futures its imports return and writes the one it passes.
 ///
-/// Runs with a larger initial GC heap: with wasmtime 49.0.1's default copying collector a GC
+/// Runs with a larger initial GC heap: with wasmtime 49's default copying collector (49.0.1 and 49.0.2) a GC
 /// in these composed components hits a wasmtime internal error (see the follow-up in
 /// `tasks/README.md`).
 #[test]

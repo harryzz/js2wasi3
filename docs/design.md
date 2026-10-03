@@ -134,6 +134,8 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   after a collection during the throwing call (`drc`: freed unless the value is also live on the normal path; the
   default copying collector: stale, "gc heap corruption"); values defined before the `try` are fine. Prelude code
   avoids the pattern (it fills an array made before the `try`); user code can still hit it (F224).
+  Fixed in wasmtime 49.0.2 (GHSA-hw8m-q44c-ggrf, GC rooting across `try_call`): F224's repro equals node under both
+  collectors; the prelude's workaround stays (harmless).
   Only exports that may throw (`ir::may_throw`) get `result<T, js-error>` (see [wit-names.md](wit-names.md)).
   An uncaught exception in a command prints `Uncaught <name>: <message>` (or the `console.log` text of a
   non-error) to stderr and exits 1. Runtime errors (`.length` of `null`, TDZ) throw node's TypeError/ReferenceError.
@@ -661,7 +663,7 @@ properties) or, since T54, a CommonJS module (a function: top-level `this` is `m
   private `G_SYM_STATE` key (like a Date); its methods are in `builtins/dispose.js`.
 
 ## Testing
-Test host: wasmtime 49.0.1 (`TOOLS.md`). JS oracle: `node`.
+Test host: wasmtime 49.0.2 (`TOOLS.md`). JS oracle: `node`.
 
 | Layer | Where | Checks |
 |---|---|---|
