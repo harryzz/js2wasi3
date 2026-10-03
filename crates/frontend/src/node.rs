@@ -41,6 +41,17 @@ const MODULES: &[(&str, &str)] = &[
     ("dgram", include_str!("../node/dgram.js")),
     ("dns", include_str!("../node/dns.js")),
     ("http", include_str!("../node/http.js")),
+    // The HTTP server (T71): node 24's lib (`scripts/gen-node-http.mjs`) over a JS llhttp.
+    ("_http_common", include_str!("../node/http/_http_common.js")),
+    ("_http_incoming", include_str!("../node/http/_http_incoming.js")),
+    ("_http_outgoing", include_str!("../node/http/_http_outgoing.js")),
+    ("_http_server", include_str!("../node/http/_http_server.js")),
+    ("internal/http", include_str!("../node/http/internal_http.js")),
+    ("internal/http_parser", include_str!("../node/http_parser.js")),
+    ("internal/http_support", include_str!("../node/http_support.js")),
+    ("internal/http_errors", include_str!("../node/http_errors.js")),
+    // `Headers`, `Request`, `Response`, `ReadableStream`, `Blob` (T71): node's web globals.
+    ("internal/fetch", include_str!("../node/fetch.js")),
     ("http2", include_str!("../node/http2.js")),
     ("https", include_str!("../node/https.js")),
     ("module", include_str!("../node/module.js")),
@@ -113,6 +124,13 @@ pub(crate) const GLOBALS: &[(&str, &str, &str)] = &[
     ("URL", "node:internal/url", "URL"),
     ("URLSearchParams", "node:internal/url", "URLSearchParams"),
     ("crypto", "node:crypto", "webcrypto"),
+    ("Headers", "node:internal/fetch", "Headers"),
+    ("Request", "node:internal/fetch", "Request"),
+    ("Response", "node:internal/fetch", "Response"),
+    ("ReadableStream", "node:internal/fetch", "ReadableStream"),
+    ("ReadableStreamDefaultReader", "node:internal/fetch", "ReadableStreamDefaultReader"),
+    ("ReadableStreamDefaultController", "node:internal/fetch", "ReadableStreamDefaultController"),
+    ("Blob", "node:internal/fetch", "Blob"),
 ];
 
 /// The program path of the built-in `spec` names (`path`, `node:path` → `node:path`), if

@@ -860,7 +860,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40), `__intrinsic_regexp_mods()`
     /// (T46), `__intrinsic_rab_mode()` (T47), `__intrinsic_big_typed_mode()` (T48) or
-    /// `__intrinsic_cjs_mode()` (T54)? Which one.
+    /// `__intrinsic_cjs_mode()` (T54), or node's built-in modules' `__intrinsic_species_mode()` (T71)?
+    /// Which one.
     fn bigint_mode_test(&self, test: &Expression<'a>) -> Option<&'static str> {
         let Expression::CallExpression(c) = test else {
             return None;
@@ -868,10 +869,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         let Expression::Identifier(id) = &c.callee else {
             return None;
         };
-        if !self.p.in_prelude(c.span.start) {
+        if !self.p.in_prelude(c.span.start) && !self.p.is_node_module(c.span.start) {
             return None;
         }
         [
+            "__intrinsic_species_mode",
             "__intrinsic_bigint_mode",
             "__intrinsic_regexp_mods",
             "__intrinsic_rab_mode",
@@ -3478,6 +3480,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Some("__intrinsic_rab_mode") => self.module.rab,
                     Some("__intrinsic_big_typed_mode") => self.module.big_typed,
                     Some("__intrinsic_cjs_mode") => self.prelude.cjs,
+                    // T71: in node's built-in modules.
+                    Some("__intrinsic_species_mode") => self.prelude.species,
                     _ => self.prelude.regexp_mods,
                 };
                 if keep {

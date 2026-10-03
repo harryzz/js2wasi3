@@ -126,16 +126,29 @@ function describe(v) {
   return `type ${typeof v} (${typeof v === "string" ? `'${v}'` : String(v)})`;
 }
 
-// The preopened directory and the path relative to it for `p` (as given: for errors).
-function at(p, syscall) {
-  const abs = pathModule.resolve(p);
+function preopenList() {
   if (preopens === undefined) {
     preopens = wasi
       .getDirectories()
       .map((d) => [d[0], pathModule.resolve(d[1])])
       .sort((a, b) => b[1].length - a[1].length);
   }
-  for (const [dir, base] of preopens) {
+  return preopens;
+}
+
+// Is the absolute path `abs` a directory above every preopen it leads to (`/tmp` for `--dir /tmp/x`)?
+// WASI can't see it; it exists (T71: `realpath` walks through it).
+function abovePreopens(abs) {
+  const prefix = abs.endsWith("/") ? abs : abs + "/";
+  const list = preopenList();
+  return !list.some(([, base]) => abs === base || abs.startsWith(base.endsWith("/") ? base : base + "/")) &&
+    list.some(([, base]) => base.startsWith(prefix));
+}
+
+// The preopened directory and the path relative to it for `p` (as given: for errors).
+function at(p, syscall) {
+  const abs = pathModule.resolve(p);
+  for (const [dir, base] of preopenList()) {
     if (abs === base) {
       return [dir, "."];
     }
@@ -927,6 +940,10 @@ function realpathSync(path, options) {
   let links = 0;
   while (parts.length > 0) {
     const next = pathModule.join(out, parts.shift());
+    if (abovePreopens(next)) {
+      out = next;
+      continue;
+    }
     const st = statPath(next, undefined, false, "lstat");
     if (st.isSymbolicLink()) {
       if (++links > 40) {
@@ -1082,12 +1099,34 @@ class FileHandle {
     return later(() => fchmodSync(this.fd, mode));
   }
   close() {
+    // A stream that closes the fd itself: done when it closed.
+    const owner = this._owner;
+    if (owner !== undefined && this.fd !== -1) return new Promise((resolve) => owner.once("close", resolve));
     return later(() => {
       if (this.fd !== -1) {
         closeSync(this.fd);
         this.fd = -1;
       }
     });
+  }
+  // A stream over the handle's fd (T71: srvx serves files so); like node's, it closes the handle when it
+  // closes (`autoClose`).
+  createReadStream(options) {
+    return this._stream(createReadStream, options);
+  }
+  createWriteStream(options) {
+    return this._stream(createWriteStream, options);
+  }
+  _stream(create, options) {
+    const s = create(null, { ...options, fd: this.fd });
+    if (s.autoClose !== false) {
+      this._owner = s;
+      s.once("close", () => {
+        this.fd = -1;
+        this._owner = undefined;
+      });
+    }
+    return s;
   }
 }
 

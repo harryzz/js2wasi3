@@ -346,6 +346,10 @@ pub(crate) struct Prelude {
     /// which user code can't name)? The prelude's `if (__intrinsic_cjs_mode()) { … }` blocks are
     /// kept only then.
     pub cjs: bool,
+    /// Does the program name `species` outside node's built-in modules (T71)? Their
+    /// `if (__intrinsic_species_mode()) { … }` blocks (`node/buffer.js`: `Buffer[Symbol.species]`) are
+    /// kept only then.
+    pub species: bool,
     /// Is the entry CommonJS (T60: the linker's `$$cjsMain(…)` call; `ir::Module::cjs_main`)?
     pub cjs_main: bool,
     /// Does the user's code have a class with `extends`, or name `construct` (T47, see
@@ -570,6 +574,14 @@ impl Prelude {
             .any(|w| w[0] == b'(' && w[1] == b'?' && matches!(w[2], b'i' | b'm' | b's' | b'-'));
         out.cjs = p.source[..p.user_end as usize].contains("$$cjs");
         out.cjs_main = p.source[..p.user_end as usize].contains("$$cjsMain(");
+        out.species = p.semantic.nodes().iter().any(|node| {
+            let (name, span) = match node.kind() {
+                AstKind::IdentifierName(n) => (n.name.as_str(), n.span),
+                AstKind::StringLiteral(l) => (l.value.as_str(), l.span),
+                _ => return false,
+            };
+            name == "species" && !p.in_prelude(span.start) && !p.is_node_module(span.start)
+        });
         // Prelude code in `if (__intrinsic_regexp_mods()) { … }` blocks, when they're dropped.
         // T47/T48: the same for `if (__intrinsic_rab_mode()) { … }`, `__intrinsic_big_typed_mode()`.
         let mut dropped: Vec<Span> = Vec::new();
@@ -578,6 +590,7 @@ impl Prelude {
             ("__intrinsic_rab_mode", out.rab),
             ("__intrinsic_big_typed_mode", out.big_typed),
             ("__intrinsic_cjs_mode", out.cjs),
+            ("__intrinsic_species_mode", out.species),
         ]
             .into_iter()
             .filter(|(_, keep)| !keep)
@@ -586,7 +599,7 @@ impl Prelude {
         if !gates.is_empty() {
             for node in p.semantic.nodes().iter() {
                 if let AstKind::IfStatement(i) = node.kind()
-                    && p.in_prelude(i.span.start)
+                    && (p.in_prelude(i.span.start) || p.is_node_module(i.span.start))
                     && matches!(&i.test, Expression::CallExpression(c)
                         if matches!(&c.callee, Expression::Identifier(id) if gates.contains(&id.name.as_str())))
                 {

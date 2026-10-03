@@ -1,7 +1,18 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Three sections: the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## Frontend 2026-10-03 (T71: `http` server, `ws`, srvx)
+
+With `frontend: {enabled: true, host: 127.0.0.1, port: 18080}` in the test-only config
+(`tasks/T71-files/build-run.sh`; patches: T66's, without the srvx stub, and the computed
+`import(settings.frontend.package)` written as `import("zigbee2mqtt-windfront")`), the release build takes 91.6 s
+(peak 774 MB) and `wasmtime compile` 40.9 s. zigbee2mqtt starts like node (`Started frontend on port
+127.0.0.1:18080`, `Zigbee2MQTT started!`) and a client (`client.cjs`: `/` plain and brotli, `/index.html`, 404s
+from `/missing` and `/device_icons/…`, a `.br` asset, the `/api` WebSocket for 5 s with a health check) gets the
+same answers from both: the pages, the WebSocket's bridge topics (`bridge/state`, `bridge/info`, `bridge/devices`,
+…, `bridge/response/health_check`) and its close. Not tried: the onboarding page (F311), `https` (F306).
 
 ## Live coordinator 2026-10-03 (T68, js2wasi3 after T62–T66 and `Error.captureStackTrace`)
 

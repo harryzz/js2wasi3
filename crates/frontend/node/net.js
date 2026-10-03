@@ -286,22 +286,29 @@ class Socket extends Duplex {
   }
 
   async _receive(rx, done) {
-    try {
-      for await (const chunk of rx) {
-        if (this.destroyed) break;
-        this.bytesRead += chunk.length;
-        this._active();
-        if (!this.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length))) {
-          await new Promise((resolve) => {
-            this._readWake = resolve;
-          });
-        }
-        if (this.destroyed) break;
+    for (;;) {
+      // Only the stream's errors are read errors: a `data` listener's throw isn't caught here.
+      let r;
+      try {
+        r = await rx.next();
+      } catch (e) {
+        // (The stream is gone: nothing to cancel.)
+        if (this._reader === rx) this._reader = null;
+        if (!this.destroyed) this.destroy(errnoError(e, "read"));
+        return;
       }
-    } catch (e) {
-      if (!this.destroyed) this.destroy(errnoError(e, "read"));
-      return;
+      if (r.done || this.destroyed) break;
+      const chunk = r.value;
+      this.bytesRead += chunk.length;
+      this._active();
+      if (!this.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length))) {
+        await new Promise((resolve) => {
+          this._readWake = resolve;
+        });
+      }
+      if (this.destroyed) break;
     }
+    if (this._reader === rx) this._reader = null;
     if (this.destroyed) return;
     const r = await done;
     if (this.destroyed) return;
@@ -348,7 +355,6 @@ class Socket extends Duplex {
       this._handle = null;
       this._sendEnded = true;
       wake(this);
-      for (const [, writeCb] of this._sendQueue.splice(0)) writeCb(err || null);
       const rx = this._reader;
       this._reader = null;
       if (rx !== null) {
@@ -356,7 +362,10 @@ class Socket extends Duplex {
         rx.return();
       }
       this._read();
-      wasi.drop(h);
+      // Writes queued before `destroy()` still go out, as node's writes reach the kernel at once (T71: an
+      // HTTP server's 400 before it destroys the socket); then the handle goes.
+      if (this._sendQueue.length > 0 && this._sent !== null) this._sent.then(() => wasi.drop(h));
+      else wasi.drop(h);
     }
     cb(err);
     if (this._opened) {

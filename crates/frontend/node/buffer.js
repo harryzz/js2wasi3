@@ -132,6 +132,12 @@ Buffer.from = function (value, encodingOrOffset, length) {
 // https://github.com/feross/buffer/pull/148
 Object.setPrototypeOf(Buffer.prototype, Uint8Array.prototype)
 Object.setPrototypeOf(Buffer, Uint8Array)
+// js2wasi3 (T71): `Buffer[Symbol.species]` is `Buffer` as in node (`ws`'s `FastBuffer`), when the program
+// names `species` (typed arrays have no species: F248; the block is dropped otherwise).
+if (__intrinsic_species_mode()) {
+  // (A data property, not node's inherited getter: a function here would renumber every program's.)
+  Object.defineProperty(Buffer, Symbol.species, { configurable: true, value: Buffer })
+}
 
 function assertSize (size) {
   validateNumberRange(size, 'size', 0, K_MAX_LENGTH)

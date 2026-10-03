@@ -125,7 +125,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
 - `crypto` (T65): random values from `wasi:random` (`randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`,
   the `crypto` global), `createHash`/`createHmac` (md5, sha1, sha224/256/384/512), AES-128/192/256 in ECB, CBC,
   CTR and CCM (`createCipheriv`/`createDecipheriv`), `timingSafeEqual`. Built-ins that load with node's shape
-  while their facility is missing (T65): `http`, `https`, `http2`, `tls`, `dns`, `zlib` (`crc32`
+  while their facility is missing (T65): `http` (T71: its server works), `https`, `http2`, `tls`, `dns`, `zlib` (`crc32`
   works), `perf_hooks`, `module` (`createRequire` fails with `MODULE_NOT_FOUND`), and `child_process` (every
   spawn fails with `ENOENT`, as for a missing program; T70: shell commands fail as with a `/bin/sh` that finds no
   program, exit code 127).
@@ -133,6 +133,10 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   `connect`/`createConnection`, `createServer`/`listen`/`close`, `setTimeout`, `setKeepAlive`, node's errors such as
   `connect ECONNREFUSED 127.0.0.1:1`), and `dns.lookup` over `wasi:sockets/ip-name-lookup`. wasmtime needs
   `-S inherit-network` (and `-S allow-ip-name-lookup` for host names).
+- `http` servers (T71): node 24's own `_http_server` over `net` with a JS llhttp (`createServer`, keep-alive,
+  chunked bodies and trailers, `Expect: 100-continue`, `upgrade`/`connect` events, `clientError`, timeouts), so
+  `ws` WebSocket servers work; the web `Headers`/`Request`/`Response`/`ReadableStream`/`Blob` globals;
+  zigbee2mqtt's frontend (srvx) serves its pages and WebSocket like node. The HTTP client isn't there yet.
 - `dgram` (T67): UDP sockets over `wasi:sockets` (`createSocket`, `bind`, `send` with and without `connect`,
   `message` with `rinfo`, `close`, `address()`/`remoteAddress()`, node's errors). No multicast or broadcast
   (WASI 0.3 has neither).
@@ -147,7 +151,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   a build error, `eval` called through a variable with a string throws an `EvalError`).
 
 Not yet: many built-ins (`Intl`, `WeakRef`), sloppy-mode CommonJS semantics, most of node's built-in
-modules (working `http`, `tls`, `zlib`, `worker_threads`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
+modules (an `http` client, `tls`, `zlib`, `worker_threads`, …), and richer WIT types at the boundary (resources; `future<T>` and `stream<T>` work in `async func`s). See [docs/keywords.md](docs/keywords.md) for keyword-by-keyword status and the Follow-ups table in
 [tasks/README.md](tasks/README.md) for every known gap.
 
 ## How it works

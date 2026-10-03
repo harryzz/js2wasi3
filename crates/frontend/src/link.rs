@@ -653,15 +653,63 @@ fn file_url(path: &str) -> String {
     out
 }
 
-/// The spans of the references to the undeclared global `name`.
-fn global_refs(p: &Program, name: &str) -> Vec<Span> {
+/// A reference to one of node's globals that a built-in module provides (`node::GLOBALS`).
+#[derive(Debug, Clone, Copy)]
+struct GlobalRef {
+    span: Span,
+    /// `globalThis.X` read (T71: srvx's `globalThis.URL`), not the identifier `X`.
+    member: bool,
+}
+
+/// The references to the undeclared global `name`, and reads of `globalThis.name` (not assignment
+/// targets) when the module declares no `name` at its top level.
+fn global_refs(p: &Program, name: &str, cjs: bool) -> Vec<GlobalRef> {
     let scoping = p.semantic.scoping();
     let nodes = p.semantic.nodes();
-    scoping
+    let mut out: Vec<GlobalRef> = scoping
         .root_unresolved_references()
         .get(name)
-        .map(|refs| refs.iter().map(|&r| nodes.kind(scoping.get_reference(r).node_id()).span()).collect())
-        .unwrap_or_default()
+        .map(|refs| {
+            refs.iter()
+                .map(|&r| GlobalRef { span: nodes.kind(scoping.get_reference(r).node_id()).span(), member: false })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Declared at the top level (a CommonJS module's top level is its wrapper function's scope).
+    let root = scoping.root_scope_id();
+    if scoping.symbol_ids().any(|sym| {
+        let sc = scoping.symbol_scope_id(sym);
+        scoping.symbol_name(sym) == name && (sc == root || (cjs && scoping.scope_parent_id(sc) == Some(root)))
+    }) {
+        return out;
+    }
+    if let Some(refs) = scoping.root_unresolved_references().get("globalThis") {
+        for &r in refs {
+            let id = scoping.get_reference(r).node_id();
+            let parent = nodes.parent_node(id);
+            if let AstKind::StaticMemberExpression(m) = parent.kind()
+                && m.property.name == name
+                && matches!(&m.object, Expression::Identifier(o) if o.span == nodes.kind(id).span())
+                && !matches!(nodes.parent_kind(parent.id()), AstKind::AssignmentTargetWithDefault(_))
+                && !is_assignment_target(nodes, parent.id())
+            {
+                out.push(GlobalRef { span: m.span, member: true });
+            }
+        }
+    }
+    out
+}
+
+/// Is the member expression at `id` written to (`=`, `+=`, `++`, `delete`, a destructuring target)?
+fn is_assignment_target(nodes: &oxc_semantic::AstNodes, id: oxc_semantic::NodeId) -> bool {
+    match nodes.parent_kind(id) {
+        AstKind::AssignmentExpression(a) => a.left.span() == nodes.kind(id).span(),
+        AstKind::UpdateExpression(_) => true,
+        AstKind::UnaryExpression(u) => u.operator == UnaryOperator::Delete,
+        AstKind::AssignmentTargetPropertyProperty(_)
+        | AstKind::ArrayAssignmentTarget(_) | AstKind::ObjectAssignmentTarget(_) => true,
+        _ => false,
+    }
 }
 
 /// Does the module have top-level `await` (outside any function)?
@@ -759,7 +807,7 @@ struct Module<'a> {
     /// (`node::GLOBALS`: the index there, and the unresolved references), and the modules they name
     /// (the index, the module): an ES module's are replaced by the export; a CommonJS module gets
     /// `const X = require("node:x").X;` first.
-    global_refs: Vec<(usize, Vec<Span>)>,
+    global_refs: Vec<(usize, Vec<GlobalRef>)>,
     global_modules: Vec<(usize, usize)>,
 }
 
@@ -973,7 +1021,7 @@ impl<'a> Graph<'a, '_> {
         self.modules[m].global_refs = node::GLOBALS
             .iter()
             .enumerate()
-            .map(|(g, (name, ..))| (g, global_refs(&self.modules[m].p, name)))
+            .map(|(g, (name, ..))| (g, global_refs(&self.modules[m].p, name, cjs)))
             .filter(|(_, refs)| !refs.is_empty())
             .collect();
         if cjs {
@@ -1025,7 +1073,7 @@ impl<'a> Graph<'a, '_> {
         for (g, refs) in self.modules[m].global_refs.clone() {
             // node's `Buffer` global (T56) and the others (T61): like an import of the export.
             let (_, module, _) = node::GLOBALS[g];
-            if let Some(Request::File(path)) = self.resolve(m, module, refs[0]) {
+            if let Some(Request::File(path)) = self.resolve(m, module, refs[0].span) {
                 let k = match self.index.get(&path) {
                     Some(&k) => k,
                     None => {
@@ -1051,7 +1099,7 @@ impl<'a> Graph<'a, '_> {
         self.cjs_computed(m, computed)?;
         for (g, refs) in &self.modules[m].global_refs {
             // node's `Buffer` global (T56) and the others (T61): the wrapper requires them first.
-            statics.push((node::GLOBALS[*g].1.to_string(), refs[0], false));
+            statics.push((node::GLOBALS[*g].1.to_string(), refs[0].span, false));
         }
         for (spec, span, always) in statics {
             // node's `require` also takes `.` and `..` as relative, and as directories (T62).
@@ -2252,12 +2300,17 @@ impl<'a> Graph<'a, '_> {
             // The wrapper becomes a (hoisted) function declaration.
             let end = source.len() as u32;
             let mut header = format!("function {}(exports, require, module, __filename, __dirname) {{", names[&Binding::Cjs(m)]);
-            for (g, _) in &module.global_refs {
+            for (g, refs) in &module.global_refs {
                 let (name, module, export) = node::GLOBALS[*g];
                 header.push_str(&format!("const {name} = require(\"{module}\").{export};"));
+                // `globalThis.X` reads the same binding (T71).
+                for r in refs.iter().filter(|r| r.member) {
+                    edits.push(Edit::new(r.span.start, r.span.end, name.to_string()));
+                }
             }
             edits.push(Edit::new(0, CJS_PRE.len() as u32, header));
             edits.push(Edit::new(end - CJS_POST.len() as u32, end, "\n}".into()));
+            edits.sort_by_key(|e| (e.start, e.end));
             return edits;
         }
 
@@ -2466,8 +2519,12 @@ impl<'a> Graph<'a, '_> {
             let i = self.modules[k].cjs_names.iter().position(|n| n == export).expect("the built-in exports it");
             let name = &names[&Binding::CjsNamed(k, i)];
             let refs = &module.global_refs.iter().find(|(h, _)| *h == g).expect("its references").1;
-            for &span in refs {
-                ident(&mut edits, span, global, name, true);
+            for r in refs {
+                if r.member {
+                    edits.push(Edit::new(r.span.start, r.span.end, name.clone()));
+                } else {
+                    ident(&mut edits, r.span, global, name, true);
+                }
             }
         }
         edits.sort_by_key(|e| (e.start, e.end));

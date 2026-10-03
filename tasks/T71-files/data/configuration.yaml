@@ -1,0 +1,28 @@
+# T71 (from T68's): the frontend on, on a local port; zigbee2mqtt against a live coordinator and an MQTT broker that a production zigbee2mqtt also uses.
+# The addresses come from the environment (build-run.sh: Z2M_SERIAL, Z2M_MQTT → ZIGBEE2MQTT_CONFIG_*);
+# every topic here is test-only, so nothing reaches the production instance or Home Assistant.
+version: 5
+homeassistant:
+  enabled: true
+  discovery_topic: homeassistant-js2wasi3
+frontend:
+  enabled: true
+  host: 127.0.0.1
+  port: 18080
+mqtt:
+  base_topic: zigbee2mqtt-js2wasi3
+  client_id: zigbee2mqtt-js2wasi3
+  server: mqtt://127.0.0.1:1883
+serial:
+  port: tcp://127.0.0.1:6638
+  adapter: zstack
+advanced:
+  # A test-only network, not zigbee2mqtt's defaults (PAN 0x1a62, ext PAN dd…dd, the published key), so it
+  # can't be confused with another network nearby; channel 25 (check it isn't the production one).
+  pan_id: 0x4a3c
+  ext_pan_id: [78, 150, 66, 187, 103, 232, 11, 9]
+  network_key: [215, 126, 225, 32, 218, 17, 243, 151, 174, 204, 100, 172, 164, 77, 13, 229]
+  channel: 25
+  log_level: debug
+  log_output:
+    - console

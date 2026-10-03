@@ -11,6 +11,12 @@ does the connection, HTTPS and HTTP/1.1–2, so no TLS in JS. `Request`/`Respons
 T71, this, then the TLS client (T73). Programs that don't use `fetch` keep their bytes.
 
 ## What we know (at handoff)
+- T71 (done 2026-10-03) left the classes in `crates/frontend/node/fetch.js` (`node:internal/fetch`, node globals
+  via `node::GLOBALS`): `Headers`, `Request`, `Response` (bodies as bytes or a `ReadableStream`; internals under a
+  `kState` symbol), default `ReadableStream`, `Blob`. `fetch` belongs there; a response body from a WASI
+  `stream<u8>` can be a `ReadableStream` with a `pull` reading the stream (T66's async iterable of `Uint8Array`s).
+  Gaps to check against `ota.js`: F309. `globalThis.fetch` reads become the binding if `fetch` is added to
+  `node::GLOBALS` (T71's linker rule).
 - zigbee-herdsman's `dist/controller/helpers/ota.js` is zigbee2mqtt's `fetch` user (none in `dist/` or
   zigbee-herdsman-converters' `lib/`): `const response = await fetch(url)`, then `response.ok`, `response.body`
   (non-null check), `response.status`, `await response.json()` (the OTA index) and

@@ -289,6 +289,11 @@ impl<'a> Program<'a> {
             && self.map.as_ref().is_some_and(|m| offset < m.generated || m.is_inserted(offset) || m.is_node_module(offset))
     }
 
+    /// Is this offset in one of node's built-in modules (`crates/frontend/node`, T55)?
+    pub fn is_node_module(&self, offset: u32) -> bool {
+        !self.in_prelude(offset) && self.map.as_ref().is_some_and(|m| m.is_node_module(offset))
+    }
+
     /// Does the reference at this offset name an import (an immutable binding, T41)?
     pub fn is_import(&self, offset: u32) -> bool {
         self.map.as_ref().is_some_and(|m| m.imports.contains(&offset))

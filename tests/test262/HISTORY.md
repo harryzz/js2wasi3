@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-03: T71 `http` server (targeted run)
+
+- Compiler: the `globalThis.X` rewrite for node's linker-bound globals (no test262 test reads one: 0 matches),
+  `__intrinsic_species_mode()` (only in node's built-in modules), new built-in modules. No full run: nothing
+  reaches the subset's tests.
+- `built-ins/global` locally (29 tests): 17 pass, 2 fail, 10 unsupported, no changes since the baseline.
+
 ## 2026-10-03: T62–T66 merged (full run)
 
 - Compiler: T62's link-error reporting and `require(".")`; T63's `error.stack`, node globals and missing statics as
