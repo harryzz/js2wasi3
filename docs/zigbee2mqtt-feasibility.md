@@ -3,6 +3,31 @@
 Sections: the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
 
+## Test rig after T76 2026-10-04 (10 minutes, one device, frontend)
+
+js2wasi3 after T76 (zigbee2mqtt 2.14.1 with all device modules: 65.5 MB of Wasm, build 291 s, `wasmtime compile`
+159 s, 343 MB `.cwasm`; wasmtime 49.0.2, `-O gc-heap-initial-size=268435456`) on the test rig: the test coordinator
+(CC2652P, Z-Stack 20230507, TCP) and the shared MQTT broker with test topics only (base topic `zigbee2mqtt-js2wasi3`,
+discovery `homeassistant-js2wasi3`), starting from a test data dir saved on 2026-10-03 with the SNZB-02 (EFEKTA
+firmware) joined; frontend on port 18080, log level info. Alongside: a read-only listener on the test topics,
+`bridge/request/health_check` every 60 s, CPU/RSS every 5 s, a frontend client (pages, an asset, the `/api`
+WebSocket) after start and after ~5 minutes.
+
+| | js2wasi3 + wasmtime |
+|---|---|
+| "Zigbee2MQTT started!" after | 2 s (network resumed, 1 device) |
+| device | its state published at start; at 05:44 it woke, `last_seen` updated and zigbee2mqtt configured it: the known `genPowerCfg.configReport` timeout of this firmware (as on 2026-10-03) |
+| errors | that configure only |
+| health check (10 requests) | all `ok`, answered in 50–73 ms |
+| frontend | both client runs equal: pages (brotli), 404s, an asset, the WebSocket with the bridge topics and the device |
+| CPU | 5.8 s in 10 minutes; 0.2% of a core after the first minute |
+| RSS peak / mean | 451 / 446 MB (256 MiB of it the initial GC heap) |
+
+With one device this isn't comparable to the production trial's 52-device numbers below; the startup burst there
+(F318) is what T74–T76 work toward (the exposes benchmark: 3.6 s → 1.3 s). A first run of this session started
+from the config-only `tasks/T71-files/data` (no devices); it also removed stale retained discovery entries under
+`homeassistant-js2wasi3/` (the test namespace) for devices it didn't know, as zigbee2mqtt does.
+
 ## Production trial 2026-10-03 (after T72, wasmtime 49.0.2)
 
 The user's production installation, for two 5-minute runs (production zigbee2mqtt stopped for the trial, restarted
