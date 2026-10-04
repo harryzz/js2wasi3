@@ -1,7 +1,48 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## Production run 2026-10-04 evening (after T78): unchanged per event, `Intl` crash after 5 minutes
+
+The user stopped production zigbee2mqtt; a fresh read-only snapshot of its data dir (17:20), the same overrides,
+laptop and wasmtime flags as in the morning runs. Build: js2wasi3 `b2e6e8b` (T78's string `+=` buffers, regex
+first-unit filter and native alternation search, native Buffer `latin1`/`ascii` decoding, F340, F341), zigbee2mqtt
+2.14.1 with all device modules: 65.5 MB of Wasm (build 395 s, `wasmtime compile` 263 s). 52 devices. Planned 10
+minutes; scripts and logs outside the repository (`~/js2wasi3-prod-run/run-prod3.sh`, `snapshot3.sh`, `prod3-wasm*`).
+
+| | T76 build (morning) | T78 build (evening) |
+|---|---|---|
+| "Zigbee2MQTT started!" after | 23 s | 33 s |
+| CPU, first 255 s | 100.3 s | 106.2 s |
+| log lines (discovery publishes), first 255 s | 5,445 (600) | 5,462 (599) |
+| **CPU per handled event** | **18.4 ms** | **19.4 ms** (node: 1.6 ms) |
+| RSS | 506 MB | 494-499 MB in the first 2 minutes, then one step to 758 MB |
+| errors | external converters' symlink (F317) | the same, only that |
+| end | 10 minutes | `Intl` crash at 5:00 (F330) |
+
+Per minute:
+
+| minute | CPU | of one core | RSS peak | log lines |
+|---|---|---|---|---|
+| 1 | 50.7 s | 85% | 494 MB | 2,207 |
+| 2 | 46.6 s | 78% | 499 MB | 1,262 |
+| 3 | 5.1 s | 9% | 758 MB | 874 |
+| 4 | 2.3 s | 4% | 758 MB | 818 |
+| 5 | 3.4 s | 6% | 759 MB | 1,176 |
+
+- **T78's fixes didn't change the real run**: ~19 ms per event, ~12× node, as before. They sped up the benchmarks
+  they targeted (regexredux fasta 100k: over 120 s → 0.55 s; 200,000 string appends: 10.3 s → 19 ms); zigbee2mqtt's
+  message handling spends its time elsewhere (property lookups, number boxing, GC: F334). The real workload needs
+  its own profile (F329).
+- Startup burst: about 2 minutes at ~80% of a core (discovery configs and retained state), then 4-9% of a core for
+  800-1,200 events a minute.
+- Memory: one step of ~260 MB during minute 3, then flat; it looks like wasmtime growing the GC heap, not a leak.
+  Not verified (nor whether T78's `$strbuf` buffers add to it).
+- Startup 33 s vs 23 s: one run each, not checked.
+- **Crash (F330)** at 5:00: `Uncaught ReferenceError: node's global 'Intl' isn't available`, as in the morning's
+  runs. Production runs end within minutes until `Intl` (T77).
+- The MQTT listener on `zigbee2mqtt/#` logged 11,239 messages.
 
 ## Production runs 2026-10-04 (after T76): CPU per event, and the `Intl` crash
 

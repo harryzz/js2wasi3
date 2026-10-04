@@ -31,6 +31,31 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 | GC Canonical ABI option (🛸) | off | scalars only; strings/lists **not implemented** |
 | Timers (`monotonic-clock` `[async-lower]wait-until`, `[subtask-cancel]`) | on | probe 8: concurrent waits overlap; a subtask must leave its waitable set (`waitable.join h 0`) before `subtask.cancel`, else trap |
 
+## Other runtimes (not test hosts; for future testing)
+
+wasmtime is the only test host because no other standalone runtime with WasmGC and WASI P3 was known. Candidates
+to recheck when they release:
+
+| runtime | version tried | status with js2wasi3 output |
+|---|---|---|
+| [zwasm](https://github.com/zwasm/zwasm) (Zig, Apache-2.0; interpreter, single-pass JIT, AOT `.cwasm`) | v2.7.0 (2026-09-14), release binary in `~/tools/zwasm-2.7.0/`; probed 2026-10-04 | **can't run it yet**, see below |
+
+zwasm v2.7.0, what stops it now:
+1. **Validation bug**: the typed `select` with a concrete reference result type (`select (result (ref $t))` or
+   `(ref null $t)`) is rejected: `BadValType at op 0x1c`. Abstract types (`eqref`, `anyref`, `i31ref`,
+   `funcref`) pass. Valid Wasm 3.0 (wasm-tools and wasmtime accept it); every js2wasi3 module has such selects
+   (`hello.js`: 21). Not reported in zwasm's issues and not fixed by 2026-10-04. Repro:
+   `(module (type $s (array (mut i16))) (func (export "run") (param $c i32) (result i32)
+   (drop (select (result (ref null $s)) (ref.null none) (ref.null none) (local.get $c))) (i32.const 1)))`,
+   `zwasm run --invoke run=1 x.wasm`.
+2. **WASI P3 async**: a P3 component with our 0.3.1 imports starts and writes to stdout (`probes/cmd.wat`), but
+   the async-lowered `monotonic-clock.wait-for` ends the program (exit 1, no message). js2wasi3 uses async lowers
+   for timers, streams and sockets. (zwasm implements WASI 0.3.0; ours is 0.3.1.)
+3. Not a blocker, measured: WasmGC allocation (a loop of 50M small structs) takes 2.38 s vs wasmtime's 0.21 s.
+   What works: GC structs/arrays, exceptions (`try_table`/`throw`), a P3 component's start and stdout.
+
+Recheck: `zwasm run` on a js2wasi3 build of `tests/fixtures/hello.js` (1) and on `probes/cmd.wat`'s component (2).
+
 ## Syntax gotchas (wasm-tools 1.259)
 
 - `(canon lift ... async (callback (core func $i "cb")))`: the `core` keyword is required.

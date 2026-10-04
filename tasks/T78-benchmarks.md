@@ -165,3 +165,7 @@ and need the user's OK to install them.
   (+ `.rss()`, `cpuUsage()`) with 0s; `setKeepAlive(enable, initialDelay)` sets `set-keep-alive-idle-time` (ka.js:
   `ss` shows a 15 s keepalive timer). `scripts/diff.sh tests/fixtures/node`: 41/41 pass (5 needed `-j 2`: the
   10 s timeout under load).
+- 2026-10-04 evening: production run with the b2e6e8b build (52 devices, docs/zigbee2mqtt-feasibility.md "Production
+  run 2026-10-04 evening"): 19.4 ms CPU per event vs 18.4 ms after T76 (node 1.6 ms): T78's fixes don't reach the
+  real workload; `Intl` crash at 5:00 (F330); RSS one step 499 → 758 MB in minute 3 (not explained). zwasm v2.7.0
+  probed as a second runtime: can't run js2wasi3 output yet (TOOLS.md "Other runtimes").
