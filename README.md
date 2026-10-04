@@ -32,9 +32,11 @@ echo 'console.log("hello from js2wasi3");' > hello.js
 target/release/js2wasi3 build hello.js -o hello.wasm
 wasmtime run -Sp3 hello.wasm          # -Sp3: enable WASI 0.3
 # hello from js2wasi3
-# Large or allocation-heavy programs: give wasmtime 49's copying GC a bigger initial heap, or it collects
-# constantly (T69). The same -O must be passed to `wasmtime compile` for a .cwasm.
-wasmtime run -O gc-heap-initial-size=268435456 -Sp3 hello.wasm
+# Large or allocation-heavy programs: give wasmtime 49's copying GC a bigger initial heap (in bytes), or it
+# collects constantly: it grows the heap only once the live data fills a whole semi-space (F304). zigbee2mqtt:
+# 512 MiB used 3.7x less CPU than 256 MiB for +330 MB RSS (T79). The same -O must be passed to `wasmtime compile`
+# for a .cwasm.
+wasmtime run -O gc-heap-initial-size=536870912 -Sp3 hello.wasm
 
 # A library: exported functions become the component's WIT exports.
 echo 'export function add(a, b) { return a + b; }' > add.js

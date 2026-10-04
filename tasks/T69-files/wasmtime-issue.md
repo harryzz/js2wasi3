@@ -1,4 +1,5 @@
-<!-- T69: DRAFT for review; not posted. Target: https://github.com/bytecodealliance/wasmtime/issues (new issue). -->
+<!-- T69: analysis of wasmtime's copying-collector heap-growth rule, kept as our notes. NOT to be posted (user,
+2026-10-04: wasmtime doesn't accept work with/from AI). Workarounds: F347, T80. -->
 
 # Copying collector: grow-vs-collect threshold of `capacity / 2` lets the live set fill the whole active semi-space, so collections free almost nothing
 

@@ -7,7 +7,7 @@
 # Writes $S/node-run.log, $S/node-client.log, $S/run-p2.log, $S/wasm-client.log.
 S=$(cd "$(dirname "$0")/.." && pwd); export PATH=~/tools/bin:$PATH
 : "${Z2M_SERIAL:?set Z2M_SERIAL}" "${Z2M_MQTT:?set Z2M_MQTT}"
-GC=(-O gc-heap-initial-size=${Z2M_GC_HEAP:-268435456})
+GC=(-O gc-heap-initial-size=${Z2M_GC_HEAP:-536870912})
 ENV=(ZIGBEE2MQTT_CONFIG_SERIAL_PORT=$Z2M_SERIAL ZIGBEE2MQTT_CONFIG_MQTT_SERVER=$Z2M_MQTT Z2M_ONBOARD_NO_SERVER=1)
 T=${T71_TIMEOUT:-90}
 # Runs "$@" in the background with its log in $1, waits for the frontend, runs the client into $2, waits.

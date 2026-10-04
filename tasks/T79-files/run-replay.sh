@@ -3,7 +3,7 @@
 #   run-replay.sh <recording dir> node|wasm <out dir> [seconds after zigbee2mqtt started (default: the recording's)]
 # Needs: <recording dir>/{zigbee.jsonl,mqtt.jsonl,snapshot/}; mosquitto (MOSQUITTO, default /usr/sbin/mosquitto);
 # wasm: $CWASM (default ~/js2wasi3-prod-run/p.cwasm) compiled with $WASM_FLAGS (default
-# "-O gc-heap-initial-size=268435456"). Parallel runs: MQTT_PORT, ZIGBEE_PORT, FRONTEND_PORT.
+# "-O gc-heap-initial-size=536870912"). Parallel runs: MQTT_PORT, ZIGBEE_PORT, FRONTEND_PORT.
 # The wasm run preopens ~/js2wasi3-prod-run (the build reads t62/ajv/* there by absolute path): keep <out dir> in it.
 # Profiling: PERF=<perf binary> (wasm: wasmtime --profile=perfmap; perf attaches at the anchor for the steady
 # window: <out dir>/perf.data, perf -e cpu-clock -g at PERF_FREQ (default 499) Hz); NODE_PROF=1 (node --cpu-prof
@@ -14,7 +14,7 @@ REC=$(cd "$1" && pwd); V=$2; OUT=$3; SECS=${4:-}
 W=~/js2wasi3-prod-run; F=$(cd "$(dirname "$0")" && pwd)
 MOSQ=${MOSQUITTO:-/usr/sbin/mosquitto}; PORT=${MQTT_PORT:-18830}; ZPORT=${ZIGBEE_PORT:-16638}; FPORT=${FRONTEND_PORT:-18080}
 # wasmtime's GC flags: the .cwasm must have been compiled with the same ones.
-read -r -a WFLAGS <<<"${WASM_FLAGS:--O gc-heap-initial-size=268435456}"
+read -r -a WFLAGS <<<"${WASM_FLAGS:--O gc-heap-initial-size=536870912}"
 CWASM=${CWASM:-$W/p.cwasm}
 mkdir -p $OUT && OUT=$(cd $OUT && pwd)
 rm -rf $OUT/data && cp -r $REC/snapshot $OUT/data && chmod -R u+w $OUT/data

@@ -5,7 +5,7 @@
 S=$(cd "$(dirname "$0")/.." && pwd); W=$1; L=$S/restart-$W.log
 H=${Z2M_MQTT#mqtt://}; H=${H%:*}
 # T69: the GC heap p2.cwasm was compiled with (build-run.sh's Z2M_GC_HEAP).
-GC=(-O gc-heap-initial-size=${Z2M_GC_HEAP:-268435456})
+GC=(-O gc-heap-initial-size=${Z2M_GC_HEAP:-536870912})
 ENV=(ZIGBEE2MQTT_CONFIG_SERIAL_PORT=$Z2M_SERIAL ZIGBEE2MQTT_CONFIG_MQTT_SERVER=$Z2M_MQTT Z2M_ONBOARD_NO_SERVER=1)
 rm -rf $S/data-r-$W && cp -r $S/t68/data $S/data-r-$W
 if [ $W = node ]; then

@@ -82,7 +82,8 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   of a local go through `runtime::JsTest` (`test_string`, `test_object`): the abstract `array`/`struct` kind and exact
   final types first, the concrete test only where it's exact or rare; same results. Host side: the copying collector
   grows its heap only once live data fills the active semi-space, so a program with a large live set collects
-  constantly: `-O gc-heap-initial-size` (README); upstream draft in `tasks/T69-files/wasmtime-issue.md`.)
+  constantly: `-O gc-heap-initial-size` (README); T79: on zigbee2mqtt's real workload ~70% of CPU at 256 MiB, 512 MiB
+  removes it (F347). The rule is wasmtime's (`should_collect_first`); we work around it, no upstream report (F304).)
   (T40: a BigInt is a `$bigint`, a final `(array (mut i32))`: the sign, then 32-bit magnitude limbs, little-endian,
   normalized; never changed once made, so `===`, `==`, SameValueZero and Map/Set hashing compare contents. The type
   (the last of the `rec` group) and the globals of `BigInt.prototype`/`BigInt` (after the runtime's; `Builtin::BigInt`

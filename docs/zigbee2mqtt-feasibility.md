@@ -5,6 +5,9 @@ Sections: the profile of a recorded production session (T79, 2026-10-04), the pr
 
 ## Profile of a recorded production session 2026-10-04 (T79): the GC heap, then UTF-8
 
+Since T79 the zigbee2mqtt run scripts and README use a 512 MiB GC heap (`-O gc-heap-initial-size=536870912`, F347);
+wasmtime's rule for growing the heap (F304) is a limitation we work around, not report. Next: T80.
+
 Production's zigbee2mqtt (52 devices) was recorded once for 15 minutes under node through two recording proxies
 (coordinator and MQTT; `tasks/T79-files/`), then replayed offline on a-03 into node and into js2wasi3's build
 (after T77 stage A): a fake coordinator answers each request with the recorded answer and replays the devices'
@@ -27,9 +30,10 @@ CPU in the 903 s from zigbee2mqtt's start (548 device frames):
   semi-space, so it collects constantly. From 512 MiB on, the GC costs about what no GC costs: **3.7× less CPU for
   +330 MB RSS**. The program allocates ~3.4 GB in 15 minutes.
 - **What's left (1 GiB, perf)**: compiled JS 79%, wasmtime 19% (GC ~3%, `is_subtype`/`get_interned_func_ref`
-  libcalls ~7%). By inclusive time: UTF-8 in `node:buffer`'s JS — `Buffer.byteLength` 20.6% and `utf8Write` 15.1%
-  (both via `utf8ToBytes`, which builds an array of bytes), `decodeChunk` 9.7% — ~36% of all CPU, from MQTT
-  publishes, their echoes (zigbee2mqtt subscribes to its own topics) and the info-level log lines; RegExp built-ins
+  libcalls ~7%). By inclusive time: UTF-8 encoding in `node:buffer`'s JS — `Buffer.byteLength` 20.6% and `utf8Write`
+  15.1% (both via `utf8ToBytes`, which builds an array of bytes; reached from `Buffer.from(string)`, readable-stream's
+  `decodeChunk`, socket writes) — ~36% of all CPU, from MQTT publishes, their echoes (zigbee2mqtt subscribes to its own
+  topics) and the info-level log lines; RegExp built-ins
   ~9% (`Symbol.match` 4.1%, the `flags` getter 2.5%, `Symbol.replace` 2.1%); property-access helpers ~27% self
   (`get_named`, `find_own_named`, `get`, `find_own`, …), `box_number` 3.3%.
 - node's profile of the same replay is idle 98.8%; its busy 10 s are spread out: module loading, its GC 6.6%,

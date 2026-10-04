@@ -5,9 +5,10 @@
 # Writes $S/node-run.log and $S/run-p2.log (fresh data dirs; the coordinator is reset by each run's network start).
 S=$(cd "$(dirname "$0")/.." && pwd); export PATH=~/tools/bin:$PATH
 : "${Z2M_SERIAL:?set Z2M_SERIAL}" "${Z2M_MQTT:?set Z2M_MQTT}"
-# T69: a 256 MiB initial GC heap (wasmtime 49's copying collector thrashes with zigbee2mqtt's ~30 MiB live set
-# in its default heap; 64 MiB isn't enough). Compile and run must agree; Z2M_GC_HEAP=0 gives wasmtime's default.
-GC=(-O gc-heap-initial-size=${Z2M_GC_HEAP:-268435456})
+# T69: a bigger initial GC heap (wasmtime 49's copying collector thrashes with zigbee2mqtt's live set
+# in its default heap; 64 MiB isn't enough; T79: 512 MiB, 3.7x less CPU than 256 MiB, F347). Compile and run must
+# agree; Z2M_GC_HEAP=0 gives wasmtime's default.
+GC=(-O gc-heap-initial-size=${Z2M_GC_HEAP:-536870912})
 ENV=(ZIGBEE2MQTT_CONFIG_SERIAL_PORT=$Z2M_SERIAL ZIGBEE2MQTT_CONFIG_MQTT_SERVER=$Z2M_MQTT Z2M_ONBOARD_NO_SERVER=1)
 rm -rf $S/data-node && cp -r $S/t68/data $S/data-node
 (cd $S/zp/package && env "${ENV[@]}" ZIGBEE2MQTT_DATA=$S/data-node timeout ${T68_TIMEOUT:-120} node index.js >$S/node-run.log 2>&1)
