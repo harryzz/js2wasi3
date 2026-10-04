@@ -1,6 +1,6 @@
 # T77: `Intl` (ECMA-402) and the locale-sensitive built-ins
 
-Status: in progress (started 2026-10-04) | Depends on: T21 (prelude), T26 (`Date`), T27 (Unicode data generation), T40 (BigInt)
+Status: paused 2026-10-04 after stage A, for T79 (started 2026-10-04) | Depends on: T21 (prelude), T26 (`Date`), T27 (Unicode data generation), T40 (BigInt)
 
 ## Goal
 A full ECMA-402 implementation in js2wasi3, like node 24.21.0 (the oracle: ICU 78.3, CLDR 48, Unicode 17.0, tzdata
@@ -180,3 +180,4 @@ locale-sensitive methods keep their bytes (gated like BigInt, T40).
   `-u-ca-gregory`, `-u-nu-latn`), all zones; `Date.prototype.toLocale*String` where `Intl` is named.
 - Unsupported (clear errors): other locales (RangeError "The locale 'de' isn't supported by js2wasi3 yet (T77)"),
   calendars, numbering systems, `formatRange*` (F342), the other constructors (TypeError).
+- 2026-10-04: paused after stage A for T79 (user). Next here: stage B (see the size estimate in the session: ~1-1.5× stage A; split B1 decimal/percent/compact/rounding + PluralRules + toLocaleString, B2 currency/units/formatRange).

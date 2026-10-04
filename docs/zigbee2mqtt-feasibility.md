@@ -1,7 +1,41 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## Profile of a recorded production session 2026-10-04 (T79): the GC heap, then UTF-8
+
+Production's zigbee2mqtt (52 devices) was recorded once for 15 minutes under node through two recording proxies
+(coordinator and MQTT; `tasks/T79-files/`), then replayed offline on a-03 into node and into js2wasi3's build
+(after T77 stage A): a fake coordinator answers each request with the recorded answer and replays the devices'
+frames on the recorded timeline; a private mosquitto holds the recorded retained messages. node on the replay
+publishes exactly what the recorded session published (13,567); repeated js2wasi3 runs agree within 1%.
+CPU in the 903 s from zigbee2mqtt's start (548 device frames):
+
+| js2wasi3 variant (same build) | CPU | vs node (8.66 s) | first minute (node 4.5 s) | RSS |
+|---|---|---|---|---|
+| copying GC, 256 MiB heap (used so far) | 143–145 s | 16.5× | 37.9 s | 431 MB |
+| copying, 384 MiB | 42.8 s | 4.9× | 15.9 s | 639 MB |
+| copying, 512 MiB | 39.1 s | 4.5× | 14.8 s | 765 MB |
+| copying, 768 MiB | 37.6 s | 4.3× | 14.4 s | 1.0 GB |
+| copying, 1 GiB | 35.9 s | 4.1× | 13.6 s | 1.3 GB |
+| null collector (never collects) | 37.0 s | 4.3× | | 3.4 GB |
+| DRC collector | 100% of a core, fell behind (1,395 of 13,476 publishes) | | | 1.0 GB |
+
+- **With 256 MiB, wasmtime's copying collector is ~70% of all CPU** (`forward` 24%, `scan_field` 17%,
+  `collect_increment` 14%, root tracing and type registry ~14%; perf on the replay): the live data nearly fills a
+  semi-space, so it collects constantly. From 512 MiB on, the GC costs about what no GC costs: **3.7× less CPU for
+  +330 MB RSS**. The program allocates ~3.4 GB in 15 minutes.
+- **What's left (1 GiB, perf)**: compiled JS 79%, wasmtime 19% (GC ~3%, `is_subtype`/`get_interned_func_ref`
+  libcalls ~7%). By inclusive time: UTF-8 in `node:buffer`'s JS — `Buffer.byteLength` 20.6% and `utf8Write` 15.1%
+  (both via `utf8ToBytes`, which builds an array of bytes), `decodeChunk` 9.7% — ~36% of all CPU, from MQTT
+  publishes, their echoes (zigbee2mqtt subscribes to its own topics) and the info-level log lines; RegExp built-ins
+  ~9% (`Symbol.match` 4.1%, the `flags` getter 2.5%, `Symbol.replace` 2.1%); property-access helpers ~27% self
+  (`get_named`, `find_own_named`, `get`, `find_own`, …), `box_number` 3.3%.
+- node's profile of the same replay is idle 98.8%; its busy 10 s are spread out: module loading, its GC 6.6%,
+  zigbee2mqtt 12.5%, herdsman 7.5%, logging ~8%.
+- js2wasi3-only errors on the replay: external converters (F317) and once a herdsman frame parse error that
+  doesn't reproduce frame by frame (F351).
 
 ## Production run 2026-10-04 evening (after T78): unchanged per event, `Intl` crash after 5 minutes
 
