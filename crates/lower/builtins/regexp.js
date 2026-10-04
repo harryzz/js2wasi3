@@ -2269,9 +2269,25 @@ function $$reSearch(r, data, s) {
     fr = sets[2 * k + 1];
     fneg = +sets[2 * k];
   }
+  // T76: a literal first character (no `i`, not a surrogate): a plain scan of the code units (in
+  // Unicode mode such a unit is never inside a pair, so it's at a code point boundary).
+  let unit = -1;
+  if (fop === 1 && icase === 0) {
+    const c = __intrinsic_i32_get(prog, first + 1);
+    if (c < 0xd800 || (c > 0xdfff && c <= 0xffff)) {
+      unit = c;
+    }
+  }
   let end = -1;
   while (lastIndex <= len) {
-    if (first >= 0) {
+    if (unit >= 0) {
+      while (lastIndex < len && __intrinsic_unit(s, lastIndex) !== unit) {
+        lastIndex++;
+      }
+      if (lastIndex >= len) {
+        break;
+      }
+    } else if (first >= 0) {
       while (lastIndex < len) {
         const c = $$reRead(s, lastIndex, len, 0, unicode);
         if ((fop === 3 ? $$reClassHas(fr, fneg, c, icase, unicode) : $$reOne(prog, first, sets, c, icase, dotAll, unicode)) !== 0) {
@@ -2706,6 +2722,48 @@ function $$reSubstitute(matched, s, position, captures, named, replacement) {
   return r + __intrinsic_sub(replacement, from, n);
 }
 
+// T76: `RegExp.prototype[Symbol.replace]` for a RegExp nobody changed (`__intrinsic_regexp_plain`: its
+// `flags`, flag getters and `exec` are the built-in ones, its `lastIndex` a number) and a replacement
+// string without `$`: the same matches and `lastIndex` writes, without the getters, `exec` lookups
+// and result arrays.
+function $$reReplacePlain(rx, s, replacement) {
+  const data = __intrinsic_regexp_data(rx);
+  const code = data[2];
+  const bits = +code[4];
+  const global = (bits & 2) !== 0;
+  const unicode = (bits & 96) !== 0;
+  if (global) {
+    rx.lastIndex = 0;
+  }
+  const caps = code[8];
+  const len = s.length;
+  const out = [];
+  let next = 0;
+  while (true) {
+    const end = $$reSearch(rx, data, s);
+    if (end < 0) {
+      break;
+    }
+    const position = __intrinsic_i32_get(caps, 0);
+    $$append(out, __intrinsic_sub(s, next, position));
+    $$append(out, replacement);
+    next = end;
+    if (!global) {
+      break;
+    }
+    if (end === position) {
+      rx.lastIndex = $$reAdvance(s, $$reToLength(rx.lastIndex), unicode);
+    }
+  }
+  if (+out.length === 0) {
+    return s;
+  }
+  if (next < len) {
+    $$append(out, __intrinsic_sub(s, next, len));
+  }
+  return out.join("");
+}
+
 function $$RegExp_prototype_$replace(string, replaceValue) {
   const rx = this;
   $$reSymThis(rx, "replace");
@@ -2715,6 +2773,9 @@ function $$RegExp_prototype_$replace(string, replaceValue) {
   let replacement = "";
   if (!functional) {
     replacement = __intrinsic_to_string(replaceValue);
+  }
+  if (!functional && __intrinsic_regexp_plain(rx) && !$$reHasFlag(replacement, 36)) {
+    return $$reReplacePlain(rx, s, replacement);
   }
   const flags = __intrinsic_to_string(rx.flags);
   const global = $$reHasFlag(flags, 103);

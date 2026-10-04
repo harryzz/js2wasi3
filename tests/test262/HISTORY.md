@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-04: T76 JSON, RegExp replace, the rest (full run)
+
+- Compiler: `JSON.stringify` fast path into one buffer (`str_copy`, `json_quote_into`), native `json_quote`,
+  `json_scan` in `JSON.parse`, `regexp_plain` + `$$reReplacePlain` (snapshot of `RegExp.prototype`), a literal
+  first-character scan in `$$reSearch`, string elements in `join`, `typeof … === "object"`/`"bigint"` inline.
+- Full run on `a-03` (31,461 tests, 1,200 s, -j 36): 28,075 of 28,984 run pass (96.9%), 0 regressions; the same 2
+  changes since the baseline as after T75. Baseline not updated.
+
 ## 2026-10-03: T75 conversions, operators, number boxing (full run)
 
 - Compiler: `===` against constants and `typeof` tests inline, `strict_eq` with `ref.eq` first, i31 fast paths in

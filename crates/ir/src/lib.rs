@@ -818,6 +818,16 @@ pub enum Intrinsic {
     ToString,
     /// JS Number::toString of an `f64` (a string).
     NumberToString,
+    /// T76: QuoteJSONString of a JS value known to be a string (a string).
+    JsonQuote,
+    /// T76: copy string `src` into string `dst` (made by `StrNew`) at `i` (args: dst, i: `i32`, src).
+    StrCopy,
+    /// T76: write QuoteJSONString of string `s` into string `buf` at `i` (args: buf, i: `i32`, s);
+    /// the index after it (`i32`). `buf` must have room for `6 * len + 2` units.
+    JsonQuoteInto,
+    /// T76: (s, i, mode: `i32`s) -> `i32`: from `i`, the first index of string `s` that isn't JSON
+    /// whitespace (mode 0), or that is `"`, `\\` or a control character (mode 1); the length if none.
+    JsonScan,
     /// `s.length` of a JS value known to be a string, as an `f64`. Never throws.
     StringLength,
     /// `typeof v` (a string).
@@ -873,6 +883,9 @@ pub enum Intrinsic {
     RegExpData,
     /// `(f) -> bool`: is `f` the built-in `RegExp.prototype.exec` (T27)?
     RegExpBuiltinExec,
+    /// `(r) -> bool` (T76): is `r` a RegExp with only its own `lastIndex` (writable, a number), whose
+    /// prototype is `RegExp.prototype` with `exec`, `flags` and the flag getters as built?
+    RegExpPlain,
     /// `(digits) -> jsval` (T40): a BigInt constant; the argument is an [`Expr::Str`] of its
     /// decimal digits (a literal's value), made once as a global.
     BigIntConst,
@@ -1354,9 +1367,10 @@ impl Intrinsic {
             | Intrinsic::Unwrap
             | Intrinsic::InspectAt(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::InspectDepth => (&[JsVal, I32], Some(JsVal)),
-            Intrinsic::BuiltinToString | Intrinsic::IsConstructor | Intrinsic::RegExpBuiltinExec => {
-                (&[JsVal], Some(Bool))
-            }
+            Intrinsic::BuiltinToString
+            | Intrinsic::IsConstructor
+            | Intrinsic::RegExpBuiltinExec
+            | Intrinsic::RegExpPlain => (&[JsVal], Some(Bool)),
             Intrinsic::BigIntConst | Intrinsic::ToNumeric => (&[JsVal], Some(JsVal)),
             Intrinsic::Numeric(NumericOp::Binary(_)) => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::Numeric(_) => (&[JsVal], Some(JsVal)),
@@ -1377,6 +1391,10 @@ impl Intrinsic {
             Intrinsic::KeysGet => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::InstanceOf(_) => (&[JsVal], Some(Bool)),
             Intrinsic::NumberToString => (&[F64], Some(JsVal)),
+            Intrinsic::JsonQuote => (&[JsVal], Some(JsVal)),
+            Intrinsic::StrCopy => (&[JsVal, I32, JsVal], None),
+            Intrinsic::JsonQuoteInto => (&[JsVal, I32, JsVal], Some(I32)),
+            Intrinsic::JsonScan => (&[JsVal, I32, I32], Some(I32)),
             Intrinsic::StringLength => (&[JsVal], Some(F64)),
             Intrinsic::ConsoleWrite { .. } => (&[JsVal], None),
             Intrinsic::NewCell(F64) => (&[F64], Some(JsVal)),
@@ -1518,6 +1536,10 @@ impl Intrinsic {
             Intrinsic::Concat => "concat",
             Intrinsic::ToString => "to_string",
             Intrinsic::NumberToString => "number_to_string",
+            Intrinsic::JsonQuote => "json_quote",
+            Intrinsic::StrCopy => "str_copy",
+            Intrinsic::JsonQuoteInto => "json_quote_into",
+            Intrinsic::JsonScan => "json_scan",
             Intrinsic::StringLength => "string_length",
             Intrinsic::TypeofString => "typeof",
             Intrinsic::Inspect => "inspect",
@@ -1551,6 +1573,7 @@ impl Intrinsic {
             Intrinsic::ModuleNew => "module_new",
             Intrinsic::ToPrimitive => "to_primitive",
             Intrinsic::RegExpBuiltinExec => "regexp_builtin_exec",
+            Intrinsic::RegExpPlain => "regexp_plain",
             Intrinsic::BigIntConst => "bigint",
             Intrinsic::ToNumeric => "to_numeric",
             Intrinsic::Numeric(_) => "numeric",

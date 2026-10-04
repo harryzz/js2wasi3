@@ -1757,7 +1757,7 @@ impl Emitter<'_> {
             Expr::TypeofIs { arg, tag } => {
                 self.expr(s, frames, arg)?;
                 // T75: the tests that need no call, inline.
-                if !runtime::typeof_is(s, self.scratch_js, *tag) {
+                if !runtime::typeof_is(s, self.scratch_js, *tag, self.m.bigint) {
                     s.call(self.helper_index(Helper::Js(runtime::Helper::Typeof)));
                     s.i32_const(runtime::typeof_code(*tag)).i32_eq();
                 }
@@ -2114,6 +2114,10 @@ impl Emitter<'_> {
                     Intrinsic::Concat => H::Concat,
                     Intrinsic::ToString => H::ToString,
                     Intrinsic::NumberToString => H::Num(numstr::Helper::NumberToString),
+                    Intrinsic::JsonQuote => H::JsonQuote,
+                    Intrinsic::StrCopy => H::StrCopy,
+                    Intrinsic::JsonQuoteInto => H::JsonQuoteInto,
+                    Intrinsic::JsonScan => H::JsonScan,
                     Intrinsic::StringLength
                     | Intrinsic::KeysLen
                     | Intrinsic::KeysGet
@@ -2197,6 +2201,7 @@ impl Emitter<'_> {
                     Intrinsic::ToObject => H::Wrap(wrapper::Helper::ToObject),
                     Intrinsic::Unwrap => H::Wrap(wrapper::Helper::Unwrap),
                     Intrinsic::RegExpNew => H::Obj(object::Helper::RegExpNew),
+                    Intrinsic::RegExpPlain => H::Obj(object::Helper::RegExpPlain),
                     Intrinsic::RegExpData => H::Obj(object::Helper::RegExpData),
                     Intrinsic::StackNew(a) => H::Obj(object::Helper::StackNew(*a)),
                     Intrinsic::StackData => H::Obj(object::Helper::StackData),

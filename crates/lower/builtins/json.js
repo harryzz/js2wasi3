@@ -67,6 +67,33 @@ function $$JSON_stringify(value, replacer, space) {
   } else if (typeof space === "string") {
     gap = +space.length <= 10 ? space : space.slice(0, 10);
   }
+  if (replacerFn === undefined && propertyList === undefined && gap === "") {
+    // T76: the common call (no replacer, no indentation), its state in parameters.
+    let v = value;
+    if ((typeof v === "object" && v !== null) || typeof v === "bigint") {
+      v = $$jsonToJSON(v, "");
+    }
+    if (typeof v === "object" && v !== null) {
+      v = $$jsonUnwrap(v);
+    }
+    if (typeof v === "undefined" || typeof v === "function" || typeof v === "symbol") {
+      return undefined;
+    }
+    // The buffer of an outer call (a `toJSON` may call `JSON.stringify`) is kept aside.
+    const outerBuf = $$jsonOutBuf;
+    const outerAt = $$jsonOutAt;
+    $$jsonOutBuf = __intrinsic_str_new(256);
+    $$jsonOutAt = 0;
+    let text = "";
+    try {
+      $$jsonFast([], [], v, "", false);
+      text = __intrinsic_sub($$jsonOutBuf, 0, $$jsonOutAt);
+    } finally {
+      $$jsonOutBuf = outerBuf;
+      $$jsonOutAt = outerAt;
+    }
+    return text;
+  }
   const state = $$jsonState(replacerFn, propertyList, gap);
   const wrapper = {};
   __intrinsic_define(wrapper, "", value);
@@ -91,6 +118,136 @@ function $$jsonValue(state, holder, key, value) {
     value = state.replacerFn.call(holder, key, value);
   }
   return $$jsonUnwrap(value);
+}
+
+// `value.toJSON(key)` if it's a function (an object or a BigInt `value`), else `value`.
+function $$jsonToJSON(value, key) {
+  const toJSON = value.toJSON;
+  if (typeof toJSON === "function") {
+    return toJSON.call(value, key);
+  }
+  return value;
+}
+
+// T76: the output of the fast path: a string made by `str_new` with spare room, and the number of
+// units written.
+let $$jsonOutBuf = null;
+let $$jsonOutAt = 0;
+
+// Room for `n` more units (doubling).
+function $$jsonRoom(n) {
+  const need = $$jsonOutAt + n;
+  const cap = __intrinsic_str_len($$jsonOutBuf);
+  if (need > cap) {
+    let c = cap * 2;
+    if (c < need) {
+      c = need;
+    }
+    const b = __intrinsic_str_new(c);
+    __intrinsic_str_copy(b, 0, $$jsonOutBuf);
+    $$jsonOutBuf = b;
+  }
+}
+
+function $$jsonPut(s) {
+  const n = __intrinsic_str_len(s);
+  $$jsonRoom(n);
+  __intrinsic_str_copy($$jsonOutBuf, $$jsonOutAt, s);
+  $$jsonOutAt += n;
+}
+
+function $$jsonPutUnit(u) {
+  $$jsonRoom(1);
+  __intrinsic_str_set($$jsonOutBuf, $$jsonOutAt, u);
+  $$jsonOutAt++;
+}
+
+// QuoteJSONString of `s` (at most 6 units per unit, and the quotes).
+function $$jsonPutQuoted(s) {
+  $$jsonRoom(6 * __intrinsic_str_len(s) + 2);
+  $$jsonOutAt = __intrinsic_json_quote_into($$jsonOutBuf, $$jsonOutAt, s);
+}
+
+// T76: `$$jsonWrite` for the common call: no replacer, no gap, written into `$$jsonOutBuf`. `stack`/`keys` are the objects being
+// written and the keys they were found under (a number for an array index), for the cycle message.
+function $$jsonFast(stack, keys, value, key, index) {
+  if (value === null) {
+    $$jsonPut("null");
+    return;
+  }
+  if (typeof value === "string") {
+    $$jsonPutQuoted(value);
+    return;
+  }
+  if (typeof value === "number") {
+    $$jsonPut(value - value === 0 ? $$String(value) : "null");
+    return;
+  }
+  if (typeof value === "boolean") {
+    $$jsonPut(value ? "true" : "false");
+    return;
+  }
+  if (typeof value === "bigint") {
+    throw new TypeError("Do not know how to serialize a BigInt");
+  }
+  const depth = +stack.length;
+  for (let i = 0; i < depth; i++) {
+    if (stack[i] === value) {
+      throw new TypeError($$jsonCircular({ stack: stack, keys: keys }, value, key, index));
+    }
+  }
+  $$append(stack, value);
+  $$append(keys, key);
+  if (Array.isArray(value)) {
+    const len = +value.length;
+    $$jsonPutUnit(91);
+    for (let i = 0; i < len; i++) {
+      if (i > 0) {
+        $$jsonPutUnit(44);
+      }
+      let v = value[i];
+      if ((typeof v === "object" && v !== null) || typeof v === "bigint") {
+        v = $$jsonToJSON(v, $$String(i));
+      }
+      if (typeof v === "object" && v !== null) {
+        v = $$jsonUnwrap(v);
+      }
+      if (typeof v === "undefined" || typeof v === "function" || typeof v === "symbol") {
+        $$jsonPut("null");
+      } else {
+        $$jsonFast(stack, keys, v, i, true);
+      }
+    }
+    $$jsonPutUnit(93);
+  } else {
+    const ks = Object.keys(value);
+    const n = +ks.length;
+    let empty = true;
+    $$jsonPutUnit(123);
+    for (let i = 0; i < n; i++) {
+      const k = ks[i];
+      let v = value[k];
+      if ((typeof v === "object" && v !== null) || typeof v === "bigint") {
+        v = $$jsonToJSON(v, k);
+      }
+      if (typeof v === "object" && v !== null) {
+        v = $$jsonUnwrap(v);
+      }
+      if (typeof v === "undefined" || typeof v === "function" || typeof v === "symbol") {
+        continue;
+      }
+      if (!empty) {
+        $$jsonPutUnit(44);
+      }
+      empty = false;
+      $$jsonPutQuoted(k);
+      $$jsonPutUnit(58);
+      $$jsonFast(stack, keys, v, k, false);
+    }
+    $$jsonPutUnit(125);
+  }
+  stack.pop();
+  keys.pop();
 }
 
 // Number, String and Boolean wrapper objects (T30): ToNumber, ToString, their boolean.
@@ -222,80 +379,9 @@ function $$jsonArray(state, value) {
   $$append(out, "]");
 }
 
-// QuoteJSONString.
+// QuoteJSONString (T76: native, `runtime::json_quote`).
 function $$jsonQuote(s) {
-  const len = __intrinsic_str_len(s);
-  // The length of the result, and whether anything needs escaping.
-  let n = len + 2;
-  for (let i = 0; i < len; i++) {
-    const u = __intrinsic_unit(s, i);
-    if (u < 32) {
-      n += u === 8 || u === 9 || u === 10 || u === 12 || u === 13 ? 1 : 5;
-    } else if (u === 34 || u === 92) {
-      n += 1;
-    } else if (u >= 0xd800 && u <= 0xdfff) {
-      if (u <= 0xdbff && i + 1 < len) {
-        const next = __intrinsic_unit(s, i + 1);
-        if (next >= 0xdc00 && next <= 0xdfff) {
-          i++;
-          continue;
-        }
-      }
-      n += 5;
-    }
-  }
-  if (n === len + 2) {
-    return '"' + s + '"';
-  }
-  const r = __intrinsic_str_new(n);
-  let j = 0;
-  __intrinsic_str_set(r, j++, 34);
-  for (let i = 0; i < len; i++) {
-    const u = __intrinsic_unit(s, i);
-    let esc = 0;
-    if (u === 8) {
-      esc = 98;
-    } else if (u === 9) {
-      esc = 116;
-    } else if (u === 10) {
-      esc = 110;
-    } else if (u === 12) {
-      esc = 102;
-    } else if (u === 13) {
-      esc = 114;
-    } else if (u === 34 || u === 92) {
-      esc = u;
-    } else if (u < 32) {
-      esc = -1;
-    } else if (u >= 0xd800 && u <= 0xdfff) {
-      esc = -1;
-      if (u <= 0xdbff && i + 1 < len) {
-        const next = __intrinsic_unit(s, i + 1);
-        if (next >= 0xdc00 && next <= 0xdfff) {
-          __intrinsic_str_set(r, j++, u);
-          __intrinsic_str_set(r, j++, next);
-          i++;
-          continue;
-        }
-      }
-    }
-    if (esc === 0) {
-      __intrinsic_str_set(r, j++, u);
-    } else if (esc > 0) {
-      __intrinsic_str_set(r, j++, 92);
-      __intrinsic_str_set(r, j++, esc);
-    } else {
-      // `\u` and four lowercase hex digits.
-      __intrinsic_str_set(r, j++, 92);
-      __intrinsic_str_set(r, j++, 117);
-      for (let shift = 12; shift >= 0; shift -= 4) {
-        const d = (u >> shift) & 15;
-        __intrinsic_str_set(r, j++, d < 10 ? 48 + d : 87 + d);
-      }
-    }
-  }
-  __intrinsic_str_set(r, j, 34);
-  return r;
+  return __intrinsic_json_quote(s);
 }
 
 // V8's name for an object's class in the circular-structure message: the nearest own
@@ -439,17 +525,8 @@ function $$jsonUnexpected(pos) {
 
 // Skip JSON whitespace (tab, LF, CR, space).
 function $$jsonSkipSpace() {
-  const src = $$jsonSrc;
-  const len = $$jsonLen;
-  let i = $$jsonPos;
-  while (i < len) {
-    const c = __intrinsic_unit(src, i);
-    if (c !== 32 && c !== 10 && c !== 13 && c !== 9) {
-      break;
-    }
-    i++;
-  }
-  $$jsonPos = i;
+  // T76: natively.
+  $$jsonPos = __intrinsic_json_scan($$jsonSrc, $$jsonPos, 0);
 }
 
 // The code unit at `i`, or -1 at the end.
@@ -572,8 +649,8 @@ function $$jsonParseString() {
   const src = $$jsonSrc;
   const len = $$jsonLen;
   const start = $$jsonPos + 1;
-  // Fast path: no escapes.
-  let i = start;
+  // Fast path: no escapes (T76: the plain units found natively).
+  let i = __intrinsic_json_scan(src, start, 1);
   for (;;) {
     if (i >= len) {
       $$jsonFail("Unterminated string", len);

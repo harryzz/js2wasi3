@@ -935,8 +935,15 @@ fn join(cx: &mut dyn Cx) -> Function {
         .struct_get(T_ARRAY, F_ELEMS)
         .local_get(I)
         .array_get(T_VALS)
-        .local_tee(E);
-    s.ref_is_null();
+        .local_set(E);
+    // T76: a string element is its own part.
+    runtime::is_string(&mut s, E);
+    s.if_(BlockType::Empty);
+    s.local_get(E)
+        .ref_cast_non_null(runtime::string())
+        .local_set(P);
+    s.else_();
+    s.local_get(E).ref_is_null();
     s.if_(BlockType::Result(jsval()));
     // A hole reads through the prototype chain (T33).
     s.local_get(A).local_get(I).ref_i31().call(get);
@@ -949,6 +956,7 @@ fn join(cx: &mut dyn Cx) -> Function {
     s.local_get(E).call(is_nullish).i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(E).call(to_string).local_set(P);
+    s.end();
     s.end();
     s.end();
     s.end();

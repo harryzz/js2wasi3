@@ -27,7 +27,7 @@
 
 use crate::runtime::JsTest;
 use js2wasi3_ir::{Builtin, ErrorKind};
-use wasm_encoder::{BlockType, Function, InstructionSink, ValType};
+use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
 
 use crate::runtime::{
     self, Cx, G_BUILTIN, G_NULL, G_PROTOS, G_UNDEFINED, T_ARRAY, T_BYTES, T_I32S, T_KEYS, T_OBJECT,
@@ -392,6 +392,10 @@ pub enum Helper {
     BuiltinToString,
     /// `(data) -> jsval`: a new RegExp holding `data` (T27), with an own `lastIndex` of 0.
     RegExpNew,
+    /// `(v) -> i32` (T76): see `Intrinsic::RegExpPlain`.
+    RegExpPlain,
+    /// `(o: $object)` (T76): fill `G_REGEXP_SNAP` from `RegExp.prototype` `o` as just built.
+    RegExpSnapshot,
     /// `(v) -> jsval`: a RegExp's data; `null` for `RegExp.prototype`; `undefined` otherwise.
     RegExpData,
     /// `(data) -> jsval`: a new Date holding `data` (T26).
@@ -508,6 +512,8 @@ impl Helper {
             Helper::BuiltinToString => "has_builtin_to_string",
             Helper::MakeArguments => "make_arguments",
             Helper::RegExpNew => "regexp_new",
+            Helper::RegExpPlain => "regexp_plain",
+            Helper::RegExpSnapshot => "regexp_snapshot",
             Helper::RegExpData => "regexp_data",
             Helper::DateNew => "date_new",
             Helper::ModuleNew => "module_new",
@@ -575,6 +581,8 @@ impl Helper {
             Helper::GetOwnSymbols | Helper::TagOf => (vec![v], vec![v]),
             Helper::BuiltinTag => (vec![o], vec![v]),
             Helper::BuiltinToString => (vec![v], vec![I32]),
+            Helper::RegExpPlain => (vec![v], vec![I32]),
+            Helper::RegExpSnapshot => (vec![o], vec![]),
             Helper::MakeArguments
             | Helper::RegExpNew
             | Helper::RegExpData
@@ -670,6 +678,8 @@ impl Helper {
             }
             Helper::ObjectRest => object_rest(cx),
             Helper::RegExpNew => regexp_new(cx),
+            Helper::RegExpPlain => regexp_plain(cx),
+            Helper::RegExpSnapshot => regexp_snapshot(cx),
             Helper::RegExpData => regexp_data(cx),
             Helper::DateNew => state_new(cx, CLASS_DATE, Builtin::Date),
             Helper::StackNew(false) => state_new(cx, CLASS_STACK, Builtin::DisposableStack),
@@ -2040,6 +2050,11 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             }
         }
     }
+    if b == Builtin::RegExp {
+        // T76: remember what `RegExpPlain` checks.
+        let snap = h(cx, Helper::RegExpSnapshot);
+        s.local_get(O).ref_as_non_null().call(snap);
+    }
     if let Builtin::Error(k) = b {
         // `constructor`: the function object (T16).
         let ctor = cx.helper(runtime::Helper::Func(func::Helper::ErrorCtor(k)));
@@ -3362,6 +3377,188 @@ fn regexp_new(cx: &mut dyn Cx) -> Function {
     s.local_get(DATA);
     s.i32_const(HIDDEN | READONLY | FIXED | PRIVATE).call(define);
     s.local_get(O);
+    s.end();
+    f
+}
+
+/// The `RegExp.prototype` keys whose values decide `RegExp.prototype[Symbol.replace]`'s steps for a
+/// RegExp (T76): `exec`, and `flags` with the flag getters it reads.
+pub const REGEXP_PLAIN_KEYS: [&str; 10] = [
+    "exec",
+    "flags",
+    "hasIndices",
+    "global",
+    "ignoreCase",
+    "multiline",
+    "dotAll",
+    "unicode",
+    "unicodeSets",
+    "sticky",
+];
+
+/// `$regexp_snapshot(o)` (T76), see [`Helper::RegExpSnapshot`]. A key that isn't there leaves the
+/// snapshot unset (no RegExp is then plain).
+fn regexp_snapshot(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwnNamed);
+    const O: u32 = 0;
+    const SNAP: u32 = 1;
+    const E: u32 = 2;
+    const V: u32 = 3;
+    let mut f = Function::new([(1, rt(true, T_VALS)), (1, ValType::I32), (1, jsval())]);
+    let mut s = f.instructions();
+    s.i32_const(3 * REGEXP_PLAIN_KEYS.len() as i32)
+        .array_new_default(T_VALS)
+        .local_set(SNAP);
+    for (k, key) in REGEXP_PLAIN_KEYS.iter().enumerate() {
+        let units: Vec<u16> = key.encode_utf16().collect();
+        let g = cx.str(key);
+        s.local_get(O)
+            .global_get(g)
+            .i32_const(key_hash(&units))
+            .call(find);
+        s.local_tee(E).i32_const(0).i32_lt_s();
+        s.if_(BlockType::Empty);
+        s.return_();
+        s.end();
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .array_get(T_VALS);
+        s.local_tee(V).ref_test_non_null(props::accessor());
+        s.if_(BlockType::Empty);
+        s.local_get(V)
+            .ref_cast_non_null(props::accessor())
+            .struct_get(runtime::T_ACCESSOR, 0)
+            .local_set(V);
+        s.end();
+        let k = 3 * k as i32;
+        s.local_get(SNAP)
+            .i32_const(k)
+            .local_get(E)
+            .ref_i31()
+            .array_set(T_VALS);
+        s.local_get(SNAP)
+            .i32_const(k + 1)
+            .local_get(V)
+            .array_set(T_VALS);
+        s.local_get(SNAP).i32_const(k + 2);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_ATTRS)
+            .local_get(E)
+            .array_get_u(T_BYTES);
+        s.ref_i31().array_set(T_VALS);
+    }
+    s.local_get(SNAP).global_set(runtime::G_REGEXP_SNAP);
+    s.end();
+    f
+}
+
+/// `$regexp_plain(v) -> i32` (T76), see [`Helper::RegExpPlain`].
+fn regexp_plain(cx: &mut dyn Cx) -> Function {
+    let last_index = cx.str("lastIndex");
+    const V: u32 = 0;
+    const O: u32 = 1;
+    const P: u32 = 2;
+    const SNAP: u32 = 3;
+    const E: u32 = 4;
+    const X: u32 = 5;
+    let mut f = Function::new([
+        (2, rt(true, T_OBJECT)),
+        (1, rt(true, T_VALS)),
+        (1, ValType::I32),
+        (1, jsval()),
+    ]);
+    let mut s = f.instructions();
+    let fail_unless = |s: &mut InstructionSink| {
+        s.i32_eqz();
+        s.if_(BlockType::Empty);
+        s.i32_const(0).return_();
+        s.end();
+    };
+    s.test_object(V);
+    fail_unless(&mut s);
+    as_obj(&mut s, V);
+    s.local_tee(O).struct_get(T_OBJECT, F_CLASS);
+    s.i32_const(CLASS_MASK)
+        .i32_and()
+        .i32_const(CLASS_REGEXP)
+        .i32_eq();
+    fail_unless(&mut s);
+    s.local_get(O).struct_get(T_OBJECT, F_PROTO);
+    s.global_get(G_PROTOS + Builtin::RegExp.index()).ref_eq();
+    fail_unless(&mut s);
+    // Own properties: `lastIndex` (writable data, a number) and the private state only.
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_COUNT)
+        .i32_const(2)
+        .i32_eq();
+    fail_unless(&mut s);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_KEYS)
+        .i32_const(0)
+        .array_get(T_KEYS);
+    s.global_get(last_index).ref_eq();
+    fail_unless(&mut s);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .i32_const(0)
+        .array_get_u(T_BYTES);
+    s.i32_const(HIDDEN | FIXED).i32_eq();
+    fail_unless(&mut s);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .i32_const(0)
+        .array_get(T_VALS);
+    s.local_tee(X).ref_test_non_null(HeapType::I31);
+    s.local_get(X)
+        .ref_test_non_null(HeapType::Concrete(runtime::T_NUMBER))
+        .i32_or();
+    fail_unless(&mut s);
+    // `RegExp.prototype` as snapshot.
+    s.global_get(runtime::G_REGEXP_SNAP)
+        .local_tee(SNAP)
+        .ref_is_null()
+        .i32_eqz();
+    fail_unless(&mut s);
+    s.global_get(G_PROTOS + Builtin::RegExp.index())
+        .local_set(P);
+    for (k, key) in REGEXP_PLAIN_KEYS.iter().enumerate() {
+        let g = cx.str(key);
+        let k = 3 * k as i32;
+        s.local_get(SNAP).i32_const(k).array_get(T_VALS);
+        s.ref_cast_non_null(HeapType::I31).i31_get_s().local_tee(E);
+        s.local_get(P).struct_get(T_OBJECT, F_COUNT).i32_lt_u();
+        fail_unless(&mut s);
+        s.local_get(P)
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(E)
+            .array_get(T_KEYS);
+        s.global_get(g).ref_eq();
+        fail_unless(&mut s);
+        s.local_get(P)
+            .struct_get(T_OBJECT, F_ATTRS)
+            .local_get(E)
+            .array_get_u(T_BYTES);
+        s.local_get(SNAP).i32_const(k + 2).array_get(T_VALS);
+        s.ref_cast_non_null(HeapType::I31).i31_get_s().i32_eq();
+        fail_unless(&mut s);
+        s.local_get(P)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .array_get(T_VALS);
+        s.local_tee(X).ref_test_non_null(props::accessor());
+        s.if_(BlockType::Empty);
+        s.local_get(X)
+            .ref_cast_non_null(props::accessor())
+            .struct_get(runtime::T_ACCESSOR, 0)
+            .local_set(X);
+        s.end();
+        s.local_get(X);
+        s.local_get(SNAP).i32_const(k + 1).array_get(T_VALS);
+        s.ref_eq();
+        fail_unless(&mut s);
+    }
+    s.i32_const(1);
     s.end();
     f
 }

@@ -5934,11 +5934,11 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "fround" | "clz32" | "hi" | "lo" => 1,
             "min" | "max" | "copysign" | "imul" | "from_words" => 2,
             "random_seed" => 0,
-            "to_string" | "str_new" | "number_to_string" | "str_len" => 1,
+            "to_string" | "str_new" | "number_to_string" | "str_len" | "json_quote" => 1,
             "trap" => 0,
             "builtin_tag" | "builtin_to_string" | "to_object" | "unwrap" | "is_constructor" => 1,
             "is_promise" => 1,
-            "regexp_new" | "regexp_data" | "regexp_builtin_exec" => 1,
+            "regexp_new" | "regexp_data" | "regexp_builtin_exec" | "regexp_plain" => 1,
             "date_new" | "date_data" => 1,
             "stack_new" | "async_stack_new" | "stack_data" => 1,
             "date_now" | "module_new" | "module_bodies" => 0,
@@ -5950,7 +5950,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "call_list" | "construct_list" => 3,
             "inspect" | "inspect_depth" => 2,
             "unit" | "i32_get" => 2,
-            "sub" | "str_set" | "define" | "i32_set" => 3,
+            "sub" | "str_set" | "define" | "i32_set" | "str_copy" | "json_quote_into"
+            | "json_scan" => 3,
             "global_init" => 1,
             "write_stdout" | "write_stderr" => 1,
             "i32_new" | "i32_len" => 1,
@@ -5976,6 +5977,31 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 library_throws("`console` isn't available in a module with exports yet (js2wasi3)")
             };
             return Ok((e, Call::Intrinsic(None)));
+        }
+        if let Some(op) = match name {
+            "str_copy" => Some(Intrinsic::StrCopy),
+            "json_quote_into" => Some(Intrinsic::JsonQuoteInto),
+            _ => None,
+        } {
+            // T76: (string, i32, string).
+            let mut args = Vec::new();
+            for (i, a) in c.arguments.iter().enumerate() {
+                let Some(e) = a.as_expression() else {
+                    return Err(self.unsupported(a.span(), "spread argument", "T21"));
+                };
+                let v = self.expr(cx, e)?;
+                args.push(if i == 1 {
+                    to_i32(self.num(v, e.span())?)
+                } else {
+                    jsval_of(v)
+                });
+            }
+            let e = Expr::intrinsic(op, args);
+            return Ok(if op == Intrinsic::StrCopy {
+                (e, Call::Intrinsic(None))
+            } else {
+                (from_i32(e), Call::Intrinsic(Some(Kind::Num)))
+            });
         }
         if name == "random_seed" {
             // An import (`wasi:random`): commands only. `check_builtin` rejects `Math.random` where
@@ -6149,6 +6175,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ));
             return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
         }
+        if name == "regexp_plain" {
+            // T76: an unchanged RegExp (`object::Helper::RegExpPlain`).
+            let Some(e) = c.arguments[0].as_expression() else {
+                return Err(self.unsupported(c.span, "spread argument", "T21"));
+            };
+            let v = jsval_of(self.expr(cx, e)?);
+            let e = jsval_of(Val::new(
+                Expr::intrinsic(Intrinsic::RegExpPlain, vec![v]),
+                Type::Bool,
+            ));
+            return Ok((e, Call::Intrinsic(Some(Kind::Bool))));
+        }
         if name == "regexp_builtin_exec" {
             // T27: is it the built-in `RegExp.prototype.exec`?
             let Some(e) = c.arguments[0].as_expression() else {
@@ -6268,7 +6306,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         let strings = matches!(
             name,
-            "to_string" | "unit" | "sub" | "str_set" | "str_len" | "i32_get" | "i32_set" | "i32_len"
+            "to_string"
+                | "unit"
+                | "sub"
+                | "str_set"
+                | "str_len"
+                | "i32_get"
+                | "i32_set"
+                | "i32_len"
+                | "json_quote"
+                | "json_scan"
         );
         let mut args = Vec::new();
         for (i, a) in c.arguments.iter().enumerate() {
@@ -6301,6 +6348,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 return Ok((e, str_kind));
             }
             "str_new" => return Ok((str_op(Intrinsic::StrNew, args), str_kind)),
+            "json_quote" => return Ok((str_op(Intrinsic::JsonQuote, args), str_kind)),
             // T27: `$i32s` arrays (the first argument is one, the rest numbers).
             "i32_new" => {
                 let e = str_op(Intrinsic::I32New, args);
@@ -6320,6 +6368,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "str_set" => return Ok((str_op(Intrinsic::StrSet, args), Call::Intrinsic(None))),
             "str_len" => {
                 let e = Expr::intrinsic(Intrinsic::StringLength, args);
+                return Ok((e, Call::Intrinsic(Some(Kind::Num))));
+            }
+            "json_scan" => {
+                let e = from_i32(str_op(Intrinsic::JsonScan, args));
                 return Ok((e, Call::Intrinsic(Some(Kind::Num))));
             }
             "unit" => {

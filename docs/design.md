@@ -117,8 +117,7 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   (T75: **operators and conversions on `jsval`s**. `===`/`!==` with a constant operand are inline in the backend
   (`runtime::strict_eq_const`: an oddball is `ref.eq`; a string constant is identity, then a string of the same
   length and `string_eq`; a number compares an i31 or a `$number`); `strict_eq` itself tries `ref.eq` first and
-  compares numbers without calls. `typeof v === "<tag>"` is inline except for `object`/`bigint`
-  (`runtime::typeof_is`). Two i31s add, subtract, compare and do bitwise ops as `i32`s (`js_add`, `js_less`,
+  compares numbers without calls. `typeof v === "<tag>"` is inline (`runtime::typeof_is`; T76: `object` and `bigint` too). Two i31s add, subtract, compare and do bitwise ops as `i32`s (`js_add`, `js_less`,
   `numeric`), giving an i31 when in range; numbers skip the object/string/BigInt tests. `f64->jsval(jsval->f64(v))`
   (`+v` as a value) keeps a number as it is (`runtime::as_number_value`): an integer may stay a `$number`, which
   every consumer accepts (an i31 is the usual form, not an invariant). `number_to_string` writes integers below
@@ -472,7 +471,12 @@ whether the user's code names property `x`, so the prelude can skip paths that c
 sentinels like the others, so ToPrimitive calls the prelude's `toString`) and `builtins/json.js` (`JSON.stringify`: the
 spec's algorithm writing pieces into one array joined at the end; node's circular-structure message). The intrinsic
 `define(o, k, v)` is CreateDataProperty. A static of a global the prelude has statics for but not this one
-(`JSON.rawJSON`) is rejected by name.)
+(`JSON.rawJSON`) is rejected by name.
+T76: the common `JSON.stringify` call (no replacer, no `space`) is `$$jsonFast`: the state in parameters, inline
+`typeof` tests, output written into one buffer string (`$$jsonOutBuf`/`$$jsonOutAt`, grown by doubling, saved and
+restored around a nested call from `toJSON`) through the intrinsics `str_copy` and `json_quote_into` (escapes
+written in place, unescaped runs by `array.copy`), the result one `sub`. The general path keeps the pieces array
+and uses the native `json_quote`. `JSON.parse` finds string ends and skips whitespace with `json_scan`.)
 (T27: `RegExp` in `builtins/regexp.js`: a RegExp is a `$object` of class `CLASS_REGEXP` with its data `[source, flags,
 code]` under the private `G_SYM_STATE` key and an own `lastIndex` (intrinsics `regexp_new`, `regexp_data`). The
 pattern is parsed to an AST of arrays and compiled to a program of `i32`s run by a backtracking VM with an explicit
@@ -480,7 +484,12 @@ backtrack stack (choices, undo entries for captures and loop registers, lookarou
 programs are cached by flags and source. Regex literals are `$$RegExpCreate(source, flags)` per evaluation. Hot
 prelude data lives in `$i32s` arrays through the intrinsics `i32_new/get/set/len` (typed, unboxed; prelude-only).
 `G_REGEXP_EXEC` holds the installed `RegExp.prototype.exec`, so RegExpExec skips the lookup-and-call while it's
-the built-in (`regexp_builtin_exec`). `console.log` prints `/source/flags`. `RegExp.prototype[Symbol.match]` etc.
+the built-in (`regexp_builtin_exec`). T76: when `RegExp.prototype` is made, `G_REGEXP_SNAP` records the entry
+index, attributes and value (an accessor's getter, as accessors are updated in place) of `exec`, `flags` and the 8
+flag getters; `regexp_plain(rx)` compares them, with `rx` having only its `lastIndex` (as made, a number) and
+state, so `[Symbol.replace]` with a `$`-free string can call the search directly (`$$reReplacePlain`): no `flags`
+getters, `exec` lookups or result arrays, the same `lastIndex` writes. A literal first character is found by a
+plain unit scan. `console.log` prints `/source/flags`. `RegExp.prototype[Symbol.match]` etc.
 are prelude methods named `$$RegExp_prototype_$match` (a `$name` key is installed as `Symbol.name`), linked from
 RegExp creation only when the code names the string method; `String.prototype.split/replace` look up
 `Symbol.split/replace` first. Unicode data comes from node itself (`scripts/gen-unicode.mjs`, node's Unicode

@@ -185,8 +185,12 @@ pub const G_IC: u32 = G_REGEXP_EXEC + 1;
 pub const G_NUM_KEYS: u32 = G_IC + 1;
 /// How many integer keys `G_NUM_KEYS` holds.
 pub const NUM_KEYS: i32 = 1024;
+/// `(mut (ref null $vals))` (T76): `RegExp.prototype` as built, for `object::Helper::RegExpPlain`:
+/// per key of [`crate::object::REGEXP_PLAIN_KEYS`] its entry index (an i31), its value (an
+/// accessor's getter) and its attributes (an i31).
+pub const G_REGEXP_SNAP: u32 = G_NUM_KEYS + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_NUM_KEYS + 1;
+pub const GLOBALS: u32 = G_REGEXP_SNAP + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -970,6 +974,15 @@ pub fn globals(
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_KEYS)),
     );
+    // T76: the RegExp.prototype snapshot.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_VALS),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
+    );
     for _ in 0..extra {
         globals.global(
             GlobalType {
@@ -1078,6 +1091,15 @@ pub enum Helper {
     StrEq,
     Concat,
     ToString,
+    /// `(s: jsval) -> (ref $string)`: QuoteJSONString of string `s` (T76).
+    JsonQuote,
+    /// `(dst: jsval, i: i32, src: jsval)`: copy string `src` into string `dst` at `i` (T76).
+    StrCopy,
+    /// `(buf: jsval, i: i32, s: jsval) -> i32`: QuoteJSONString of `s` written into `buf` at `i`;
+    /// the index after it (T76).
+    JsonQuoteInto,
+    /// `(s: jsval, i: i32, mode: i32) -> i32`: see `Intrinsic::JsonScan` (T76).
+    JsonScan,
     JsAdd,
     Inspect,
     NoFormat,
@@ -1135,6 +1157,10 @@ impl Helper {
             Helper::StrEq => "string_eq",
             Helper::Concat => "concat",
             Helper::ToString => "to_string",
+            Helper::JsonQuote => "json_quote",
+            Helper::StrCopy => "str_copy",
+            Helper::JsonQuoteInto => "json_quote_into",
+            Helper::JsonScan => "json_scan",
             Helper::JsAdd => "js_add",
             Helper::Inspect => "inspect",
             Helper::NoFormat => "no_format",
@@ -1180,6 +1206,10 @@ impl Helper {
             Helper::TypeofString | Helper::ToString => (vec![v], vec![s]),
             Helper::StrEq => (vec![s, s], vec![ValType::I32]),
             Helper::Concat => (vec![s, s], vec![s]),
+            Helper::JsonQuote => (vec![v], vec![string_ref()]),
+            Helper::StrCopy => (vec![v, ValType::I32, v], vec![]),
+            Helper::JsonQuoteInto => (vec![v, ValType::I32, v], vec![ValType::I32]),
+            Helper::JsonScan => (vec![v, ValType::I32, ValType::I32], vec![ValType::I32]),
             Helper::JsAdd => (vec![v, v], vec![v]),
             Helper::NoFormat | Helper::NewSymbol => (vec![v], vec![v]),
             Helper::Inspect | Helper::Describe => (vec![v], vec![s]),
@@ -1224,6 +1254,10 @@ impl Helper {
             Helper::StrEq => str_eq(),
             Helper::Concat => concat(),
             Helper::ToString => to_string(cx),
+            Helper::JsonQuote => json_quote(),
+            Helper::StrCopy => str_copy(),
+            Helper::JsonQuoteInto => json_quote_into(),
+            Helper::JsonScan => json_scan(),
             Helper::JsAdd => js_add(cx),
             Helper::Inspect => inspect(cx),
             Helper::NoFormat => no_format(),
@@ -1554,8 +1588,8 @@ pub fn as_number_value(s: &mut InstructionSink, t: u32, to_number: u32, box_: u3
 }
 
 /// T75: push `typeof v === tag` for the `jsval` `v` on the stack if it needs no call (`t` is a
-/// `jsval` scratch local); false (nothing emitted) for `object` and `bigint`.
-pub fn typeof_is(s: &mut InstructionSink, t: u32, tag: TypeofTag) -> bool {
+/// `jsval` scratch local); true (it always does since T76).
+pub fn typeof_is(s: &mut InstructionSink, t: u32, tag: TypeofTag, bigint: bool) -> bool {
     match tag {
         TypeofTag::Number => {
             s.local_tee(t).ref_test_non_null(i31());
@@ -1578,7 +1612,21 @@ pub fn typeof_is(s: &mut InstructionSink, t: u32, tag: TypeofTag) -> bool {
             s.local_tee(t).global_get(G_TRUE).ref_eq();
             s.local_get(t).global_get(G_FALSE).ref_eq().i32_or();
         }
-        TypeofTag::Object | TypeofTag::BigInt => return false,
+        TypeofTag::Object => {
+            // T76: `null`, or an object that isn't a function.
+            s.local_tee(t).global_get(G_NULL).ref_eq();
+            s.test_object(t);
+            s.local_get(t).ref_test_non_null(func::function()).i32_eqz();
+            s.i32_and().i32_or();
+        }
+        TypeofTag::BigInt if bigint => {
+            s.local_set(t);
+            bigint::is_bigint(s, t);
+        }
+        // No `$bigint` type: never a BigInt.
+        TypeofTag::BigInt => {
+            s.drop().i32_const(0);
+        }
     }
     true
 }
@@ -1953,6 +2001,441 @@ fn to_string(cx: &mut dyn Cx) -> Function {
         s.end();
     }
     s.global_get(names[3]);
+    s.end();
+    f
+}
+
+/// `$json_quote(s: jsval) -> (ref $string)` (T76): QuoteJSONString. One pass finds the result's length;
+/// with nothing to escape the units are copied between the quotes, else a second pass writes the
+/// escapes (`\b \t \n \f \r \" \\`, `\u00xx` for other controls and lone surrogates).
+fn json_quote() -> Function {
+    const V: u32 = 0;
+    const S: u32 = 1;
+    const R: u32 = 2;
+    const LEN: u32 = 3;
+    const N: u32 = 4;
+    const I: u32 = 5;
+    const J: u32 = 6;
+    const U: u32 = 7;
+    const E: u32 = 8;
+    let sref = |nullable| {
+        ValType::Ref(RefType {
+            nullable,
+            heap_type: string(),
+        })
+    };
+    let mut f = Function::new([(2, sref(true)), (6, ValType::I32)]);
+    let mut s = f.instructions();
+    let unit = |s: &mut InstructionSink, i: u32| {
+        s.local_get(S)
+            .ref_as_non_null()
+            .local_get(i)
+            .array_get_u(T_STRING);
+    };
+    // U is one of 8, 9, 10, 12, 13 (a two-character escape).
+    let short = |s: &mut InstructionSink| {
+        s.local_get(U)
+            .i32_const(8)
+            .i32_sub()
+            .i32_const(6)
+            .i32_lt_u();
+        s.local_get(U).i32_const(11).i32_ne().i32_and();
+    };
+    // U is a high surrogate followed by a low one (at I + 1).
+    let paired = |s: &mut InstructionSink| {
+        s.local_get(U).i32_const(0xdbff).i32_le_u();
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(I)
+            .i32_const(1)
+            .i32_add()
+            .local_get(LEN)
+            .i32_lt_u();
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(S).ref_as_non_null();
+        s.local_get(I).i32_const(1).i32_add().array_get_u(T_STRING);
+        s.i32_const(0xfc00).i32_and().i32_const(0xdc00).i32_eq();
+        s.else_();
+        s.i32_const(0);
+        s.end();
+        s.else_();
+        s.i32_const(0);
+        s.end();
+    };
+    let set = |s: &mut InstructionSink, at: i32, val: &dyn Fn(&mut InstructionSink)| {
+        s.local_get(R).ref_as_non_null();
+        s.local_get(J);
+        if at != 0 {
+            s.i32_const(at).i32_add();
+        }
+        val(s);
+        s.array_set(T_STRING);
+    };
+    s.local_get(V).ref_cast_non_null(string()).local_tee(S);
+    s.array_len()
+        .local_tee(LEN)
+        .i32_const(2)
+        .i32_add()
+        .local_set(N);
+    // Pass 1: the length.
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+    unit(&mut s, I);
+    s.local_tee(U).i32_const(32).i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(N).i32_const(1).i32_const(5);
+    short(&mut s);
+    s.select().i32_add().local_set(N);
+    s.else_();
+    s.local_get(U).i32_const(34).i32_eq();
+    s.local_get(U).i32_const(92).i32_eq().i32_or();
+    s.if_(BlockType::Empty);
+    s.local_get(N).i32_const(1).i32_add().local_set(N);
+    s.else_();
+    s.local_get(U)
+        .i32_const(0xf800)
+        .i32_and()
+        .i32_const(0xd800)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    paired(&mut s);
+    s.if_(BlockType::Empty);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.else_();
+    s.local_get(N).i32_const(5).i32_add().local_set(N);
+    s.end();
+    s.end();
+    s.end();
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(N).array_new_default(T_STRING).local_set(R);
+    s.local_get(R)
+        .ref_as_non_null()
+        .i32_const(0)
+        .i32_const(34)
+        .array_set(T_STRING);
+    s.local_get(R)
+        .ref_as_non_null()
+        .local_get(N)
+        .i32_const(1)
+        .i32_sub()
+        .i32_const(34)
+        .array_set(T_STRING);
+    // Nothing to escape: copy.
+    s.local_get(N)
+        .local_get(LEN)
+        .i32_const(2)
+        .i32_add()
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(R).ref_as_non_null().i32_const(1);
+    s.local_get(S).ref_as_non_null().i32_const(0).local_get(LEN);
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(R).ref_as_non_null().return_();
+    s.end();
+    // Pass 2: write. E: 0 = the unit itself, > 0 = `\` and E, -1 = `\u` and 4 hex digits.
+    s.i32_const(1).local_set(J);
+    s.i32_const(0).local_set(I);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+    unit(&mut s, I);
+    s.local_set(U);
+    s.i32_const(0).local_set(E);
+    s.local_get(U).i32_const(32).i32_lt_u();
+    s.if_(BlockType::Empty);
+    // 8 → b, 9 → t, 10 → n, 12 → f, 13 → r, others → \u.
+    s.i32_const(98)
+        .i32_const(116)
+        .i32_const(110)
+        .i32_const(102)
+        .i32_const(114);
+    s.local_get(U).i32_const(12).i32_eq().select();
+    s.local_get(U).i32_const(10).i32_eq().select();
+    s.local_get(U).i32_const(9).i32_eq().select();
+    s.local_get(U).i32_const(8).i32_eq().select();
+    s.i32_const(-1);
+    short(&mut s);
+    s.select().local_set(E);
+    s.else_();
+    s.local_get(U).i32_const(34).i32_eq();
+    s.local_get(U).i32_const(92).i32_eq().i32_or();
+    s.if_(BlockType::Empty);
+    s.local_get(U).local_set(E);
+    s.else_();
+    s.local_get(U)
+        .i32_const(0xf800)
+        .i32_and()
+        .i32_const(0xd800)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    paired(&mut s);
+    s.if_(BlockType::Empty);
+    set(&mut s, 0, &|s| {
+        s.local_get(U);
+    });
+    set(&mut s, 1, &|s| {
+        s.local_get(S).ref_as_non_null();
+        s.local_get(I).i32_const(1).i32_add().array_get_u(T_STRING);
+    });
+    s.local_get(J).i32_const(2).i32_add().local_set(J);
+    s.local_get(I).i32_const(2).i32_add().local_set(I);
+    s.br(4);
+    s.end();
+    s.i32_const(-1).local_set(E);
+    s.end();
+    s.end();
+    s.end();
+    s.local_get(E).i32_eqz();
+    s.if_(BlockType::Empty);
+    set(&mut s, 0, &|s| {
+        s.local_get(U);
+    });
+    s.local_get(J).i32_const(1).i32_add().local_set(J);
+    s.else_();
+    set(&mut s, 0, &|s| {
+        s.i32_const(92);
+    });
+    s.local_get(E).i32_const(0).i32_gt_s();
+    s.if_(BlockType::Empty);
+    set(&mut s, 1, &|s| {
+        s.local_get(E);
+    });
+    s.local_get(J).i32_const(2).i32_add().local_set(J);
+    s.else_();
+    set(&mut s, 1, &|s| {
+        s.i32_const('u' as i32);
+    });
+    for (k, shift) in [12, 8, 4, 0].into_iter().enumerate() {
+        set(&mut s, 2 + k as i32, &|s| {
+            // d < 10 ? 48 + d : 87 + d
+            s.local_get(U)
+                .i32_const(shift)
+                .i32_shr_u()
+                .i32_const(15)
+                .i32_and()
+                .local_tee(E);
+            s.i32_const(48).i32_add();
+            s.local_get(E).i32_const(87).i32_add();
+            s.local_get(E).i32_const(10).i32_lt_u().select();
+        });
+    }
+    s.local_get(J).i32_const(6).i32_add().local_set(J);
+    s.end();
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(R).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `$str_copy(dst, i, src)` (T76): `array.copy` of all of string `src` into string `dst` at `i`.
+fn str_copy() -> Function {
+    let mut f = Function::new([(1, string_ref())]);
+    let mut s = f.instructions();
+    s.local_get(2).ref_cast_non_null(string()).local_set(3);
+    s.local_get(0).ref_cast_non_null(string()).local_get(1);
+    s.local_get(3).i32_const(0).local_get(3).array_len();
+    s.array_copy(T_STRING, T_STRING);
+    s.end();
+    f
+}
+
+/// `$json_quote_into(buf, i, s) -> i32` (T76): QuoteJSONString of `s` written into `buf` from `i`
+/// (which has room for it); the index after the closing quote. Runs of units that need no escape
+/// are copied with `array.copy`.
+fn json_quote_into() -> Function {
+    const BUF: u32 = 0;
+    const AT: u32 = 1;
+    const SV: u32 = 2;
+    const B: u32 = 3;
+    const S: u32 = 4;
+    const LEN: u32 = 5;
+    const I: u32 = 6;
+    const FROM: u32 = 7;
+    const U: u32 = 8;
+    const E: u32 = 9;
+    let mut f = Function::new([(2, string_ref()), (5, ValType::I32)]);
+    let mut s = f.instructions();
+    let set = |s: &mut InstructionSink, val: &dyn Fn(&mut InstructionSink)| {
+        s.local_get(B).local_get(AT);
+        val(s);
+        s.array_set(T_STRING);
+        s.local_get(AT).i32_const(1).i32_add().local_set(AT);
+    };
+    // Copy the run [FROM, I) to AT.
+    let flush = |s: &mut InstructionSink| {
+        s.local_get(B).local_get(AT).local_get(S).local_get(FROM);
+        s.local_get(I).local_get(FROM).i32_sub();
+        s.array_copy(T_STRING, T_STRING);
+        s.local_get(AT)
+            .local_get(I)
+            .local_get(FROM)
+            .i32_sub()
+            .i32_add()
+            .local_set(AT);
+    };
+    s.local_get(BUF).ref_cast_non_null(string()).local_set(B);
+    s.local_get(SV).ref_cast_non_null(string()).local_tee(S);
+    s.array_len().local_set(LEN);
+    set(&mut s, &|s| {
+        s.i32_const(34);
+    });
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+    s.local_get(S)
+        .local_get(I)
+        .array_get_u(T_STRING)
+        .local_tee(U);
+    // Needs an escape: < 32, `"`, `\`, or a surrogate (unless a pair).
+    s.i32_const(32).i32_lt_u();
+    s.local_get(U).i32_const(34).i32_eq().i32_or();
+    s.local_get(U).i32_const(92).i32_eq().i32_or();
+    s.local_get(U)
+        .i32_const(0xf800)
+        .i32_and()
+        .i32_const(0xd800)
+        .i32_eq()
+        .i32_or();
+    s.i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(1);
+    s.end();
+    // A high surrogate followed by a low one: part of the run.
+    s.local_get(U)
+        .i32_const(0xfc00)
+        .i32_and()
+        .i32_const(0xd800)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(I)
+        .i32_const(1)
+        .i32_add()
+        .local_get(LEN)
+        .i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(S)
+        .local_get(I)
+        .i32_const(1)
+        .i32_add()
+        .array_get_u(T_STRING);
+    s.i32_const(0xfc00).i32_and().i32_const(0xdc00).i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(I).i32_const(2).i32_add().local_set(I);
+    s.br(3);
+    s.end();
+    s.end();
+    s.end();
+    flush(&mut s);
+    // E: `\` and a letter or the unit itself, or -1 for `\u` and 4 hex digits.
+    s.i32_const(98)
+        .i32_const(116)
+        .i32_const(110)
+        .i32_const(102)
+        .i32_const(114);
+    s.local_get(U).i32_const(12).i32_eq().select();
+    s.local_get(U).i32_const(10).i32_eq().select();
+    s.local_get(U).i32_const(9).i32_eq().select();
+    s.local_get(U).i32_const(8).i32_eq().select();
+    s.i32_const(-1);
+    s.local_get(U)
+        .i32_const(8)
+        .i32_sub()
+        .i32_const(6)
+        .i32_lt_u();
+    s.local_get(U).i32_const(11).i32_ne().i32_and();
+    s.select();
+    // `"` and `\` escape as themselves.
+    s.local_get(U);
+    s.local_get(U).i32_const(34).i32_eq();
+    s.local_get(U).i32_const(92).i32_eq().i32_or();
+    s.i32_eqz().select().local_set(E);
+    set(&mut s, &|s| {
+        s.i32_const(92);
+    });
+    s.local_get(E).i32_const(0).i32_gt_s();
+    s.if_(BlockType::Empty);
+    set(&mut s, &|s| {
+        s.local_get(E);
+    });
+    s.else_();
+    set(&mut s, &|s| {
+        s.i32_const('u' as i32);
+    });
+    for shift in [12, 8, 4, 0] {
+        set(&mut s, &|s| {
+            s.local_get(U)
+                .i32_const(shift)
+                .i32_shr_u()
+                .i32_const(15)
+                .i32_and()
+                .local_tee(E);
+            s.i32_const(48).i32_add();
+            s.local_get(E).i32_const(87).i32_add();
+            s.local_get(E).i32_const(10).i32_lt_u().select();
+        });
+    }
+    s.end();
+    s.local_get(I)
+        .i32_const(1)
+        .i32_add()
+        .local_tee(I)
+        .local_set(FROM);
+    s.br(0).end().end();
+    flush(&mut s);
+    set(&mut s, &|s| {
+        s.i32_const(34);
+    });
+    s.local_get(AT);
+    s.end();
+    f
+}
+
+/// `$json_scan(s, i, mode) -> i32` (T76): see `Intrinsic::JsonScan`.
+fn json_scan() -> Function {
+    const SV: u32 = 0;
+    const I: u32 = 1;
+    const MODE: u32 = 2;
+    const S: u32 = 3;
+    const LEN: u32 = 4;
+    const U: u32 = 5;
+    let mut f = Function::new([(1, string_ref()), (2, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(SV).ref_cast_non_null(string()).local_tee(S);
+    s.array_len().local_set(LEN);
+    s.local_get(MODE).i32_eqz();
+    s.if_(BlockType::Empty);
+    // Whitespace: space, \n, \r, \t.
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+    s.local_get(S)
+        .local_get(I)
+        .array_get_u(T_STRING)
+        .local_tee(U);
+    s.i32_const(32).i32_ne();
+    s.local_get(U).i32_const(10).i32_ne().i32_and();
+    s.local_get(U).i32_const(13).i32_ne().i32_and();
+    s.local_get(U).i32_const(9).i32_ne().i32_and();
+    s.br_if(1);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(I).return_();
+    s.end();
+    // A string's plain units.
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+    s.local_get(S)
+        .local_get(I)
+        .array_get_u(T_STRING)
+        .local_tee(U);
+    s.i32_const(34).i32_eq();
+    s.local_get(U).i32_const(92).i32_eq().i32_or();
+    s.local_get(U).i32_const(32).i32_lt_u().i32_or();
+    s.br_if(1);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(I);
     s.end();
     f
 }

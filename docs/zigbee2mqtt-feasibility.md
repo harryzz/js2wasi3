@@ -70,8 +70,9 @@ Not tried: the production version (2.14.2), an aarch64 host (the board has ~3 GB
 
 **Speed work since the trial** (zigbee-herdsman-converters' definitions and exposes for the trial's 52 device types,
 `tasks/T74-files/bench.sh`; exposes ×200, node 62–73 ms): T74 property access 3,602–3,712 → 2,529–2,732 ms (−29%); T75
-operators, conversions and boxing 2,438 → 1,941 ms (−20%). Not yet re-measured on the live installation; next: T76
-(the compiled program, JSON, regex).
+operators, conversions and boxing 2,438 → 1,941 ms (−20%); T76 JSON, RegExp `replace`, regex search 1,950 → 1,285 ms
+(−34%; find 533 → 466 ms). About 20% of the remaining run is the benchmark's own checksum loop (F326). Not yet
+re-measured on the live installation.
 
 ## OTA downloads 2026-10-03 (T72: `fetch`)
 
