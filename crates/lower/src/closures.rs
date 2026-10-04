@@ -78,6 +78,9 @@ pub struct Analysis {
     pub self_ref: HashSet<ScopeId>,
     /// Function declarations referenced other than as the callee of a call.
     pub fn_values: HashSet<SymbolId>,
+    /// Variables appended to: `x += e` or `x = x + e` (T78). An uncaptured one of kind string gets
+    /// a growable buffer (`Intrinsic::StrBufAppend`), so appending in a loop isn't quadratic.
+    pub appended: HashSet<SymbolId>,
     /// Classes, by their scope (T16).
     pub classes: HashMap<ScopeId, ClassInfo>,
     /// An explicit constructor's `Function` scope: its class's scope.
@@ -550,6 +553,37 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
         .into_iter()
         .map(|(s, c)| (s, c.into_iter().collect()))
         .collect();
+    for node in nodes.iter() {
+        let AstKind::AssignmentExpression(a) = node.kind() else {
+            continue;
+        };
+        let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
+            continue;
+        };
+        let Some(sym) = scoping.get_reference(id.reference_id()).symbol_id() else {
+            continue;
+        };
+        let appends = match a.operator {
+            AssignmentOperator::Addition => true,
+            AssignmentOperator::Assign => {
+                // `x = x + a + b`: `x` is the leftmost operand of a chain of `+`.
+                let mut e = &a.right;
+                while let Expression::BinaryExpression(b) = e.without_parentheses() {
+                    if b.operator != BinaryOperator::Addition {
+                        break;
+                    }
+                    e = &b.left;
+                }
+                matches!(e.without_parentheses(), Expression::Identifier(r)
+                    if !std::ptr::eq(e, &a.right)
+                        && scoping.get_reference(r.reference_id()).symbol_id() == Some(sym))
+            }
+            _ => false,
+        };
+        if appends {
+            an.appended.insert(sym);
+        }
+    }
     an
 }
 

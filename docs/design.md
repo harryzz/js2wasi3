@@ -124,6 +124,14 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   2^53 directly (no shortest-digits search), and ToPropertyKey of an i31 in [0, 1024) returns a key string made
   once (`G_NUM_KEYS`). `to_boolean` tests oddballs, numbers and strings before BigInts.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
+  (T78: the benchmarks called for it: `s += x` copied the whole string each time (O(n²): 200,000 appends 10.3 s).
+  A variable that is appended to (`x += e`, `x = x + e …`; `closures::Analysis::appended`), holds strings and is
+  an uncaptured local (`Place::Buf`) or a top-level global (`Place::BufGlobal`) keeps the string or a `$strbuf`
+  (`buf`, `len`, `flat`; runtime type 28, `$bigint` 29): `str_buf_append` appends in place (the buffer doubles),
+  `str_buf_get` makes the string once per run of appends, `.length` reads `str_buf_len`. The lowering's
+  `buf_append` rewrites only stores whose pieces can't write the variable (for a global: pieces that run no JS
+  code); any other store is a plain store. 200,000 appends: 19 ms. Properties (`o.s += x`) and captured
+  variables still copy: F337.)
 - Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
   inline caches only after T12 works and a benchmark justifies them.
 - Linear memory exists **only** for the Canonical ABI boundary (`cabi_realloc`, string/list copies).
@@ -333,7 +341,9 @@ an import (`Module::buffer_refs`); programs that don't name it don't load it. `n
 package (feross, which re-prototypes plain `Uint8Array`s, so typed arrays need no species) with node 24's errors and
 checks, a WHATWG UTF-8 decoder, `base64url`, `subarray` giving a Buffer; `node/string_decoder.js` is node's former
 pure-JS decoder. Functions of node's built-in modules and every CommonJS module's wrapper function keep no source text
-(F246: the 66 KB `buffer` module as a string constant cost 30 s in wasmtime).)
+(F246: the 66 KB `buffer` module as a string constant cost 30 s in wasmtime). T78: `latin1`/`binary`/`ascii`
+decoding of a `Uint8Array`/Buffer is one native pass (`__intrinsic_typed_latin1(t, start, end, mask)`,
+`TypedOp::Latin1`), not a `+=` per byte; `utf8` is still JS (F339).)
 (T59: **a command imports WASI interfaces** from JS like a user world's (`import { f } from "wasi:x/y@0.3.1"`,
 `component::COMMAND_WASI_IMPORTS`: those the runtime doesn't import itself); its boundary has only the interfaces
 its `import`s name (a boundary's types decide some of the runtime). The calls **block** (`ir::AbiSig::blocking`):
@@ -501,7 +511,15 @@ the VM's `i`/`m`/`s` bits (undo-logged on the backtrack stack); the parser and e
 `if (__intrinsic_regexp_mods()) { … }` blocks, kept only when the user's source contains `(?i`/`(?m`/`(?s`/`(?-`.
 T39: `STAR` (a greedy loop over one CHAR/ANY/CLASS, forwards) also runs in `u`/`v` mode, a code point per step, and
 gives back whole surrogate pairs; `$$reSearch` skips start positions the first instruction rejects; hot helpers take
-and return numbers, not booleans (F14).)
+and return numbers, not booleans (F14).
+T78: `code` has two more entries. `code[10]` (`$$reFirstSet`): the code units a match can start with (128 ASCII flags,
+ranges above), from the AST (alternatives, sequences up to the first unit that can't be empty, quantifiers,
+groups; a class with `i` by its ASCII letters' cases; anything else: no filter), outside Unicode mode and only if
+the pattern can't match the empty string; `$$reSearch` skips the other positions. `code[11]` (`$$reAltsProg`): a
+pattern that is an alternation of fixed sequences of characters and classes (`agggtaaa|tttaccct`, `Ha[DS]|WaS`;
+with `i` ASCII only) is a table that the native `re_alts_find` (runtime.rs) searches without the VM: the filter,
+then each alternative in order (no element can backtrack, so this is the VM's answer), writing `caps[0..1]`.
+`$$reRun` keeps the `code` fields it read last and returns a number (`f64`, not boxed).)
 (T26: `Date` in `builtins/date.js`: a Date is a `$object` of class `CLASS_DATE` with its data `[time value]` under the
 private `G_SYM_STATE` key (intrinsics `date_new`, `date_data`); the setters mutate that array. All of `Date` is
 prelude code on `f64`s (the spec's MakeDay/MakeTime/TimeClip, Hinnant's days <-> civil dates); `Date.parse` is the
@@ -720,6 +738,10 @@ Test host: wasmtime 49.0.2 (`TOOLS.md`). JS oracle: `node`.
 - A command fixture is self-checking: it prints its results, and node's output is the expectation, so no `.out`
   file is needed. Keep each one under 2 s. Constructs that aren't supported yet show up as build failures.
 - `cargo test` doesn't run it (it needs node, F30).
+- T78: node's results are cached in `out/node-cache/<key>/`; the key hashes the node version, how the script runs
+  node, the fixture and its `.args`/`.env`/`.uncaught`/`.fs`, its directory's `package.json` and, for a multi-file
+  program, the whole case. node runs only for a new key (not cached: a node timeout). `DIFF_NODE_CACHE=0` reruns
+  node. node runs without `FORCE_COLOR` (Claude Code's shell sets it: colored `console.log` in the output files).
 - node runs with `--no-warnings`: process warnings (node 24's `TimeoutNegativeWarning`, …) start with `(node:<pid>)`
   and aren't JS behaviour.
 - Timers (T19): node refreshes its clock whenever a timer is made (ms steps), so the order of near-tied deadlines,

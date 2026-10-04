@@ -774,6 +774,41 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             s.end();
             f
         }
+        TypedOp::Latin1 => {
+            // (t, start, end, mask): one unit per byte, from the buffer's data at the view's offset.
+            const T: u32 = 0;
+            const START: u32 = 1;
+            const END: u32 = 2;
+            const MASK: u32 = 3;
+            const R: u32 = 4;
+            const DATA: u32 = 5;
+            const AT: u32 = 6;
+            const I: u32 = 7;
+            let mut f = Function::new([
+                (1, rt(true, runtime::T_STRING)),
+                (1, rt(true, T_BYTES)),
+                (2, ValType::I32),
+            ]);
+            let mut s = f.instructions();
+            s.local_get(END).local_get(START).i32_sub();
+            s.array_new_default(runtime::T_STRING).local_set(R);
+            t(&mut s, T);
+            s.struct_get(T_TYPED, F_BUF).struct_get(T_BUFFER, F_DATA).local_set(DATA);
+            t(&mut s, T);
+            s.struct_get(T_TYPED, F_OFFSET).local_get(START).i32_add().local_set(AT);
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(I).local_get(END).local_get(START).i32_sub().i32_ge_s().br_if(1);
+            s.local_get(R).local_get(I);
+            s.local_get(DATA).local_get(AT).local_get(I).i32_add().array_get_u(T_BYTES);
+            s.local_get(MASK).i32_and();
+            s.array_set(runtime::T_STRING);
+            s.local_get(I).i32_const(1).i32_add().local_set(I);
+            s.br(0);
+            s.end().end();
+            s.local_get(R).ref_as_non_null();
+            s.end();
+            f
+        }
         TypedOp::BufferTransfer => {
             // (b, len, resizable): ArrayBufferCopyAndDetach.
             const NEW: u32 = 3;

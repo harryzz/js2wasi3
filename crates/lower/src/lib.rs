@@ -726,6 +726,11 @@ enum Place {
     Global(GlobalId),
     /// A captured variable: the local holding its cell (T14).
     Cell(LocalId),
+    /// T78: an uncaptured string variable that is appended to (`x += e`, `x = x + e`): its local holds
+    /// the string or a `$strbuf` (`Intrinsic::StrBufAppend`); reads go through `StrBufGet`.
+    Buf(LocalId),
+    /// T78: the same for a top-level variable (a global).
+    BufGlobal(GlobalId),
 }
 
 /// A resolved variable: where it lives, its slot, its type and kind.
@@ -4442,10 +4447,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let obj = self.expr(cx, &m.object)?;
                 let kind = obj.kind;
                 if kind == Kind::Str {
-                    return Ok(Val::num(Expr::intrinsic(
-                        Intrinsic::StringLength,
-                        vec![jsval_of(obj)],
-                    )));
+                    return Ok(Val::num(match jsval_of(obj) {
+                        // T78: a string being appended to: its length without making it.
+                        Expr::Intrinsic { op: Intrinsic::StrBufGet, args } => {
+                            Expr::intrinsic(Intrinsic::StrBufLen, args)
+                        }
+                        e => Expr::intrinsic(Intrinsic::StringLength, vec![e]),
+                    }));
                 }
                 let len =
                     Expr::intrinsic(Intrinsic::GetProp, vec![jsval_of(obj), Expr::str("length")]);
@@ -5952,6 +5960,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "unit" | "i32_get" => 2,
             "sub" | "str_set" | "define" | "i32_set" | "str_copy" | "json_quote_into"
             | "json_scan" => 3,
+            "re_alts_find" => 8,
             "global_init" => 1,
             "write_stdout" | "write_stderr" => 1,
             "i32_new" | "i32_len" => 1,
@@ -6002,6 +6011,23 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             } else {
                 (from_i32(e), Call::Intrinsic(Some(Kind::Num)))
             });
+        }
+        if name == "re_alts_find" {
+            // T78: (alts, classes, s, from: i32, flags: i32, ascii, wide, caps) -> i32.
+            let mut args = Vec::new();
+            for (i, a) in c.arguments.iter().enumerate() {
+                let Some(e) = a.as_expression() else {
+                    return Err(self.unsupported(a.span(), "spread argument", "T21"));
+                };
+                let v = self.expr(cx, e)?;
+                args.push(if i == 3 || i == 4 {
+                    to_i32(self.num(v, e.span())?)
+                } else {
+                    jsval_of(v)
+                });
+            }
+            let e = from_i32(Expr::intrinsic(Intrinsic::ReAltsFind, args));
+            return Ok((e, Call::Intrinsic(Some(Kind::Num))));
         }
         if name == "random_seed" {
             // An import (`wasi:random`): commands only. `check_builtin` rejects `Math.random` where
@@ -7428,6 +7454,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if let Some((place, ty)) = place {
             // f64 slots are `Num` or `Bottom`, matching their type.
             let kind = self.slot_kind(Slot::Var(sym));
+            let place = match place {
+                _ if ty != Type::JsVal || kind != Kind::Str || !self.an.appended.contains(&sym) => place,
+                Place::Local(l) => Place::Buf(l),
+                Place::Global(g) => Place::BufGlobal(g),
+                p => p,
+            };
             return Ok(Var {
                 place,
                 sym,
@@ -8317,6 +8349,8 @@ fn read(p: Place, ty: Type) -> Expr {
         Place::Local(l) => Expr::Local(l),
         Place::Global(g) => Expr::Global(g),
         Place::Cell(l) => Expr::intrinsic(Intrinsic::CellGet(ty), vec![Expr::Local(l)]),
+        Place::Buf(l) => Expr::intrinsic(Intrinsic::StrBufGet, vec![Expr::Local(l)]),
+        Place::BufGlobal(g) => Expr::intrinsic(Intrinsic::StrBufGet, vec![Expr::Global(g)]),
     }
 }
 
@@ -8328,7 +8362,76 @@ fn set(p: Place, ty: Type, e: Expr) -> Stmt {
             Intrinsic::CellSet(ty),
             vec![Expr::Local(l), e],
         )),
+        Place::Buf(l) => Stmt::Set(l, buf_append(&Expr::Local(l), &e).unwrap_or(e)),
+        Place::BufGlobal(g) => Stmt::SetGlobal(g, buf_append(&Expr::Global(g), &e).unwrap_or(e)),
     }
+}
+
+/// T78: `e` stored into `Place::Buf`/`BufGlobal` (`home`: its local or global) when it is the
+/// variable's value followed by more (`x += a`, `x = x + a + b`): the appends to the buffer in `home`
+/// (`StrBufAppend`), evaluated in the same order. `None` for any other value, or if a piece may
+/// write the variable itself (then the plain store).
+fn buf_append(home: &Expr, e: &Expr) -> Option<Expr> {
+    let is_get = |e: &Expr| {
+        matches!(e, Expr::Intrinsic { op: Intrinsic::StrBufGet, args } if args[..] == [home.clone()])
+    };
+    // The leftmost operand of a chain of `Concat` / `JsAdd`, and the pieces after it.
+    let mut pieces = Vec::new();
+    let mut cur = e;
+    let base = loop {
+        match cur {
+            Expr::Intrinsic { op: Intrinsic::Concat, args } => {
+                pieces.push(args[1].clone());
+                cur = &args[0];
+            }
+            Expr::Intrinsic { op: Intrinsic::JsAdd, args } => {
+                // The left side is a string (the variable's, then more): `+` gives it followed by
+                // ToString(ToPrimitive(right)), which is `"" + right`.
+                pieces.push(Expr::intrinsic(Intrinsic::JsAdd, vec![Expr::str(""), args[1].clone()]));
+                cur = &args[0];
+            }
+            Expr::Seq { body, value } if is_get(value) => break Some(body.clone()),
+            _ if is_get(cur) => break None,
+            _ => return None,
+        }
+    };
+    pieces.reverse();
+    // A piece that assigns the variable (`x += (x = "a")`, or a call that sets the global) would
+    // see its write lost or doubled.
+    let writes = match home {
+        Expr::Local(l) => vec![format!("Set({l:?}, "), format!("Tee({l:?}, ")],
+        Expr::Global(g) => vec![format!("SetGlobal({g:?}, ")],
+        _ => return None,
+    };
+    // A global can also be set by any code a piece runs (a call, a getter, `valueOf`): there only
+    // pieces that run no JS code.
+    fn runs_no_code(e: &Expr) -> bool {
+        match e {
+            Expr::Const(_) | Expr::Str(_) | Expr::Local(_) | Expr::Global(_) => true,
+            Expr::Intrinsic {
+                op: Intrinsic::Concat | Intrinsic::NumberToString | Intrinsic::StrBufGet,
+                args,
+            } => args.iter().all(runs_no_code),
+            Expr::Convert { arg, .. } | Expr::Unary { arg, .. } => runs_no_code(arg),
+            Expr::Binary { lhs, rhs, .. } => runs_no_code(lhs) && runs_no_code(rhs),
+            _ => false,
+        }
+    }
+    let global = matches!(home, Expr::Global(_));
+    if pieces.iter().any(|p| {
+        let d = format!("{p:?}");
+        writes.iter().any(|w| d.contains(w)) || (global && !runs_no_code(p))
+    }) {
+        return None;
+    }
+    let appended = pieces
+        .into_iter()
+        .fold(home.clone(), |acc, p| Expr::intrinsic(Intrinsic::StrBufAppend, vec![acc, p]));
+    Some(match base {
+        // The TDZ check of the read comes first, as before.
+        Some(body) => Expr::Seq { body, value: Box::new(appended) },
+        None => appended,
+    })
 }
 
 /// `if (!cond) break label`, with `!true` folded away for `while (true)`.
@@ -8448,6 +8551,7 @@ fn typed_op(name: &str) -> Option<ir::TypedOp> {
         "buffer_detached" => T::BufferDetached,
         "buffer_resize" => T::BufferResize,
         "buffer_transfer" => T::BufferTransfer,
+        "typed_latin1" => T::Latin1,
         _ => return None,
     })
 }

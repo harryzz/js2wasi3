@@ -98,11 +98,15 @@ pub const T_TYPED: u32 = 26;
 /// `$wrapper`: a final subtype of `$object` (a `String`/`Number`/`Boolean`/`Symbol` wrapper
 /// object) with `prim: jsval` (T30, see [`crate::wrapper`]).
 pub const T_WRAPPER: u32 = 27;
+/// `$strbuf { buf: mut (ref null $string), len: mut i32, flat: mut (ref null $string) }` (T78): a
+/// string being appended to (`str_buf_append`): its first `len` units of `buf` (room to grow), and
+/// that string once made (`str_buf_get`; null after an append). Only ever in a variable's local.
+pub const T_STRBUF: u32 = 28;
 /// `$bigint`: a final `(array (mut i32))`, sign then magnitude limbs (T40, see [`crate::bigint`]).
 /// Only in a module that can make a BigInt ([`Cx::bigint`]): the last type of the group then.
-pub const T_BIGINT: u32 = 28;
+pub const T_BIGINT: u32 = 29;
 /// Number of runtime types before the function types (one more with `$bigint`).
-pub const TYPES: u32 = 28;
+pub const TYPES: u32 = 29;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -781,6 +785,14 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
             true,
             Some(T_OBJECT),
         ),
+        // $strbuf: buf, len, flat (T78).
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(rt(true, T_STRING)), true),
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(rt(true, T_STRING)), true),
+            ]),
+        })),
     ];
     if bigint {
         group.push(sub(CompositeInnerType::Array(ArrayType(field(
@@ -1095,6 +1107,14 @@ pub enum Helper {
     JsonQuote,
     /// `(dst: jsval, i: i32, src: jsval)`: copy string `src` into string `dst` at `i` (T76).
     StrCopy,
+    StrBufGet,
+    StrBufAppend,
+    StrBufLen,
+    /// `(r: (ref $i32s), base: i32, n: i32, c: i32) -> i32` (T78): is `c` in one of the `n` sorted
+    /// ranges `[lo, hi]` of `r` from `base`?
+    ReInRanges,
+    /// See `Intrinsic::ReAltsFind` (T78).
+    ReAltsFind,
     /// `(buf: jsval, i: i32, s: jsval) -> i32`: QuoteJSONString of `s` written into `buf` at `i`;
     /// the index after it (T76).
     JsonQuoteInto,
@@ -1159,6 +1179,11 @@ impl Helper {
             Helper::ToString => "to_string",
             Helper::JsonQuote => "json_quote",
             Helper::StrCopy => "str_copy",
+            Helper::StrBufGet => "str_buf_get",
+            Helper::StrBufAppend => "str_buf_append",
+            Helper::StrBufLen => "str_buf_len",
+            Helper::ReInRanges => "re_in_ranges",
+            Helper::ReAltsFind => "re_alts_find",
             Helper::JsonQuoteInto => "json_quote_into",
             Helper::JsonScan => "json_scan",
             Helper::JsAdd => "js_add",
@@ -1208,6 +1233,17 @@ impl Helper {
             Helper::Concat => (vec![s, s], vec![s]),
             Helper::JsonQuote => (vec![v], vec![string_ref()]),
             Helper::StrCopy => (vec![v, ValType::I32, v], vec![]),
+            Helper::StrBufGet => (vec![v], vec![v]),
+            Helper::StrBufAppend => (vec![v, v], vec![v]),
+            Helper::StrBufLen => (vec![v], vec![ValType::F64]),
+            Helper::ReInRanges => (
+                vec![rt(false, T_I32S), ValType::I32, ValType::I32, ValType::I32],
+                vec![ValType::I32],
+            ),
+            Helper::ReAltsFind => (
+                vec![v, v, v, ValType::I32, ValType::I32, v, v, v],
+                vec![ValType::I32],
+            ),
             Helper::JsonQuoteInto => (vec![v, ValType::I32, v], vec![ValType::I32]),
             Helper::JsonScan => (vec![v, ValType::I32, ValType::I32], vec![ValType::I32]),
             Helper::JsAdd => (vec![v, v], vec![v]),
@@ -1256,6 +1292,11 @@ impl Helper {
             Helper::ToString => to_string(cx),
             Helper::JsonQuote => json_quote(),
             Helper::StrCopy => str_copy(),
+            Helper::StrBufGet => str_buf_get(),
+            Helper::StrBufAppend => str_buf_append(cx),
+            Helper::StrBufLen => str_buf_len(),
+            Helper::ReInRanges => re_in_ranges(),
+            Helper::ReAltsFind => re_alts_find(cx),
             Helper::JsonQuoteInto => json_quote_into(),
             Helper::JsonScan => json_scan(),
             Helper::JsAdd => js_add(cx),
@@ -2237,6 +2278,301 @@ fn str_copy() -> Function {
     s.local_get(0).ref_cast_non_null(string()).local_get(1);
     s.local_get(3).i32_const(0).local_get(3).array_len();
     s.array_copy(T_STRING, T_STRING);
+    s.end();
+    f
+}
+
+fn strbuf() -> HeapType {
+    HeapType::Concrete(T_STRBUF)
+}
+
+/// `$str_buf_get(v) -> jsval` (T78): a `$strbuf`'s string (made from its buffer once per run of
+/// appends, then kept in `flat`); any other value as it is.
+fn str_buf_get() -> Function {
+    const V: u32 = 0;
+    const B: u32 = 1;
+    const R: u32 = 2;
+    let mut f = Function::new([
+        (1, ValType::Ref(RefType { nullable: true, heap_type: strbuf() })),
+        (1, ValType::Ref(RefType { nullable: true, heap_type: string() })),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_nullable(strbuf()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(V).return_();
+    s.end();
+    s.local_get(V).ref_cast_non_null(strbuf()).local_tee(B);
+    s.struct_get(T_STRBUF, 2).local_tee(R).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(R).return_();
+    s.end();
+    s.local_get(B).struct_get(T_STRBUF, 1).array_new_default(T_STRING).local_set(R);
+    s.local_get(R).i32_const(0);
+    s.local_get(B).struct_get(T_STRBUF, 0).i32_const(0);
+    s.local_get(B).struct_get(T_STRBUF, 1);
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(B).local_get(R).struct_set(T_STRBUF, 2);
+    s.local_get(R);
+    s.end();
+    f
+}
+
+/// `$str_buf_append(v, s) -> jsval` (T78): string `s` appended to `v`, a `$strbuf` (in place; its
+/// buffer doubles when full) or a string (a new `$strbuf` with room for as much again). Any other
+/// `v` (not expected) gives `v + s`. Appending "" changes nothing.
+fn str_buf_append(cx: &mut dyn Cx) -> Function {
+    let js_add = cx.helper(Helper::JsAdd);
+    const V: u32 = 0;
+    const SV: u32 = 1;
+    const B: u32 = 2;
+    const S: u32 = 3;
+    const N: u32 = 4;
+    const NEW: u32 = 5;
+    const NB: u32 = 6;
+    let mut f = Function::new([
+        (1, ValType::Ref(RefType { nullable: true, heap_type: strbuf() })),
+        (1, ValType::Ref(RefType { nullable: true, heap_type: string() })),
+        (2, ValType::I32),
+        (1, ValType::Ref(RefType { nullable: true, heap_type: string() })),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(SV).ref_cast_non_null(string()).local_tee(S);
+    s.array_len().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(V).return_();
+    s.end();
+    s.local_get(V).ref_test_nullable(strbuf());
+    s.if_(BlockType::Empty);
+    s.local_get(V).ref_cast_non_null(strbuf()).local_set(B);
+    s.else_();
+    s.test_string(V).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(V).local_get(SV).call(js_add).return_();
+    s.end();
+    // A new buffer holding `v`: room for twice what it will hold after this append (16 at least).
+    s.local_get(V).ref_cast_non_null(string()).array_len().local_set(N);
+    s.local_get(N).local_get(S).array_len().i32_add().i32_const(1).i32_shl();
+    s.local_tee(NEW).i32_const(16).local_get(NEW).i32_const(16).i32_gt_u().select();
+    s.array_new_default(T_STRING).local_set(NB);
+    s.local_get(NB).i32_const(0);
+    s.local_get(V).ref_cast_non_null(string()).i32_const(0);
+    s.local_get(N);
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(NB).local_get(N).ref_null(string()).struct_new(T_STRBUF).local_set(B);
+    s.end();
+    // Grow the buffer when `s` doesn't fit: to twice the new length.
+    s.local_get(B).struct_get(T_STRBUF, 1).local_get(S).array_len().i32_add().local_set(NEW);
+    s.local_get(NEW);
+    s.local_get(B).struct_get(T_STRBUF, 0).ref_as_non_null().array_len();
+    s.i32_gt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(NEW).i32_const(1).i32_shl().array_new_default(T_STRING).local_set(NB);
+    s.local_get(NB).i32_const(0);
+    s.local_get(B).struct_get(T_STRBUF, 0).i32_const(0);
+    s.local_get(B).struct_get(T_STRBUF, 1);
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(B).local_get(NB).struct_set(T_STRBUF, 0);
+    s.end();
+    s.local_get(B).struct_get(T_STRBUF, 0).local_get(B).struct_get(T_STRBUF, 1);
+    s.local_get(S).i32_const(0).local_get(S).array_len();
+    s.array_copy(T_STRING, T_STRING);
+    s.local_get(B).local_get(NEW).struct_set(T_STRBUF, 1);
+    s.local_get(B).ref_null(string()).struct_set(T_STRBUF, 2);
+    s.local_get(B).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `$str_buf_len(v) -> f64` (T78): the length of a `$strbuf`'s string, or of string `v`.
+fn str_buf_len() -> Function {
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(0).ref_test_nullable(strbuf());
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(0).ref_cast_non_null(strbuf()).struct_get(T_STRBUF, 1);
+    s.else_();
+    s.local_get(0).ref_cast_non_null(string()).array_len();
+    s.end();
+    s.f64_convert_i32_u();
+    s.end();
+    f
+}
+
+/// `$re_in_ranges(r, base, n, c) -> i32` (T78): binary search of `n` sorted pairs `[lo, hi]` of
+/// `r` from `base` for `c`.
+fn re_in_ranges() -> Function {
+    const R: u32 = 0;
+    const BASE: u32 = 1;
+    const N: u32 = 2;
+    const C: u32 = 3;
+    const LO: u32 = 4;
+    const MID: u32 = 5;
+    let mut f = Function::new([(2, ValType::I32)]);
+    let mut s = f.instructions();
+    // `N` is `hi` from here on.
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(LO).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(LO).local_get(N).i32_add().i32_const(1).i32_shr_u().local_set(MID);
+    s.local_get(C);
+    s.local_get(R).local_get(BASE).local_get(MID).i32_const(1).i32_shl().i32_add();
+    s.array_get(T_I32S);
+    s.i32_lt_s();
+    s.if_(BlockType::Empty);
+    s.local_get(MID).local_set(N).br(1);
+    s.end();
+    s.local_get(C);
+    s.local_get(R).local_get(BASE).local_get(MID).i32_const(1).i32_shl().i32_add();
+    s.i32_const(1).i32_add().array_get(T_I32S);
+    s.i32_gt_s();
+    s.if_(BlockType::Empty);
+    s.local_get(MID).i32_const(1).i32_add().local_set(LO).br(1);
+    s.end();
+    s.i32_const(1).return_();
+    s.end().end();
+    s.i32_const(0);
+    s.end();
+    f
+}
+
+/// `$re_alts_find(alts, classes, s, from, flags, ascii, wide, caps) -> i32` (T78): see
+/// `Intrinsic::ReAltsFind`; regexp.js's `$$reAltsProg` describes `alts` and `classes`. With `i` the
+/// pattern is ASCII only (its characters and class ranges), so only ASCII letters need folding: a
+/// non-ASCII unit folds to a non-ASCII one, which no element matches but a negated class.
+fn re_alts_find(cx: &mut dyn Cx) -> Function {
+    let in_ranges = cx.helper(Helper::ReInRanges);
+    const AV: u32 = 0;
+    const CV: u32 = 1;
+    const SV: u32 = 2;
+    const FROM: u32 = 3;
+    const FLAGS: u32 = 4;
+    const FAV: u32 = 5;
+    const FWV: u32 = 6;
+    const CAPSV: u32 = 7;
+    const A: u32 = 8;
+    const CL: u32 = 9;
+    const FA: u32 = 10;
+    const FW: u32 = 11;
+    const S: u32 = 12;
+    const POS: u32 = 13;
+    const LEN: u32 = 14;
+    const COUNT: u32 = 15;
+    const I: u32 = 16;
+    const K: u32 = 17;
+    const N: u32 = 18;
+    const J: u32 = 19;
+    const C: u32 = 20;
+    const KIND: u32 = 21;
+    const V: u32 = 22;
+    const NWIDE: u32 = 23;
+    let i32s = ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(T_I32S) });
+    let mut f = Function::new([
+        (4, i32s),
+        (1, ValType::Ref(RefType { nullable: true, heap_type: string() })),
+        (11, ValType::I32),
+    ]);
+    let mut s = f.instructions();
+    let i32s_ht = HeapType::Concrete(T_I32S);
+    s.local_get(AV).ref_cast_non_null(i32s_ht).local_set(A);
+    s.local_get(CV).ref_cast_non_null(i32s_ht).local_set(CL);
+    s.local_get(SV).ref_cast_non_null(string()).local_tee(S);
+    s.array_len().local_set(LEN);
+    // The filter (JS `null`: none). Not with `y`: only `from` is tried.
+    s.local_get(FAV).ref_test_non_null(i32s_ht);
+    s.local_get(FLAGS).i32_const(2).i32_and().i32_eqz();
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(FAV).ref_cast_non_null(i32s_ht).local_set(FA);
+    s.local_get(FWV).ref_cast_non_null(i32s_ht).local_tee(FW);
+    s.array_len().i32_const(1).i32_shr_u().local_set(NWIDE);
+    s.end();
+    s.local_get(A).i32_const(0).array_get(T_I32S).local_set(COUNT);
+    s.local_get(FROM).local_set(POS);
+    // block 0: no match
+    s.block(BlockType::Empty);
+    // loop: each start position
+    s.loop_(BlockType::Empty);
+    // Every alternative needs a unit.
+    s.local_get(POS).local_get(LEN).i32_ge_s().br_if(1);
+    s.local_get(FA).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    // depths here: 0 scan loop, 1 found block, 2 if, 3 position loop, 4 no-match block
+    s.local_get(POS).local_get(LEN).i32_ge_s().br_if(4);
+    s.local_get(S).local_get(POS).array_get_u(T_STRING).local_tee(C);
+    s.i32_const(128).i32_lt_u();
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(FA).local_get(C).array_get(T_I32S);
+    s.else_();
+    s.local_get(NWIDE).i32_eqz();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(FW).ref_as_non_null().i32_const(0).local_get(NWIDE).local_get(C).call(in_ranges);
+    s.end();
+    s.end();
+    s.br_if(1);
+    s.local_get(POS).i32_const(1).i32_add().local_set(POS);
+    s.br(0);
+    s.end().end();
+    s.end();
+    // The alternatives at POS, in order.
+    s.i32_const(1).local_set(I);
+    s.i32_const(0).local_set(K);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    // depths: 0 alternatives loop, 1 alternatives block, 2 position loop, 3 no-match block
+    s.local_get(K).local_get(COUNT).i32_ge_s().br_if(1);
+    s.local_get(A).local_get(I).array_get(T_I32S).local_set(N);
+    s.block(BlockType::Empty);
+    // depths: 0 this alternative fails, 1 alternatives loop
+    s.local_get(POS).local_get(N).i32_add().local_get(LEN).i32_gt_s().br_if(0);
+    s.i32_const(0).local_set(J);
+    s.loop_(BlockType::Empty);
+    // depths: 0 element loop, 1 this alternative fails
+    s.local_get(J).local_get(N).i32_ge_s();
+    s.if_(BlockType::Empty);
+    s.local_get(CAPSV).ref_cast_non_null(i32s_ht).i32_const(0).local_get(POS).array_set(T_I32S);
+    s.local_get(CAPSV).ref_cast_non_null(i32s_ht).i32_const(1);
+    s.local_get(POS).local_get(N).i32_add().array_set(T_I32S);
+    s.local_get(POS).local_get(N).i32_add().return_();
+    s.end();
+    s.local_get(S).local_get(POS).local_get(J).i32_add().array_get_u(T_STRING).local_set(C);
+    // `i`: an ASCII lowercase letter as uppercase.
+    s.local_get(FLAGS).i32_const(1).i32_and();
+    s.local_get(C).i32_const(97).i32_sub().i32_const(26).i32_lt_u();
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(C).i32_const(32).i32_sub().local_set(C);
+    s.end();
+    s.local_get(A).local_get(I).i32_const(1).i32_add().local_get(J).i32_const(1).i32_shl().i32_add();
+    s.array_get(T_I32S).local_set(KIND);
+    s.local_get(A).local_get(I).i32_const(2).i32_add().local_get(J).i32_const(1).i32_shl().i32_add();
+    s.array_get(T_I32S).local_set(V);
+    s.local_get(KIND).i32_const(1).i32_eq();
+    s.if_(BlockType::Empty);
+    // depths: 0 if, 1 element loop, 2 this alternative fails
+    s.local_get(C).local_get(V).i32_ne().br_if(2);
+    s.else_();
+    s.local_get(CL).ref_as_non_null().local_get(V).i32_const(1).i32_add();
+    s.local_get(CL).local_get(V).array_get(T_I32S);
+    s.local_get(C).call(in_ranges);
+    s.local_get(KIND).i32_const(3).i32_eq();
+    s.i32_eq().br_if(2);
+    s.end();
+    s.local_get(J).i32_const(1).i32_add().local_set(J);
+    s.br(0);
+    s.end();
+    s.end();
+    // The next alternative.
+    s.local_get(I).i32_const(1).i32_add().local_get(N).i32_const(1).i32_shl().i32_add().local_set(I);
+    s.local_get(K).i32_const(1).i32_add().local_set(K);
+    s.br(0);
+    s.end().end();
+    // No alternative at POS.
+    s.local_get(FLAGS).i32_const(2).i32_and().br_if(1);
+    s.local_get(POS).i32_const(1).i32_add().local_set(POS);
+    s.br(0);
+    s.end().end();
+    s.i32_const(-1);
     s.end();
     f
 }

@@ -2116,6 +2116,10 @@ impl Emitter<'_> {
                     Intrinsic::NumberToString => H::Num(numstr::Helper::NumberToString),
                     Intrinsic::JsonQuote => H::JsonQuote,
                     Intrinsic::StrCopy => H::StrCopy,
+                    Intrinsic::StrBufGet => H::StrBufGet,
+                    Intrinsic::StrBufAppend => H::StrBufAppend,
+                    Intrinsic::StrBufLen => H::StrBufLen,
+                    Intrinsic::ReAltsFind => H::ReAltsFind,
                     Intrinsic::JsonQuoteInto => H::JsonQuoteInto,
                     Intrinsic::JsonScan => H::JsonScan,
                     Intrinsic::StringLength

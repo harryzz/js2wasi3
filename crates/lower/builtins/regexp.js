@@ -4,7 +4,7 @@
 // canonical order): `__intrinsic_regexp_new(data)` makes one,
 // `__intrinsic_regexp_data(v)` reads it back (`null` for `RegExp.prototype`, `undefined` for
 // anything else). `code` is the compiled pattern, shared by every RegExp of the same source and
-// flags: `[prog, sets, groups, names, flagBits, regs, source, flags, caps, regs]`: `prog`, `caps`
+// flags: `[prog, sets, groups, names, flagBits, regs, source, flags, caps, regs, firstSet, alts]`: `prog`, `caps`
 // and `regs` are `$i32s` arrays (`__intrinsic_i32_*`: typed, unboxed); `sets` holds two slots per
 // class (`negate`, its ranges as `$i32s`) or backreference (its groups, `null`); the escaped source
 // and the canonical flags; `caps`/`regs` are reused by every match (no user code runs while
@@ -1506,6 +1506,183 @@ function $$reFlagBits(f) {
 let $$reCache = null;
 let $$reCacheSize = 0;
 
+// T78: the code units a match can start with, for `$$reSearch` to skip the other positions: the
+// ranges (JS array `[lo, hi, …]`) collected by `$$reFirst`, or every unit (`$$reFsAll`).
+let $$reFs = null;
+let $$reFsAll = false;
+
+// Is unit `c` in JS ranges `r` (`[lo, hi, …]`)?
+function $$reInJsRanges(r, c) {
+  for (let i = 0; i < r.length; i += 2) {
+    if (c >= r[i] && c <= r[i + 1]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Add the units node `n` can start a match with to `$$reFs` (outside Unicode mode); 1 if it can
+// also match the empty string (then what follows it can start the match too), else 0. Conservative:
+// a node it doesn't understand adds every unit.
+function $$reFirst(n, icase) {
+  const t = n[0];
+  if (t === 1) {
+    const c = n[1];
+    if (icase && ((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) {
+      // Without `u` no non-ASCII unit canonicalizes to an ASCII one: the two cases.
+      $$append($$reFs, c & ~32);
+      $$append($$reFs, c & ~32);
+      $$append($$reFs, c | 32);
+      $$append($$reFs, c | 32);
+    } else if (icase && c >= 128) {
+      $$append($$reFs, 128);
+      $$append($$reFs, 0xffff);
+    } else {
+      $$append($$reFs, c);
+      $$append($$reFs, c);
+    }
+    return 0;
+  }
+  if (t === 3) {
+    const negate = n[1];
+    const r = n[2];
+    let wide = false;
+    for (let i = 0; i < r.length; i += 2) {
+      if (r[i + 1] >= 128) {
+        wide = true;
+      }
+    }
+    for (let u = 0; u < 128; u++) {
+      let m = $$reInJsRanges(r, u);
+      if (icase && !m && ((u >= 65 && u <= 90) || (u >= 97 && u <= 122))) {
+        m = $$reInJsRanges(r, u ^ 32);
+      }
+      if (m !== negate) {
+        $$append($$reFs, u);
+        $$append($$reFs, u);
+      }
+    }
+    if (negate || wide) {
+      $$append($$reFs, 128);
+      $$append($$reFs, 0xffff);
+    }
+    return 0;
+  }
+  if (t === 4) {
+    const items = n[1];
+    for (let i = 0; i < items.length; i++) {
+      if ($$reFirst(items[i], icase) === 0) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  if (t === 5) {
+    const alts = n[1];
+    let empty = 0;
+    for (let i = 0; i < alts.length; i++) {
+      empty |= $$reFirst(alts[i], icase);
+    }
+    return empty;
+  }
+  if (t === 6) {
+    return $$reFirst(n[2], icase);
+  }
+  if (t === 7) {
+    const e = $$reFirst(n[4], icase);
+    return n[1] === 0 ? 1 : e;
+  }
+  if (t === 8 || t === 9 || t === 10 || t === 12) {
+    // Assertions and lookarounds consume nothing.
+    return 1;
+  }
+  // `.`, a backreference, a modifiers group, anything else: any unit.
+  $$reFsAll = true;
+  return 1;
+}
+
+// T78: a pattern that is an alternation of fixed sequences of characters and classes (`abc|d[ef]g`,
+// outside Unicode and `v` mode; with `i` only ASCII ones): `[alts, classes]` (`$i32s`) for the
+// native search `__intrinsic_re_alts_find`, else null. `alts`:
+// the alternative count, then per alternative its length and per element (1, canonical unit) or
+// (2 | 3 for a negated class, offset in `classes`); `classes`: per class its pair count, then its
+// sorted ranges (closed under case folding with `i`, as `$$reEmit` makes them).
+function $$reAltsProg(ast, bits) {
+  if ((bits & 96) !== 0) {
+    return null;
+  }
+  const icase = (bits & 4) !== 0;
+  let alts = [ast];
+  if (ast[0] === 5) {
+    alts = ast[1];
+  }
+  const out = [alts.length];
+  const classes = [];
+  for (let a = 0; a < alts.length; a++) {
+    let items = [alts[a]];
+    if (alts[a][0] === 4) {
+      items = alts[a][1];
+    }
+    if (items.length === 0) {
+      return null;
+    }
+    $$append(out, items.length);
+    for (let i = 0; i < items.length; i++) {
+      const n = items[i];
+      if (n[0] === 1) {
+        if (icase && n[1] >= 128) {
+          return null;
+        }
+        $$append(out, 1);
+        $$append(out, icase ? +$$reCanon(n[1], false) : n[1]);
+      } else if (n[0] === 3) {
+        $$append(out, n[1] ? 3 : 2);
+        $$append(out, classes.length);
+        const r = icase ? $$reCaseClose(n[2], false) : n[2];
+        if (icase && r.length > 0 && r[r.length - 1] >= 128) {
+          return null;
+        }
+        $$append(classes, r.length >> 1);
+        for (let k = 0; k < r.length; k++) {
+          $$append(classes, r[k]);
+        }
+      } else {
+        return null;
+      }
+    }
+  }
+  return [$$reI32(out), $$reI32(classes)];
+}
+
+// The first-unit filter of pattern `ast` as `[ascii, ranges]` (`$i32s`: 128 flags, then the
+// sorted ranges of units from 128 on), or null when every position must be tried (Unicode mode,
+// a pattern that can match the empty string, or any unit can start it).
+function $$reFirstSet(ast, bits) {
+  if ((bits & 96) !== 0) {
+    return null;
+  }
+  $$reFs = [];
+  $$reFsAll = false;
+  const empty = $$reFirst(ast, (bits & 4) !== 0);
+  const r = $$reNormalize($$reFs);
+  $$reFs = null;
+  if (empty !== 0 || $$reFsAll) {
+    return null;
+  }
+  const ascii = __intrinsic_i32_new(128);
+  const wide = [];
+  for (let i = 0; i < r.length; i += 2) {
+    for (let u = r[i]; u <= r[i + 1] && u < 128; u++) {
+      __intrinsic_i32_set(ascii, u, 1);
+    }
+    if (r[i + 1] >= 128) {
+      $$append(wide, r[i] < 128 ? 128 : r[i]);
+      $$append(wide, r[i + 1]);
+    }
+  }
+  return [ascii, $$reI32(wide)];
+}
+
 // A JS array of integers as an `$i32s` array.
 function $$reI32(a) {
   const n = a.length;
@@ -1538,6 +1715,8 @@ function $$reCompile(src, flagText, bits) {
   }
   $$reEmit(ast, 0);
   $$reOp(0);
+  const firstSet = $$reFirstSet(ast, bits);
+  const altsProg = $$reVMode ? null : $$reAltsProg(ast, bits);
   const names = [];
   for (let i = 0; i < $$reNames.length; i++) {
     $$append(names, [$$reNames[i][0], $$reNames[i][1]]);
@@ -1550,7 +1729,8 @@ function $$reCompile(src, flagText, bits) {
     }
   }
   const code = [$$reI32($$reProg), $$reSets, $$reGroups + 1, names, bits, $$reRegs,
-    $$reEscapeSource(src), f, __intrinsic_i32_new(2 * ($$reGroups + 1)), __intrinsic_i32_new($$reRegs)];
+    $$reEscapeSource(src), f, __intrinsic_i32_new(2 * ($$reGroups + 1)), __intrinsic_i32_new($$reRegs),
+    firstSet, altsProg];
   $$reProg = null;
   $$reSets = null;
   $$reNames = null;
@@ -1741,13 +1921,30 @@ function $$reGrow(a) {
   return b;
 }
 
+// T78: the fields `$$reRun` reads from the `code` it ran last (a search runs it at many positions;
+// `code` arrays never change).
+let $$reRunCode = null;
+let $$reRunProg = null;
+let $$reRunSets = null;
+let $$reRunBits = 0;
+let $$reRunCaps = null;
+let $$reRunRegs = null;
+
 // Run `code` on `s` from `start`: the end position (captures in `code[8]`), or -1.
 function $$reRun(code, s, start) {
-  const prog = code[0];
-  const sets = code[1];
-  const bits = +code[4];
-  const caps = code[8];
-  const regs = code[9];
+  if (code !== $$reRunCode) {
+    $$reRunCode = code;
+    $$reRunProg = code[0];
+    $$reRunSets = code[1];
+    $$reRunBits = +code[4];
+    $$reRunCaps = code[8];
+    $$reRunRegs = code[9];
+  }
+  const prog = $$reRunProg;
+  const sets = $$reRunSets;
+  const bits = $$reRunBits;
+  const caps = $$reRunCaps;
+  const regs = $$reRunRegs;
   // Flags as numbers, not booleans (boolean locals are boxed, F14).
   // (`let`: T46's MODS changes them; the same code as `const` without it.)
   let icase = bits & 4;
@@ -2124,6 +2321,8 @@ function $$reRun(code, s, start) {
       }
     }
   }
+  // Not reached (the loop only returns). Without it the result would also be `undefined`: boxed.
+  return -1;
 }
 
 // Does the one-character instruction at `apc` (CHAR, ANY or CLASS) match the character `c`
@@ -2278,13 +2477,42 @@ function $$reSearch(r, data, s) {
       unit = c;
     }
   }
+  // T78: the units any match starts with (`$$reFirstSet`), when there's no single literal.
+  let fascii = null;
+  let fwide = null;
+  let nwide = 0;
+  const fset = code[10];
+  if (unit < 0 && !sticky && fset !== null) {
+    fascii = fset[0];
+    fwide = fset[1];
+    nwide = __intrinsic_i32_len(fwide);
+  }
   let end = -1;
-  while (lastIndex <= len) {
+  const altsProg = code[11];
+  if (altsProg !== null && lastIndex <= len) {
+    // T78: a fixed alternation: the native search (filter, then the alternatives in order).
+    end = __intrinsic_re_alts_find(altsProg[0], altsProg[1], s, lastIndex,
+      (icase !== 0 ? 1 : 0) | (sticky ? 2 : 0), fset === null ? null : fset[0],
+      fset === null ? null : fset[1], code[8]);
+  }
+  while (altsProg === null && lastIndex <= len) {
     if (unit >= 0) {
       while (lastIndex < len && __intrinsic_unit(s, lastIndex) !== unit) {
         lastIndex++;
       }
       if (lastIndex >= len) {
+        break;
+      }
+    } else if (fascii !== null) {
+      while (lastIndex < len) {
+        const c = __intrinsic_unit(s, lastIndex);
+        if (c < 128 ? __intrinsic_i32_get(fascii, c) !== 0 : nwide !== 0 && $$reInRanges(fwide, c) !== 0) {
+          break;
+        }
+        lastIndex++;
+      }
+      if (lastIndex >= len) {
+        // The pattern needs a character.
         break;
       }
     } else if (first >= 0) {

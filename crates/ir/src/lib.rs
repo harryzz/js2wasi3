@@ -822,6 +822,20 @@ pub enum Intrinsic {
     JsonQuote,
     /// T76: copy string `src` into string `dst` (made by `StrNew`) at `i` (args: dst, i: `i32`, src).
     StrCopy,
+    /// T78: the value of a variable that may hold a string buffer (`$strbuf`, made by
+    /// `StrBufAppend`): a buffer's string (made once per append run), any other value as it is.
+    StrBufGet,
+    /// T78: (v, s) -> the buffer holding `v`'s string followed by string `s`: `v` itself if it is
+    /// a buffer (appended in place, amortized O(1)), else a new buffer with room to grow. `v` is a
+    /// string or a buffer; anything else gives `v + s` (a string).
+    StrBufAppend,
+    /// T78: the length (`f64`) of what `StrBufGet` gives, a string, without making it.
+    StrBufLen,
+    /// T78: (alts, classes, s, from: `i32`, flags: `i32` (1 `i`, 2 `y`), ascii, wide, caps) -> `i32`:
+    /// regexp.js's `$$reAlts` search natively: the end of the first match of a fixed alternation in
+    /// string `s` from `from` (only at `from` with `y`), with its start and end in `caps` (`$i32s`);
+    /// -1 if none. `ascii`/`wide` (`$i32s`, or `null`): the first-unit filter of `$$reFirstSet`.
+    ReAltsFind,
     /// T76: write QuoteJSONString of string `s` into string `buf` at `i` (args: buf, i: `i32`, s);
     /// the index after it (`i32`). `buf` must have room for `6 * len + 2` units.
     JsonQuoteInto,
@@ -1309,6 +1323,9 @@ pub enum TypedOp {
     /// `(b, byte_length, resizable) -> jsval`: a new buffer with `b`'s bytes (cut or zero-filled to
     /// `byte_length`; resizable with `b`'s max if `resizable` and `b` is), then `b` is detached.
     BufferTransfer,
+    /// T78: `(t, start, end, mask) -> jsval`: the string of units `byte & mask` of elements
+    /// `start..end` (in range) of a typed array of bytes (`Buffer`'s `latin1`/`ascii` decoding).
+    Latin1,
 }
 
 pub const MAP_KIND_MAP: u8 = 0;
@@ -1393,6 +1410,10 @@ impl Intrinsic {
             Intrinsic::NumberToString => (&[F64], Some(JsVal)),
             Intrinsic::JsonQuote => (&[JsVal], Some(JsVal)),
             Intrinsic::StrCopy => (&[JsVal, I32, JsVal], None),
+            Intrinsic::StrBufGet => (&[JsVal], Some(JsVal)),
+            Intrinsic::StrBufAppend => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::StrBufLen => (&[JsVal], Some(F64)),
+            Intrinsic::ReAltsFind => (&[JsVal, JsVal, JsVal, I32, I32, JsVal, JsVal, JsVal], Some(I32)),
             Intrinsic::JsonQuoteInto => (&[JsVal, I32, JsVal], Some(I32)),
             Intrinsic::JsonScan => (&[JsVal, I32, I32], Some(I32)),
             Intrinsic::StringLength => (&[JsVal], Some(F64)),
@@ -1526,6 +1547,7 @@ impl Intrinsic {
                 TypedOp::BufferDetached => (&[JsVal], Some(Bool)),
                 TypedOp::BufferResize => (&[JsVal, I32], None),
                 TypedOp::BufferTransfer => (&[JsVal, I32, I32], Some(JsVal)),
+                TypedOp::Latin1 => (&[JsVal, I32, I32, I32], Some(JsVal)),
             },
         }
     }
@@ -1538,6 +1560,10 @@ impl Intrinsic {
             Intrinsic::NumberToString => "number_to_string",
             Intrinsic::JsonQuote => "json_quote",
             Intrinsic::StrCopy => "str_copy",
+            Intrinsic::StrBufGet => "str_buf_get",
+            Intrinsic::StrBufAppend => "str_buf_append",
+            Intrinsic::StrBufLen => "str_buf_len",
+            Intrinsic::ReAltsFind => "re_alts_find",
             Intrinsic::JsonQuoteInto => "json_quote_into",
             Intrinsic::JsonScan => "json_scan",
             Intrinsic::StringLength => "string_length",
@@ -1741,6 +1767,7 @@ impl Intrinsic {
                 TypedOp::BufferDetached => "buffer_detached",
                 TypedOp::BufferResize => "buffer_resize",
                 TypedOp::BufferTransfer => "buffer_transfer",
+                TypedOp::Latin1 => "typed_latin1",
             },
         }
     }

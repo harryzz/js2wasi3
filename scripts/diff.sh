@@ -26,6 +26,31 @@ TIMEOUT=10s
 
 now_ms() { echo $(($(date +%s%N) / 1000000)); }
 
+# T78: node's results are cached in out/node-cache/<key>/ (node.out, node.err, node.status): node runs
+# only when the key changes. The key hashes the node version, this script's way of running node
+# (NODE_RUN), the fixture, its .args/.env/.uncaught files and .fs directory, its directory's
+# package.json and, for a multi-file program (<dir>/<case>/main.js), every file of the case.
+# DIFF_NODE_CACHE=0: always run node (and refresh the cache).
+NODE_CACHE=$ROOT/out/node-cache
+NODE_RUN="v1 TZ=UTC --no-warnings uncaught-reduced"
+node_key() {
+  local f=$1 dir; dir=$(dirname "$f")
+  {
+    echo "$NODE_VERSION $NODE_RUN"
+    sha256sum <"$f"
+    for x in args env uncaught; do
+      [ -f "${f%.js}.$x" ] && { echo "$x"; sha256sum <"${f%.js}.$x"; }
+    done
+    [ -f "$dir/package.json" ] && sha256sum <"$dir/package.json"
+    [ -d "${f%.js}.fs" ] && (cd "${f%.js}.fs" && find . -type f | LC_ALL=C sort | xargs -r -d '\n' sha256sum)
+    if [ "$(basename "$f")" = main.js ]; then
+      case "$(basename "$(dirname "$dir")")" in
+        modules | commonjs) (cd "$dir" && find . -type f | LC_ALL=C sort | xargs -r -d '\n' sha256sum) ;;
+      esac
+    fi
+  } | sha256sum | cut -c1-32
+}
+
 # One fixture: writes <work>/<id>.result ("PASS ms" / "FAIL ms reason" / "SKIP reason") and <id>.diff.
 one() {
   local f=$1 work=$2
@@ -54,11 +79,24 @@ one() {
     cp -r "${f%.js}.fs" "$d/node.fs" && cp -r "${f%.js}.fs" "$d/wasm.fs"
     ncwd="$d/node.fs" wdir=(--dir "$d/wasm.fs::/")
   fi
-  (cd "$ncwd" && env TZ=UTC "${envs[@]}" timeout "$TIMEOUT" node --no-warnings "$f" "${args[@]}") >"$d/node.out" 2>"$d/node.err"
-  echo $? >"$d/node.status"
-  if [ -f "${f%.js}.uncaught" ]; then
-    mv "$d/node.err" "$d/node.err.raw"
-    node "$ROOT/scripts/node-uncaught.mjs" "$d/node.err.raw" >"$d/node.err"
+  local key cached
+  key=$(node_key "$f")
+  cached=$NODE_CACHE/$key
+  if [ "${DIFF_NODE_CACHE:-1}" != 0 ] && [ -f "$cached/node.status" ]; then
+    cp "$cached/node.out" "$cached/node.err" "$cached/node.status" "$d/"
+  else
+    (cd "$ncwd" && env -u FORCE_COLOR TZ=UTC "${envs[@]}" timeout "$TIMEOUT" node --no-warnings "$f" "${args[@]}") >"$d/node.out" 2>"$d/node.err"
+    echo $? >"$d/node.status"
+    if [ -f "${f%.js}.uncaught" ]; then
+      mv "$d/node.err" "$d/node.err.raw"
+      node "$ROOT/scripts/node-uncaught.mjs" "$d/node.err.raw" >"$d/node.err"
+    fi
+    # Not a result of the timeout (status 124): that one is node's speed, not its answer.
+    if [ "$(cat "$d/node.status")" != 124 ]; then
+      mkdir -p "$NODE_CACHE"
+      local tmp; tmp=$(mktemp -d "$NODE_CACHE/.tmp.XXXXXX")
+      cp "$d/node.out" "$d/node.err" "$d/node.status" "$tmp/" && mv -T "$tmp" "$cached" 2>/dev/null || rm -rf "$tmp"
+    fi
   fi
   # `x.flags` next to `x.js`: more build options (one line, e.g. `--include 'lib/*.js'`), used
   # from the fixture's directory.
@@ -123,6 +161,8 @@ done
 [ ${#files[@]} -eq 0 ] && { echo "no fixtures" >&2; exit 2; }
 
 (cd "$ROOT" && cargo build -q -p js2wasi3) || exit 2
+NODE_VERSION=$(node --version)
+export NODE_VERSION
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/js2wasi3-diff.XXXXXX")
 trap 'rm -rf "$work"' EXIT

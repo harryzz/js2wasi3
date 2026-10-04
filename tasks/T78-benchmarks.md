@@ -1,6 +1,6 @@
 # T78: run-time benchmarks against node (Benchmarks Game, Octane 2)
 
-Status: todo (handoff written 2026-10-04) | Depends on: none (independent of T77)
+Status: in progress (started 2026-10-04) | Depends on: none (independent of T77)
 
 ## Goal
 Standard, third-party run-time benchmarks to measure js2wasi3 against node, chosen by others (not by us, unlike
@@ -77,3 +77,83 @@ and need the user's OK to install them.
   (`docs/zigbee2mqtt-feasibility.md`, "Production runs 2026-10-04"); the user asked for standard benchmarks with
   node versions, regexes first; scriptc (vercel-labs) publishes no benchmark results (checked 2026-10-04: its
   `scripts/bench-builds.mjs` measures build latency of two small TypeScript apps).
+- 2026-10-04: started. Sources: Benchmarks Game repo (salsa, commit 40296663, 2025-03-07) `public/download/benchmarksgame-sourcecode.zip`
+  (the `bencher/programs` dir only has 4 non-node programs); Octane github chromium/octane commit 570ad1cc (2017-04-12).
+  Picked single-threaded node programs: binarytrees #7, fannkuchredux #8, fasta #8, knucleotide #8, mandelbrot #8,
+  nbody #8, pidigits #3, regexredux #4, revcomp #2, spectralnorm #8 → `tests/bench/benchmarksgame/<name>.js` (+ LICENSE.md;
+  `tests/bench/package.json` `"type":"commonjs"`: several are sloppy code). Octane: base.js + 8 benchmarks + LICENSE in
+  `tests/bench/octane/`, `driver.js` (modes `score` / `fixed` = deterministicIterations, no warm-up).
+- 2026-10-04: first builds (release): 15/18 build. Build failures: knucleotide (`node:readline`, F238), Octane EarleyBoyer
+  (`"\000"` octal escapes, sloppy only, F232), Octane RayTrace (`Object.extend = …`: new property on a built-in
+  constructor). Small-input runs vs node: same output for binarytrees, fasta, pidigits; ReferenceError for implicit
+  globals (sloppy assignment) in fannkuchredux (`f`), nbody (`py = pz = 0`), spectralnorm (`i = j = 0`) (F232);
+  mandelbrot: `process.stdout.write(Uint8Array)` rejected (only Buffer/string); regexredux: `readFileSync('/dev/stdin')`
+  ENOENT; revcomp: no `process.stdin` (F239); `readFileSync(0)` EBADF. Plan: report these, plus run minimally patched
+  copies (marked) so every program still gets a time.
+- 2026-10-04: no stdin at all (F239: `process.stdin` undefined, fd 0 EBADF), so the stdin programs get patched copies
+  in `tests/bench/patched/` that read `input.fa` from a preopened dir (regexredux, knucleotide; revcomp: a tiny
+  `stdin.read(n)`/`on('readable')` object over the file). Patched for strict mode: fannkuchredux, nbody,
+  spectralnorm, knucleotide (declarations only); mandelbrot: `write(Buffer.from(u8.buffer))`.
+- 2026-10-04: Octane needs more: base.js assigns `Math.random = …` (unsupported: assigning a property of a built-in,
+  build error at top level, run-time "global `Math` isn't available" inside a function; also `Object.extend = …` in
+  RayTrace) and implicit globals (`alert`, `setupEngine`, crypto's `nValue`…, earley-boyer's `result`), NavierStokes
+  uses sloppy `this` (=global) in `checkResult`, EarleyBoyer has `eval` in the unused `sc_jsNew` (F191) and octal
+  escapes. Fix: `octane/prelude.js` (declarations, `__random = Math.random`) + `s/Math\.random/__random/g` on the
+  concatenation, and patched copies of raytrace, navier-stokes, earley-boyer. Found the implicit globals by running
+  node on the file with `"use strict"` prepended until no ReferenceError.
+- 2026-10-04: first Octane `fixed` runs (deterministicIterations, no warm-up), outputs equal: Richards node 0.98 s vs
+  149 s (152×), DeltaBlue 0.64 s vs 134 s (209×), RayTrace 1.36 s vs 301 s (221×). Too long for 5 runs: the runner
+  needs an iteration scale (`score` mode runs ~1 s per benchmark instead).
+- 2026-10-04: `scripts/bench.sh` written (programs table with small/official sizes, Octane `fixed 0.05` by default,
+  patched copies marked `*`, outputs compared on the first run, min/median of `-r` runs, `results.tsv`). Laptop
+  calibration (1 run): binarytrees 16 0.33 s vs 13.6 s (42×), fannkuchredux* 10 0.45 vs 9.5 s (21×), fasta 250k
+  0.29 vs 1.9 s (6.5×), all equal output. User OK'd the 5-run pass on a-03: synced (rsync, release build there),
+  1-run calibration there first (a-03: binarytrees 20×, fannkuchredux* 22×, fasta 6.6×).
+- 2026-10-04: a-03 calibration so far: knucleotide* fasta 250k > 300 s timeout (node 1.3 s), nbody* 500k 55 s vs
+  0.15 s (363×), pidigits 2000 6.9×. mandelbrot* failed: `process.stdout.write` takes strings only (Buffer and
+  Uint8Array both rejected: `crates/lower/builtins/process.js` `$$processWriter`), `fs.writeSync(1, …)` EBADF; the
+  patched copy now prints the header + a checksum of the bitmap (same compute loop).
+- 2026-10-04: root-cause probe (laptop, user asked): nbody-like loop (`b.x += b.vx * dt` over 2 objects, 6M updates):
+  node 45 ms, js2wasi3 1.89 s. IR: every `b.x` is `$get(obj, "x")` / `$set`, every float result `f64->jsval` (boxed).
+  perf: 39% wasmtime GC fixed costs (trace_vmctx_roots 13.5%, type_registry root 12.3%, RefType::from_wasm_type,
+  RegisteredType drop, copying forward), get_named 9.9%, box_number 4.4%, to_number 3.4%. With
+  `-O gc-heap-initial-size=256MiB`: 0.91 s (2.1× faster); then get_named 17.6%, box_number 7.9%, to_number 5.8%,
+  get 4.3%, set_named 4.2%, find_own_named 3.9%, ordinary_set_named 3.1%, get_length 2.8%, js_add 2.5%.
+  A plain f64 loop (typed locals) is fast. So: (1) very frequent collections with large per-collection fixed cost,
+  fed by (2) boxing every non-i31 number, and (3) property access as runtime hash lookups (no shapes/inline caches).
+- 2026-10-04: a-03 calibration done (1 run): revcomp* 68×, spectralnorm* 44×, Octane fixed 0.05: Richards 59×,
+  DeltaBlue 38×, RayTrace* 118×, NavierStokes* 33×, Crypto 28×, Splay 14×, RegExp 74×; EarleyBoyer*: wrong result
+  under js2wasi3 (`TypeError: Cannot read properties of undefined (reading 'cdr')`, node: done) → to narrow down;
+  knucleotide* (fasta 250k) and regexredux* (fasta 500k) > 300 s.
+- 2026-10-04: regexredux root cause (laptop): superlinear (fasta 5k 7.9 s, 20k 60 s; node 40-60 ms). 1 GiB GC heap:
+  1.65 s / 7.8 s, still superlinear; then perf: memset 53% + memmove 26%, 81.5% of samples inside
+  `readFileSync(…, 'ascii')` → Buffer `asciiSlice` (crates/frontend/node/buffer.js:1014: `ret += String.fromCharCode(…)`
+  per byte) → `concat`, which copies the whole flat string each time: O(n²) string building with `+=` (node: ropes).
+  Diagnostic: the same program reading `'utf8'`: 20k 0.92 s, 100k 5.6 s (linear; was 62.7 s at 20k), GC heap size
+  no longer matters there. So two separate problems: quadratic `+=` string building (concat copies; latin1Slice etc.
+  have the same loop) and the GC fixed costs/boxing/property lookups from the nbody probe.
+- 2026-10-04: user code too: `let s = ""; for (…) s += "a"` (sc.js): 25k 0.65 s, 50k 1.56 s, 100k 3.74 s, 200k 10.3 s
+  (node 200k: 66 ms incl. startup). `+=` on strings is O(n²) in general (flat strings, concat copies both sides).
+- 2026-10-04: user: fix the quadratic `+=` now (under T78), the rest as follow-ups. Change: a string variable
+  that is appended to (`x += e`, `x = x + e…`; closures analysis `appended`) and is uncaptured (a local) or
+  top-level (a global) holds the string or a `$strbuf` (new runtime type 28; `$bigint` is now 29):
+  `str_buf_append` appends in place (buffer doubles), `str_buf_get` makes the string once per run of appends,
+  `str_buf_len` gives `.length` without making it (IR intrinsics StrBufGet/StrBufAppend/StrBufLen;
+  `Place::Buf`/`BufGlobal` in the lowering; `buf_append` rewrites the store; it refuses pieces that write the
+  variable, and for globals pieces that run any JS code). sc.js (`s += "a"` top-level): 200k 10.3 s → 19 ms,
+  2M 64 ms. sb.js (function locals, `.length`, `x = x + i + ","`): same output as node, validates.
+- 2026-10-04: regexredux* fasta 20k after the fix: 62.7 s → 1.31 s (100k 5.8 s, 500k 28.0 s vs node 0.55 s), same output. This shell sets FORCE_COLOR=3 (node colors console.log into files): bench.sh now runs node with `env -u FORCE_COLOR`. scripts/diff.sh run started and stopped by the user before its summary (user: cache node's results instead of rerunning node every time).
+- 2026-10-04: regexredux (patched, fasta 100k; node 0.12 s): after the `+=` fix 4.23 s; profile: the regex VM
+  started at every position (alternation patterns have no first instruction to skip on). `$$reFirstSet`
+  (`code[10]`, first-unit filter): 2.78 s. `$$reRun` keeps the `code` fields it read last and returns an `f64`
+  (an explicit `return -1` after its loop; the implicit `undefined` made the result boxed): 2.14 s. Fixed
+  alternations (`$$reAltsProg`, `code[11]`) matched without the VM, in JS: 1.39 s; natively (`re_alts_find`,
+  `re_in_ranges` in runtime.rs; `Intrinsic::ReAltsFind`): 0.92 s (possibly measured under load). Buffer
+  `latin1`/`ascii` decoding native (`TypedOp::Latin1`, `__intrinsic_typed_latin1`): 0.55-0.60 s (user's 5 runs),
+  output equal. Checks: tmp re.js (38 patterns: match/exec/replace, `i`, classes, negated, `^`/`\b`/lookarounds,
+  `y`, `u`, overlapping alternatives) and bd.js (ascii/latin1/binary, offsets, ranges) equal node's.
+- 2026-10-04: user: node's results shouldn't be recomputed each run: `scripts/diff.sh` caches them in
+  `out/node-cache/` (key: node version, fixture and its side files, package.json, a multi-file case's files).
+  Full `scripts/diff.sh` (filled the cache, 524 s): 237 passed, 2 failed (node/fetch.js, node/fs-streams.js: the
+  10 s timeout under the full parallel load; alone both pass), 19 skipped. `cargo test`: all pass (no IR snapshot
+  changed). Follow-ups F331-F339 added. Benchmarks (5-run tables, docs/benchmarks.md) still to do.

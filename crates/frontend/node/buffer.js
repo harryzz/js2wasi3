@@ -1012,21 +1012,24 @@ function decodeCodePointsArray (codePoints) {
 }
 
 function asciiSlice (buf, start, end) {
-  let ret = ''
-  end = Math.min(buf.length, end)
-
-  for (let i = start; i < end; ++i) {
-    ret += String.fromCharCode(buf[i] & 0x7F)
-  }
-  return ret
+  return byteSlice(buf, start, end, 0x7F)
 }
 
 function latin1Slice (buf, start, end) {
-  let ret = ''
-  end = Math.min(buf.length, end)
+  return byteSlice(buf, start, end, 0xFF)
+}
 
+// One unit per byte (`byte & mask`). T78: a Uint8Array (a Buffer) in one native pass.
+function byteSlice (buf, start, end, mask) {
+  end = Math.min(buf.length, end)
+  if (start >= end) return ''
+  const kind = __intrinsic_typed_kind(buf)
+  if ((kind === 1 || kind === 2) && start >= 0) {
+    return __intrinsic_typed_latin1(buf, start, end, mask)
+  }
+  let ret = ''
   for (let i = start; i < end; ++i) {
-    ret += String.fromCharCode(buf[i])
+    ret += String.fromCharCode(buf[i] & mask)
   }
   return ret
 }
