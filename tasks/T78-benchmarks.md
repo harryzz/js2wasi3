@@ -1,6 +1,6 @@
 # T78: run-time benchmarks against node (Benchmarks Game, Octane 2)
 
-Status: in progress (started 2026-10-04) | Depends on: none (independent of T77)
+Status: paused 2026-10-04 for T77 (started 2026-10-04) | Depends on: none (independent of T77)
 
 ## Goal
 Standard, third-party run-time benchmarks to measure js2wasi3 against node, chosen by others (not by us, unlike

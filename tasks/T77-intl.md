@@ -1,6 +1,6 @@
 # T77: `Intl` (ECMA-402) and the locale-sensitive built-ins
 
-Status: todo (handoff written 2026-10-04) | Depends on: T21 (prelude), T26 (`Date`), T27 (Unicode data generation), T40 (BigInt)
+Status: in progress (started 2026-10-04) | Depends on: T21 (prelude), T26 (`Date`), T27 (Unicode data generation), T40 (BigInt)
 
 ## Goal
 A full ECMA-402 implementation in js2wasi3, like node 24.21.0 (the oracle: ICU 78.3, CLDR 48, Unicode 17.0, tzdata
@@ -63,6 +63,44 @@ locale-sensitive methods keep their bytes (gated like BigInt, T40).
   agree, and a live run must survive a device's time read. Production runs need the user (they stop production);
   the test rig: `reference` memory (test coordinator, test topics only).
 
+## Findings 2026-10-04 (session 1, before any code)
+- **How to bind `Intl`**: like node's other JS globals: add `("Intl", "node:internal/intl", "Intl")` to
+  `GLOBALS` in `crates/frontend/src/node.rs` and the module to its `MODULES` (`include_str!("../node/intl.js")`).
+  The linker loads the module only where a program names `Intl`, so other programs keep their bytes (the gating the
+  task asks for). Remove `Intl` from the "node's global … isn't available (planned: T21)" path (`lower/src/lib.rs`,
+  `NODE_GLOBALS` / `lacks_global`). The locale-sensitive methods of other built-ins (`toLocaleString`, …) are in the
+  prelude (`crates/lower/builtins/`): they need a separate way to reach the module (decide in slice 2/3).
+- **What zigbee-herdsman needs** (`dist/utils/timeService.js`, `@date-fns/tz` 1.x in the zp tree):
+  `Intl.DateTimeFormat().resolvedOptions().timeZone`; `tzScan(zone, {start, end})` → `tzOffset(zone, date)`, which
+  caches `new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "longOffset" }).format` **as an unbound
+  function**: `format` must be the spec's getter returning a bound function (node: the same function each read;
+  reading the getter on `Intl.DateTimeFormat.prototype` itself throws `TypeError: Method UnwrapDateTimeFormat called
+  on incompatible receiver`); then `format(date).split("GMT")[1]`.
+- **Default time zone**: js2wasi3's local time is UTC (T26, F184), so `resolvedOptions().timeZone` must be `"UTC"`
+  (node with `TZ=UTC` gives that) to agree with `Date`. Honouring `TZ` is F184's decision, later.
+- **node reference** (`TZ=UTC`, d = 2026-10-04T07:12:44Z, and 2026-01-15T00:00Z), `en-US`, `longOffset`:
+  UTC `"10/4/2026, GMT+00:00"` / `"1/15/2026, GMT+00:00"`; Europe/Sofia `GMT+03:00` / `GMT+02:00`;
+  America/New_York `"10/4/2026, GMT-04:00"` / `"1/14/2026, GMT-05:00"`; Asia/Kolkata `GMT+05:30`;
+  Australia/Lord_Howe `GMT+11:00` both; Etc/GMT+5 `GMT-05:00`. `new Intl.DateTimeFormat().format(d)` →
+  `"10/4/2026"`; `new Intl.DateTimeFormat("en-US").format !== another instance's .format`;
+  `Intl.supportedValuesOf("timeZone").length` 418; `Object.getOwnPropertyNames(Intl)`: getCanonicalLocales,
+  supportedValuesOf, DateTimeFormat, NumberFormat, Collator, PluralRules, RelativeTimeFormat, ListFormat, Locale,
+  DisplayNames, Segmenter, DurationFormat.
+- **Size of the task**: full ECMA-402 like node (every locale's CLDR patterns, ICU's skeleton matching, collation,
+  segmentation) is weeks of work. Delivered in stages (all T77):
+  - **Stage A** (first, fixes F330): the `Intl` global; BCP 47 parsing/canonicalization, `getCanonicalLocales`,
+    `supportedValuesOf`; `DateTimeFormat` for `en-US` (`format`, `formatToParts`, `resolvedOptions`, the bound
+    `format` getter, `timeZoneName` styles, `dateStyle`/`timeStyle`); **all 418 IANA zones** (+ aliases) with
+    offsets and DST transitions **generated from node itself** (`scripts/gen-intl.mjs`: probe node's `Intl` per
+    zone, e.g. daily from 1900 to 2100 then bisect to the second; check the output against node; future years by
+    the zone's yearly rule; decide the data format by size: F246 warns about large string constants in a module).
+    Unsupported locales/options throw a clear error, never wrong output.
+  - **Stage B**: `NumberFormat`, `PluralRules`, `Number/BigInt/Date.prototype.toLocale*` for `en-US`.
+  - **Stage C**: other locales from CLDR data (cldr-json 48, pinned in TOOLS.md), `Collator`/`localeCompare`/
+    `normalize`, `RelativeTimeFormat`, `ListFormat`, `DisplayNames`, `DurationFormat`, `Segmenter`, test262 intl402.
+- Also found: `node:process`'s named-export list (`crates/frontend/src/node.rs`, `exports("node:process")`) lacks
+  `memoryUsage`/`cpuUsage` (added in F340): `import { memoryUsage } from "node:process"` would fail. Small fix.
+
 ## Plan (slices; each with fixtures vs node, `wasm-tools validate`, a wasmtime run, Progress entries)
 1. **Infrastructure**: the `Intl` namespace (a global the linker binds when named; gated), BCP 47 parsing and
    canonicalization (aliases, likely subtags), locale negotiation (`lookup`/`best fit` as node resolves),
@@ -89,3 +127,56 @@ locale-sensitive methods keep their bytes (gated like BigInt, T40).
 
 ## Progress
 - 2026-10-04: handoff written (after the zigbee2mqtt production runs of 2026-10-04 found the `Intl` crash, F330).
+- 2026-10-04: started (user: Intl first, then a task to profile zigbee2mqtt's real workload). Order: slice 1
+  (namespace, locales, generator, gating), then slice 3 (DateTimeFormat + time zones: the production crash, F330),
+  then 2, 4-7, grouped as stages A-C (see Findings). T78 paused. Tools unchanged (check-tools.sh). No code yet:
+  findings and node reference values recorded above; next session starts with Stage A (gen-intl.mjs first).
+- After T77: a new task to profile zigbee2mqtt's real workload (user, 2026-10-04): record a production run's
+  traffic, replay it offline under node and js2wasi3, profile where the ~12× CPU per event goes (F329, F334).
+- 2026-10-04 (session 2): Stage A begun. Probed node: zone ids resolve to ICU's canonical (Asia/Kolkata → Asia/Calcutta, US/Eastern → America/New_York, utc/Etc/UTC/GMT/Zulu → UTC; offsets `+05:30`, `-0800` → `-08:00`); names change with the metazone over time (New York 1850: short `GMT-4:56:02`, generic `New York Time`); LMT offsets have seconds (Sofia `GMT+01:33:16`). Generator plan: sample offsets by `getTimezoneOffset` (TZ switched in-process, 0.08 µs/call) every 12 h 1800–2100, names monthly via `formatToParts` (3.3 µs), bisect each change to the second with `Intl`; store per zone up to its rule-stable window, project later years by the equivalent year (same leap, same Jan 1 weekday). Alias candidates: /usr/share/zoneinfo + tzdata.zi links, each checked by node.
+- 2026-10-04: `scripts/gen-intl.mjs` written and run. `tz`: 445 resolved zones + 152 aliases, every zone checked
+  against node at 248,403 instants (random 1779–2286 and ±1 s around each change); 483 KB (`intl_tz.js`; the
+  per-period en names are most of it). Generic names change at *other* zones' transitions (ICU compares with the
+  metazone's golden zone: "Eastern European Time (Egypt)"), so names are sampled at every zone's change instants;
+  Asia/Gaza and Asia/Hebron have no repeating rule (Ramadan) and are stored to 2100, later years by the
+  equivalent year (not node's beyond 2100 for those two). `locales`: `intl_en.js` (CLDR 48 en calendar data, 4 KB),
+  `intl_meta.js` (948 locales node resolves to themselves, supportedValuesOf lists, CLDR aliases, 17 KB).
+  Decision: port ICU 78's DateTimePatternGenerator (`intl_dtpg.js`, from dtptngen.cpp) and V8 13.6's
+  JSDateTimeFormat option → skeleton → pattern steps, rather than a pattern table copied from node (date×time
+  combos don't compose for ~1.3% of option sets, and a table would be ~90 KB per locale).
+- 2026-10-04: `intl.js` (Intl, DateTimeFormat, locales, zones), `intl_dtpg.js` (the DTPG port) written; a node
+  harness loads them as plain JS and compares with node's `Intl`. Findings: node 24.21.0's ICU 78.3 data is CLDR
+  **48.2** (cldr-json 48.0.0 differs: en `Hv` is `HH'h' v` there, `HH v` in ICU 78.3): the generator now uses
+  cldr-json 48.2.0. V8 prints zero offsets `GMT+0`/`GMT+00:00`; an offset zone `+00:00` takes the GMT zone's names;
+  `format()` (and `toLocale*String`) turn U+202F into a space, `formatToParts` keeps it; from UTC
+  9999-12-31T23:59 ICU has no metazone (specific names → GMT format, generic → location): generator records the
+  names after it. Sample of 23,088 option sets (every 97th of all component combinations × 6 hour-cycle options
+  × 4 zones × 7 zone-name styles): 0 differ from node. First wasmtime run of the fixture: only the U+202F and the
+  intended "not supported yet" lines differed; compile 15 s (debug compiler), 1.4 MB component, run 1.9 s.
+- 2026-10-04: more node findings: `-u-hc-` makes ICU build a style's time pattern with the DTPG from
+  `jmmsszzzz`/`jmmssz`/`jmmss`/`jmm` (createInstanceNoStdPat, no hour-length option); `+00:00` is ICU's GMT zone
+  (GMT metazone names only from 1970 to 9999-12-31T23:59); after 9999 Europe/Dublin keeps its own "Irish Standard
+  Time" (names stored per offset); ICU's language aliases differ from CLDR's (`bh`, `tw` stay; `sgn-NO` → `nsl`):
+  the generator stores node's results for CLDR's rule tags, the regions node picks for split territories
+  (`hy-SU` → `hy-AM`, 208 rules) and -u-/-t- value aliases (335). `scripts/check-intl.mjs` (all parts, components
+  every 97th): 23,088 + 19,681 + 4,335 + 43 checks, 0 differ; components every 5th (447,898 option sets): 0 differ.
+- 2026-10-04: wired in (`node.rs` MODULES + GLOBALS `Intl`; the stale "(planned: T21)" dropped from the missing
+  global message). `tests/fixtures/builtins/intl-datetimeformat.js` passes `scripts/diff.sh` (slow: 11 s with the
+  debug compiler, F343); `wasm-tools validate` ok; zigbee check `tasks/T77-files/zigbee-time.cjs` (built in
+  `~/js2wasi3-prod-run/zp/patched`): js2wasi3 + wasmtime output identical to node (F330 fixed offline; live run on
+  the test rig still to do). Related fixtures (locale, date-basic, date-convert, globals/*) pass; cargo test
+  frontend + lower pass. Size/compile: +1.3 MB, +2.75 s (release compiler) per program naming `Intl` (F343).
+  Follow-ups F342-F346. **Stage A done except `formatRange` (F342).** Next: Stage B (`NumberFormat`, `PluralRules`,
+  `Number`/`BigInt`/`Date.prototype.toLocale*` for en-US, F344), or the zigbee2mqtt profiling task first (user's
+  order: Intl, then profiling; stage A covers the crash).
+
+## Stage A result (2026-10-04)
+- Files: `crates/frontend/node/intl.js` (Intl, locales, DateTimeFormat, zones, Date toLocale*), `intl_dtpg.js`
+  (ICU DTPG port), generated `intl_en.js` (4 KB), `intl_meta.js` (25 KB), `intl_tz.js` (493 KB);
+  `scripts/gen-intl.mjs` (`node scripts/gen-intl.mjs [tz] [locales]`; tz ~6 min, checks itself against node),
+  `scripts/check-intl.mjs` (`TZ=UTC node scripts/check-intl.mjs [components[=step]] [styles] [locales] [api]`).
+- Supported: `Intl.getCanonicalLocales`, `Intl.supportedValuesOf`, `Intl.DateTimeFormat` (constructor with/without
+  `new`, `supportedLocalesOf`, `format` getter, `formatToParts`, `resolvedOptions`) for `en`/`en-US` (+ `-u-hc-`,
+  `-u-ca-gregory`, `-u-nu-latn`), all zones; `Date.prototype.toLocale*String` where `Intl` is named.
+- Unsupported (clear errors): other locales (RangeError "The locale 'de' isn't supported by js2wasi3 yet (T77)"),
+  calendars, numbering systems, `formatRange*` (F342), the other constructors (TypeError).

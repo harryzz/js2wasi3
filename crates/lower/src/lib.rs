@@ -7958,7 +7958,7 @@ fn lacks_global(name: &str) -> Expr {
         body: vec![Stmt::Throw(Expr::intrinsic(
             Intrinsic::NewError(ErrorKind::ReferenceError),
             vec![
-                Expr::str(&format!("node's global `{name}` isn't available in js2wasi3 (planned: T21)")),
+                Expr::str(&format!("node's global `{name}` isn't available in js2wasi3")),
                 Expr::undefined(),
             ],
         ))],
