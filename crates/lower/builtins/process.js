@@ -171,6 +171,21 @@ function $$Process() {
   p.uptime = function uptime() {
     return (__intrinsic_monotonic_now() - $$processStart) / 1e9;
   };
+  // F340 (T78): WASI gives a program no way to read its own memory use or CPU time: node's shapes, with 0s
+  // (zigbee2mqtt's health check reads `memoryUsage().rss` every 10 minutes).
+  const memoryUsage = function memoryUsage() {
+    return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 };
+  };
+  memoryUsage.rss = function rss() {
+    return 0;
+  };
+  p.memoryUsage = memoryUsage;
+  p.cpuUsage = function cpuUsage(previousValue) {
+    if (previousValue !== undefined && (previousValue === null || typeof previousValue !== "object")) {
+      throw $$errInvalidArgType("prevValue", "of type object", previousValue);
+    }
+    return { user: 0, system: 0 };
+  };
   p.emitWarning = function emitWarning(warning, type, code) {
     let w = warning;
     if (typeof w === "string") {

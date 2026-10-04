@@ -35,6 +35,17 @@ log line at level info) over the same window, first 255 s:
   runs (about 25 minutes on production in total, and the test rig, whose sensor never reads the time) hadn't met it.
   Fix: a full `Intl` in js2wasi3 (T77).
 
+## Test rig after T78 2026-10-04: health check ends the program after 10 minutes
+
+A long test-rig run with the build after T78 (5757a57) stopped 10 minutes after start: zigbee2mqtt's Health extension
+runs every `health.interval` minutes (default 10) and calls `process.memoryUsage().rss`, which js2wasi3 lacks
+(`Uncaught TypeError: process.memoryUsage is not a function`, F340). Earlier runs were 10 minutes or shorter and
+never reached the first check. Fixed after the run (F340: `process.memoryUsage()` with 0s, WASI can't measure it).
+The rerun with `ZIGBEE2MQTT_CONFIG_HEALTH_INTERVAL=600` ran 2 h 49 min (5.8 s CPU, RSS 461 MB, health checks every 60 s
+`ok` in ~50-130 ms) until it was stopped; at about 2 h the coordinator's ESPHome stream server showed 0 TCP clients
+while zigbee2mqtt still held an established socket: js2wasi3 ignored `setKeepAlive(true, 15000)`'s delay, so the
+dead link would have been noticed only after the OS default 2 h of idle time (F341, fixed after the run).
+
 ## Test rig after T76 2026-10-04 (10 minutes, one device, frontend)
 
 js2wasi3 after T76 (zigbee2mqtt 2.14.1 with all device modules: 65.5 MB of Wasm, build 291 s, `wasmtime compile`

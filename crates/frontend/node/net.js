@@ -122,6 +122,7 @@ class Socket extends Duplex {
     this._readWake = null;
     this._timer = null;
     this._keepAlive = false;
+    this._keepAliveIdle = 0;
     this._bytesDispatched = 0;
     this.bytesRead = 0;
     this.server = null;
@@ -428,8 +429,11 @@ class Socket extends Duplex {
     return this;
   }
 
-  setKeepAlive(enable = false) {
+  setKeepAlive(enable = false, initialDelay = 0) {
     this._keepAlive = Boolean(enable);
+    // F341 (T78): node (libuv) takes whole seconds of `initialDelay` (ms); 0 keeps the current idle time.
+    const secs = Math.floor(Number(initialDelay) / 1000);
+    if (secs > 0) this._keepAliveIdle = secs;
     if (this._handle !== null && !this.connecting) this._applyKeepAlive();
     return this;
   }
@@ -437,6 +441,10 @@ class Socket extends Duplex {
   _applyKeepAlive() {
     try {
       wasi.setKeepAliveEnabled(this._handle, this._keepAlive);
+      if (this._keepAlive && this._keepAliveIdle > 0) {
+        // `duration` is in nanoseconds.
+        wasi.setKeepAliveIdleTime(this._handle, this._keepAliveIdle * 1e9);
+      }
     } catch {
       // (Not supported: ignored, as node ignores a failed `setsockopt`.)
     }
@@ -471,6 +479,7 @@ class Server extends EventEmitter {
     this.pauseOnConnect = Boolean(options.pauseOnConnect);
     this.noDelay = Boolean(options.noDelay);
     this.keepAlive = Boolean(options.keepAlive);
+    this.keepAliveInitialDelay = Number(options.keepAliveInitialDelay ?? 0);
     this.maxConnections = undefined;
   }
 
@@ -545,7 +554,7 @@ class Server extends EventEmitter {
           continue;
         }
         const socket = new Socket({ handle: h, allowHalfOpen: this.allowHalfOpen });
-        if (this.keepAlive) socket.setKeepAlive(true);
+        if (this.keepAlive) socket.setKeepAlive(true, this.keepAliveInitialDelay);
         if (this.pauseOnConnect) socket.pause();
         socket.server = this;
         socket._server = this;

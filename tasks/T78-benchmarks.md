@@ -157,3 +157,11 @@ and need the user's OK to install them.
   Full `scripts/diff.sh` (filled the cache, 524 s): 237 passed, 2 failed (node/fetch.js, node/fs-streams.js: the
   10 s timeout under the full parallel load; alone both pass), 19 skipped. `cargo test`: all pass (no IR snapshot
   changed). Follow-ups F331-F339 added. Benchmarks (5-run tables, docs/benchmarks.md) still to do.
+- 2026-10-04: zigbee2mqtt on the test rig with the build after 5757a57 (p78.cwasm): stopped after 10 min,
+  `process.memoryUsage is not a function` (the Health extension's 10-minute check; F340). Rerun with
+  `ZIGBEE2MQTT_CONFIG_HEALTH_INTERVAL=600`: 2 h 49 min, 5.8 s CPU, RSS 461 MB, health `ok` 50-130 ms; the
+  coordinator dropped the TCP link around 14:55-15:05 and zigbee2mqtt kept a half-open socket (keepalive at the
+  OS default 2 h: `setKeepAlive`'s delay ignored, F341). Stopped by the user. Fixed both: `process.memoryUsage()`
+  (+ `.rss()`, `cpuUsage()`) with 0s; `setKeepAlive(enable, initialDelay)` sets `set-keep-alive-idle-time` (ka.js:
+  `ss` shows a 15 s keepalive timer). `scripts/diff.sh tests/fixtures/node`: 41/41 pass (5 needed `-j 2`: the
+  10 s timeout under load).
