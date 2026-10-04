@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-04: T78 string appends, regex search, Buffer decoding (full run)
+
+- Compiler (5757a57): `+=` on uncaptured locals and top-level variables appends into a `$strbuf`
+  (`str_buf_append`/`str_buf_get`/`str_buf_len`); regexes: a first-unit filter in `$$reSearch` (`code[10]`), fixed
+  alternations searched natively (`re_alts_find`, `code[11]`), `$$reRun` caches its `code` fields and returns an
+  `f64`; Buffer `latin1`/`ascii` decoding native (`TypedOp::Latin1`). Runner: unchanged.
+- Full run on `a-03` (31,461 tests, 1,213 s, -j 36): 28,075 of 28,984 run pass (96.9%), 0 regressions; the same 2
+  changes since the baseline as after T75 and T76. Baseline not updated.
+
 ## 2026-10-04: T76 JSON, RegExp replace, the rest (full run)
 
 - Compiler: `JSON.stringify` fast path into one buffer (`str_copy`, `json_quote_into`), native `json_quote`,
