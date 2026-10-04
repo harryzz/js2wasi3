@@ -62,6 +62,10 @@ surrogates, `u`, `i`, `y`, lookbehind) and `join`/`typeof` all equal node. `carg
 directory: all pass (`node/fetch.js` failed under load and passes alone, F320). test262 full subset on a-03:
 28,075 of 28,984 run pass (96.9%), 0 regressions.
 
+**Real-run check (2026-10-04, after the task)**: on the production network the CPU per handled event was unchanged
+(~18.4 ms vs 18.7 ms before T74, node 1.6 ms): the benchmark (definitions/exposes) is a small slice of a real run.
+See `docs/zigbee2mqtt-feasibility.md`, "Production runs 2026-10-04", and F329.
+
 **Not done**: code size (F328), the general JSON path and per-key quoting (F327), the benchmark's checksum loop
 (F326), node's `global`-based replace/flags behaviour (F325). Next: T73 (TLS client), as planned.
 

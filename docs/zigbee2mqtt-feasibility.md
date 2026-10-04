@@ -3,6 +3,38 @@
 Sections: the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
 
+## Production runs 2026-10-04 (after T76): CPU per event, and the `Intl` crash
+
+The user stopped production zigbee2mqtt again; a fresh read-only copy of its data dir, the same overrides, laptop and
+wasmtime flags as on 2026-10-03 (above). Runs: the T76 build (10 min), then the 2026-10-03 trial build twice
+(5 min planned each). Scripts and logs outside the repository (`~/js2wasi3-prod-run/run-prod.sh`, `snapshot.sh`).
+
+**Raw totals mislead.** The same coordinator, devices and broker don't give the same work: zigbee2mqtt republishes
+a Home Assistant discovery config only when the retained one differs, so the work depends on which zigbee2mqtt ran
+last (production runs 2.14.2, the builds 2.14.1), and devices report when they like. Discovery publishes in the first
+~4 minutes: 200 (10-03), 600 (T76 build today, after production had run), 1 (trial build today, right after the T76
+build had left 2.14.1's configs). So compare **CPU per handled event** (every MQTT publish and device message is one
+log line at level info) over the same window, first 255 s:
+
+| run | CPU | log lines | discovery | CPU per line | vs node |
+|---|---|---|---|---|---|
+| node, 10-03 | 6.6 s | 4,118 | 199 | **1.6 ms** | 1× |
+| trial build (before T74), 10-03 | 75.4 s | 4,033 | 200 | **18.7 ms** | ~12× |
+| T76 build, 10-04 | 100.3 s | 5,445 | 600 | **18.4 ms** | ~12× |
+| trial build, 10-04 (2nd try) | 43.3 s | 4,232 | 1 | 10.2 ms | not comparable (almost no discovery) |
+
+- **T74–T76 didn't change the real run**: ~18.5 ms per event before and after, ~12× node. Their benchmark
+  (zigbee-herdsman-converters' definitions and exposes, 3.6 s → 1.3 s) is a small slice of a real run; steady-state
+  message handling dominates. Next speed work starts from a recorded real workload replayed offline (F329, F318).
+- The T76 build: started in 23 s (10-03: 24 s), ~40 s at 100% of a core, then 16.7% of a core over 10 minutes,
+  RSS 506 / 500 MB; errors as on 10-03 (external converters' symlink, F317; one retained `set` timed out, F318).
+- **Crash (F330)**: both runs of the trial build stopped (after 85 s and 257 s) with `Uncaught ReferenceError:
+  node's global 'Intl' isn't available`: a device read the coordinator's time cluster (`genTime`), and
+  zigbee-herdsman's `getTimeClusterAttributes()` uses `Intl.DateTimeFormat` (and `@date-fns/tz`, which formats with
+  `timeZoneName: "longOffset"`). The T76 build has the same code path; no device asked during its 10 minutes. Earlier
+  runs (about 25 minutes on production in total, and the test rig, whose sensor never reads the time) hadn't met it.
+  Fix: a full `Intl` in js2wasi3 (T77).
+
 ## Test rig after T76 2026-10-04 (10 minutes, one device, frontend)
 
 js2wasi3 after T76 (zigbee2mqtt 2.14.1 with all device modules: 65.5 MB of Wasm, build 291 s, `wasmtime compile`
@@ -96,8 +128,9 @@ Not tried: the production version (2.14.2), an aarch64 host (the board has ~3 GB
 **Speed work since the trial** (zigbee-herdsman-converters' definitions and exposes for the trial's 52 device types,
 `tasks/T74-files/bench.sh`; exposes ×200, node 62–73 ms): T74 property access 3,602–3,712 → 2,529–2,732 ms (−29%); T75
 operators, conversions and boxing 2,438 → 1,941 ms (−20%); T76 JSON, RegExp `replace`, regex search 1,950 → 1,285 ms
-(−34%; find 533 → 466 ms). About 20% of the remaining run is the benchmark's own checksum loop (F326). Not yet
-re-measured on the live installation.
+(−34%; find 533 → 466 ms). About 20% of the remaining run is the benchmark's own checksum loop (F326). On the live
+installation (2026-10-04, "Production runs" above) the CPU per handled event didn't change (~18.5 ms, ~12× node): the
+benchmark wasn't representative.
 
 ## OTA downloads 2026-10-03 (T72: `fetch`)
 

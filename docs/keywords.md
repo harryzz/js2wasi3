@@ -23,7 +23,7 @@ table in [`tasks/README.md`](../tasks/README.md).
 | Built-in objects, properties, methods (25) | 11 | 14 | 0 | – |
 | Window/HTML, Java, event handlers | the timer functions, `parseInt`/`parseFloat`/`isNaN`/`isFinite`, `encodeURI*`/`decodeURI*`/`escape`/`unescape`, `console`, `structuredClone`, `URL`/`URLSearchParams`, `TextEncoder`/`TextDecoder` (T64) ✅ | | | the rest ➖ |
 
-What's most needed, in order: the rest of the built-in library (`Intl`, `Float16Array`), then the language gaps below.
+What's most needed, in order: the rest of the built-in library (`Intl`: T77, `Float16Array`), then the language gaps below.
 
 ## 1. Keywords
 
