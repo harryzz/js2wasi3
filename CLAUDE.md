@@ -7,6 +7,11 @@ Compiler: JavaScript → a WASI 0.3 Wasm component (WasmGC, native EH, P3 async)
 2. Work on **one** task file, `tasks/Txx-*.md`. Read its "Read first" list and nothing unrelated.
 3. Run `scripts/check-tools.sh`. If tools changed, rerun `probes/run.sh` and update `TOOLS.md`.
 
+## Cloud sessions (Claude Code on the web)
+If this session runs in a cloud sandbox (no `~/js2wasi3-prod-run`, no a-03), follow **`tasks/CLOUD-BATCH.md`**: it
+says which tasks to run unattended (T80, then T81), on which branch (`speed-batch`, never `main`), and what the
+sandbox can't do.
+
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.
 - **Write progress every iteration, not only at the end.** After each step (build/test run, design choice,
