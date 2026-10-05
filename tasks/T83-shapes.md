@@ -147,3 +147,15 @@ transitions (an attribute change goes to dictionary mode).
   methods 3, json 5, polymorphic 5, dictionary 22; js2wasi3 nbody 1336, literals 149, methods 117, json 56,
   polymorphic 112, dictionary 151 (same output as node).
 - 2026-10-05: design note written (above), committed before code.
+- 2026-10-05: implemented (backend `object.rs`, `props.rs`, `runtime.rs`, `mapset.rs`, `lib.rs`): `$shape` (type 29),
+  `$ic`/`$ics` (30, 31; `$bigint` 32), `$object.index` an eqref, root shape on `alloc`, transitions in `define`/
+  `append_named`, `unshape`/`set_attr` for deletes, attribute changes and `integrity`, `IS_PROTO` (0x1000; the identity
+  hash moved to bit 13) and `G_EPOCH`; read/write/add/literal caches per site. Design change from the note: one
+  `$ic` struct per site in `G_IC` (an `$ics` array) instead of parallel `$i32s`/`$vals` arrays: each array access
+  costs a bounds check sequence in wasmtime, a struct field doesn't (the hit path has 2 array accesses instead of 5).
+  Measured on a hit: ~15 ns per `get_named` call either way (most of it `test_object`'s type tests and the call); the
+  shape check is about as fast as T74's guess for own hits, the gains are prototype hits, writes and adds.
+- 2026-10-05: `tests/fixtures/builtins/object-shapes.js` (new) passes; `scripts/diff.sh` on `objects/`, `classes/`,
+  `builtins/`, `arrays/`, `commonjs/`, `modules/`, `node/`: all pass but `node/fetch-https.js` and `node/dgram.js`,
+  which fail the same with the build before T83 (the sandbox has no outbound DNS/HTTPS for wasmtime and no IPv6).
+  `cargo test -p js2wasi3-backend -p js2wasi3`: all pass (installed wac 0.11.0 for the 4 composition tests).

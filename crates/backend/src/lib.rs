@@ -950,7 +950,8 @@ struct Emitter<'m> {
     shared: Vec<ir::FuncId>,
     /// Functions used by `ref.func` (a declarative element segment).
     declared: Vec<u32>,
-    /// T74: the next inline-cache site of a constant-key read (`object::Helper::GetNamed`).
+    /// T74: the next inline-cache site of a constant-key access (`object::Helper::GetNamed`; T83: also
+    /// `SetNamed`, `DefineNamed`).
     ic_sites: u32,
 }
 
@@ -1836,6 +1837,8 @@ impl Emitter<'_> {
                     s.global_get(g);
                     self.expr(s, frames, value)?;
                     s.i32_const(object::key_hash(units));
+                    s.i32_const(self.ic_sites as i32);
+                    self.ic_sites += 1;
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::DefineNamed))));
                     return Ok(false);
                 }
@@ -1849,6 +1852,8 @@ impl Emitter<'_> {
                     s.global_get(g);
                     self.expr(s, frames, value)?;
                     s.i32_const(object::key_hash(units));
+                    s.i32_const(self.ic_sites as i32);
+                    self.ic_sites += 1;
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
                     return Ok(false);
                 }

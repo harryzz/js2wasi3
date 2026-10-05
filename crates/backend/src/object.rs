@@ -31,6 +31,7 @@ use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
 
 use crate::runtime::{
     self, Cx, G_BUILTIN, G_NULL, G_PROTOS, G_UNDEFINED, T_ARRAY, T_BYTES, T_I32S, T_KEYS, T_OBJECT,
+    T_SHAPE,
     T_STRING, T_VALS, TAG, jsval, object, rt, string, string_ref,
 };
 use crate::{array, func, numstr, props, wrapper};
@@ -78,6 +79,16 @@ pub const FROZEN: i32 = 0x400;
 /// `class` flag of an array: `length` is read-only (`defineProperty(a, "length", { writable: false })`,
 /// T32).
 pub const LENGTH_READONLY: i32 = 0x800;
+
+/// `class` flag (T83): a shape cache depends on this object's layout as a prototype; its layout
+/// changes bump `G_EPOCH`.
+pub const IS_PROTO: i32 = 0x1000;
+/// Shapes have at most this many keys; an object adding more goes to dictionary mode (T83).
+const SHAPE_MAX: i32 = 64;
+/// A shape has at most this many transitions (T83).
+const CHILD_MAX: i32 = 64;
+/// At most this many shapes are made (T83): they're never freed.
+const SHAPE_BUDGET: i32 = 65536;
 
 /// Attribute bit: not enumerable.
 pub const HIDDEN: i32 = 1;
@@ -291,6 +302,24 @@ pub enum Helper {
     GetNamed,
     /// `(site: i32, e: i32)`: remember entry `e` for site `site` (T74), growing `G_IC`.
     IcStore,
+    /// `(site: i32) -> (ref $ic)`: the site's inline cache, made on first use (T83).
+    IcEntry,
+    /// `(site, shape, proto, extra: eqref, slot, epoch: i32)`: a shape cache entry (T83).
+    IcFill,
+    /// `(keys: (ref $keys), n: i32, cap: i32) -> (ref $i32s)`: a hash index of `n` keys (T83).
+    BuildIndex,
+    /// `(sh: (ref $shape), k: (ref $string), attrs: i32) -> (ref null $shape)`: a transition (T83).
+    ShapeChild,
+    /// `(o, ns: (ref $shape), v)`: shaped `o` takes the next shape `ns`, the new entry's value `v` (T83).
+    ShapeShift,
+    /// `(o, k, v, attrs) -> i32`: add an absent key by a shape transition (1), or 0 (T83).
+    AddShaped,
+    /// `(o)`: dictionary mode (T83).
+    Unshape,
+    /// `(o, e: i32, attrs: i32)`: change entry `e`'s attributes (T83).
+    SetAttr,
+    /// `(p, holder: (ref null $object))`: flag the chain from `p` to `holder` as prototypes (T83).
+    MarkChain,
     /// `(v: jsval) -> jsval`: `v.length` (T74): an array's or a string's directly, else [`Helper::Get`].
     GetLength,
     /// `(o, k, v: jsval, attrs: i32)`: set an own property (attributes only for a new one).
@@ -427,6 +456,15 @@ impl Helper {
             Helper::LookupNamed => "lookup_named",
             Helper::GetNamed => "get_named",
             Helper::IcStore => "ic_store",
+            Helper::IcEntry => "ic_entry",
+            Helper::IcFill => "ic_fill",
+            Helper::BuildIndex => "build_index",
+            Helper::ShapeChild => "shape_child",
+            Helper::ShapeShift => "shape_shift",
+            Helper::AddShaped => "add_shaped",
+            Helper::Unshape => "unshape",
+            Helper::SetAttr => "set_attr",
+            Helper::MarkChain => "mark_chain",
             Helper::GetLength => "get_length",
             Helper::Define => "define",
             Helper::AppendNamed => "append_named",
@@ -541,11 +579,20 @@ impl Helper {
             Helper::LookupNamed => (vec![on, s, I32], vec![v]),
             Helper::GetNamed => (vec![v, s, I32, I32], vec![v]),
             Helper::IcStore => (vec![I32, I32], vec![]),
+            Helper::IcEntry => (vec![I32], vec![rt(false, runtime::T_IC)]),
+            Helper::IcFill => (vec![I32, v, v, v, I32, I32], vec![]),
+            Helper::BuildIndex => (vec![rt(false, T_KEYS), I32, I32], vec![rt(false, T_I32S)]),
+            Helper::ShapeChild => (vec![rt(false, T_SHAPE), s, I32], vec![rt(true, T_SHAPE)]),
+            Helper::ShapeShift => (vec![o, rt(false, T_SHAPE), v], vec![]),
+            Helper::AddShaped => (vec![o, s, v, I32], vec![I32]),
+            Helper::Unshape => (vec![o], vec![]),
+            Helper::SetAttr => (vec![o, I32, I32], vec![]),
+            Helper::MarkChain => (vec![on, on], vec![]),
             Helper::GetLength => (vec![v], vec![v]),
             Helper::Define => (vec![o, s, v, I32], vec![]),
             Helper::AppendNamed => (vec![o, s, v, I32, I32], vec![]),
-            Helper::DefineNamed => (vec![v, s, v, I32], vec![]),
-            Helper::SetNamed => (vec![v, s, v, I32], vec![]),
+            Helper::DefineNamed => (vec![v, s, v, I32, I32], vec![]),
+            Helper::SetNamed => (vec![v, s, v, I32, I32], vec![]),
             Helper::Remove => (vec![o, s], vec![]),
             Helper::Grow => (vec![o], vec![]),
             Helper::Reindex => (vec![o, I32], vec![]),
@@ -602,7 +649,16 @@ impl Helper {
             Helper::FindOwnNamed => find_own(cx, true),
             Helper::LookupNamed => lookup_named(cx),
             Helper::GetNamed => get_named(cx),
-            Helper::IcStore => ic_store(),
+            Helper::IcStore => ic_store(cx),
+            Helper::IcEntry => ic_entry(),
+            Helper::IcFill => ic_fill(cx),
+            Helper::BuildIndex => build_index(cx),
+            Helper::ShapeChild => shape_child(cx),
+            Helper::ShapeShift => shape_shift(),
+            Helper::AddShaped => add_shaped(cx),
+            Helper::Unshape => unshape(),
+            Helper::SetAttr => set_attr(cx),
+            Helper::MarkChain => mark_chain(),
             Helper::GetLength => get_length(cx),
             Helper::OwnGet => own_get(cx),
             Helper::Lookup => lookup(cx, false),
@@ -836,55 +892,299 @@ fn hash() -> Function {
     f
 }
 
-/// `define_named(o, k, v, hash)`: CreateDataProperty on object `o` (see [`Helper::DefineNamed`]).
+/// `$ic` fields (T83, see [`runtime::T_IC`]).
+const IC_SHAPE: u32 = 0;
+const IC_PROTO: u32 = 1;
+const IC_EXTRA: u32 = 2;
+const IC_SLOT: u32 = 3;
+const IC_TAG: u32 = 4;
+const IC_GUESS: u32 = 5;
+
+/// Set local `ic` to site `site`'s `$ic` (null if none yet) and local `sh` to the `index` of the receiver in
+/// local `o`, and leave "the receiver has the shape the site remembers" (T83): its `index` is a non-null
+/// reference identical to the entry's shape.
+fn shape_hit(s: &mut InstructionSink, o: u32, site: u32, ic: u32, sh: u32) {
+    s.local_get(o).struct_get(T_OBJECT, F_INDEX).local_set(sh);
+    s.ref_null(HeapType::Concrete(runtime::T_IC)).local_set(ic);
+    s.global_get(runtime::G_IC).ref_is_null();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(site).global_get(runtime::G_IC).array_len().i32_lt_u();
+    s.if_(BlockType::Result(ValType::I32));
+    s.global_get(runtime::G_IC)
+        .local_get(site)
+        .array_get(runtime::T_ICS)
+        .local_tee(ic)
+        .ref_is_null();
+    s.local_get(sh).ref_is_null();
+    s.i32_or();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(sh);
+    s.local_get(ic).struct_get(runtime::T_IC, IC_SHAPE);
+    s.ref_eq();
+    s.end();
+    s.else_();
+    s.i32_const(0);
+    s.end();
+    s.end();
+}
+
+/// Push field `f` of the `$ic` in local `ic`.
+fn ic_get(s: &mut InstructionSink, ic: u32, f: u32) {
+    s.local_get(ic).struct_get(runtime::T_IC, f);
+}
+
+/// A read cache's slot bit (T83): the entry was filled with an accessor or a built-in sentinel, so the
+/// value goes through `property_value`.
+const IC_CHECK: i32 = 0x4000_0000;
+
+/// Push slot `e`, with [`IC_CHECK`] when the value in local `r` is an accessor or a sentinel.
+fn check_bit(s: &mut InstructionSink, e: u32, r: u32) {
+    s.local_get(e);
+    s.local_get(r)
+        .ref_test_non_null(HeapType::Concrete(runtime::T_ACCESSOR));
+    s.local_get(r).global_get(G_BUILTIN).ref_eq();
+    s.i32_or();
+    s.i32_const(30).i32_shl().i32_or();
+}
+
+/// `define_named(o, k, v, hash, site)`: CreateDataProperty on object `o` (see [`Helper::DefineNamed`]).
+/// T83: the site caches a literal's transition (shape before → shape after).
 fn define_named(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwnNamed);
     let append = h(cx, Helper::AppendNamed);
-    const O: u32 = 0;
+    let set_attr = h(cx, Helper::SetAttr);
+    let shift = h(cx, Helper::ShapeShift);
+    let fill = h(cx, Helper::IcFill);
+    const V0: u32 = 0;
     const K: u32 = 1;
     const V: u32 = 2;
     const H: u32 = 3;
-    const E: u32 = 4;
-    let mut f = Function::new([(1, ValType::I32)]);
+    const SITE: u32 = 4;
+    const E: u32 = 5;
+    const O: u32 = 6;
+    const ICR: u32 = 8;
+    const BEFORE: u32 = 9;
+    let mut f = Function::new([
+        (1, ValType::I32),
+        (1, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, rt(true, runtime::T_IC)),
+        (1, jsval()),
+    ]);
     let mut s = f.instructions();
-    as_obj(&mut s, O);
+    as_obj(&mut s, V0);
+    s.local_set(O);
+    shape_hit(&mut s, O, SITE, ICR, BEFORE);
+    s.if_(BlockType::Empty);
+    s.local_get(O).ref_as_non_null();
+    ic_get(&mut s, ICR, IC_EXTRA);
+    s.ref_cast_non_null(shape());
+    s.local_get(V).call(shift);
+    s.return_();
+    s.end();
+    s.local_get(O).ref_as_non_null();
     s.local_get(K).local_get(H).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
     // An existing property: now a data property with this value (the other attributes stay).
-    as_obj(&mut s, O);
-    s.struct_get(T_OBJECT, F_VALS).local_get(E).local_get(V).array_set(T_VALS);
-    as_obj(&mut s, O);
-    s.struct_get(T_OBJECT, F_ATTRS).local_get(E);
-    as_obj(&mut s, O);
-    s.struct_get(T_OBJECT, F_ATTRS)
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .local_get(V)
+        .array_set(T_VALS);
+    s.local_get(O).ref_as_non_null().local_get(E);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
         .local_get(E)
         .array_get_u(T_BYTES)
         .i32_const(!ACCESSOR)
         .i32_and();
-    s.array_set(T_BYTES);
+    s.call(set_attr);
     s.return_();
     s.end();
-    as_obj(&mut s, O);
+    s.local_get(O).ref_as_non_null();
     s.local_get(K).local_get(V).i32_const(0).local_get(H).call(append);
+    // A transition: remember it.
+    s.local_get(BEFORE).ref_test_non_null(shape());
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_INDEX)
+        .ref_test_non_null(shape());
+    s.i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(SITE).local_get(BEFORE);
+    s.ref_null(HeapType::Abstract {
+        shared: false,
+        ty: wasm_encoder::AbstractHeapType::None,
+    });
+    s.local_get(O).struct_get(T_OBJECT, F_INDEX);
+    s.i32_const(0).i32_const(0).call(fill);
+    s.end();
     s.end();
     f
 }
 
-/// `set_named(v, k, value, hash)`: `v.k = value` (see [`Helper::SetNamed`]).
+/// `set_named(v, k, value, hash, site)`: `v.k = value` (see [`Helper::SetNamed`]). T83: the site caches a
+/// write to an existing writable data property of a shape (`extra` null), or an add (`extra`: the next
+/// shape, valid with the prototype and epoch it was filled with).
 fn set_named(cx: &mut dyn Cx) -> Function {
     let ordinary = rh(cx, runtime::Helper::Prop(props::Helper::SetNamed));
     let set = h(cx, Helper::Set);
+    let find = h(cx, Helper::FindOwnNamed);
+    let shift = h(cx, Helper::ShapeShift);
+    let fill = h(cx, Helper::IcFill);
+    let mark = h(cx, Helper::MarkChain);
     const V: u32 = 0;
     const K: u32 = 1;
     const X: u32 = 2;
     const H: u32 = 3;
-    let mut f = Function::new([]);
+    const SITE: u32 = 4;
+    const O: u32 = 5;
+    const ICR: u32 = 7;
+    const BEFORE: u32 = 8;
+    const AFTER: u32 = 9;
+    const E: u32 = 10;
+    const Q: u32 = 11;
+    const NS: u32 = 12;
+    let mut f = Function::new([
+        (1, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, rt(true, runtime::T_IC)),
+        (2, jsval()),
+        (1, ValType::I32),
+        (1, rt(true, T_OBJECT)),
+        (1, rt(true, T_SHAPE)),
+    ]);
     let mut s = f.instructions();
     s.test_object(V);
     s.if_(BlockType::Empty);
-    as_obj(&mut s, V);
-    s.local_get(K).local_get(X).local_get(H).call(ordinary);
+    {
+        as_obj(&mut s, V);
+        s.local_set(O);
+        shape_hit(&mut s, O, SITE, ICR, BEFORE);
+        s.if_(BlockType::Empty);
+        ic_get(&mut s, ICR, IC_TAG);
+        s.local_tee(E).i32_const(0).i32_lt_s();
+        s.if_(BlockType::Empty);
+        s.local_get(O).struct_get(T_OBJECT, F_VALS);
+        ic_get(&mut s, ICR, IC_SLOT);
+        s.local_get(X).array_set(T_VALS);
+        s.return_();
+        s.end();
+        ic_get(&mut s, ICR, IC_PROTO);
+        s.local_get(O).struct_get(T_OBJECT, F_PROTO);
+        s.ref_eq();
+        s.local_get(E);
+        s.global_get(runtime::G_EPOCH).i32_eq();
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_as_non_null();
+        ic_get(&mut s, ICR, IC_EXTRA);
+        s.ref_cast_non_null(shape());
+        s.local_get(X).call(shift);
+        s.return_();
+        s.end();
+        s.end();
+        s.local_get(O).ref_as_non_null();
+        s.local_get(K).local_get(X).local_get(H).call(ordinary);
+        s.local_get(BEFORE).ref_test_non_null(shape());
+        s.if_(BlockType::Empty);
+        s.local_get(O).struct_get(T_OBJECT, F_INDEX).local_tee(AFTER);
+        s.local_get(BEFORE).ref_eq();
+        s.if_(BlockType::Empty);
+        {
+            // The same shape: an own writable data property was written.
+            s.local_get(O).ref_as_non_null();
+            s.local_get(K).local_get(H).call(find).local_tee(E);
+            s.i32_const(0).i32_ge_s();
+            s.if_(BlockType::Empty);
+            s.local_get(O)
+                .struct_get(T_OBJECT, F_ATTRS)
+                .local_get(E)
+                .array_get_u(T_BYTES)
+                .i32_const(ACCESSOR | READONLY)
+                .i32_and()
+                .i32_eqz();
+            s.if_(BlockType::Empty);
+            s.local_get(SITE).local_get(BEFORE);
+            s.ref_null(HeapType::Abstract {
+                shared: false,
+                ty: wasm_encoder::AbstractHeapType::None,
+            });
+            s.ref_null(HeapType::Abstract {
+                shared: false,
+                ty: wasm_encoder::AbstractHeapType::None,
+            });
+            s.local_get(E).i32_const(-1).call(fill);
+            s.end();
+            s.end();
+            s.return_();
+        }
+        s.end();
+        // A plain add: the next shape has one more key, `k` itself, with the default attributes, and no
+        // object on the chain has `k` (so no setter or read-only property can be in the way).
+        s.local_get(AFTER).ref_test_non_null(shape()).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.return_();
+        s.end();
+        s.local_get(AFTER).ref_cast_non_null(shape()).local_tee(NS);
+        s.struct_get(T_SHAPE, SH_COUNT);
+        s.local_get(BEFORE)
+            .ref_cast_non_null(shape())
+            .struct_get(T_SHAPE, SH_COUNT)
+            .i32_const(1)
+            .i32_add()
+            .i32_ne();
+        s.if_(BlockType::Empty);
+        s.return_();
+        s.end();
+        s.local_get(NS)
+            .struct_get(T_SHAPE, SH_KEYS)
+            .local_get(NS)
+            .struct_get(T_SHAPE, SH_COUNT)
+            .i32_const(1)
+            .i32_sub()
+            .local_tee(E)
+            .array_get(T_KEYS)
+            .local_get(K)
+            .ref_eq()
+            .i32_eqz();
+        s.local_get(NS)
+            .struct_get(T_SHAPE, SH_ATTRS)
+            .local_get(E)
+            .array_get_u(T_BYTES)
+            .i32_const(0)
+            .i32_ne();
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.return_();
+        s.end();
+        s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(Q);
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(Q).ref_is_null().br_if(1);
+        s.local_get(Q).ref_as_non_null();
+        s.local_get(K).local_get(H).call(find);
+        s.i32_const(0).i32_ge_s();
+        s.if_(BlockType::Empty);
+        s.return_();
+        s.end();
+        s.local_get(Q)
+            .ref_as_non_null()
+            .struct_get(T_OBJECT, F_PROTO)
+            .local_set(Q);
+        s.br(0).end().end();
+        s.local_get(O).struct_get(T_OBJECT, F_PROTO);
+        s.ref_null(object());
+        s.call(mark);
+        s.local_get(SITE).local_get(BEFORE);
+        s.local_get(O).struct_get(T_OBJECT, F_PROTO);
+        s.local_get(NS);
+        s.local_get(E).global_get(runtime::G_EPOCH).call(fill);
+        s.end();
+    }
     s.else_();
     s.local_get(V).local_get(K).local_get(X).call(set);
     s.end();
@@ -966,10 +1266,12 @@ fn find_own(cx: &mut dyn Cx, hashed: bool) -> Function {
     let i = 5 + p;
     let kk = 6 + p;
     let idx = 7 + p;
+    let any = 8 + p;
     let mut f = Function::new([
         (4, ValType::I32),
         (1, rt(true, T_STRING)),
         (1, rt(true, T_I32S)),
+        (1, jsval()),
     ]);
     let mut s = f.instructions();
     // Is entry `e`'s key `k`? (leaves i32)
@@ -981,10 +1283,8 @@ fn find_own(cx: &mut dyn Cx, hashed: bool) -> Function {
             .local_set(kk);
         key_matches(s, kk, K, str_eq);
     };
-    s.local_get(O)
-        .struct_get(T_OBJECT, F_INDEX)
-        .local_tee(idx)
-        .ref_is_null();
+    push_index(&mut s, O, any);
+    s.local_tee(idx).ref_is_null();
     s.if_(BlockType::Empty);
     {
         s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(n);
@@ -1066,12 +1366,16 @@ fn lookup_named(cx: &mut dyn Cx) -> Function {
 }
 
 /// `get_named(v, k, hash, site)`: `v.k` (see [`Helper::GetNamed`]); the same steps as [`get`] for such a
-/// key. A cached entry index is only a guess: it's used when that entry's key is `k` (keys are unique
-/// within an object, and a deleted entry's key is null).
+/// key. T83: a shaped receiver uses the site's shape cache: an own hit (`proto` null: `o.vals[slot]`), or a
+/// prototype hit or miss (`proto` the receiver's prototype, valid at the epoch it was filled at: `extra`
+/// is the holder's `vals`, `slot` −1 for absent). Other objects use T74's entry guess: an entry index,
+/// used when that entry's key is `k` (keys are unique within an object, a deleted entry's key is null).
 fn get_named(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwnNamed);
     let lookup = h(cx, Helper::LookupNamed);
     let store = h(cx, Helper::IcStore);
+    let fill = h(cx, Helper::IcFill);
+    let mark = h(cx, Helper::MarkChain);
     let get = h(cx, Helper::Get);
     let sproto = h(cx, Helper::Proto(Builtin::String));
     let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
@@ -1080,27 +1384,149 @@ fn get_named(cx: &mut dyn Cx) -> Function {
     const H: u32 = 2;
     const SITE: u32 = 3;
     const O: u32 = 4;
-    const IC: u32 = 5;
     const E: u32 = 6;
     const R: u32 = 7;
+    const ICR: u32 = 9;
+    const SH: u32 = 10;
+    const P: u32 = 11;
+    const Q: u32 = 12;
+    const TAG: u32 = 13;
     let mut f = Function::new([
         (1, rt(true, T_OBJECT)),
         (1, rt(true, T_I32S)),
         (1, ValType::I32),
         (1, jsval()),
+        (1, ValType::I32),
+        (1, rt(true, runtime::T_IC)),
+        (1, jsval()),
+        (2, rt(true, T_OBJECT)),
+        (1, ValType::I32),
     ]);
     let mut s = f.instructions();
+    // A plain value as is; an accessor or a built-in sentinel through `property_value`.
+    let ret = |s: &mut InstructionSink| {
+        s.local_tee(R);
+        s.ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
+        s.local_get(R).global_get(runtime::G_BUILTIN).ref_eq();
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.local_get(R).local_get(V).call(value).return_();
+        s.end();
+        s.local_get(R).return_();
+    };
+    let none = || HeapType::Abstract {
+        shared: false,
+        ty: wasm_encoder::AbstractHeapType::None,
+    };
     s.test_object(V);
     s.if_(BlockType::Result(jsval()));
     {
         as_obj(&mut s, V);
         s.local_set(O);
-        // The cached entry.
-        s.global_get(runtime::G_IC).local_tee(IC).ref_is_null().i32_eqz();
+        // The shape cache (T83).
+        shape_hit(&mut s, O, SITE, ICR, SH);
         s.if_(BlockType::Empty);
-        s.local_get(SITE).local_get(IC).array_len().i32_lt_u();
+        ic_get(&mut s, ICR, IC_SLOT);
+        s.local_set(E);
+        // The value at slot `E` (without the CHECK bit) of the `$vals` on the stack: as is, or through
+        // `property_value` when the entry was filled with an accessor or a sentinel.
+        let slot = |s: &mut InstructionSink| {
+            s.local_get(E).i32_const(!IC_CHECK).i32_and().array_get(T_VALS).local_set(R);
+            s.local_get(E).i32_const(IC_CHECK).i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(R).local_get(V).call(value).return_();
+            s.end();
+            s.local_get(R).return_();
+        };
+        ic_get(&mut s, ICR, IC_TAG);
+        s.local_tee(TAG).i32_const(0).i32_lt_s();
         s.if_(BlockType::Empty);
-        s.local_get(IC).local_get(SITE).array_get(T_I32S).local_tee(E);
+        s.local_get(O).struct_get(T_OBJECT, F_VALS);
+        slot(&mut s);
+        s.end();
+        ic_get(&mut s, ICR, IC_PROTO);
+        s.local_get(O).struct_get(T_OBJECT, F_PROTO);
+        s.ref_eq();
+        s.local_get(TAG);
+        s.global_get(runtime::G_EPOCH).i32_eq();
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(E).i32_const(0).i32_lt_s();
+        s.if_(BlockType::Empty);
+        s.global_get(G_UNDEFINED).return_();
+        s.end();
+        ic_get(&mut s, ICR, IC_EXTRA);
+        s.ref_cast_non_null(HeapType::Concrete(T_VALS));
+        slot(&mut s);
+        s.end();
+        s.end();
+        s.local_get(SH).ref_test_non_null(shape());
+        s.if_(BlockType::Empty);
+        {
+            // A shaped receiver: fill the shape cache.
+            s.local_get(O)
+                .ref_as_non_null()
+                .local_get(K)
+                .local_get(H)
+                .call(find)
+                .local_tee(E);
+            s.i32_const(0).i32_ge_s();
+            s.if_(BlockType::Empty);
+            s.local_get(O)
+                .struct_get(T_OBJECT, F_VALS)
+                .local_get(E)
+                .array_get(T_VALS)
+                .local_set(R);
+            s.local_get(SITE).local_get(SH).ref_null(none()).ref_null(none());
+            check_bit(&mut s, E, R);
+            s.i32_const(-1).call(fill);
+            s.local_get(R);
+            ret(&mut s);
+            s.end();
+            s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_tee(P).local_set(Q);
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(Q).ref_is_null().br_if(1);
+            s.local_get(Q)
+                .ref_as_non_null()
+                .local_get(K)
+                .local_get(H)
+                .call(find)
+                .local_tee(E);
+            s.i32_const(0).i32_ge_s();
+            s.if_(BlockType::Empty);
+            s.local_get(P).local_get(Q).call(mark);
+            s.local_get(Q)
+                .struct_get(T_OBJECT, F_VALS)
+                .local_get(E)
+                .array_get(T_VALS)
+                .local_set(R);
+            s.local_get(SITE).local_get(SH).local_get(P);
+            s.local_get(Q).struct_get(T_OBJECT, F_VALS);
+            check_bit(&mut s, E, R);
+            s.global_get(runtime::G_EPOCH).call(fill);
+            s.local_get(R);
+            ret(&mut s);
+            s.end();
+            s.local_get(Q)
+                .ref_as_non_null()
+                .struct_get(T_OBJECT, F_PROTO)
+                .local_set(Q);
+            s.br(0).end().end();
+            // Absent (cached only with a prototype: the shape doesn't say there's none).
+            s.local_get(P).ref_is_null().i32_eqz();
+            s.if_(BlockType::Empty);
+            s.local_get(P).ref_null(object()).call(mark);
+            s.local_get(SITE).local_get(SH).local_get(P).ref_null(none());
+            s.i32_const(-1).global_get(runtime::G_EPOCH).call(fill);
+            s.end();
+            s.global_get(G_UNDEFINED).return_();
+        }
+        s.end();
+        // T74's entry guess.
+        s.local_get(ICR).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        ic_get(&mut s, ICR, IC_GUESS);
+        s.local_tee(E);
         s.local_get(O).struct_get(T_OBJECT, F_COUNT).i32_lt_u();
         s.if_(BlockType::Empty);
         s.local_get(O)
@@ -1113,17 +1539,8 @@ fn get_named(cx: &mut dyn Cx) -> Function {
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
             .local_get(E)
-            .array_get(T_VALS)
-            .local_tee(R);
-        // A plain value as is; an accessor or a built-in sentinel through `property_value`.
-        s.ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
-        s.local_get(R).global_get(runtime::G_BUILTIN).ref_eq();
-        s.i32_or();
-        s.if_(BlockType::Empty);
-        s.local_get(R).local_get(V).call(value).return_();
-        s.end();
-        s.local_get(R).return_();
-        s.end();
+            .array_get(T_VALS);
+        ret(&mut s);
         s.end();
         s.end();
         s.end();
@@ -1201,49 +1618,15 @@ fn get_length(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `ic_store(site, e)`: `G_IC[site] = e`, growing the array (doubling, at least 1,024) when needed.
-fn ic_store() -> Function {
+/// `ic_store(site, e)`: T74's entry guess for site `site`.
+fn ic_store(cx: &mut dyn Cx) -> Function {
+    let entry = h(cx, Helper::IcEntry);
     const SITE: u32 = 0;
     const E: u32 = 1;
-    const IC: u32 = 2;
-    const N: u32 = 3;
-    const NEW: u32 = 4;
-    let mut f = Function::new([(1, rt(true, T_I32S)), (1, ValType::I32), (1, rt(true, T_I32S))]);
+    let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.global_get(runtime::G_IC).local_set(IC);
-    s.local_get(IC).ref_is_null();
-    s.if_(BlockType::Result(ValType::I32));
-    s.i32_const(0);
-    s.else_();
-    s.local_get(IC).array_len();
-    s.end();
-    s.local_tee(N);
-    s.local_get(SITE).i32_le_u();
-    s.if_(BlockType::Empty);
-    {
-        // max(2 * n, site + 1, 1024)
-        s.local_get(N).i32_const(1).i32_shl().local_tee(N);
-        s.local_get(SITE).i32_const(1).i32_add();
-        s.local_get(N).local_get(SITE).i32_const(1).i32_add().i32_gt_u();
-        s.select().local_tee(N);
-        s.i32_const(1024);
-        s.local_get(N).i32_const(1024).i32_gt_u();
-        s.select();
-        s.array_new_default(T_I32S).local_set(NEW);
-        s.local_get(IC).ref_is_null().i32_eqz();
-        s.if_(BlockType::Empty);
-        s.local_get(NEW)
-            .i32_const(0)
-            .local_get(IC)
-            .i32_const(0)
-            .local_get(IC)
-            .array_len()
-            .array_copy(T_I32S, T_I32S);
-        s.end();
-        s.local_get(NEW).local_tee(IC).global_set(runtime::G_IC);
-    }
-    s.end();
-    s.local_get(IC).local_get(SITE).local_get(E).array_set(T_I32S);
+    s.local_get(SITE).call(entry);
+    s.local_get(E).struct_set(runtime::T_IC, IC_GUESS);
     s.end();
     f
 }
@@ -1325,6 +1708,8 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     let grow = h(cx, Helper::Grow);
     let reindex = h(cx, Helper::Reindex);
     let hash = h(cx, Helper::Hash);
+    let set_attr = h(cx, Helper::SetAttr);
+    let add_shaped = h(cx, Helper::AddShaped);
     const O: u32 = 0;
     const K: u32 = 1;
     const V: u32 = 2;
@@ -1358,14 +1743,14 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
         .local_get(V)
         .array_set(T_VALS);
     // Now a data property (the other attributes stay).
-    s.local_get(O).struct_get(T_OBJECT, F_ATTRS).local_get(e);
+    s.local_get(O).local_get(e);
     s.local_get(O)
         .struct_get(T_OBJECT, F_ATTRS)
         .local_get(e)
         .array_get_u(T_BYTES)
         .i32_const(!ACCESSOR)
         .i32_and();
-    s.array_set(T_BYTES);
+    s.call(set_attr);
     s.return_();
     s.end();
     // An index key on `Array.prototype` or `Object.prototype`: array writes must look at the
@@ -1380,6 +1765,12 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     s.end();
     s.end();
     }
+    // A shaped object: a transition (T83).
+    s.local_get(O).local_get(K).local_get(V).local_get(A).call(add_shaped);
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    layout_changed(&mut s, O);
     // A new entry at `count`.
     s.local_get(O).struct_get(T_OBJECT, F_COUNT);
     s.local_get(O).struct_get(T_OBJECT, F_KEYS).array_len();
@@ -1411,6 +1802,7 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     // Index it: start an index past SMALL entries, grow it past half full.
     s.local_get(O)
         .struct_get(T_OBJECT, F_INDEX)
+        .ref_cast_nullable(HeapType::Concrete(T_I32S))
         .local_tee(idx)
         .ref_is_null();
     s.if_(BlockType::Empty);
@@ -1475,6 +1867,7 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
 
 fn remove(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwn);
+    let unshape = h(cx, Helper::Unshape);
     const O: u32 = 0;
     const K: u32 = 1;
     const E: u32 = 2;
@@ -1483,6 +1876,9 @@ fn remove(cx: &mut dyn Cx) -> Function {
     s.local_get(O).local_get(K).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
+    // Dictionary mode (T83).
+    s.local_get(O).call(unshape);
+    layout_changed(&mut s, O);
     s.local_get(O)
         .struct_get(T_OBJECT, F_KEYS)
         .local_get(E)
@@ -1614,68 +2010,27 @@ fn grow(cx: &mut dyn Cx) -> Function {
 }
 
 fn reindex(cx: &mut dyn Cx) -> Function {
-    let hash = h(cx, Helper::Hash);
+    let build = h(cx, Helper::BuildIndex);
     const O: u32 = 0;
     const CAP: u32 = 1;
-    const E: u32 = 2;
-    const N: u32 = 3;
-    const I: u32 = 4;
-    const MASK: u32 = 5;
-    const KK: u32 = 6;
-    const IDX: u32 = 7;
-    let mut f = Function::new([
-        (4, ValType::I32),
-        (1, rt(true, T_STRING)),
-        (1, rt(true, T_I32S)),
-    ]);
+    let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(CAP).array_new_default(T_I32S).local_set(IDX);
-    s.local_get(CAP).i32_const(1).i32_sub().local_set(MASK);
-    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(N);
-    count_loop(&mut s, E, N, |s| {
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_KEYS)
-            .local_get(E)
-            .array_get(T_KEYS)
-            .local_tee(KK)
-            .ref_is_null()
-            .i32_eqz();
-        s.if_(BlockType::Empty);
-        s.local_get(KK)
-            .ref_as_non_null()
-            .call(hash)
-            .local_get(MASK)
-            .i32_and()
-            .local_set(I);
-        s.block(BlockType::Empty).loop_(BlockType::Empty);
-        s.local_get(IDX)
-            .local_get(I)
-            .array_get(T_I32S)
-            .i32_eqz()
-            .br_if(1);
-        s.local_get(I)
-            .i32_const(1)
-            .i32_add()
-            .local_get(MASK)
-            .i32_and()
-            .local_set(I);
-        s.br(0).end().end();
-        s.local_get(IDX)
-            .local_get(I)
-            .local_get(E)
-            .i32_const(1)
-            .i32_add()
-            .array_set(T_I32S);
-        s.end();
-    });
-    s.local_get(O).local_get(IDX).struct_set(T_OBJECT, F_INDEX);
+    s.local_get(O);
+    s.local_get(O).struct_get(T_OBJECT, F_KEYS);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT);
+    s.local_get(CAP).call(build);
+    s.struct_set(T_OBJECT, F_INDEX);
     s.end();
     f
 }
 
+/// `alloc(class, proto)`: a new empty object; with a class without flag bits it starts at the root
+/// shape (T83), sharing its (empty) keys and attributes.
 fn alloc() -> Function {
     let mut f = Function::new([]);
     let mut s = f.instructions();
+    s.local_get(0).i32_const(!CLASS_MASK).i32_and();
+    s.if_(BlockType::Result(rt(false, T_OBJECT)));
     s.local_get(0).local_get(1);
     s.i32_const(0).array_new_default(T_KEYS);
     s.i32_const(0).array_new_default(T_VALS);
@@ -1683,6 +2038,15 @@ fn alloc() -> Function {
     s.i32_const(0);
     s.ref_null(wasm_encoder::HeapType::Concrete(T_I32S));
     s.struct_new(T_OBJECT);
+    s.else_();
+    s.local_get(0).local_get(1);
+    s.global_get(runtime::G_ROOT_SHAPE).struct_get(T_SHAPE, SH_KEYS);
+    s.i32_const(0).array_new_default(T_VALS);
+    s.global_get(runtime::G_ROOT_SHAPE).struct_get(T_SHAPE, SH_ATTRS);
+    s.i32_const(0);
+    s.global_get(runtime::G_ROOT_SHAPE);
+    s.struct_new(T_OBJECT);
+    s.end();
     s.end();
     f
 }
@@ -2893,7 +3257,8 @@ fn new_object(cx: &mut dyn Cx) -> Function {
 fn set_proto() -> Function {
     const O: u32 = 0;
     const P: u32 = 1;
-    let mut f = Function::new([]);
+    const OBJ: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
     // An array with another prototype: its writes look at the chain (T34).
     s.local_get(O).ref_test_non_null(array::array());
@@ -2906,11 +3271,17 @@ fn set_proto() -> Function {
     s.local_get(P)
         .ref_cast_non_null(object())
         .struct_set(T_OBJECT, F_PROTO);
+    as_obj(&mut s, O);
+    s.local_set(OBJ);
+    layout_changed(&mut s, OBJ);
     s.end();
     s.local_get(P).global_get(G_NULL).ref_eq();
     s.if_(BlockType::Empty);
     as_obj(&mut s, O);
     s.ref_null(object()).struct_set(T_OBJECT, F_PROTO);
+    as_obj(&mut s, O);
+    s.local_set(OBJ);
+    layout_changed(&mut s, OBJ);
     s.end();
     s.end();
     f
@@ -4639,4 +5010,549 @@ pub fn define_tag(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, tag: &str) {
     s.call(sym).ref_cast_non_null(string());
     s.global_get(tag);
     s.i32_const(HIDDEN | READONLY).call(define);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shapes (T83)
+// ---------------------------------------------------------------------------------------------
+
+/// `$shape` fields (see [`runtime::T_SHAPE`]).
+const SH_KEYS: u32 = 0;
+const SH_ATTRS: u32 = 1;
+const SH_INDEX: u32 = 2;
+const SH_COUNT: u32 = 3;
+const SH_CHILD: u32 = 4;
+const SH_SIBLING: u32 = 5;
+const SH_NCHILD: u32 = 6;
+
+fn shape() -> HeapType {
+    HeapType::Concrete(T_SHAPE)
+}
+
+/// Push the hash index (a `(ref null $i32s)`) of the object in local `o`: its own, or its shape's. Uses
+/// local `any` (an eqref).
+fn push_index(s: &mut InstructionSink, o: u32, any: u32) {
+    s.local_get(o).struct_get(T_OBJECT, F_INDEX).local_tee(any);
+    s.ref_test_non_null(shape());
+    s.if_(BlockType::Result(rt(true, T_I32S)));
+    s.local_get(any)
+        .ref_cast_non_null(shape())
+        .struct_get(T_SHAPE, SH_INDEX);
+    s.else_();
+    s.local_get(any).ref_cast_nullable(HeapType::Concrete(T_I32S));
+    s.end();
+}
+
+/// The object in local `o` (a non-null `$object` ref) had a layout change: bump `G_EPOCH` if it's
+/// flagged as a prototype some cache depends on.
+fn layout_changed(s: &mut InstructionSink, o: u32) {
+    s.local_get(o)
+        .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(IS_PROTO)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    bump_epoch(s);
+    s.end();
+}
+
+/// `G_EPOCH += 1`, kept non-negative (a negative tag marks the caches that don't depend on it).
+pub fn bump_epoch(s: &mut InstructionSink) {
+    s.global_get(runtime::G_EPOCH)
+        .i32_const(1)
+        .i32_add()
+        .i32_const(0x7fff_ffff)
+        .i32_and()
+        .global_set(runtime::G_EPOCH);
+}
+
+/// `build_index(keys, n, cap) -> (ref $i32s)`: the hash index of the first `n` keys (null keys skipped)
+/// with `cap` (a power of 2) slots.
+fn build_index(cx: &mut dyn Cx) -> Function {
+    let hash = h(cx, Helper::Hash);
+    const KEYS: u32 = 0;
+    const N: u32 = 1;
+    const CAP: u32 = 2;
+    const E: u32 = 3;
+    const I: u32 = 4;
+    const MASK: u32 = 5;
+    const KK: u32 = 6;
+    const IDX: u32 = 7;
+    let mut f = Function::new([
+        (3, ValType::I32),
+        (1, rt(true, T_STRING)),
+        (1, rt(true, T_I32S)),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(CAP).array_new_default(T_I32S).local_set(IDX);
+    s.local_get(CAP).i32_const(1).i32_sub().local_set(MASK);
+    count_loop(&mut s, E, N, |s| {
+        s.local_get(KEYS)
+            .local_get(E)
+            .array_get(T_KEYS)
+            .local_tee(KK)
+            .ref_is_null()
+            .i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(KK)
+            .ref_as_non_null()
+            .call(hash)
+            .local_get(MASK)
+            .i32_and()
+            .local_set(I);
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(IDX)
+            .local_get(I)
+            .array_get(T_I32S)
+            .i32_eqz()
+            .br_if(1);
+        s.local_get(I)
+            .i32_const(1)
+            .i32_add()
+            .local_get(MASK)
+            .i32_and()
+            .local_set(I);
+        s.br(0).end().end();
+        s.local_get(IDX)
+            .local_get(I)
+            .local_get(E)
+            .i32_const(1)
+            .i32_add()
+            .array_set(T_I32S);
+        s.end();
+    });
+    s.local_get(IDX).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `shape_child(sh, k, attrs) -> (ref null $shape)`: the shape after adding `k` with `attrs` to `sh`, found
+/// among its transitions or made; null past the limits (`SHAPE_MAX` keys, `CHILD_MAX` children,
+/// `SHAPE_BUDGET` shapes).
+fn shape_child(cx: &mut dyn Cx) -> Function {
+    let str_eq = rh(cx, runtime::Helper::StrEq);
+    let build = h(cx, Helper::BuildIndex);
+    const SH: u32 = 0;
+    const K: u32 = 1;
+    const A: u32 = 2;
+    const C: u32 = 3;
+    const N: u32 = 4;
+    const KK: u32 = 5;
+    const KEYS: u32 = 6;
+    const ATTRS: u32 = 7;
+    const J: u32 = 8;
+    let mut f = Function::new([
+        (1, rt(true, T_SHAPE)),
+        (1, ValType::I32),
+        (1, rt(true, T_STRING)),
+        (1, rt(true, T_KEYS)),
+        (1, rt(true, T_BYTES)),
+        (1, ValType::I32),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(SH).struct_get(T_SHAPE, SH_CHILD).local_set(C);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(C).ref_is_null().br_if(1);
+    s.local_get(C)
+        .struct_get(T_SHAPE, SH_COUNT)
+        .i32_const(1)
+        .i32_sub()
+        .local_set(N);
+    s.local_get(C)
+        .struct_get(T_SHAPE, SH_ATTRS)
+        .local_get(N)
+        .array_get_u(T_BYTES)
+        .local_get(A)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(C)
+        .struct_get(T_SHAPE, SH_KEYS)
+        .local_get(N)
+        .array_get(T_KEYS)
+        .local_set(KK);
+    key_matches(&mut s, KK, K, str_eq);
+    s.if_(BlockType::Empty);
+    s.local_get(C).return_();
+    s.end();
+    s.end();
+    s.local_get(C).struct_get(T_SHAPE, SH_SIBLING).local_set(C);
+    s.br(0).end().end();
+    // A new one, within the limits.
+    s.local_get(SH).struct_get(T_SHAPE, SH_COUNT).local_tee(N);
+    s.i32_const(SHAPE_MAX).i32_ge_s();
+    s.local_get(SH)
+        .struct_get(T_SHAPE, SH_NCHILD)
+        .i32_const(CHILD_MAX)
+        .i32_ge_s();
+    s.i32_or();
+    s.global_get(runtime::G_SHAPES_N)
+        .i32_const(SHAPE_BUDGET)
+        .i32_ge_s();
+    s.i32_or();
+    s.if_(BlockType::Empty);
+    s.ref_null(shape()).return_();
+    s.end();
+    s.local_get(N).i32_const(1).i32_add().local_tee(J);
+    s.array_new_default(T_KEYS).local_set(KEYS);
+    s.local_get(J).array_new_default(T_BYTES).local_set(ATTRS);
+    s.local_get(KEYS)
+        .i32_const(0)
+        .local_get(SH)
+        .struct_get(T_SHAPE, SH_KEYS)
+        .i32_const(0)
+        .local_get(N)
+        .array_copy(T_KEYS, T_KEYS);
+    s.local_get(ATTRS)
+        .i32_const(0)
+        .local_get(SH)
+        .struct_get(T_SHAPE, SH_ATTRS)
+        .i32_const(0)
+        .local_get(N)
+        .array_copy(T_BYTES, T_BYTES);
+    s.local_get(KEYS).local_get(N).local_get(K).array_set(T_KEYS);
+    s.local_get(ATTRS).local_get(N).local_get(A).array_set(T_BYTES);
+    s.local_get(KEYS).ref_as_non_null();
+    s.local_get(ATTRS).ref_as_non_null();
+    // The index past SMALL keys: the smallest power of 2 ≥ 4 * keys, at least 64 (as `grow`).
+    s.local_get(J).i32_const(SMALL).i32_gt_s();
+    s.if_(BlockType::Result(rt(true, T_I32S)));
+    s.local_get(KEYS).ref_as_non_null().local_get(J);
+    s.i32_const(1)
+        .i32_const(32)
+        .local_get(J)
+        .i32_const(2)
+        .i32_shl()
+        .i32_const(1)
+        .i32_sub()
+        .i32_clz()
+        .i32_sub()
+        .i32_shl()
+        .local_tee(N);
+    s.i32_const(64).local_get(N).i32_const(64).i32_gt_u().select();
+    s.call(build);
+    s.else_();
+    s.ref_null(HeapType::Concrete(T_I32S));
+    s.end();
+    // count, child, sibling (the parent's first child so far), nchild
+    s.local_get(J);
+    s.ref_null(shape());
+    s.local_get(SH).struct_get(T_SHAPE, SH_CHILD);
+    s.i32_const(0);
+    s.struct_new(T_SHAPE).local_set(C);
+    s.local_get(SH).local_get(C).struct_set(T_SHAPE, SH_CHILD);
+    s.local_get(SH)
+        .local_get(SH)
+        .struct_get(T_SHAPE, SH_NCHILD)
+        .i32_const(1)
+        .i32_add()
+        .struct_set(T_SHAPE, SH_NCHILD);
+    s.global_get(runtime::G_SHAPES_N)
+        .i32_const(1)
+        .i32_add()
+        .global_set(runtime::G_SHAPES_N);
+    s.local_get(C);
+    s.end();
+    f
+}
+
+/// `shape_shift(o, ns, v)`: shaped object `o` takes shape `ns`, one key more than its own, whose
+/// last entry gets value `v` (`vals` grows when needed).
+fn shape_shift() -> Function {
+    const O: u32 = 0;
+    const NS: u32 = 1;
+    const V: u32 = 2;
+    const N: u32 = 3;
+    const VALS: u32 = 4;
+    const NEW: u32 = 5;
+    const NEW_LEN: u32 = 6;
+    let mut f = Function::new([
+        (1, ValType::I32),
+        (1, rt(true, T_VALS)),
+        (1, rt(true, T_VALS)),
+        (1, ValType::I32),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(NS)
+        .struct_get(T_SHAPE, SH_COUNT)
+        .i32_const(1)
+        .i32_sub()
+        .local_set(N);
+    s.local_get(O).struct_get(T_OBJECT, F_VALS).local_tee(VALS);
+    s.array_len().local_get(N).i32_le_u();
+    s.if_(BlockType::Empty);
+    // max(4, 2 * n)
+    s.local_get(N).i32_const(1).i32_shl().local_tee(NEW_LEN);
+    s.i32_const(4)
+        .local_get(NEW_LEN)
+        .i32_const(4)
+        .i32_gt_u()
+        .select();
+    s.array_new_default(T_VALS).local_tee(NEW);
+    s.i32_const(0)
+        .local_get(VALS)
+        .i32_const(0)
+        .local_get(VALS)
+        .array_len()
+        .array_copy(T_VALS, T_VALS);
+    s.local_get(O)
+        .local_get(NEW)
+        .ref_as_non_null()
+        .struct_set(T_OBJECT, F_VALS);
+    s.local_get(NEW).local_set(VALS);
+    s.end();
+    s.local_get(VALS).local_get(N).local_get(V).array_set(T_VALS);
+    s.local_get(O)
+        .local_get(NS)
+        .struct_get(T_SHAPE, SH_KEYS)
+        .struct_set(T_OBJECT, F_KEYS);
+    s.local_get(O)
+        .local_get(NS)
+        .struct_get(T_SHAPE, SH_ATTRS)
+        .struct_set(T_OBJECT, F_ATTRS);
+    s.local_get(O).local_get(NS).struct_set(T_OBJECT, F_INDEX);
+    s.local_get(O)
+        .local_get(N)
+        .i32_const(1)
+        .i32_add()
+        .struct_set(T_OBJECT, F_COUNT);
+    layout_changed(&mut s, O);
+    s.end();
+    f
+}
+
+/// `add_shaped(o, k, v, attrs) -> i32`: add the new own property `k` (known absent) to `o` by a shape
+/// transition: 1 if done; 0 if `o` has no shape (any more: past the limits it goes to dictionary mode).
+fn add_shaped(cx: &mut dyn Cx) -> Function {
+    let child = h(cx, Helper::ShapeChild);
+    let shift = h(cx, Helper::ShapeShift);
+    let unshape = h(cx, Helper::Unshape);
+    const O: u32 = 0;
+    const K: u32 = 1;
+    const V: u32 = 2;
+    const A: u32 = 3;
+    const ANY: u32 = 4;
+    const C: u32 = 5;
+    let mut f = Function::new([(1, jsval()), (1, rt(true, T_SHAPE))]);
+    let mut s = f.instructions();
+    s.local_get(O).struct_get(T_OBJECT, F_INDEX).local_tee(ANY);
+    s.ref_test_non_null(shape()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(ANY).ref_cast_non_null(shape());
+    s.local_get(K).local_get(A).call(child).local_tee(C);
+    s.ref_is_null();
+    s.if_(BlockType::Empty);
+    s.local_get(O).call(unshape);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(O)
+        .local_get(C)
+        .ref_as_non_null()
+        .local_get(V)
+        .call(shift);
+    s.i32_const(1);
+    s.end();
+    f
+}
+
+/// `unshape(o)`: dictionary mode: `o` gets its own copies of its shape's keys, attributes and index
+/// (nothing for an object without a shape).
+fn unshape() -> Function {
+    const O: u32 = 0;
+    const ANY: u32 = 1;
+    const SH: u32 = 2;
+    const N: u32 = 3;
+    const KEYS: u32 = 4;
+    const ATTRS: u32 = 5;
+    const IDX: u32 = 6;
+    const ANY_IDX: u32 = 7;
+    let mut f = Function::new([
+        (1, jsval()),
+        (1, rt(true, T_SHAPE)),
+        (1, ValType::I32),
+        (1, rt(true, T_KEYS)),
+        (1, rt(true, T_BYTES)),
+        (1, rt(true, T_I32S)),
+        (1, rt(true, T_I32S)),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(O).struct_get(T_OBJECT, F_INDEX).local_tee(ANY);
+    s.ref_test_non_null(shape()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.local_get(ANY).ref_cast_non_null(shape()).local_set(SH);
+    s.local_get(SH).struct_get(T_SHAPE, SH_COUNT).local_tee(N);
+    s.array_new_default(T_KEYS).local_set(KEYS);
+    s.local_get(N).array_new_default(T_BYTES).local_set(ATTRS);
+    s.local_get(KEYS)
+        .i32_const(0)
+        .local_get(SH)
+        .struct_get(T_SHAPE, SH_KEYS)
+        .i32_const(0)
+        .local_get(N)
+        .array_copy(T_KEYS, T_KEYS);
+    s.local_get(ATTRS)
+        .i32_const(0)
+        .local_get(SH)
+        .struct_get(T_SHAPE, SH_ATTRS)
+        .i32_const(0)
+        .local_get(N)
+        .array_copy(T_BYTES, T_BYTES);
+    s.local_get(O)
+        .local_get(KEYS)
+        .ref_as_non_null()
+        .struct_set(T_OBJECT, F_KEYS);
+    s.local_get(O)
+        .local_get(ATTRS)
+        .ref_as_non_null()
+        .struct_set(T_OBJECT, F_ATTRS);
+    s.local_get(SH).struct_get(T_SHAPE, SH_INDEX).local_tee(IDX);
+    s.ref_is_null().i32_eqz();
+    s.if_(BlockType::Result(rt(true, T_I32S)));
+    s.local_get(IDX).ref_as_non_null().array_len().array_new_default(T_I32S);
+    s.local_tee(ANY_IDX);
+    s.i32_const(0)
+        .local_get(IDX)
+        .i32_const(0)
+        .local_get(IDX)
+        .array_len()
+        .array_copy(T_I32S, T_I32S);
+    s.local_get(ANY_IDX);
+    s.else_();
+    s.ref_null(HeapType::Concrete(T_I32S));
+    s.end();
+    s.local_set(IDX);
+    s.local_get(O).local_get(IDX).struct_set(T_OBJECT, F_INDEX);
+    s.end();
+    f
+}
+
+/// `set_attr(o, e, a)`: entry `e` of `o` gets attributes `a`; a change goes to dictionary mode first
+/// (a shape's attributes never change) and counts as a layout change.
+fn set_attr(cx: &mut dyn Cx) -> Function {
+    let unshape = h(cx, Helper::Unshape);
+    const O: u32 = 0;
+    const E: u32 = 1;
+    const A: u32 = 2;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .array_get_u(T_BYTES)
+        .local_get(A)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.local_get(O).call(unshape);
+    layout_changed(&mut s, O);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .local_get(A)
+        .array_set(T_BYTES);
+    s.end();
+    f
+}
+
+/// `mark_chain(p, holder)`: flag every object from `p` to `holder` (to the end of the chain when `holder`
+/// is null) [`IS_PROTO`]: a cache now depends on their layouts.
+fn mark_chain() -> Function {
+    const P: u32 = 0;
+    const HOLDER: u32 = 1;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(P).ref_is_null().br_if(1);
+    s.local_get(P).ref_as_non_null();
+    s.local_get(P)
+        .ref_as_non_null()
+        .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(IS_PROTO)
+        .i32_or();
+    s.struct_set(T_OBJECT, F_CLASS);
+    s.local_get(P).local_get(HOLDER).ref_eq().br_if(1);
+    s.local_get(P)
+        .ref_as_non_null()
+        .struct_get(T_OBJECT, F_PROTO)
+        .local_set(P);
+    s.br(0).end().end();
+    s.end();
+    f
+}
+
+/// `ic_entry(site) -> (ref $ic)`: site `site`'s inline cache, made on first use (`G_IC` grows by
+/// doubling, at least 1,024 sites).
+fn ic_entry() -> Function {
+    const SITE: u32 = 0;
+    const ICS: u32 = 1;
+    const N: u32 = 2;
+    const NEW: u32 = 3;
+    const IC: u32 = 4;
+    let mut f = Function::new([
+        (1, rt(true, runtime::T_ICS)),
+        (1, ValType::I32),
+        (1, rt(true, runtime::T_ICS)),
+        (1, rt(true, runtime::T_IC)),
+    ]);
+    let mut s = f.instructions();
+    s.global_get(runtime::G_IC).local_tee(ICS).ref_is_null();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(ICS).array_len();
+    s.end();
+    s.local_tee(N);
+    s.local_get(SITE).i32_le_u();
+    s.if_(BlockType::Empty);
+    {
+        // max(2 * n, site + 1, 1024)
+        s.local_get(N).i32_const(1).i32_shl().local_tee(N);
+        s.local_get(SITE).i32_const(1).i32_add();
+        s.local_get(N).local_get(SITE).i32_const(1).i32_add().i32_gt_u();
+        s.select().local_tee(N);
+        s.i32_const(1024);
+        s.local_get(N).i32_const(1024).i32_gt_u();
+        s.select();
+        s.array_new_default(runtime::T_ICS).local_set(NEW);
+        s.local_get(ICS).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(NEW)
+            .i32_const(0)
+            .local_get(ICS)
+            .i32_const(0)
+            .local_get(ICS)
+            .array_len()
+            .array_copy(runtime::T_ICS, runtime::T_ICS);
+        s.end();
+        s.local_get(NEW).local_tee(ICS).global_set(runtime::G_IC);
+    }
+    s.end();
+    s.local_get(ICS).local_get(SITE).array_get(runtime::T_ICS).local_tee(IC);
+    s.ref_is_null();
+    s.if_(BlockType::Empty);
+    s.local_get(ICS).local_get(SITE);
+    s.struct_new_default(runtime::T_IC).local_tee(IC);
+    s.array_set(runtime::T_ICS);
+    s.end();
+    s.local_get(IC).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `ic_fill(site, shape, proto, extra, slot, tag)`: the site's shape cache (see the module docs).
+fn ic_fill(cx: &mut dyn Cx) -> Function {
+    let entry = h(cx, Helper::IcEntry);
+    const SITE: u32 = 0;
+    const IC: u32 = 6;
+    let mut f = Function::new([(1, rt(true, runtime::T_IC))]);
+    let mut s = f.instructions();
+    s.local_get(SITE).call(entry).local_set(IC);
+    for (field, l) in [(IC_SHAPE, 1), (IC_PROTO, 2), (IC_EXTRA, 3), (IC_SLOT, 4), (IC_TAG, 5)] {
+        s.local_get(IC).local_get(l).struct_set(runtime::T_IC, field);
+    }
+    s.end();
+    f
 }

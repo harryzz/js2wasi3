@@ -102,11 +102,20 @@ pub const T_WRAPPER: u32 = 27;
 /// string being appended to (`str_buf_append`): its first `len` units of `buf` (room to grow), and
 /// that string once made (`str_buf_get`; null after an append). Only ever in a variable's local.
 pub const T_STRBUF: u32 = 28;
+/// `$shape { keys: (ref $keys), attrs: (ref $bytes), index: (ref null $i32s), count: i32,
+/// child: mut (ref null $shape), sibling: mut (ref null $shape), nchild: mut i32 }` (T83): an
+/// object's layout, shared by the objects that have it (see `object.rs`, "Shapes").
+pub const T_SHAPE: u32 = 29;
+/// `$ic { shape, proto, extra: mut eqref, slot, tag, guess: mut i32 }` (T83): a constant-key site's
+/// inline cache (see `object.rs`, "Inline caches").
+pub const T_IC: u32 = 30;
+/// `(array (mut (ref null $ic)))` (T83): the inline caches by site ([`G_IC`]).
+pub const T_ICS: u32 = 31;
 /// `$bigint`: a final `(array (mut i32))`, sign then magnitude limbs (T40, see [`crate::bigint`]).
 /// Only in a module that can make a BigInt ([`Cx::bigint`]): the last type of the group then.
-pub const T_BIGINT: u32 = 29;
+pub const T_BIGINT: u32 = 32;
 /// Number of runtime types before the function types (one more with `$bigint`).
-pub const TYPES: u32 = 29;
+pub const TYPES: u32 = 32;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -181,8 +190,8 @@ pub const G_INDEX_PROTO: u32 = G_TIMER_ID + 1;
 /// `(mut (ref null $object))` (T27): the built-in `RegExp.prototype.exec` as installed, so the
 /// prelude can skip the lookup-and-call of RegExpExec while it's still in place.
 pub const G_REGEXP_EXEC: u32 = G_INDEX_PROTO + 1;
-/// `(mut (ref null $i32s))` (T74): the inline caches of constant-key property reads, one entry index
-/// per site (`object::Helper::GetNamed`), grown on demand.
+/// `(mut (ref null $ics))` (T74, T83): the inline caches of constant-key property accesses, one `$ic`
+/// per site (`object::Helper::GetNamed`, `SetNamed`, `DefineNamed`), grown on demand.
 pub const G_IC: u32 = G_REGEXP_EXEC + 1;
 /// `(mut (ref null $keys))` (T75): the property keys of the integers 0 to [`NUM_KEYS`] − 1, made on
 /// first use (`object::Helper::ToKey`).
@@ -193,8 +202,14 @@ pub const NUM_KEYS: i32 = 1024;
 /// per key of [`crate::object::REGEXP_PLAIN_KEYS`] its entry index (an i31), its value (an
 /// accessor's getter) and its attributes (an i31).
 pub const G_REGEXP_SNAP: u32 = G_NUM_KEYS + 1;
+/// `(mut i32)` (T83): bumped by every layout change of an object flagged `object::IS_PROTO`.
+pub const G_EPOCH: u32 = G_REGEXP_SNAP + 1;
+/// `(ref $shape)` (T83): the empty root shape.
+pub const G_ROOT_SHAPE: u32 = G_EPOCH + 1;
+/// `(mut i32)` (T83): how many shapes were made (capped by `object::SHAPE_BUDGET`).
+pub const G_SHAPES_N: u32 = G_ROOT_SHAPE + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_REGEXP_SNAP + 1;
+pub const GLOBALS: u32 = G_SHAPES_N + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -565,7 +580,8 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
         field(StorageType::Val(rt(false, T_VALS)), true),
         field(StorageType::Val(rt(false, T_BYTES)), true),
         field(StorageType::Val(ValType::I32), true),
-        field(StorageType::Val(rt(true, T_I32S)), true),
+        // `index`: null or an `$i32s` (dictionary mode), or the object's `$shape` (T83).
+        field(StorageType::Val(jsval()), true),
     ];
     let mut array_fields = object_fields.clone();
     array_fields.push(field(StorageType::Val(rt(false, T_VALS)), true));
@@ -793,6 +809,33 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
                 field(StorageType::Val(rt(true, T_STRING)), true),
             ]),
         })),
+        // $shape (T83).
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(rt(false, T_KEYS)), false),
+                field(StorageType::Val(rt(false, T_BYTES)), false),
+                field(StorageType::Val(rt(true, T_I32S)), false),
+                field(StorageType::Val(ValType::I32), false),
+                field(StorageType::Val(rt(true, T_SHAPE)), true),
+                field(StorageType::Val(rt(true, T_SHAPE)), true),
+                field(StorageType::Val(ValType::I32), true),
+            ]),
+        })),
+        // $ic, $ics (T83).
+        sub(CompositeInnerType::Struct(StructType {
+            fields: Box::new([
+                field(StorageType::Val(jsval()), true),
+                field(StorageType::Val(jsval()), true),
+                field(StorageType::Val(jsval()), true),
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(ValType::I32), true),
+                field(StorageType::Val(ValType::I32), true),
+            ]),
+        })),
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::Val(rt(true, T_IC)),
+            true,
+        )))),
     ];
     if bigint {
         group.push(sub(CompositeInnerType::Array(ArrayType(field(
@@ -971,11 +1014,11 @@ pub fn globals(
     // T74: the inline caches.
     globals.global(
         GlobalType {
-            val_type: rt(true, T_I32S),
+            val_type: rt(true, T_ICS),
             mutable: true,
             shared: false,
         },
-        &ConstExpr::ref_null(HeapType::Concrete(T_I32S)),
+        &ConstExpr::ref_null(HeapType::Concrete(T_ICS)),
     );
     // T75: the integer keys.
     globals.global(
@@ -995,6 +1038,32 @@ pub fn globals(
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
     );
+    // T83: the prototype epoch, the root shape, the shape count.
+    globals.global(int, &ConstExpr::i32_const(0));
+    globals.global(
+        GlobalType {
+            val_type: rt(false, T_SHAPE),
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::extended([
+            Instruction::ArrayNewFixed {
+                array_type_index: T_KEYS,
+                array_size: 0,
+            },
+            Instruction::ArrayNewFixed {
+                array_type_index: T_BYTES,
+                array_size: 0,
+            },
+            Instruction::RefNull(HeapType::Concrete(T_I32S)),
+            Instruction::I32Const(0),
+            Instruction::RefNull(HeapType::Concrete(T_SHAPE)),
+            Instruction::RefNull(HeapType::Concrete(T_SHAPE)),
+            Instruction::I32Const(0),
+            Instruction::StructNew(T_SHAPE),
+        ]),
+    );
+    globals.global(int, &ConstExpr::i32_const(0));
     for _ in 0..extra {
         globals.global(
             GlobalType {

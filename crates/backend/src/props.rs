@@ -156,7 +156,7 @@ impl Helper {
             Helper::DefineAccessor => define_accessor(cx),
             Helper::DefineProperty => define_property(cx),
             Helper::GetOwnPropertyDescriptor => get_own_property_descriptor(cx),
-            Helper::Integrity(op) => integrity(op),
+            Helper::Integrity(op) => integrity(cx, op),
             Helper::TestIntegrity(op) => test_integrity(op, cx.names("$module")),
             Helper::SuperGet => super_get(cx),
             Helper::SuperSet => super_set(cx),
@@ -201,13 +201,6 @@ fn attrs(s: &mut InstructionSink, o: u32, e: u32) {
         .struct_get(T_OBJECT, F_ATTRS)
         .local_get(e)
         .array_get_u(T_BYTES);
-}
-
-/// `o.attrs[e] = <value pushed by f>`.
-fn set_attrs(s: &mut InstructionSink, o: u32, e: u32, f: impl FnOnce(&mut InstructionSink)) {
-    s.local_get(o).struct_get(T_OBJECT, F_ATTRS).local_get(e);
-    f(s);
-    s.array_set(T_BYTES);
 }
 
 /// Push `o.vals[e]`.
@@ -647,6 +640,7 @@ fn desc(cx: &mut dyn Cx) -> Function {
 fn put(cx: &mut dyn Cx) -> Function {
     let define = oh(cx, object::Helper::Define);
     let find = oh(cx, object::Helper::FindOwn);
+    let set_attr = oh(cx, object::Helper::SetAttr);
     const O: u32 = 0;
     const K: u32 = 1;
     const V: u32 = 2;
@@ -654,6 +648,8 @@ fn put(cx: &mut dyn Cx) -> Function {
     const E: u32 = 4;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
+    // `define` gives a new property its attributes (T83: a shape transition with them); an existing
+    // one changes them after.
     s.local_get(O)
         .local_get(K)
         .local_get(V)
@@ -662,9 +658,7 @@ fn put(cx: &mut dyn Cx) -> Function {
     s.local_get(O).local_get(K).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
-    set_attrs(&mut s, O, E, |s| {
-        s.local_get(A);
-    });
+    s.local_get(O).local_get(E).local_get(A).call(set_attr);
     s.end();
     s.end();
     f
@@ -750,6 +744,7 @@ const D_GET: i32 = 16;
 const D_SET: i32 = 32;
 
 fn define_property(cx: &mut dyn Cx) -> Function {
+    let set_attr = oh(cx, object::Helper::SetAttr);
     let to_key = oh(cx, object::Helper::ToKey);
     let find = oh(cx, object::Helper::FindOwn);
     let lookup = oh(cx, object::Helper::Lookup);
@@ -935,10 +930,9 @@ fn define_property(cx: &mut dyn Cx) -> Function {
             arr(s);
             s.local_get(E).local_get(A).call(set_elem_attrs);
         } else {
-            s.local_get(O)
-                .ref_as_non_null()
-                .struct_get(T_OBJECT, F_ATTRS);
-            s.local_get(E).local_get(A).array_set(T_BYTES);
+            // T83: an attribute change goes to dictionary mode.
+            s.local_get(O).ref_as_non_null();
+            s.local_get(E).local_get(A).call(set_attr);
         }
     };
     // An existing non-configurable property: only compatible changes.
@@ -1458,7 +1452,8 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn integrity(op: u8) -> Function {
+fn integrity(cx: &mut dyn Cx, op: u8) -> Function {
+    let unshape = oh(cx, object::Helper::Unshape);
     const V: u32 = 0;
     const O: u32 = 1;
     const E: u32 = 2;
@@ -1471,6 +1466,19 @@ fn integrity(op: u8) -> Function {
     s.local_get(V).return_();
     s.end();
     s.local_get(V).ref_cast_non_null(object()).local_set(O);
+    // T83: dictionary mode (a shaped object is extensible, and its attributes never change); a
+    // layout change of a prototype.
+    s.local_get(O).ref_as_non_null().call(unshape);
+    if op >= 1 {
+        s.local_get(O)
+            .ref_as_non_null()
+            .struct_get(T_OBJECT, F_CLASS)
+            .i32_const(object::IS_PROTO)
+            .i32_and();
+        s.if_(BlockType::Empty);
+        object::bump_epoch(&mut s);
+        s.end();
+    }
     let mut flags = NO_EXTEND;
     if op >= 1 {
         flags |= SEALED;
