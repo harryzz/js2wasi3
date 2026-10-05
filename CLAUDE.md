@@ -10,7 +10,11 @@ Compiler: JavaScript → a WASI 0.3 Wasm component (WasmGC, native EH, P3 async)
 ## Cloud sessions (Claude Code on the web)
 If this session runs in a cloud sandbox (no `~/js2wasi3-prod-run`, no a-03), follow **`tasks/CLOUD-BATCH.md`**: it
 says which tasks to run unattended (T80, then T81), on which branch (`speed-batch`, never `main`), and what the
-sandbox can't do.
+sandbox can't do. (That batch finished 2026-10-05.)
+
+**Local sessions, until the cloud batch is merged**: `tasks/README.md`'s "Next up" may still say T80/T81; they're done
+on `origin/speed-batch`. The next task is **T82** (`tasks/T82-zigbee-replay-measure.md`): step 1 merges that branch
+into `main` with the user as author, step 2 is one replay on a-03.
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.

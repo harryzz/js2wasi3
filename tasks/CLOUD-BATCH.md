@@ -1,5 +1,8 @@
 # Cloud batch (user's rule, 2026-10-05): T80 then T81, unattended, on branch `speed-batch`
 
+**Finished 2026-10-05** (T80 and T81 done on `speed-batch`; merged into `main` by T82 step 1). A cloud session that
+reads this now has nothing to run: stop and report.
+
 This rule applies to a session that runs this batch in Claude Code on the web (a cloud sandbox with only this
 repository). It overrides "ask first" defaults for exactly these actions; everything else in `CLAUDE.md` still holds.
 
