@@ -35,7 +35,7 @@ pub const F_EATTRS: u32 = 9;
 pub const MAX_DENSE: i32 = 1 << 26;
 
 /// The throw of the RangeError that stands for sparse arrays (an index or length at or past
-/// [`MAX_DENSE`]; not implemented, F366) instead of a trap (T87): the helper and the message.
+/// [`MAX_DENSE`]; not implemented, F50/F160) instead of a trap (T87): the helper and the message.
 fn sparse_error(cx: &mut dyn Cx) -> (u32, u32) {
     let throw = oh(cx, object::Helper::Throw(ErrorKind::RangeError));
     let msg = cx.str(
@@ -374,7 +374,7 @@ fn define(cx: &mut dyn Cx, set: bool) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(I).i64_const(MAX_DENSE as i64).i64_ge_u();
     s.if_(BlockType::Empty);
-    sparse(&mut s, sparse_ids); // sparse arrays aren't implemented (F366)
+    sparse(&mut s, sparse_ids); // sparse arrays aren't implemented (F50/F160)
     s.end();
     s.local_get(A)
         .local_get(I)
@@ -790,7 +790,7 @@ fn resize(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     s.local_get(L).i32_const(MAX_DENSE).i32_gt_u();
     s.if_(BlockType::Empty);
-    sparse(&mut s, sparse_ids); // sparse arrays aren't implemented (F366)
+    sparse(&mut s, sparse_ids); // sparse arrays aren't implemented (F50/F160)
     s.end();
     s.local_get(L)
         .local_get(A)

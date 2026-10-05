@@ -1,6 +1,6 @@
 # T87: Wasm traps in test262 (crashes instead of JS behaviour)
 
-Status: in progress (2026-10-05) | Depends on: — | Local
+Status: done (2026-10-05) | Depends on: — | Local
 
 ## Goal
 Every test262 test that ends in a Wasm trap (`unreachable`, a failed cast, call stack exhausted) either passes or
@@ -21,11 +21,26 @@ Per group: the test262 files (`node scripts/test262.mjs <files>`), a small `scri
 helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask first).
 
 ## Acceptance
-- [ ] No test262 test ends in a trap (or the rest recorded with reasons).
-- [ ] No regressions in the touched directories; full run on a-03.
+- [x] No test262 test ends in a trap (or the rest recorded with reasons): 2 left, F33.
+- [x] No regressions in the touched directories; full run on a-03.
 
 ## Notes / Result
-(to be written)
+36 test262 tests ended in a Wasm trap (T84's full run); 2 still do (F33). By group:
+- Case mapping (12 pass): the hand-written BMP tables trapped on every cased character outside Latin-1/Extended-A,
+  Greek, basic Cyrillic and fullwidth (real text: Romanian, Armenian, Georgian, …). Now generated from node
+  (`scripts/gen-unicode.mjs` → `unicode-case.js`: simple runs, special casing, Cased/Case_Ignorable), Final_Sigma.
+- `normalize` (5 pass): full UAX #15 with node-generated decompositions/composites and UnicodeData.txt classes.
+- `localeCompare` (3 pass): every string and the options, by ICU-like levels; accent order ranked from node's
+  collator; other scripts approximate (F367).
+- Prototypes (3 pass): `String`/`Number`/`Boolean.prototype` unwrap to "", +0, false (`unwrap`, `to_primitive`);
+  `String.prototype.length` 0; `$$describe` names wrappers like V8.
+- Miscompile (1 pass): `var f` before `function f` in one scope left `f` without its value (`closures.rs`).
+- Sparse arrays (13): a RangeError instead of a trap (still failures; F50/F160).
+- RegExp nesting (2): Wasm stack exhaustion, F33.
+Full test262 on a-03: 28,099 pass (was 28,077), 0 regressions (`tests/test262/HISTORY.md`). New fixtures:
+`builtins/string-case.js`, `string-normalize.js`, `string-locale-compare.js`, `closures/var-function-redeclare.js`.
+Follow-ups: F364, F365, F367; F107 updated; F50/F160 updated.
+Next smallest step: F333 (EarleyBoyer computes a wrong result), then F338 (Map with string keys, 300 s).
 
 ## Progress
 - 2026-10-05: task started; the 36 traps listed from a-03's `results.tsv` of the T84 run.
@@ -40,7 +55,7 @@ helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask 
 - 2026-10-05: arrays (13 tests: `array_define`, `array_resize`, `array_set_index`): an index or length ≥ 2^26
   (`MAX_DENSE`, no sparse storage) hit `unreachable`; now a RangeError ("Arrays with an index or length of 2^26 or
   more (sparse arrays) aren't supported by js2wasi3 yet", `array::sparse_error`). Still failures in test262 (node
-  supports them), but catchable; sparse arrays: F366.
+  supports them), but catchable; sparse arrays: F50/F160.
 - 2026-10-05: `String.prototype.normalize` (3 tests): only text needing no change was handled (NFC below U+0300,
   others ASCII); anything else trapped, e.g. the diacritics idiom `s.normalize("NFD").replace(/[̀-ͯ]/g,
   "")`. Now full UAX #15 (`$$normalize`: decomposition, canonical ordering, composition; Hangul algorithmic) with
@@ -72,3 +87,5 @@ helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask 
   RangeError), not fixed here. Local check: `scripts/diff.sh` builtins/, node/, objects/, classes/, closures/,
   arrays/: 149 pass; the two exhaustive Unicode fixtures timed out under parallel load (10 s): limited to
   U+0000–U+2FFFF (node: nothing beyond changes in any of the operations), then builtins/ 70/70.
+- 2026-10-05: full test262 on a-03 (`~/t262-t87.log`): 28,099 pass, 0 regressions, 26 → pass; traps left 2 (F33).
+  Docs: HISTORY.md, keywords.md, F50/F160/F107. Done.

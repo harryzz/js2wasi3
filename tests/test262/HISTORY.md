@@ -3,6 +3,17 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-05: T87 traps: case mapping, normalize, localeCompare, prototypes (full run)
+
+- Compiler (c68ad76; shapes reverted, so T82's objects): full Unicode case mapping and normalization from node's
+  data (`scripts/gen-unicode.mjs`), `localeCompare` by collation levels with options, `String`/`Number`/
+  `Boolean.prototype` as primitive wrappers, `String.prototype.length`, wrappers described like V8, a function
+  declared after a same-named `var` gets its value; sparse arrays throw a RangeError instead of trapping.
+  Runner: unchanged.
+- Full run on `a-03` (31,461 tests, 1,296 s, -j 36): 28,099 of 28,984 run pass (96.9%), **0 regressions**; 26
+  changes since the baseline, all to pass (22 of them T87's). Traps left: 2 (`RegExp/S15.10.2.8_A3_T15`, `_T16`:
+  200 nested groups exhaust the Wasm stack, F33). Baseline not updated.
+
 ## 2026-10-05: T80 UTF-8, T81 RegExp fast paths, T83 shapes (full run, T84)
 
 - Compiler (a77d0da): native UTF-8 in `node:buffer` (T80); RegExp fast paths for unmodified RegExps (T81); shapes
