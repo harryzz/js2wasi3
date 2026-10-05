@@ -1,14 +1,39 @@
-//! Objects (T13, design D1: dictionary mode, no hidden classes yet).
+//! Objects (T13, design D1; T83: shapes).
 //!
 //! # Layout
 //! `$object { class: i32, proto: mut (ref null $object), keys: mut (ref $keys), vals: mut (ref $vals),
-//! attrs: mut (ref $bytes), count: mut i32, index: mut (ref null $i32s) }`:
+//! attrs: mut (ref $bytes), count: mut i32, index: mut eqref }`:
 //! - Properties are entries `0..count` in insertion order: `keys[e]`, `vals[e]`, `attrs[e]` (bit 0: not
 //!   enumerable). A deleted entry has a null key. Keys are strings (no symbols yet).
 //! - Up to [`SMALL`] entries a lookup scans them. Beyond that an open-addressing hash index
 //!   (FNV-1a over the UTF-16 units, linear probing) maps slots to `entry + 1` (0: empty). Deleted
 //!   entries keep their slots until the arrays are compacted ([`Helper::Grow`]).
 //! - `class`: [`CLASS_PLAIN`] or [`CLASS_ERROR`] (made by an error constructor).
+//! - `index`: null or an `$i32s` (dictionary mode), or the object's `$shape` (T83).
+//!
+//! # Shapes (T83)
+//! A `$shape` owns a layout: `keys`/`attrs` of exactly `count` entries (never written once made), the
+//! hash index past [`SMALL`] keys, and its transitions (`child`, then `sibling`s: one per added key and
+//! attribute byte). A shaped object's `keys`/`attrs` are its shape's arrays and its `count` the shape's, so
+//! every reader works unchanged; only writers of the layout care: an add takes the next shape
+//! ([`Helper::AddShaped`], keys compared by content), anything else first goes to dictionary mode
+//! ([`Helper::Unshape`]: a delete, an attribute change through [`Helper::SetAttr`], `integrity`), as does
+//! an add past [`SHAPE_MAX`] keys, [`CHILD_MAX`] transitions or [`SHAPE_BUDGET`] shapes. `alloc` gives the
+//! root shape (`G_ROOT_SHAPE`) to exact `$object`s whose class has no flag bits, so a shaped object is
+//! extensible. A shape doesn't include the prototype.
+//!
+//! # Inline caches (T74, T83)
+//! Each constant-key site (`GetNamed`, `SetNamed`, `DefineNamed`) has an `$ic` in `G_IC`: `shape`, `proto`,
+//! `extra`, `slot`, `tag`, and T74's entry `guess` for unshaped receivers. A hit needs `o.index == shape`:
+//! - read: `tag` < 0: own, `o.vals[slot]`; else a prototype hit (`extra`: the holder's `vals`) or absent
+//!   (`slot` −1), valid while `o.proto == proto` and `tag == G_EPOCH`; `slot` has [`IC_CHECK`] for an
+//!   accessor or a sentinel.
+//! - write: `tag` < 0: an own writable data property; else an add (`extra`: the next shape), valid as a
+//!   prototype read is (filled only when no object on the chain has the key).
+//! - literal define: `extra` is the next shape.
+//! Filling a chain-dependent entry flags every object on the chain [`IS_PROTO`]; a layout change of a
+//! flagged object (add, delete, attribute change, `integrity`, a new prototype) bumps `G_EPOCH`, which
+//! invalidates all of them at once. Values are read live, so replacing a method needs no bump.
 //!
 //! # Built-in prototypes
 //! One per [`Builtin`], created on first use (globals from [`runtime::G_PROTOS`]) with their real
@@ -1037,6 +1062,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
     let shift = h(cx, Helper::ShapeShift);
     let fill = h(cx, Helper::IcFill);
     let mark = h(cx, Helper::MarkChain);
+    let store = h(cx, Helper::IcStore);
     const V: u32 = 0;
     const K: u32 = 1;
     const X: u32 = 2;
@@ -1088,8 +1114,56 @@ fn set_named(cx: &mut dyn Cx) -> Function {
         s.return_();
         s.end();
         s.end();
+        // An unshaped receiver: T74's entry guess, for a writable own data property.
+        let writable = |s: &mut InstructionSink| {
+            s.local_get(O)
+                .struct_get(T_OBJECT, F_ATTRS)
+                .local_get(E)
+                .array_get_u(T_BYTES)
+                .i32_const(ACCESSOR | READONLY)
+                .i32_and()
+                .i32_eqz();
+        };
+        s.local_get(ICR).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        ic_get(&mut s, ICR, IC_GUESS);
+        s.local_tee(E);
+        s.local_get(O).struct_get(T_OBJECT, F_COUNT).i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(E)
+            .array_get(T_KEYS)
+            .local_get(K)
+            .ref_eq();
+        s.if_(BlockType::Empty);
+        writable(&mut s);
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .local_get(X)
+            .array_set(T_VALS);
+        s.return_();
+        s.end();
+        s.end();
+        s.end();
+        s.end();
         s.local_get(O).ref_as_non_null();
         s.local_get(K).local_get(X).local_get(H).call(ordinary);
+        s.local_get(BEFORE).ref_test_non_null(shape()).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_as_non_null();
+        s.local_get(K).local_get(H).call(find).local_tee(E);
+        s.i32_const(0).i32_ge_s();
+        s.if_(BlockType::Empty);
+        writable(&mut s);
+        s.if_(BlockType::Empty);
+        s.local_get(SITE).local_get(E).call(store);
+        s.end();
+        s.end();
+        s.return_();
+        s.end();
         s.local_get(BEFORE).ref_test_non_null(shape());
         s.if_(BlockType::Empty);
         s.local_get(O).struct_get(T_OBJECT, F_INDEX).local_tee(AFTER);

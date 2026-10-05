@@ -1,6 +1,6 @@
 # T83: shapes (hidden classes) and shape-keyed inline caches for property access (F321)
 
-Status: in progress (handoff written 2026-10-05, chosen by the user after T82) | Depends on: T82 (numbers) | Cloud batch: yes
+Status: done (2026-10-05, cloud, branch `shapes-batch`; handoff chosen by the user after T82) | Depends on: T82 (numbers) | Cloud batch: yes
 (`tasks/CLOUD-BATCH.md`, branch `shapes-batch`)
 
 ## Goal
@@ -64,13 +64,13 @@ keys, whatever is simpler to leave out: decide in the design note).
   suite runs in T84 on a-03.
 
 ## Acceptance
-- [ ] Design note written here before code.
-- [ ] Shapes + shape-keyed caches for own reads/writes/adds; prototype hits cached; anything else falls back with
+- [x] Design note written here before code.
+- [x] Shapes + shape-keyed caches for own reads/writes/adds; prototype hits cached; anything else falls back with
       node's results.
-- [ ] New fixture and the touched fixtures pass `scripts/diff.sh`; the listed test262 directories show no regressions;
+- [x] New fixture and the touched fixtures pass `scripts/diff.sh`; the listed test262 directories show no regressions;
       `wasm-tools validate`; a wasmtime smoke run; `cargo test` of the touched crates.
-- [ ] Micro-benchmark before/after in Notes; F321 ticked (or what's left recorded); docs as `CLAUDE.md` says.
-- [ ] Not here: the zigbee2mqtt replay and the full test262 run (T84, local on a-03).
+- [x] Micro-benchmark before/after in Notes; F321 ticked (or what's left recorded); docs as `CLAUDE.md` says.
+- [x] Not here: the zigbee2mqtt replay and the full test262 run (T84, local on a-03).
 
 ## Design note (2026-10-05, before code)
 
@@ -136,7 +136,45 @@ grown together. Sites are numbered for `GetNamed`, `SetNamed` and `DefineNamed` 
 transitions (an attribute change goes to dictionary mode).
 
 ## Notes / Result
-(to be written)
+**What changed** (backend only; no IR or frontend change):
+- `runtime.rs`: `$shape` (type 29), `$ic` (30), `$ics` (31; `$bigint` moved to 32); `$object.index` is an `eqref`
+  (null / `$i32s` dictionary index / `$shape`); globals `G_EPOCH`, `G_ROOT_SHAPE` (made in its initializer),
+  `G_SHAPES_N`; `G_IC` is an `$ics` (one `$ic` struct per site: `shape`, `proto`, `extra`, `slot`, `tag`, `guess`).
+- `object.rs`: shapes (root shape from `alloc` for classes without flag bits; transitions by key content + attribute
+  byte in `define`/`append_named`; `unshape` to dictionary mode on delete, attribute change, integrity levels, past 64
+  keys, 64 children or 65536 shapes); `IS_PROTO` (0x1000) marks objects found as prototype holders, whose layout
+  changes and `setPrototypeOf` bump `G_EPOCH`; `get_named`/`set_named`/`define_named` take a site and check
+  `$ic.shape` (own read/write, add with the next shape, prototype hit valid while `o.proto == ic.proto` and
+  `tag == G_EPOCH`, absent cached too). Unshaped receivers keep T74's per-site slot guess (now also for writes).
+- `props.rs` (`put`, `define_property`, `integrity` go through `set_attr`/`unshape`), `mapset.rs` (identity hash
+  moved to bit 13), `lib.rs` (`SetNamed`/`DefineNamed` sites numbered like `GetNamed`).
+- `docs/design.md` (T83 paragraph), new fixture `tests/fixtures/builtins/object-shapes.js`, bench files in
+  `tasks/T83-files/`.
+
+**Tests**: `scripts/diff.sh` on `objects/`, `classes/`, `builtins/`, `arrays/`, `commonjs/`, `modules/`, `node/`:
+all pass but `node/fetch-https.js` and `node/dgram.js` (fail the same before T83: no outbound DNS/HTTPS or IPv6 in
+the sandbox). `cargo test -p js2wasi3-backend -p js2wasi3`: pass. test262 (`node scripts/test262.mjs`, no `--update`):
+`built-ins/Reflect`, `built-ins/JSON`, `language/statements/for-in`, `language/expressions/assignment`,
+`language/expressions/object` (2092 tests): "No changes since the baseline"; with `language/expressions/class` and `language/statements/class` added (10518 tests, final build): "No changes since the baseline". `built-ins/Object` is not in
+the sandbox's sparse test262 checkout / baseline: not run (T84's full run covers it).
+
+**Micro-benchmark** (`tasks/T83-files/bench.sh`, wasmtime 49.0.2 precompiled, min of 5, ms; same output as node):
+
+| case | node | before | after |
+|---|---|---|---|
+| nbody | 18 | 1287 | 1238 |
+| literals | 7 | 136 | 87 |
+| methods | 3 | 119 | 85 |
+| json | 5 | 57 | 27 |
+| polymorphic | 5 | 116 | 123 |
+| dictionary | 22 | 153 | 155 |
+
+Gains are prototype hits (methods), run-time keys (JSON.parse objects share shapes by key content) and adds
+(literals). nbody is dominated by number boxing (F323/F334), not property lookup. `polymorphic` is a little slower:
+one entry per site thrashes between shapes (F357). A hit still costs ~15 ns: `test_object`'s type tests and the
+helper call (F359).
+
+**Unsupported / left**: F357-F361. **Next smallest step**: T84 (local, a-03): merge, full test262, one replay.
 
 ## Progress
 - 2026-10-05: handoff written after T82 (user chose F321 shapes as the next speed item; to run in the cloud on
@@ -159,3 +197,8 @@ transitions (an attribute change goes to dictionary mode).
   `builtins/`, `arrays/`, `commonjs/`, `modules/`, `node/`: all pass but `node/fetch-https.js` and `node/dgram.js`,
   which fail the same with the build before T83 (the sandbox has no outbound DNS/HTTPS for wasmtime and no IPv6).
   `cargo test -p js2wasi3-backend -p js2wasi3`: all pass (installed wac 0.11.0 for the 4 composition tests).
+- 2026-10-05: `set_named` on unshaped receivers: T74's slot guess for writes too (dictionary 165 -> 155 ms).
+  Final bench (min of 5) in Notes.
+- 2026-10-05: test262 Reflect, JSON, for-in, expressions/assignment, expressions/object: no changes since the
+  baseline (2092 tests); the same plus expressions/class and statements/class with the final build (10518 tests):
+  no changes since the baseline.
