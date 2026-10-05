@@ -3,6 +3,16 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-05: T80 UTF-8, T81 RegExp fast paths, T83 shapes (full run, T84)
+
+- Compiler (a77d0da): native UTF-8 in `node:buffer` (T80); RegExp fast paths for unmodified RegExps (T81); shapes
+  and shape-keyed inline caches for constant-key property access, prototype hits checked by `G_EPOCH` (T83).
+  Runner: unchanged.
+- Full run on `a-03` (`--causes 25 subset`, -j 36): 28,077 of 28,984 run pass (96.9%), **0 regressions**; 4 changes
+  since the baseline, all to pass: three timeouts (`Array/prototype/map/15.4.4.19-8-c-ii-1`,
+  `decodeURI/S15.1.3.1_A2.5_T1`, `decodeURIComponent/S15.1.3.2_A2.5_T1`) and one fail
+  (`for-await-of/async-gen-decl-dstr-array-elem-iter-rtrn-close-null`). Baseline not updated.
+
 ## 2026-10-04: T78 string appends, regex search, Buffer decoding (full run)
 
 - Compiler (5757a57): `+=` on uncaptured locals and top-level variables appends into a `$strbuf`

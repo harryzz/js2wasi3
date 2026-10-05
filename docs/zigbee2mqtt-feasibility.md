@@ -1,7 +1,32 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T83 shapes on the T79 replay 2026-10-05 (T84): no gain
+
+One replay on a-03 of `main` at a77d0da (T80 + T81 + T83's shapes and shape-keyed inline caches), same recording
+and 512 MiB heap; T82's run and node weren't re-run. Run dir `~/js2wasi3-prod-run/t79/out-t83`.
+
+| | CPU (903 s, 548 frames) | vs node (8.66 s) | CPU per frame | first minute (CPU at 61 s) | peak RSS | publishes |
+|---|---|---|---|---|---|---|
+| js2wasi3 T80+T81 (T82) | 22.6 s | 2.6× | 41.2 ms | 6.5 s | 782 MB | 13,478 |
+| **js2wasi3 + T83 shapes** | **23.9 s** | **2.8×** | **43.6 ms** | **6.8 s** | 778 MB | 13,478 |
+
+- No improvement on the real workload: +6%, confirmed by a second run (23.96 s, `t79/out-t83-perf`, meant for perf
+  but started without it), although
+  T83's micro-benchmark gained on literals, methods and `JSON.parse` objects (1.4–2.1×). Same output (publishes, the
+  same 9 error lines). Full test262 on the same commit: 0 regressions (T84).
+- Why (perf on a third run, `t79/out-t83-perf`, 24.5 s with perf, 11,301 samples; self time):
+  - **New cost: `shape_child` 5.7%** (~1.4 s, about the whole slowdown): finding or making a transition walks the
+    shape's list of children comparing keys. Mostly from `define` (objects the runtime builds: iterator results
+    `{value, done}` from async generators and array iterators) and `define_named` on literals whose site missed (F362).
+  - **Misses are still common**: `get_named` 8.0% self, `find_own_named` 3.8% (1.9% via `lookup_named`, prototype
+    walks), spread over many sites (the logger's `debug`, …): polymorphic sites (F357), unshaped receivers (F360).
+  - **Computed keys aren't cached**: `get` → `lookup` → `own_get` → `find_own` ~12% self plus `string_hash` 2.2%,
+    `to_property_key` 1.3% (F363).
+  - Also: wasmtime `is_subtype*` ~2.8% and `get_interned_func_ref`/`FuncRefTable` ~2.2% (F350), GC ~4.5%,
+    RegExp `$$reRun`/`$$reSearch` 2.9%, `box_number` 1.2%.
 
 ## T80+T81 on the T79 replay 2026-10-05 (T82): 2.6× node
 

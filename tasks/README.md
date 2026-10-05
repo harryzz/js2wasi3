@@ -94,7 +94,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T81](T81-regexp-fast-paths.md) | RegExp fast paths for unmodified RegExp objects (F349); cloud batch | done | — |
 | [T82](T82-zigbee-replay-measure.md) | measure T80 and T81 on the T79 replay (local, a-03) | done | T80, T81 |
 | [T83](T83-shapes.md) | shapes (hidden classes) and shape-keyed inline caches (F321); cloud batch, branch `shapes-batch` | done | T82 |
-| [T84](T84-shapes-measure.md) | merge T83, full test262 and one replay on a-03 (local) | in progress | T83 |
+| [T84](T84-shapes-measure.md) | merge T83, full test262 and one replay on a-03 (local) | done | T83 |
 
 The first milestone is T03 → T07: `add.js` runs as a component. The second is T08 → T11: `hello.js` runs as a WASI 0.3 command with differential tests.
 
@@ -463,5 +463,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F358 | `Object.defineProperty` with non-default attributes and any attribute change (`writable: false`, accessors via `defineProperty`, `freeze`/`seal`/`preventExtensions`) send a shaped object to dictionary mode; attribute transitions (shape child with the new attribute byte) or non-extensible shapes would keep them shaped | T83 | if T84 shows it | [ ] |
 | F359 | A cache hit still costs ~15 ns: the `get_named`/`set_named` helper call plus `test_object`'s type tests; inline the shape check and the slot load at the site (with F350) | T83 | speed task after T84 | [ ] |
 | F360 | Arrays, functions and other `$object` subtypes are never shaped: named reads on them (methods on `Array.prototype`/`Function.prototype` reached through an array or function, `fn.prototype`, static class members) miss the shape caches and use T74's guess or the slow path | T83 | if T84 shows it | [ ] |
-| F361 | Shapes are never freed (the transition tree is global; capped at 65536 shapes, then new objects go to dictionary mode); measure `G_SHAPES_N` after a zigbee2mqtt replay | T83 | T84 | [ ] |
+| F361 | Shapes are never freed (the transition tree is global; capped at 65536 shapes, then new objects go to dictionary mode); measure `G_SHAPES_N` after a zigbee2mqtt replay (T84: not measured, needs a counter printed at exit) | T83 | with F362 | [ ] |
+| F362 | `shape_child` (T83's transition search: a linked list of children compared by key) is 5.7% self on the zigbee2mqtt replay (T84 perf), about T83's whole +6% there: mostly objects built by the runtime (`create_iter_result_object`, array iterators, `define_property`) and literal defines whose site missed. Give runtime-built objects fixed precomputed shapes, memoize the last transition per shape, hash the children past a few | T84 | next speed task | [ ] |
+| F363 | Computed-key property access (`o[k]`, `get_length` on non-arrays, RegExp internals) takes `get` → `lookup` → `own_get` → `find_own` with `to_property_key` and `string_hash` every time: ~15% self on the zigbee2mqtt replay after T83 (T84 perf). Cache per computed site by (shape, key identity), or keep strings' hashes | T84 | next speed task (with F362) | [ ] |
 | F191 | Optional embedded engine for what can't compile ahead of time (`eval`, `new Function`, computed `import()` of unknown code), like scriptc's `--dynamic` quickjs-ng "island": QuickJS built for wasm (a second core module or a component composed with `wac`), values copied across the boundary (GC heap ↔ linear memory). Big; decide if it's wanted at all (size ~0.6 MB+, two object models) | T41 handoff (scriptc) | not scheduled | [ ] |
