@@ -1,6 +1,6 @@
 # T84: merge T83 (shapes) and measure it: full test262 and one zigbee2mqtt replay (local: a-03)
 
-Status: todo (handoff written 2026-10-05) | Depends on: T83 (cloud, branch `shapes-batch`) | **Not for cloud
+Status: in progress (2026-10-05) | Depends on: T83 (cloud, branch `shapes-batch`) | **Not for cloud
 sessions**: needs a-03, the recording and the zigbee2mqtt build tree outside the repo (see `tasks/CLOUD-BATCH.md`).
 
 ## Goal
@@ -45,3 +45,7 @@ publishes) and node (8.66 s). Profile (`PERF=…` on that same run) only if the 
 
 ## Progress
 - 2026-10-05: handoff written (T83 goes to the cloud on `shapes-batch`).
+- 2026-10-05: step 1 done locally: shapes-batch (cloud, author Claude) rebased onto main with `--reset-author`
+  (11ebcb0 design note, 6a91910 code, 21588ab notes; author/committer Zahari Zahariev, no attribution in messages or
+  added lines), `main` fast-forwarded. `cargo build --release` OK; `scripts/diff.sh builtins/object-shapes.js` PASS.
+  The stopped local agent's worktree (unfinished, superseded) removed. Not pushed yet (user runs the push).

@@ -94,7 +94,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T81](T81-regexp-fast-paths.md) | RegExp fast paths for unmodified RegExp objects (F349); cloud batch | done | — |
 | [T82](T82-zigbee-replay-measure.md) | measure T80 and T81 on the T79 replay (local, a-03) | done | T80, T81 |
 | [T83](T83-shapes.md) | shapes (hidden classes) and shape-keyed inline caches (F321); cloud batch, branch `shapes-batch` | done | T82 |
-| [T84](T84-shapes-measure.md) | merge T83, full test262 and one replay on a-03 (local) | todo | T83 |
+| [T84](T84-shapes-measure.md) | merge T83, full test262 and one replay on a-03 (local) | in progress | T83 |
 
 The first milestone is T03 → T07: `add.js` runs as a component. The second is T08 → T11: `hello.js` runs as a WASI 0.3 command with differential tests.
 
