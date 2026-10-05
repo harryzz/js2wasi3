@@ -819,6 +819,8 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
                 field(StorageType::Val(rt(true, T_SHAPE)), true),
                 field(StorageType::Val(rt(true, T_SHAPE)), true),
                 field(StorageType::Val(ValType::I32), true),
+                // T85: the transitions hashed.
+                field(StorageType::Val(rt(true, T_VALS)), true),
             ]),
         })),
         // $ic, $ics (T83).
@@ -1060,6 +1062,7 @@ pub fn globals(
             Instruction::RefNull(HeapType::Concrete(T_SHAPE)),
             Instruction::RefNull(HeapType::Concrete(T_SHAPE)),
             Instruction::I32Const(0),
+            Instruction::RefNull(HeapType::Concrete(T_VALS)),
             Instruction::StructNew(T_SHAPE),
         ]),
     );

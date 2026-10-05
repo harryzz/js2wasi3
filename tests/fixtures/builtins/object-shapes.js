@@ -233,3 +233,21 @@ class C {
 const cs = [new C(), new C()];
 for (let i = 0; i < 3; i++) console.log(cs.map((c) => c.bump()).join());
 console.log(Object.keys(cs[0]), JSON.stringify(cs[1]));
+
+// T85: many transitions from one shape (hashed past 8, more than T83's 64): every object keeps its own keys,
+// order and values; the same key with other attributes is another transition.
+const wide = [];
+for (let i = 0; i < 300; i++) wide.push(JSON.parse(`{"w${i}": ${i}, "tail": ${i * 2}}`));
+for (let i = 0; i < 300; i++) wide.push({ [`w${i}`]: -i, tail: 0 });
+console.log(wide.length, Object.keys(wide[299]), Object.keys(wide[599]), wide[150].w150, wide[450].w150);
+let wideSum = 0;
+for (const o of wide) wideSum += o.tail + (o[Object.keys(o)[0]] ?? 0);
+console.log(wideSum);
+const attrA = {};
+Object.defineProperty(attrA, "w7", { value: 1, enumerable: false, writable: true, configurable: true });
+const attrB = { w7: 2 };
+console.log(Object.keys(attrA), Object.keys(attrB), attrA.w7, attrB.w7, JSON.stringify(attrA), JSON.stringify(attrB));
+for (let i = 0; i < 20; i++) {
+  const m = { topic: `t${i}`, payload: i, qos: i & 1 };
+  if (i % 7 === 0) console.log(JSON.stringify(m), Object.keys(m).join());
+}

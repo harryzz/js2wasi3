@@ -110,8 +110,11 @@ pub const LENGTH_READONLY: i32 = 0x800;
 pub const IS_PROTO: i32 = 0x1000;
 /// Shapes have at most this many keys; an object adding more goes to dictionary mode (T83).
 const SHAPE_MAX: i32 = 64;
-/// A shape has at most this many transitions (T83).
-const CHILD_MAX: i32 = 64;
+/// A shape has at most this many transitions (T83; T85: 64 filled the root shape early in a large program,
+/// sending every later object with a new first key to dictionary mode after scanning all 64).
+const CHILD_MAX: i32 = 4096;
+/// Past this many transitions a shape hashes them (T85).
+const CHILD_HASH: i32 = 8;
 /// At most this many shapes are made (T83): they're never freed.
 const SHAPE_BUDGET: i32 = 65536;
 
@@ -335,6 +338,8 @@ pub enum Helper {
     BuildIndex,
     /// `(sh: (ref $shape), k: (ref $string), attrs: i32) -> (ref null $shape)`: a transition (T83).
     ShapeChild,
+    /// `(table: (ref $vals), c: (ref $shape))`: put transition `c` into its parent's children hash (T85).
+    ShapePut,
     /// `(o, ns: (ref $shape), v)`: shaped `o` takes the next shape `ns`, the new entry's value `v` (T83).
     ShapeShift,
     /// `(o, k, v, attrs) -> i32`: add an absent key by a shape transition (1), or 0 (T83).
@@ -485,6 +490,7 @@ impl Helper {
             Helper::IcFill => "ic_fill",
             Helper::BuildIndex => "build_index",
             Helper::ShapeChild => "shape_child",
+            Helper::ShapePut => "shape_put",
             Helper::ShapeShift => "shape_shift",
             Helper::AddShaped => "add_shaped",
             Helper::Unshape => "unshape",
@@ -608,6 +614,7 @@ impl Helper {
             Helper::IcFill => (vec![I32, v, v, v, I32, I32], vec![]),
             Helper::BuildIndex => (vec![rt(false, T_KEYS), I32, I32], vec![rt(false, T_I32S)]),
             Helper::ShapeChild => (vec![rt(false, T_SHAPE), s, I32], vec![rt(true, T_SHAPE)]),
+            Helper::ShapePut => (vec![rt(false, T_VALS), rt(false, T_SHAPE)], vec![]),
             Helper::ShapeShift => (vec![o, rt(false, T_SHAPE), v], vec![]),
             Helper::AddShaped => (vec![o, s, v, I32], vec![I32]),
             Helper::Unshape => (vec![o], vec![]),
@@ -679,6 +686,7 @@ impl Helper {
             Helper::IcFill => ic_fill(cx),
             Helper::BuildIndex => build_index(cx),
             Helper::ShapeChild => shape_child(cx),
+            Helper::ShapePut => shape_put(cx),
             Helper::ShapeShift => shape_shift(),
             Helper::AddShaped => add_shaped(cx),
             Helper::Unshape => unshape(),
@@ -5098,6 +5106,8 @@ const SH_COUNT: u32 = 3;
 const SH_CHILD: u32 = 4;
 const SH_SIBLING: u32 = 5;
 const SH_NCHILD: u32 = 6;
+/// `(ref null $vals)`: the transitions hashed by last key and attributes, past [`CHILD_HASH`] (T85).
+const SH_TABLE: u32 = 7;
 
 fn shape() -> HeapType {
     HeapType::Concrete(T_SHAPE)
@@ -5201,10 +5211,13 @@ fn build_index(cx: &mut dyn Cx) -> Function {
 
 /// `shape_child(sh, k, attrs) -> (ref null $shape)`: the shape after adding `k` with `attrs` to `sh`, found
 /// among its transitions or made; null past the limits (`SHAPE_MAX` keys, `CHILD_MAX` children,
-/// `SHAPE_BUDGET` shapes).
+/// `SHAPE_BUDGET` shapes). Few transitions: a list, a found one moves to the front; past [`CHILD_HASH`]: a
+/// hash table (T85).
 fn shape_child(cx: &mut dyn Cx) -> Function {
     let str_eq = rh(cx, runtime::Helper::StrEq);
     let build = h(cx, Helper::BuildIndex);
+    let hash = h(cx, Helper::Hash);
+    let put = h(cx, Helper::ShapePut);
     const SH: u32 = 0;
     const K: u32 = 1;
     const A: u32 = 2;
@@ -5214,6 +5227,11 @@ fn shape_child(cx: &mut dyn Cx) -> Function {
     const KEYS: u32 = 6;
     const ATTRS: u32 = 7;
     const J: u32 = 8;
+    const P: u32 = 9;
+    const T: u32 = 10;
+    const H: u32 = 11;
+    const M: u32 = 12;
+    const E: u32 = 13;
     let mut f = Function::new([
         (1, rt(true, T_SHAPE)),
         (1, ValType::I32),
@@ -5221,35 +5239,77 @@ fn shape_child(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_KEYS)),
         (1, rt(true, T_BYTES)),
         (1, ValType::I32),
+        (1, rt(true, T_SHAPE)),
+        (1, rt(true, T_VALS)),
+        (2, ValType::I32),
+        (1, jsval()),
     ]);
     let mut s = f.instructions();
+    // Is child `C` the transition for (k, attrs)? Returns it if so.
+    let check = |s: &mut InstructionSink| {
+        s.local_get(C)
+            .struct_get(T_SHAPE, SH_COUNT)
+            .i32_const(1)
+            .i32_sub()
+            .local_set(N);
+        s.local_get(C)
+            .struct_get(T_SHAPE, SH_ATTRS)
+            .local_get(N)
+            .array_get_u(T_BYTES)
+            .local_get(A)
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(C)
+            .struct_get(T_SHAPE, SH_KEYS)
+            .local_get(N)
+            .array_get(T_KEYS)
+            .local_set(KK);
+        key_matches(s, KK, K, str_eq);
+    };
+    s.local_get(SH).struct_get(T_SHAPE, SH_TABLE).local_tee(T).ref_is_null();
+    s.if_(BlockType::Empty);
     s.local_get(SH).struct_get(T_SHAPE, SH_CHILD).local_set(C);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(C).ref_is_null().br_if(1);
-    s.local_get(C)
-        .struct_get(T_SHAPE, SH_COUNT)
-        .i32_const(1)
-        .i32_sub()
-        .local_set(N);
-    s.local_get(C)
-        .struct_get(T_SHAPE, SH_ATTRS)
-        .local_get(N)
-        .array_get_u(T_BYTES)
-        .local_get(A)
-        .i32_eq();
+    check(&mut s);
     s.if_(BlockType::Empty);
+    // Found past the first child: move it to the front, so hot transitions are found first (T85).
+    s.local_get(P).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(P)
+        .local_get(C)
+        .struct_get(T_SHAPE, SH_SIBLING)
+        .struct_set(T_SHAPE, SH_SIBLING);
     s.local_get(C)
-        .struct_get(T_SHAPE, SH_KEYS)
-        .local_get(N)
-        .array_get(T_KEYS)
-        .local_set(KK);
-    key_matches(&mut s, KK, K, str_eq);
+        .local_get(SH)
+        .struct_get(T_SHAPE, SH_CHILD)
+        .struct_set(T_SHAPE, SH_SIBLING);
+    s.local_get(SH).local_get(C).struct_set(T_SHAPE, SH_CHILD);
+    s.end();
+    s.local_get(C).return_();
+    s.end();
+    s.end();
+    s.local_get(C).local_set(P);
+    s.local_get(C).struct_get(T_SHAPE, SH_SIBLING).local_set(C);
+    s.br(0).end().end();
+    s.else_();
+    // Hashed: linear probing from hash(k) + 31 * attrs.
+    s.local_get(T).array_len().i32_const(1).i32_sub().local_set(M);
+    s.local_get(K).call(hash);
+    s.local_get(A).i32_const(31).i32_mul().i32_add();
+    s.local_get(M).i32_and().local_set(H);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(T).local_get(H).array_get(T_VALS).local_tee(E);
+    s.ref_is_null().br_if(1);
+    s.local_get(E).ref_cast_non_null(shape()).local_set(C);
+    check(&mut s);
     s.if_(BlockType::Empty);
     s.local_get(C).return_();
     s.end();
     s.end();
-    s.local_get(C).struct_get(T_SHAPE, SH_SIBLING).local_set(C);
+    s.local_get(H).i32_const(1).i32_add().local_get(M).i32_and().local_set(H);
     s.br(0).end().end();
+    s.end();
     // A new one, within the limits.
     s.local_get(SH).struct_get(T_SHAPE, SH_COUNT).local_tee(N);
     s.i32_const(SHAPE_MAX).i32_ge_s();
@@ -5306,11 +5366,12 @@ fn shape_child(cx: &mut dyn Cx) -> Function {
     s.else_();
     s.ref_null(HeapType::Concrete(T_I32S));
     s.end();
-    // count, child, sibling (the parent's first child so far), nchild
+    // count, child, sibling (the parent's first child so far), nchild, table
     s.local_get(J);
     s.ref_null(shape());
     s.local_get(SH).struct_get(T_SHAPE, SH_CHILD);
     s.i32_const(0);
+    s.ref_null(HeapType::Concrete(T_VALS));
     s.struct_new(T_SHAPE).local_set(C);
     s.local_get(SH).local_get(C).struct_set(T_SHAPE, SH_CHILD);
     s.local_get(SH)
@@ -5318,12 +5379,92 @@ fn shape_child(cx: &mut dyn Cx) -> Function {
         .struct_get(T_SHAPE, SH_NCHILD)
         .i32_const(1)
         .i32_add()
+        .local_tee(N)
         .struct_set(T_SHAPE, SH_NCHILD);
     s.global_get(runtime::G_SHAPES_N)
         .i32_const(1)
         .i32_add()
         .global_set(runtime::G_SHAPES_N);
+    // Past CHILD_HASH children: hash them; rebuild at half full (the smallest power of 2 ≥ 4 * children,
+    // at least 32) by walking the list, else put the new one in.
+    s.local_get(N).i32_const(CHILD_HASH).i32_gt_s();
+    s.if_(BlockType::Empty);
+    s.local_get(SH).struct_get(T_SHAPE, SH_TABLE).local_tee(T).ref_is_null();
+    s.local_get(N).i32_const(1).i32_shl();
+    s.local_get(T).ref_is_null();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(T).array_len();
+    s.end();
+    s.i32_gt_s();
+    s.i32_or();
+    s.if_(BlockType::Empty);
+    s.i32_const(1)
+        .i32_const(32)
+        .local_get(N)
+        .i32_const(2)
+        .i32_shl()
+        .i32_const(1)
+        .i32_sub()
+        .i32_clz()
+        .i32_sub()
+        .i32_shl()
+        .local_tee(M);
+    s.i32_const(32).local_get(M).i32_const(32).i32_gt_u().select();
+    s.array_new_default(T_VALS).local_set(T);
+    s.local_get(SH).local_get(T).ref_as_non_null().struct_set(T_SHAPE, SH_TABLE);
+    s.local_get(SH).struct_get(T_SHAPE, SH_CHILD).local_set(P);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(P).ref_is_null().br_if(1);
+    s.local_get(T).ref_as_non_null().local_get(P).ref_as_non_null().call(put);
+    s.local_get(P).struct_get(T_SHAPE, SH_SIBLING).local_set(P);
+    s.br(0).end().end();
+    s.else_();
+    s.local_get(T).ref_as_non_null().local_get(C).ref_as_non_null().call(put);
+    s.end();
+    s.end();
     s.local_get(C);
+    s.end();
+    f
+}
+
+/// `shape_put(table, c)`: put transition `c` into the free slot its last key and attributes hash to (as
+/// `shape_child` looks them up).
+fn shape_put(cx: &mut dyn Cx) -> Function {
+    let hash = h(cx, Helper::Hash);
+    const T: u32 = 0;
+    const C: u32 = 1;
+    const N: u32 = 2;
+    const H: u32 = 3;
+    const M: u32 = 4;
+    let mut f = Function::new([(3, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(C)
+        .struct_get(T_SHAPE, SH_COUNT)
+        .i32_const(1)
+        .i32_sub()
+        .local_set(N);
+    s.local_get(T).array_len().i32_const(1).i32_sub().local_set(M);
+    s.local_get(C)
+        .struct_get(T_SHAPE, SH_KEYS)
+        .local_get(N)
+        .array_get(T_KEYS)
+        .ref_as_non_null()
+        .call(hash);
+    s.local_get(C)
+        .struct_get(T_SHAPE, SH_ATTRS)
+        .local_get(N)
+        .array_get_u(T_BYTES)
+        .i32_const(31)
+        .i32_mul()
+        .i32_add();
+    s.local_get(M).i32_and().local_set(H);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(T).local_get(H).array_get(T_VALS).ref_is_null().br_if(1);
+    s.local_get(H).i32_const(1).i32_add().local_get(M).i32_and().local_set(H);
+    s.br(0).end().end();
+    s.local_get(T).local_get(H).local_get(C).array_set(T_VALS);
     s.end();
     f
 }

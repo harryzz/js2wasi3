@@ -4,8 +4,8 @@
 # Usage: tasks/T83-files/bench.sh <compiler>...   (RUNS=3)
 T=$(cd "$(dirname "$0")" && pwd); W=$(mktemp -d); RUNS=${RUNS:-3}
 min() { sed 's/ ms$//' | awk '{t[$1]=(t[$1]==""||$2<t[$1])?$2:t[$1]} END {for (k in t) printf "%-12s %6d ms\n", k, t[k]}' | sort; }
-node $T/prop-bench.js >$W/node.out 2>/dev/null
-echo "== node"; for i in $(seq $RUNS); do node $T/prop-bench.js 2>&1 >/dev/null; done | min
+env -u FORCE_COLOR node $T/prop-bench.js >$W/node.out 2>/dev/null
+echo "== node"; for i in $(seq $RUNS); do env -u FORCE_COLOR node $T/prop-bench.js 2>&1 >/dev/null; done | min
 for c in "$@"; do
   $c build $T/prop-bench.js -o $W/m.wasm || exit 1
   wasmtime compile -O gc-heap-initial-size=536870912 $W/m.wasm -o $W/m.cwasm || exit 1
