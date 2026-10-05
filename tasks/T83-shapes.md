@@ -1,6 +1,6 @@
 # T83: shapes (hidden classes) and shape-keyed inline caches for property access (F321)
 
-Status: todo (handoff written 2026-10-05, chosen by the user after T82) | Depends on: T82 (numbers) | Cloud batch: yes
+Status: in progress (handoff written 2026-10-05, chosen by the user after T82) | Depends on: T82 (numbers) | Cloud batch: yes
 (`tasks/CLOUD-BATCH.md`, branch `shapes-batch`)
 
 ## Goal
@@ -72,9 +72,78 @@ keys, whatever is simpler to leave out: decide in the design note).
 - [ ] Micro-benchmark before/after in Notes; F321 ticked (or what's left recorded); docs as `CLAUDE.md` says.
 - [ ] Not here: the zigbee2mqtt replay and the full test262 run (T84, local on a-03).
 
+## Design note (2026-10-05, before code)
+
+**Idea**: a shape is a run-time `$shape` that owns an object's *layout* (keys, attributes, hash index, count); a
+shaped object's own `keys`/`attrs` fields **alias the shape's arrays**, so every existing reader (lookups,
+enumeration, `Object.keys`, `for-in`, `JSON.stringify`, inspect, `defineProperty` validation) works unchanged. Values
+stay per object in `vals`. An object without a shape is in dictionary mode exactly as today.
+
+**Types**
+- `$shape` (new final struct, runtime type 29; `$bigint` moves to 30): `keys: (ref $keys)` and `attrs: (ref $bytes)`
+  of exactly `count` entries (never written once made), `index: (ref null $i32s)` (the same FNV-1a open-addressing
+  index a dictionary gets, built when the shape has more than `SMALL` = 8 keys), `count: i32`, and the transitions:
+  `child`/`sibling: mut (ref null $shape)` (a linked list of children; a child is identified by its last key, compared
+  like `find_own` compares keys, and its last attribute byte), `nchild: mut i32`.
+- `$object.index` becomes `(mut eqref)`: null or an `$i32s` (dictionary mode, as today) or the object's `$shape`
+  (shaped). `index` is private to `object.rs`; `find_own` takes the shape's index when it holds a shape (a `ref.test`
+  against the final `$shape`: inline, no libcall, F350). "Is shaped" = `index` is a `$shape`. All `$object` subtypes
+  keep their field numbers.
+
+**Which objects have a shape**: exact `$object`s from `alloc` with a class without flag bits (`{}`, literals,
+`new C` of ordinary classes, `Object.create`, `JSON.parse` results, errors, built-in prototypes) start at the empty
+root shape (a global, made in the global's initializer). Arrays, functions, wrappers, maps, promises, typed arrays,
+generators and timers are never shaped (they keep today's paths). Shaped implies extensible (see below).
+
+**Transitions** (adding a property `k` with attributes `a` to a shaped object, from every add path: `define`,
+`append_named`, so `[[Set]]`, CreateDataProperty, `put`): find the child `(k, a)` of the current shape or make it
+(copy keys/attrs + 1, index past 8 keys), point the object's `keys`/`attrs`/`index`/`count` at it, grow `vals` if
+needed (doubling, at least 4), store the value. Run-time keys (`JSON.parse`, computed keys) compare by content, so
+objects with the same key order share shapes whatever made their key strings: no key interning needed.
+
+**Dictionary mode** (`unshape`: copy the shape's keys/attrs/index into the object, `index` := its own `$i32s` or null):
+- a `delete` of an own property; any attribute change (`defineProperty` on an existing key that changes its bits,
+  accessor ↔ data, `put` over an existing key); `preventExtensions`/`seal`/`freeze` (so shaped ⇒ extensible: the add
+  caches need no extensibility check);
+- an add past `SHAPE_MAX` = 64 keys, a shape with `CHILD_MAX` = 64 children already, or past the global budget of
+  65,536 shapes (shapes are never freed: objects used as hash maps must not grow the tree without bound).
+- `Object.setPrototypeOf` doesn't touch shapes: a shape doesn't include the prototype; caches that depend on the
+  chain check the receiver's prototype themselves.
+
+**Prototype epoch**: a `class` flag bit `IS_PROTO` (0x1000; the identity hash moves from bit 12 to bit 13) marks
+objects some cache depends on as a prototype (set when a cache is filled, on every object from the receiver's
+prototype to the holder, or to the end of the chain). A layout change of a flagged object (an add, a delete, an
+attribute change, `integrity`, a new prototype via `set_proto`) bumps the global `G_EPOCH` (i32), which invalidates
+every chain-dependent cache entry at once. Value writes don't bump it (cached holders' values are read live).
+
+**Inline caches** (monomorphic, per constant-key site, as `G_IC` today): `G_IC` (`$i32s`) gets 3 ints per site
+(`slot`, `epoch`, and T74's entry guess) and a new `G_ICR` (`$vals`) 3 refs per site (`shape`, `proto`, `extra`),
+grown together. Sites are numbered for `GetNamed`, `SetNamed` and `DefineNamed` (both get a `site` argument).
+- read, own: `o.index == shape` (`ref.eq`, no cast) → `o.vals[slot]`.
+- read, prototype (`proto` non-null): `o.index == shape && o.proto == proto && epoch == G_EPOCH` → `extra[slot]`
+  where `extra` is the holder's `vals` array (a holder's `vals` only change identity on an add, which bumps the
+  epoch since the holder is flagged), or `undefined` with `slot` −1 (absent on the whole chain; not cached when the
+  receiver's prototype is null). Accessors and built-in sentinels go through `props::value` as today.
+- write, existing key: `o.index == shape` (filled only for a writable own data property) → `o.vals[slot] = v`.
+- write, add (`extra` = the next shape): `o.index == shape && o.proto == proto && epoch == G_EPOCH` → transition.
+  Filled only when the slow path added exactly `k` with default attributes and no object on the chain has `k`.
+- literal define (`DefineNamed`): `o.index == shape` → transition (no chain check: CreateDataProperty).
+- Unshaped receivers (arrays, functions, dictionary objects) keep T74's entry guess.
+
+**`G_IC` before**: one entry index per read site. Kept as the third int for unshaped receivers.
+
+**Out of scope**: polymorphic caches, unboxed number slots (F323/F334), shapes for arrays/functions, attribute
+transitions (an attribute change goes to dictionary mode).
+
 ## Notes / Result
 (to be written)
 
 ## Progress
 - 2026-10-05: handoff written after T82 (user chose F321 shapes as the next speed item; to run in the cloud on
   branch `shapes-batch`, like T80/T81).
+- 2026-10-05 (cloud): tools installed in the sandbox (wasmtime 49.0.2, wasm-tools 1.259.0, node 24.21.0, rustc
+  1.98.1; wkg/wit-bindgen/wac/wasm-opt not installed: not needed here). Branch `shapes-batch` from `origin/main`.
+- 2026-10-05: `tasks/T83-files/prop-bench.js` + `bench.sh` written; before (min of 3, ms): node nbody 18, literals 7,
+  methods 3, json 5, polymorphic 5, dictionary 22; js2wasi3 nbody 1336, literals 149, methods 117, json 56,
+  polymorphic 112, dictionary 151 (same output as node).
+- 2026-10-05: design note written (above), committed before code.
