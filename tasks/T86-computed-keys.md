@@ -49,3 +49,6 @@ sites under 0.7% each (`$$reSearch` 0.66, `_write` 0.60, `writeOrBuffer` 0.58, `
   objects/, classes/, generators/ and the Array/typed/Buffer/shapes fixtures: 42 pass; `cargo test -p
   js2wasi3-backend -p js2wasi3` ok; test262 `built-ins/Array/length`, `Array/prototype/push`: 0 regressions;
   `Function/prototype/bind` (not in the subset): the same 10 failures with the T83 compiler. Found: F364 (message).
+- 2026-10-05: replay on a-03 (`t79/out-t86`): **22.18 s** (T85 22.63, T82 22.59; node 8.66), first minute 6.3 s,
+  RSS 777 MB, 13,478 publishes, the same 9 error lines. The rule's bar (≤ 21.5 s) isn't reached: revert pending the
+  user's confirmation.

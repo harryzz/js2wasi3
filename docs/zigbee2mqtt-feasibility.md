@@ -1,7 +1,21 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T86 `.length` paths on the T79 replay 2026-10-05: 22.18 s, the 21.5 s bar not reached
+
+One replay on a-03 of 3239533 (T83 + T85 + T86: cached `.length` of typed arrays, plain objects' own `length` read
+and written directly). Run dir `~/js2wasi3-prod-run/t79/out-t86`.
+
+| | CPU (903 s) | vs node (8.66 s) | first minute | peak RSS | publishes |
+|---|---|---|---|---|---|
+| T82 (no shapes) | 22.59 s | 2.6× | 6.5 s | 782 MB | 13,478 |
+| T85 (shapes, hashed transitions) | 22.63 s | 2.6× | 6.4 s | 777 MB | 13,478 |
+| **T86** | **22.18 s** | **2.56×** | **6.3 s** | 777 MB | 13,478 |
+
+- 0.45 s less than T85 (the profile suggested up to ~1.1 s for the `.length` paths); same output.
+- The user's rule (T85): ≤ 21.5 s keeps the shapes work, else revert T83 + T85 + T86.
 
 ## T85 hashed shape transitions on the T79 replay 2026-10-05: back to T82
 
