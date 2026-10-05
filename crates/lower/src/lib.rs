@@ -8552,6 +8552,9 @@ fn typed_op(name: &str) -> Option<ir::TypedOp> {
         "buffer_resize" => T::BufferResize,
         "buffer_transfer" => T::BufferTransfer,
         "typed_latin1" => T::Latin1,
+        "typed_utf8_length" => T::Utf8Length,
+        "typed_utf8_write" => T::Utf8Write,
+        "typed_utf8_slice" => T::Utf8Slice,
         _ => return None,
     })
 }

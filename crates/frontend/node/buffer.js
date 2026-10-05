@@ -410,7 +410,7 @@ function byteLength (string, encoding) {
         return len
       case 'utf8':
       case 'utf-8':
-        return utf8ToBytes(string).length
+        return __intrinsic_typed_utf8_length(string)
       case 'ucs2':
       case 'ucs-2':
       case 'utf16le':
@@ -423,7 +423,7 @@ function byteLength (string, encoding) {
         return base64ByteLength(string, len)
       default:
         if (loweredCase) {
-          return mustMatch ? -1 : utf8ToBytes(string).length // assume utf8
+          return mustMatch ? -1 : __intrinsic_typed_utf8_length(string) // assume utf8
         }
         encoding = ('' + encoding).toLowerCase()
         loweredCase = true
@@ -826,8 +826,13 @@ function hexWrite (buf, string, offset, length) {
   return i
 }
 
+// T80: native for a Uint8Array (a Buffer): whole characters while they fit in `length` bytes.
 function utf8Write (buf, string, offset, length) {
-  return blitBuffer(utf8ToBytes(string, buf.length - offset), buf, offset, length)
+  const kind = __intrinsic_typed_kind(buf)
+  if ((kind === 1 || kind === 2) && offset >= 0 && length >= 0 && offset + length <= buf.length) {
+    return __intrinsic_typed_utf8_write(buf, string, offset, length)
+  }
+  return blitBuffer(utf8ToBytes(string, Math.min(length, buf.length - offset)), buf, offset, length)
 }
 
 function asciiWrite (buf, string, offset, length) {
@@ -923,9 +928,14 @@ function base64Slice (buf, start, end) {
 }
 
 // UTF-8 decoding as node's (WHATWG): an invalid or truncated sequence's maximal subpart is one
-// U+FFFD.
+// U+FFFD. T80: native for a Uint8Array (a Buffer).
 function utf8Slice (buf, start, end) {
   end = Math.min(buf.length, end)
+  if (start >= end) return ''
+  const kind = __intrinsic_typed_kind(buf)
+  if ((kind === 1 || kind === 2) && start >= 0) {
+    return __intrinsic_typed_utf8_slice(buf, start, end)
+  }
   const res = []
 
   let i = start

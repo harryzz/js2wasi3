@@ -74,32 +74,13 @@ class TextEncoder {
     return 'utf-8';
   }
 
+  // T80: native UTF-8 length and encoding (unpaired surrogates are U+FFFD).
   encode(input = '') {
     const s = `${input}`;
-    const out = [];
-    const n = s.length;
-    for (let i = 0; i < n; i++) {
-      let c = s.charCodeAt(i);
-      if (c >= 0xd800 && c <= 0xdfff) {
-        const d = i + 1 < n ? s.charCodeAt(i + 1) : 0;
-        if (c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff) {
-          c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
-          i++;
-        } else {
-          c = 0xfffd;
-        }
-      }
-      if (c < 0x80) {
-        out.push(c);
-      } else if (c < 0x800) {
-        out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-      } else if (c < 0x10000) {
-        out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-      } else {
-        out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-      }
-    }
-    return new Uint8Array(out);
+    const n = __intrinsic_typed_utf8_length(s);
+    const out = new Uint8Array(n);
+    __intrinsic_typed_utf8_write(out, s, 0, n);
+    return out;
   }
 
   encodeInto(src, dest) {

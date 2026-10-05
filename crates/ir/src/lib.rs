@@ -1326,6 +1326,15 @@ pub enum TypedOp {
     /// T78: `(t, start, end, mask) -> jsval`: the string of units `byte & mask` of elements
     /// `start..end` (in range) of a typed array of bytes (`Buffer`'s `latin1`/`ascii` decoding).
     Latin1,
+    /// T80: `(s) -> i32`: the UTF-8 length of string `s` (an unpaired surrogate is U+FFFD: 3 bytes).
+    Utf8Length,
+    /// T80: `(t, s, offset, limit) -> i32`: encode string `s` as UTF-8 into a typed array of bytes
+    /// from element `offset`, at most `limit` bytes (in range), never a partial character; the
+    /// bytes written. Unpaired surrogates are U+FFFD.
+    Utf8Write,
+    /// T80: `(t, start, end) -> jsval`: the string of elements `start..end` (in range) of a typed
+    /// array of bytes decoded as UTF-8 (WHATWG: U+FFFD per maximal invalid subpart).
+    Utf8Slice,
 }
 
 pub const MAP_KIND_MAP: u8 = 0;
@@ -1548,6 +1557,9 @@ impl Intrinsic {
                 TypedOp::BufferResize => (&[JsVal, I32], None),
                 TypedOp::BufferTransfer => (&[JsVal, I32, I32], Some(JsVal)),
                 TypedOp::Latin1 => (&[JsVal, I32, I32, I32], Some(JsVal)),
+                TypedOp::Utf8Length => (&[JsVal], Some(I32)),
+                TypedOp::Utf8Write => (&[JsVal, JsVal, I32, I32], Some(I32)),
+                TypedOp::Utf8Slice => (&[JsVal, I32, I32], Some(JsVal)),
             },
         }
     }
@@ -1768,6 +1780,9 @@ impl Intrinsic {
                 TypedOp::BufferResize => "buffer_resize",
                 TypedOp::BufferTransfer => "buffer_transfer",
                 TypedOp::Latin1 => "typed_latin1",
+                TypedOp::Utf8Length => "typed_utf8_length",
+                TypedOp::Utf8Write => "typed_utf8_write",
+                TypedOp::Utf8Slice => "typed_utf8_slice",
             },
         }
     }

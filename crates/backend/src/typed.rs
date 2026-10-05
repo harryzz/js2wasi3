@@ -809,6 +809,237 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             s.end();
             f
         }
+        TypedOp::Utf8Length => {
+            // (s): a pass over the units, 1/2/3 bytes each, 4 per surrogate pair.
+            const S: u32 = 1;
+            const N: u32 = 2;
+            const I: u32 = 3;
+            const R: u32 = 4;
+            const C: u32 = 5;
+            const SZ: u32 = 6;
+            let mut f = Function::new([(1, rt(true, runtime::T_STRING)), (5, ValType::I32)]);
+            let mut s = f.instructions();
+            s.local_get(0).ref_cast_non_null(runtime::string()).local_tee(S);
+            s.ref_as_non_null().array_len().local_set(N);
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+            utf8_code_point(&mut s, S, N, I, C);
+            utf8_size(&mut s, C, SZ);
+            s.local_get(R).local_get(SZ).i32_add().local_set(R);
+            s.local_get(I).i32_const(1).i32_add().local_set(I);
+            s.br(0);
+            s.end().end();
+            s.local_get(R);
+            s.end();
+            f
+        }
+        TypedOp::Utf8Write => {
+            // (t, s, offset, limit): whole characters while they fit.
+            const LIMIT: u32 = 3;
+            const S: u32 = 4;
+            const DATA: u32 = 5;
+            const N: u32 = 6;
+            const I: u32 = 7;
+            const AT: u32 = 8;
+            const P: u32 = 9;
+            const END: u32 = 10;
+            const C: u32 = 11;
+            const SZ: u32 = 12;
+            let mut f = Function::new([
+                (1, rt(true, runtime::T_STRING)),
+                (1, rt(true, T_BYTES)),
+                (7, ValType::I32),
+            ]);
+            let mut s = f.instructions();
+            s.local_get(1).ref_cast_non_null(runtime::string()).local_tee(S);
+            s.ref_as_non_null().array_len().local_set(N);
+            t(&mut s, 0);
+            s.struct_get(T_TYPED, F_BUF).struct_get(T_BUFFER, F_DATA).local_set(DATA);
+            t(&mut s, 0);
+            s.struct_get(T_TYPED, F_OFFSET).local_get(2).i32_add().local_tee(AT).local_tee(P);
+            s.local_get(LIMIT).i32_add().local_set(END);
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+            utf8_code_point(&mut s, S, N, I, C);
+            utf8_size(&mut s, C, SZ);
+            s.local_get(P).local_get(SZ).i32_add().local_get(END).i32_gt_u().br_if(1);
+            // The lead byte: C itself, or the marker bits and C's top bits.
+            let byte = |s: &mut InstructionSink, k: i32, shift: i32, bits: i32| {
+                s.local_get(DATA).local_get(P);
+                if k > 0 {
+                    s.i32_const(k).i32_add();
+                }
+                s.local_get(C);
+                if shift > 0 {
+                    s.i32_const(shift).i32_shr_u();
+                }
+                s.i32_const(0x3F).i32_and().i32_const(bits).i32_or();
+                s.array_set(T_BYTES);
+            };
+            s.local_get(SZ).i32_const(1).i32_eq();
+            s.if_(BlockType::Empty);
+            s.local_get(DATA).local_get(P).local_get(C).array_set(T_BYTES);
+            s.else_();
+            s.local_get(SZ).i32_const(2).i32_eq();
+            s.if_(BlockType::Empty);
+            byte(&mut s, 0, 6, 0xC0);
+            byte(&mut s, 1, 0, 0x80);
+            s.else_();
+            s.local_get(SZ).i32_const(3).i32_eq();
+            s.if_(BlockType::Empty);
+            // 0xE0 | C >> 12 (C < 0x10000: no bits above the low 4 are set).
+            byte(&mut s, 0, 12, 0xE0);
+            byte(&mut s, 1, 6, 0x80);
+            byte(&mut s, 2, 0, 0x80);
+            s.else_();
+            byte(&mut s, 0, 18, 0xF0);
+            byte(&mut s, 1, 12, 0x80);
+            byte(&mut s, 2, 6, 0x80);
+            byte(&mut s, 3, 0, 0x80);
+            s.end().end().end();
+            s.local_get(P).local_get(SZ).i32_add().local_set(P);
+            s.local_get(I).i32_const(1).i32_add().local_set(I);
+            s.br(0);
+            s.end().end();
+            s.local_get(P).local_get(AT).i32_sub();
+            s.end();
+            f
+        }
+        TypedOp::Utf8Slice => {
+            // (t, start, end): the WHATWG decoder into units (never more units than bytes), then
+            // cut to the units written.
+            const R: u32 = 3;
+            const DATA: u32 = 4;
+            const P: u32 = 5;
+            const E: u32 = 6;
+            const K: u32 = 7;
+            const B: u32 = 8;
+            const NEED: u32 = 9;
+            const CP: u32 = 10;
+            const LO: u32 = 11;
+            const HI: u32 = 12;
+            const J: u32 = 13;
+            const OK: u32 = 14;
+            const NEW: u32 = 15;
+            let mut f = Function::new([
+                (1, rt(true, runtime::T_STRING)),
+                (1, rt(true, T_BYTES)),
+                (10, ValType::I32),
+                (1, rt(true, runtime::T_STRING)),
+            ]);
+            let mut s = f.instructions();
+            s.local_get(2).local_get(1).i32_sub();
+            s.array_new_default(runtime::T_STRING).local_set(R);
+            t(&mut s, 0);
+            s.struct_get(T_TYPED, F_BUF).struct_get(T_BUFFER, F_DATA).local_set(DATA);
+            t(&mut s, 0);
+            s.struct_get(T_TYPED, F_OFFSET).local_tee(E).local_get(1).i32_add().local_set(P);
+            s.local_get(E).local_get(2).i32_add().local_set(E);
+            let push = |s: &mut InstructionSink, unit: &dyn Fn(&mut InstructionSink)| {
+                s.local_get(R).local_get(K);
+                unit(s);
+                s.array_set(runtime::T_STRING);
+                s.local_get(K).i32_const(1).i32_add().local_set(K);
+            };
+            let in_range = |s: &mut InstructionSink, lo: i32, hi: i32| {
+                s.local_get(B).i32_const(lo).i32_sub().i32_const(hi - lo + 1).i32_lt_u();
+            };
+            // LO = B == at ? lo : 0x80 (HI likewise).
+            let bound = |s: &mut InstructionSink, local: u32, at: i32, v: i32, default: i32| {
+                s.i32_const(v).i32_const(default);
+                s.local_get(B).i32_const(at).i32_eq().select().local_set(local);
+            };
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(P).local_get(E).i32_ge_u().br_if(1);
+            s.local_get(DATA).local_get(P).array_get_u(T_BYTES).local_tee(B);
+            s.i32_const(0x80).i32_lt_u();
+            s.if_(BlockType::Empty);
+            push(&mut s, &|s| {
+                s.local_get(B);
+            });
+            s.local_get(P).i32_const(1).i32_add().local_set(P);
+            s.else_();
+            s.i32_const(1).local_set(OK);
+            s.i32_const(0x80).local_set(LO);
+            s.i32_const(0xBF).local_set(HI);
+            in_range(&mut s, 0xC2, 0xDF);
+            s.if_(BlockType::Empty);
+            s.i32_const(1).local_set(NEED);
+            s.local_get(B).i32_const(0x1F).i32_and().local_set(CP);
+            s.else_();
+            in_range(&mut s, 0xE0, 0xEF);
+            s.if_(BlockType::Empty);
+            s.i32_const(2).local_set(NEED);
+            s.local_get(B).i32_const(0xF).i32_and().local_set(CP);
+            bound(&mut s, LO, 0xE0, 0xA0, 0x80);
+            bound(&mut s, HI, 0xED, 0x9F, 0xBF);
+            s.else_();
+            in_range(&mut s, 0xF0, 0xF4);
+            s.if_(BlockType::Empty);
+            s.i32_const(3).local_set(NEED);
+            s.local_get(B).i32_const(0x7).i32_and().local_set(CP);
+            bound(&mut s, LO, 0xF0, 0x90, 0x80);
+            bound(&mut s, HI, 0xF4, 0x8F, 0xBF);
+            s.else_();
+            s.i32_const(0).local_set(NEED);
+            s.i32_const(0).local_set(OK);
+            s.end().end().end();
+            s.local_get(P).i32_const(1).i32_add().local_set(J);
+            // The continuation bytes: stop at the first one out of [LO, HI] (not consumed).
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(NEED).i32_eqz().br_if(1);
+            s.local_get(J).local_get(E).i32_ge_u();
+            s.if_(BlockType::Empty);
+            s.i32_const(0).local_set(OK).br(2);
+            s.end();
+            s.local_get(DATA).local_get(J).array_get_u(T_BYTES).local_tee(B);
+            s.local_get(LO).i32_lt_u();
+            s.local_get(B).local_get(HI).i32_gt_u().i32_or();
+            s.if_(BlockType::Empty);
+            s.i32_const(0).local_set(OK).br(2);
+            s.end();
+            s.i32_const(0x80).local_set(LO);
+            s.i32_const(0xBF).local_set(HI);
+            s.local_get(CP).i32_const(6).i32_shl();
+            s.local_get(B).i32_const(0x3F).i32_and().i32_or().local_set(CP);
+            s.local_get(NEED).i32_const(1).i32_sub().local_set(NEED);
+            s.local_get(J).i32_const(1).i32_add().local_set(J);
+            s.br(0);
+            s.end().end();
+            s.local_get(OK);
+            s.if_(BlockType::Empty);
+            s.local_get(CP).i32_const(0xFFFF).i32_gt_u();
+            s.if_(BlockType::Empty);
+            s.local_get(CP).i32_const(0x10000).i32_sub().local_set(CP);
+            push(&mut s, &|s| {
+                s.local_get(CP).i32_const(10).i32_shr_u().i32_const(0xD800).i32_or();
+            });
+            s.local_get(CP).i32_const(0x3FF).i32_and().i32_const(0xDC00).i32_or().local_set(CP);
+            s.end();
+            push(&mut s, &|s| {
+                s.local_get(CP);
+            });
+            s.else_();
+            push(&mut s, &|s| {
+                s.i32_const(0xFFFD);
+            });
+            s.end();
+            s.local_get(J).local_set(P);
+            s.end();
+            s.br(0);
+            s.end().end();
+            // Cut to K units.
+            s.local_get(K).local_get(R).ref_as_non_null().array_len().i32_eq();
+            s.if_(BlockType::Empty);
+            s.local_get(R).ref_as_non_null().return_();
+            s.end();
+            s.local_get(K).array_new_default(runtime::T_STRING).local_tee(NEW);
+            s.i32_const(0).local_get(R).i32_const(0).local_get(K);
+            s.array_copy(runtime::T_STRING, runtime::T_STRING);
+            s.local_get(NEW).ref_as_non_null();
+            s.end();
+            f
+        }
         TypedOp::BufferTransfer => {
             // (b, len, resizable): ArrayBufferCopyAndDetach.
             const NEW: u32 = 3;
@@ -867,6 +1098,46 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             f
         }
     }
+}
+
+/// T80: the code point at unit `i` of string `str` (`n` units) into local `c`: a surrogate pair's
+/// (then `i` is at its second unit), U+FFFD for an unpaired surrogate.
+fn utf8_code_point(s: &mut InstructionSink, str: u32, n: u32, i: u32, c: u32) {
+    s.local_get(str).local_get(i).array_get_u(runtime::T_STRING).local_tee(c);
+    s.i32_const(0xF800).i32_and().i32_const(0xD800).i32_eq();
+    s.if_(BlockType::Empty);
+    // A lead followed by a trail: a pair.
+    s.local_get(c).i32_const(0xDC00).i32_lt_u();
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(i).i32_const(1).i32_add().local_get(n).i32_lt_u();
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(str).local_get(i).i32_const(1).i32_add().array_get_u(runtime::T_STRING);
+    s.i32_const(0xFC00).i32_and().i32_const(0xDC00).i32_eq();
+    s.else_();
+    s.i32_const(0);
+    s.end();
+    s.else_();
+    s.i32_const(0);
+    s.end();
+    s.if_(BlockType::Empty);
+    s.local_get(i).i32_const(1).i32_add().local_set(i);
+    s.local_get(c).i32_const(0xD800).i32_sub().i32_const(10).i32_shl();
+    s.local_get(str).local_get(i).array_get_u(runtime::T_STRING);
+    s.i32_const(0xDC00).i32_sub().i32_or();
+    s.i32_const(0x10000).i32_add().local_set(c);
+    s.else_();
+    s.i32_const(0xFFFD).local_set(c);
+    s.end();
+    s.end();
+}
+
+/// T80: local `sz` = the UTF-8 length of code point `c` (1 to 4).
+fn utf8_size(s: &mut InstructionSink, c: u32, sz: u32) {
+    s.i32_const(1);
+    s.local_get(c).i32_const(0x80).i32_ge_u().i32_add();
+    s.local_get(c).i32_const(0x800).i32_ge_u().i32_add();
+    s.local_get(c).i32_const(0x10000).i32_ge_u().i32_add();
+    s.local_set(sz);
 }
 
 /// Copy the first min(len, old length) bytes of the `$buffer` in local `b` (a jsval) into the
