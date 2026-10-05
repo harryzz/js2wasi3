@@ -1,4 +1,4 @@
-// T87: String.prototype.normalize in all four forms over every code point (one string, so neighbours
+// T87: String.prototype.normalize in all four forms over every code point to U+2FFFF (no data beyond) (one string, so neighbours
 // compose too), and sequences for reordering, Hangul, blocked composition and the diacritics idiom.
 function hash(s) {
   let h = 0;
@@ -7,7 +7,7 @@ function hash(s) {
 }
 function allCodePoints() {
   let all = "";
-  for (let c = 0; c <= 0x10ffff; c++) {
+  for (let c = 0; c <= 0x2ffff; c++) {
     if (c < 0xd800 || c > 0xdfff) all += String.fromCodePoint(c);
   }
   return all;

@@ -1,4 +1,4 @@
-// T87: toUpperCase / toLowerCase over every code point (node's full, language-insensitive mapping), the
+// T87: toUpperCase / toLowerCase over every code point to U+2FFFF (no case data beyond) (node's full, language-insensitive mapping), the
 // multi-character mappings, Final_Sigma and lone surrogates.
 function hash(s) {
   let h = 0;
@@ -8,7 +8,7 @@ function hash(s) {
 // (Built in a function: a top-level `+=` loop is quadratic, F365.)
 function allCodePoints() {
   let all = "";
-  for (let c = 0; c <= 0x10ffff; c++) {
+  for (let c = 0; c <= 0x2ffff; c++) {
     if (c < 0xd800 || c > 0xdfff) all += String.fromCodePoint(c);
   }
   return all;
