@@ -1,6 +1,6 @@
 # T86: computed-key and `.length` property access (F363)
 
-Status: in progress (2026-10-05) | Depends on: T85 | Local
+Status: done, reverted with T83/T85 (2026-10-05) | Depends on: T85 | Local
 
 ## Goal
 T84's profile: `get` (the generic, uncached [[Get]] with ToPropertyKey and a string hash per object on the chain) is
@@ -23,11 +23,20 @@ sites under 0.7% each (`$$reSearch` 0.66, `_write` 0.60, `writeOrBuffer` 0.58, `
    `Buffer.prototype` and `%TypedArray%.prototype`), `wasm-tools validate`, smoke run, `cargo test`.
 
 ## Acceptance
-- [ ] Micro-benchmark before/after; fixtures and guard test pass.
-- [ ] One replay on a-03 (ask first); the rule applied; docs and follow-ups.
+- [x] Micro-benchmark before/after; fixtures and guard test pass.
+- [x] One replay on a-03 (ask first); the rule applied; docs and follow-ups.
 
 ## Notes / Result
-(to be written)
+- Change: `.length` of typed arrays without own properties cached per prototype (`G_LEN_IC`, 4 entries, validated by
+  `G_EPOCH`, the getter called live); plain (shaped) objects' own `length` read by the constant's hash and written
+  directly (`SetLength`, new lowering for `v.length = x`). Fixture `builtins/typed-length-cache.js`.
+- Micro-benchmark (`tasks/T86-files/length-bench.js`, ms; node / before / after): length 3/623/218, read
+  16/2216/1549, slice-copy 14/670/467, concat 16/261/192, state 2/212/91.
+- Replay (a-03, `t79/out-t86`): 22.18 s (T85 22.63, T82 22.59; node 8.66). The user's bar (≤ 21.5 s) not reached.
+- **Reverted** (user, 2026-10-05, on my recommendation): `crates/` restored to T82's (66f6684), the fixtures
+  `object-shapes.js` and `typed-length-cache.js` removed. All the shapes work (T83, T85, T86) is on the local branch
+  **`shapes`** (8532edb) for later. Found: F364.
+- Next: F350 (wasmtime libcalls, ~1.2 s in T84's profile, independent of shapes).
 
 ## Progress
 - 2026-10-05: task started. Callers of `get` aggregated from T84's `perf script`: `.length` of Buffers is the one
@@ -52,3 +61,5 @@ sites under 0.7% each (`$$reSearch` 0.66, `_write` 0.60, `writeOrBuffer` 0.58, `
 - 2026-10-05: replay on a-03 (`t79/out-t86`): **22.18 s** (T85 22.63, T82 22.59; node 8.66), first minute 6.3 s,
   RSS 777 MB, 13,478 publishes, the same 9 error lines. The rule's bar (≤ 21.5 s) isn't reached: revert pending the
   user's confirmation.
+- 2026-10-05: reverted with T83/T85 (code to 66f6684); branch `shapes` keeps it. Fixtures objects/, classes/,
+  buffer, typed arrays pass on the reverted build.

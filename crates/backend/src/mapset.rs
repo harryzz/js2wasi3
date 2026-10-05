@@ -42,7 +42,7 @@ use crate::runtime::{
 pub const CLASS_MAP: i32 = 2;
 pub const CLASS_SET: i32 = 3;
 /// The identity hash lives in `class` from this bit up (the low bits are the class and flags).
-const ID_SHIFT: i32 = 13;
+const ID_SHIFT: i32 = 12;
 
 /// `$map` field after the object's.
 pub const M_TABLE: u32 = 7;

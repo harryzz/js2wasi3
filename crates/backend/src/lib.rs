@@ -950,8 +950,7 @@ struct Emitter<'m> {
     shared: Vec<ir::FuncId>,
     /// Functions used by `ref.func` (a declarative element segment).
     declared: Vec<u32>,
-    /// T74: the next inline-cache site of a constant-key access (`object::Helper::GetNamed`; T83: also
-    /// `SetNamed`, `DefineNamed`).
+    /// T74: the next inline-cache site of a constant-key read (`object::Helper::GetNamed`).
     ic_sites: u32,
 }
 
@@ -1827,15 +1826,6 @@ impl Emitter<'_> {
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::GetLength))));
                     return Ok(true);
                 }
-                if let (Intrinsic::SetProp, [obj, Expr::Str(units), value]) = (op, args.as_slice())
-                    && units.as_slice() == "length".encode_utf16().collect::<Vec<_>>().as_slice()
-                {
-                    // T86: `v.length = x`.
-                    self.expr(s, frames, obj)?;
-                    self.expr(s, frames, value)?;
-                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetLength))));
-                    return Ok(false);
-                }
                 if let (Intrinsic::DefineProp, [obj, Expr::Str(units), value]) =
                     (op, args.as_slice())
                     && object::named_key(units)
@@ -1846,8 +1836,6 @@ impl Emitter<'_> {
                     s.global_get(g);
                     self.expr(s, frames, value)?;
                     s.i32_const(object::key_hash(units));
-                    s.i32_const(self.ic_sites as i32);
-                    self.ic_sites += 1;
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::DefineNamed))));
                     return Ok(false);
                 }
@@ -1861,8 +1849,6 @@ impl Emitter<'_> {
                     s.global_get(g);
                     self.expr(s, frames, value)?;
                     s.i32_const(object::key_hash(units));
-                    s.i32_const(self.ic_sites as i32);
-                    self.ic_sites += 1;
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
                     return Ok(false);
                 }

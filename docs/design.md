@@ -124,17 +124,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   every consumer accepts (an i31 is the usual form, not an invariant). `number_to_string` writes integers below
   2^53 directly (no shortest-digits search), and ToPropertyKey of an i31 in [0, 1024) returns a key string made
   once (`G_NUM_KEYS`). `to_boolean` tests oddballs, numbers and strings before BigInts.)
-  (T83: **shapes**. A `$shape` (keys, attributes, hash index, count; transitions to children by key and attribute)
-  owns an object's layout: a shaped object's `keys`/`attrs` alias its shape's arrays and its `index` field (an
-  eqref) holds the shape, so every reader works unchanged; values stay per object. Exact `$object`s from `alloc`
-  (literals, `new C`, `Object.create`, `JSON.parse`, errors, prototypes) start at the root shape; arrays, functions
-  and the other subtypes never have one. Adds transition (keys compared by content, so run-time keys share
-  shapes); a delete, an attribute change, `preventExtensions`/`seal`/`freeze`, more than 64 keys, 64 children or
-  65,536 shapes go to dictionary mode (`unshape`). Each constant-key site has an `$ic` (in `G_IC`, an `$ics`):
-  own reads and writes check `o.index == ic.shape`; prototype reads and adds also check the receiver's prototype
-  and `G_EPOCH`, which a layout change of an object flagged `IS_PROTO` (set on the chain when a cache is filled)
-  bumps; literal defines cache their transition. Unshaped receivers use T74's entry guess, now for writes too.
-  See `object.rs`, "Shapes".)
+  (T83–T86: **shapes** (hidden classes, shape-keyed inline caches, hashed transitions, a typed-array `.length`
+  cache) were built and **reverted** 2026-10-05: on the zigbee2mqtt replay they gave 22.18 s vs 22.59 s without
+  them, short of the user's bar (≤ 21.5 s), for ~2,000 lines of runtime code. The code is on branch `shapes`
+  (8532edb); measurements in `docs/zigbee2mqtt-feasibility.md`, tasks T83–T86. Objects are T74's again.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
   (T78: the benchmarks called for it: `s += x` copied the whole string each time (O(n²): 200,000 appends 10.3 s).
   A variable that is appended to (`x += e`, `x = x + e …`; `closures::Analysis::appended`), holds strings and is
@@ -145,7 +138,8 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   code); any other store is a plain store. 200,000 appends: 19 ms. Properties (`o.s += x`) and captured
   variables still copy: F337.)
 - Objects: start as dictionary objects (a hash map in GC arrays) with a prototype. Hidden classes and
-  inline caches only after T12 works and a benchmark justifies them. (T74: inline caches; T83: shapes.)
+  inline caches only after T12 works and a benchmark justifies them. (T74: inline caches; T83: shapes, reverted
+  after T86: branch `shapes`.)
 - Linear memory exists **only** for the Canonical ABI boundary (`cabi_realloc`, string/list copies).
   (T09: a bump allocator, reset by every export adapter once its string arguments are copied into
   GC strings; see `crates/backend/src/abi.rs`. The core-side adapters live in the backend because they

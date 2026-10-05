@@ -15,7 +15,8 @@ and written directly). Run dir `~/js2wasi3-prod-run/t79/out-t86`.
 | **T86** | **22.18 s** | **2.56×** | **6.3 s** | 777 MB | 13,478 |
 
 - 0.45 s less than T85 (the profile suggested up to ~1.1 s for the `.length` paths); same output.
-- The user's rule (T85): ≤ 21.5 s keeps the shapes work, else revert T83 + T85 + T86.
+- The user's rule (T85): ≤ 21.5 s keeps the shapes work, else revert T83 + T85 + T86. **Reverted** 2026-10-05;
+  the code is on branch `shapes` (8532edb). `main` is back to T82's code (22.59 s).
 
 ## T85 hashed shape transitions on the T79 replay 2026-10-05: back to T82
 
