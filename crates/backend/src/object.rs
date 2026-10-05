@@ -352,6 +352,9 @@ pub enum Helper {
     MarkChain,
     /// `(v: jsval) -> jsval`: `v.length` (T74): an array's or a string's directly, else [`Helper::Get`].
     GetLength,
+    /// `(v, value)`: `v.length = value` (T86): a shaped object's own writable data property directly, else
+    /// [`Helper::Set`].
+    SetLength,
     /// `(o, k, v: jsval, attrs: i32)`: set an own property (attributes only for a new one).
     Define,
     /// `(o, k, v, attrs, hash)`: a new own property `k` known to be absent, neither an array index nor
@@ -497,6 +500,7 @@ impl Helper {
             Helper::SetAttr => "set_attr",
             Helper::MarkChain => "mark_chain",
             Helper::GetLength => "get_length",
+            Helper::SetLength => "set_length",
             Helper::Define => "define",
             Helper::AppendNamed => "append_named",
             Helper::DefineNamed => "define_named",
@@ -621,6 +625,7 @@ impl Helper {
             Helper::SetAttr => (vec![o, I32, I32], vec![]),
             Helper::MarkChain => (vec![on, on], vec![]),
             Helper::GetLength => (vec![v], vec![v]),
+            Helper::SetLength => (vec![v, v], vec![]),
             Helper::Define => (vec![o, s, v, I32], vec![]),
             Helper::AppendNamed => (vec![o, s, v, I32, I32], vec![]),
             Helper::DefineNamed => (vec![v, s, v, I32, I32], vec![]),
@@ -693,6 +698,7 @@ impl Helper {
             Helper::SetAttr => set_attr(cx),
             Helper::MarkChain => mark_chain(),
             Helper::GetLength => get_length(cx),
+            Helper::SetLength => set_length(cx),
             Helper::OwnGet => own_get(cx),
             Helper::Lookup => lookup(cx, false),
             Helper::Holder => lookup(cx, true),
@@ -1663,14 +1669,37 @@ fn get_named(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `get_length(v)`: `v.length` (see [`Helper::GetLength`]).
+/// `get_length(v)`: `v.length` (see [`Helper::GetLength`]). A typed array without own properties
+/// (a Buffer) finds `length` on its prototype chain: cached in `G_LEN_IC` per prototype like a site's
+/// prototype hit (valid while `tag == G_EPOCH`; the getter is read live, T86).
 fn get_length(cx: &mut dyn Cx) -> Function {
     let get = h(cx, Helper::Get);
+    let find = h(cx, Helper::FindOwnNamed);
+    let mark = h(cx, Helper::MarkChain);
     let box_ = rh(cx, runtime::Helper::Box);
+    let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
     let length = cx.str("length");
+    let hash = key_hash(&"length".encode_utf16().collect::<Vec<_>>());
     const V: u32 = 0;
     const N: u32 = 1;
-    let mut f = Function::new([(1, ValType::I32)]);
+    const O: u32 = 2;
+    const IC: u32 = 3;
+    const R: u32 = 4;
+    const P: u32 = 5;
+    const Q: u32 = 6;
+    const E: u32 = 7;
+    const ICS: u32 = 8;
+    const I: u32 = 9;
+    let mut f = Function::new([
+        (1, ValType::I32),
+        (1, rt(true, T_OBJECT)),
+        (1, rt(true, runtime::T_IC)),
+        (1, jsval()),
+        (2, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, rt(true, runtime::T_ICS)),
+        (1, ValType::I32),
+    ]);
     let mut s = f.instructions();
     let number = |s: &mut InstructionSink| {
         // An i31 below 2^30 (the runtime's small integers), else a boxed number.
@@ -1693,9 +1722,177 @@ fn get_length(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(string()).array_len();
     number(&mut s);
     s.else_();
+    s.local_get(V).ref_test_non_null(crate::typed::typed());
+    s.if_(BlockType::Empty);
+    {
+        s.local_get(V).ref_cast_non_null(crate::typed::typed()).local_set(O);
+        s.local_get(O).struct_get(T_OBJECT, F_COUNT).i32_eqz();
+        s.if_(BlockType::Empty);
+        {
+            s.global_get(runtime::G_LEN_IC).local_tee(ICS).ref_is_null().i32_eqz();
+            s.if_(BlockType::Empty);
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(I).i32_const(runtime::LEN_IC_WAYS).i32_ge_u().br_if(1);
+            s.local_get(ICS).local_get(I).array_get(runtime::T_ICS).local_tee(IC);
+            s.ref_is_null().br_if(1);
+            s.local_get(IC).struct_get(runtime::T_IC, IC_PROTO);
+            s.local_get(O).struct_get(T_OBJECT, F_PROTO);
+            s.ref_eq();
+            s.local_get(IC).struct_get(runtime::T_IC, IC_TAG);
+            s.global_get(runtime::G_EPOCH).i32_eq();
+            s.i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(IC)
+                .struct_get(runtime::T_IC, IC_EXTRA)
+                .ref_cast_non_null(HeapType::Concrete(T_VALS))
+                .local_get(IC)
+                .struct_get(runtime::T_IC, IC_SLOT)
+                .array_get(T_VALS)
+                .local_tee(R);
+            s.ref_test_non_null(HeapType::Concrete(runtime::T_ACCESSOR));
+            s.local_get(R).global_get(runtime::G_BUILTIN).ref_eq();
+            s.i32_or();
+            s.if_(BlockType::Empty);
+            s.local_get(R).local_get(V).call(value).return_();
+            s.end();
+            s.local_get(R).return_();
+            s.end();
+            s.local_get(I).i32_const(1).i32_add().local_set(I);
+            s.br(0).end().end();
+            s.end();
+            // Fill: the first holder of `length` on the chain (none own: no own properties).
+            s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_tee(P).local_set(Q);
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(Q).ref_is_null().br_if(1);
+            s.local_get(Q)
+                .ref_as_non_null()
+                .global_get(length)
+                .i32_const(hash)
+                .call(find)
+                .local_tee(E);
+            s.i32_const(0).i32_ge_s();
+            s.if_(BlockType::Empty);
+            s.local_get(P).local_get(Q).call(mark);
+            // A new entry first, the others one down (the last one drops out).
+            s.global_get(runtime::G_LEN_IC).local_tee(ICS).ref_is_null();
+            s.if_(BlockType::Empty);
+            s.i32_const(runtime::LEN_IC_WAYS)
+                .array_new_default(runtime::T_ICS)
+                .local_tee(ICS)
+                .global_set(runtime::G_LEN_IC);
+            s.end();
+            s.local_get(ICS)
+                .i32_const(1)
+                .local_get(ICS)
+                .i32_const(0)
+                .i32_const(runtime::LEN_IC_WAYS - 1)
+                .array_copy(runtime::T_ICS, runtime::T_ICS);
+            s.local_get(ICS).i32_const(0);
+            s.struct_new_default(runtime::T_IC).local_tee(IC);
+            s.array_set(runtime::T_ICS);
+            s.local_get(IC).local_get(P).struct_set(runtime::T_IC, IC_PROTO);
+            s.local_get(IC)
+                .local_get(Q)
+                .struct_get(T_OBJECT, F_VALS)
+                .struct_set(runtime::T_IC, IC_EXTRA);
+            s.local_get(IC).local_get(E).struct_set(runtime::T_IC, IC_SLOT);
+            s.local_get(IC)
+                .global_get(runtime::G_EPOCH)
+                .struct_set(runtime::T_IC, IC_TAG);
+            s.br(2);
+            s.end();
+            s.local_get(Q)
+                .ref_as_non_null()
+                .struct_get(T_OBJECT, F_PROTO)
+                .local_set(Q);
+            s.br(0).end().end();
+        }
+        s.end();
+    }
+    s.end();
+    // A shaped receiver is an ordinary object (`alloc`): its own `length` by the constant's hash (stream
+    // states' `state.length`, T86). Not found: the generic path (a prototype may be exotic).
+    s.test_object(V);
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.local_tee(O);
+    s.struct_get(T_OBJECT, F_INDEX).ref_test_non_null(shape());
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .ref_as_non_null()
+        .global_get(length)
+        .i32_const(hash)
+        .call(find)
+        .local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .array_get(T_VALS)
+        .local_tee(R);
+    s.ref_test_non_null(HeapType::Concrete(runtime::T_ACCESSOR));
+    s.local_get(R).global_get(runtime::G_BUILTIN).ref_eq();
+    s.i32_or();
+    s.if_(BlockType::Empty);
+    s.local_get(R).local_get(V).call(value).return_();
+    s.end();
+    s.local_get(R).return_();
+    s.end();
+    s.end();
+    s.end();
     s.local_get(V).global_get(length).call(get);
     s.end();
     s.end();
+    s.end();
+    f
+}
+
+/// `set_length(v, value)`: `v.length = value` (see [`Helper::SetLength`]).
+fn set_length(cx: &mut dyn Cx) -> Function {
+    let set = h(cx, Helper::Set);
+    let find = h(cx, Helper::FindOwnNamed);
+    let length = cx.str("length");
+    let hash = key_hash(&"length".encode_utf16().collect::<Vec<_>>());
+    const V: u32 = 0;
+    const VAL: u32 = 1;
+    const O: u32 = 2;
+    const E: u32 = 3;
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.test_object(V);
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, V);
+    s.local_tee(O);
+    s.struct_get(T_OBJECT, F_INDEX).ref_test_non_null(shape());
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .ref_as_non_null()
+        .global_get(length)
+        .i32_const(hash)
+        .call(find)
+        .local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .array_get_u(T_BYTES)
+        .i32_const(READONLY | ACCESSOR)
+        .i32_and()
+        .i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .local_get(VAL)
+        .array_set(T_VALS);
+    s.return_();
+    s.end();
+    s.end();
+    s.end();
+    s.end();
+    s.local_get(V).global_get(length).local_get(VAL).call(set);
     s.end();
     f
 }

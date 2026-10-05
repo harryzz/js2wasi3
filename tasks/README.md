@@ -96,7 +96,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T83](T83-shapes.md) | shapes (hidden classes) and shape-keyed inline caches (F321); cloud batch, branch `shapes-batch` | done | T82 |
 | [T84](T84-shapes-measure.md) | merge T83, full test262 and one replay on a-03 (local) | done | T83 |
 | [T85](T85-shape-transitions.md) | cheap shape transitions (F362); replay decides keep/revert T83 | done | T84 |
-| [T86](T86-computed-keys.md) | cached computed-key property access (F363); replay ≤ 21.5 s or revert shapes | in progress | T85 |
+| [T86](T86-computed-keys.md) | computed-key and `.length` property access (F363); replay ≤ 21.5 s or revert shapes | in progress | T85 |
 
 The first milestone is T03 → T07: `add.js` runs as a component. The second is T08 → T11: `hello.js` runs as a WASI 0.3 command with differential tests.
 
@@ -468,4 +468,5 @@ Each open item names where it came from and which task should pick it up. When i
 | F361 | Shapes are never freed (the transition tree is global; capped at 65536 shapes, then new objects go to dictionary mode); measure `G_SHAPES_N` after a zigbee2mqtt replay (T84: not measured, needs a counter printed at exit) | T83 | later (T85: RSS over a 15-min replay grows as without shapes) | [ ] |
 | F362 | `shape_child` (T83's transition search: a linked list of children compared by key) is 5.7% self on the zigbee2mqtt replay (T84 perf), about T83's whole +6% there: mostly objects built by the runtime (`create_iter_result_object`, array iterators, `define_property`) and literal defines whose site missed. Give runtime-built objects fixed precomputed shapes, memoize the last transition per shape, hash the children past a few | T84 | T85 | [x] 2026-10-05 (T85: hashed transitions; replay 22.63 s, T83 23.9 s) |
 | F363 | Computed-key property access (`o[k]`, `get_length` on non-arrays, RegExp internals) takes `get` → `lookup` → `own_get` → `find_own` with `to_property_key` and `string_hash` every time: ~15% self on the zigbee2mqtt replay after T83 (T84 perf). Cache per computed site by (shape, key identity), or keep strings' hashes | T84 | T86 | [ ] |
+| F364 | Strict-mode assignment to a function's read-only `length`: node says `Cannot assign to read only property 'length' of function 'function f(a, b) {}'`, js2wasi3 `of object '#<Object>'`/`'#<Function>'` (already so before T86) | T86 | later (error messages) | [ ] |
 | F191 | Optional embedded engine for what can't compile ahead of time (`eval`, `new Function`, computed `import()` of unknown code), like scriptc's `--dynamic` quickjs-ng "island": QuickJS built for wasm (a second core module or a component composed with `wac`), values copied across the boundary (GC heap ↔ linear memory). Big; decide if it's wanted at all (size ~0.6 MB+, two object models) | T41 handoff (scriptc) | not scheduled | [ ] |

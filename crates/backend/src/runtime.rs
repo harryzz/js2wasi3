@@ -208,8 +208,14 @@ pub const G_EPOCH: u32 = G_REGEXP_SNAP + 1;
 pub const G_ROOT_SHAPE: u32 = G_EPOCH + 1;
 /// `(mut i32)` (T83): how many shapes were made (capped by `object::SHAPE_BUDGET`).
 pub const G_SHAPES_N: u32 = G_ROOT_SHAPE + 1;
+/// `(mut (ref null $ics))` (T86): the cache of `.length` on typed arrays without own properties
+/// (`object::get_length`): up to [`LEN_IC_WAYS`] `$ic`s (`proto`, `extra`: the holder's `vals`, `slot`,
+/// `tag`), as prototype hits, newest first.
+pub const G_LEN_IC: u32 = G_SHAPES_N + 1;
+/// How many prototypes `G_LEN_IC` remembers (Buffer, Uint8Array, …).
+pub const LEN_IC_WAYS: i32 = 4;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_SHAPES_N + 1;
+pub const GLOBALS: u32 = G_LEN_IC + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -1067,6 +1073,14 @@ pub fn globals(
         ]),
     );
     globals.global(int, &ConstExpr::i32_const(0));
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_ICS),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_ICS)),
+    );
     for _ in 0..extra {
         globals.global(
             GlobalType {

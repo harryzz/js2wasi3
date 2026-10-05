@@ -1827,6 +1827,15 @@ impl Emitter<'_> {
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::GetLength))));
                     return Ok(true);
                 }
+                if let (Intrinsic::SetProp, [obj, Expr::Str(units), value]) = (op, args.as_slice())
+                    && units.as_slice() == "length".encode_utf16().collect::<Vec<_>>().as_slice()
+                {
+                    // T86: `v.length = x`.
+                    self.expr(s, frames, obj)?;
+                    self.expr(s, frames, value)?;
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetLength))));
+                    return Ok(false);
+                }
                 if let (Intrinsic::DefineProp, [obj, Expr::Str(units), value]) =
                     (op, args.as_slice())
                     && object::named_key(units)
