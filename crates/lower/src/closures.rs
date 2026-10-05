@@ -468,10 +468,13 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
             Some(s) => Some(s),
             None => an.fn_at(scoping, decl_scope, nodes.get_node(decl_node).span().start),
         };
-        let is_fn_decl = matches!(
-            nodes.kind(decl_node),
-            AstKind::Function(f) if f.is_declaration()
-        );
+        // T87: any of its declarations (`var f = 1; function f() {}` declares `f` first as the var).
+        let is_fn = |n| matches!(nodes.kind(n), AstKind::Function(f) if f.is_declaration());
+        let is_fn_decl = is_fn(decl_node)
+            || scoping
+                .symbol_redeclarations(sym)
+                .iter()
+                .any(|r| is_fn(r.declaration));
         for r in scoping.get_resolved_references(sym) {
             let node = r.node_id();
             if is_fn_decl && !is_callee(semantic, node) {

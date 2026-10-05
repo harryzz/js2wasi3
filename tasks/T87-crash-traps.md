@@ -61,3 +61,9 @@ helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask 
   ("[object Symbol]" …) instead of reading their prototype's `constructor` (a sentinel when the program doesn't
   name it); `String.prototype.length` is 0 (read-only), not a sentinel. Repros = node; test262: 3 fail → pass, 0
   regressions in `Symbol/keyFor`, `property-accessors`, `String/prototype/{toString,valueOf}`.
+- 2026-10-05: `typeof` cast failure (1 test, a miscompile): with `var f` before `function f() {}` in one function
+  scope, oxc's first declaration of `f` is the var, so the closure analysis didn't count `f` as a function
+  declaration: its value was never made (the local stayed a Wasm null, `typeof` trapped, a call would too).
+  `closures.rs`: a symbol is a function declaration if any of its declarations is one
+  (`symbol_redeclarations`). New fixture `closures/var-function-redeclare.js` = node; closures/ pass; test262
+  `language/statements/{function,variable}`: 1 fail → pass, 0 regressions.
