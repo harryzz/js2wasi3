@@ -2843,10 +2843,40 @@ function $$reRequireGlobal(v, name) {
   }
 }
 
+// T81: `Symbol.match` for a RegExp nobody changed (`__intrinsic_regexp_plain`, checked after
+// ToString(string), which can run user code): the flags from its data and the built-in exec;
+// with `g`, the matched substrings without result arrays. Same matches and `lastIndex` writes.
+function $$reMatchPlain(rx, s) {
+  const data = __intrinsic_regexp_data(rx);
+  const code = data[2];
+  const bits = +code[4];
+  if ((bits & 2) === 0) {
+    return $$reExec(rx, data, s);
+  }
+  const unicode = (bits & 96) !== 0;
+  const caps = code[8];
+  rx.lastIndex = 0;
+  const a = [];
+  while (true) {
+    const end = $$reSearch(rx, data, s);
+    if (end < 0) {
+      return a.length === 0 ? null : a;
+    }
+    const position = __intrinsic_i32_get(caps, 0);
+    $$append(a, __intrinsic_sub(s, position, end));
+    if (end === position) {
+      rx.lastIndex = $$reAdvance(s, $$reToLength(rx.lastIndex), unicode);
+    }
+  }
+}
+
 function $$RegExp_prototype_$match(string) {
   const rx = this;
   $$reSymThis(rx, "match");
   const s = __intrinsic_to_string(string);
+  if (__intrinsic_regexp_plain(rx)) {
+    return $$reMatchPlain(rx, s);
+  }
   const flags = __intrinsic_to_string(rx.flags);
   if (!$$reHasFlag(flags, 103)) {
     return $$reExecAny(rx, s);
@@ -2871,6 +2901,20 @@ function $$RegExp_prototype_$search(string) {
   const rx = this;
   $$reSymThis(rx, "search");
   const s = __intrinsic_to_string(string);
+  if (__intrinsic_regexp_plain(rx)) {
+    // T81: the built-in exec without its result array (`lastIndex` is a number: no user code).
+    const data = __intrinsic_regexp_data(rx);
+    const prev = rx.lastIndex;
+    if (!$$reSameValue(prev, 0)) {
+      rx.lastIndex = 0;
+    }
+    const end = $$reSearch(rx, data, s);
+    const index = end < 0 ? -1 : __intrinsic_i32_get(data[2][8], 0);
+    if (!$$reSameValue(rx.lastIndex, prev)) {
+      rx.lastIndex = prev;
+    }
+    return index;
+  }
   const previous = rx.lastIndex;
   if (!$$reSameValue(previous, 0)) {
     rx.lastIndex = 0;
@@ -3002,10 +3046,14 @@ function $$RegExp_prototype_$replace(string, replaceValue) {
   if (!functional) {
     replacement = __intrinsic_to_string(replaceValue);
   }
-  if (!functional && __intrinsic_regexp_plain(rx) && !$$reHasFlag(replacement, 36)) {
+  // T81: for a RegExp nobody changed, the flags from its data and the built-in exec (the matches
+  // are all found before any replacement function runs).
+  const plain = __intrinsic_regexp_plain(rx);
+  if (!functional && plain && !$$reHasFlag(replacement, 36)) {
     return $$reReplacePlain(rx, s, replacement);
   }
-  const flags = __intrinsic_to_string(rx.flags);
+  const data = plain ? __intrinsic_regexp_data(rx) : null;
+  const flags = plain ? data[2][7] : __intrinsic_to_string(rx.flags);
   const global = $$reHasFlag(flags, 103);
   let unicode = false;
   if (global) {
@@ -3014,7 +3062,7 @@ function $$RegExp_prototype_$replace(string, replaceValue) {
   }
   const results = [];
   while (true) {
-    const result = $$reExecAny(rx, s);
+    const result = plain ? $$reExec(rx, data, s) : $$reExecAny(rx, s);
     if (result === null) {
       break;
     }
@@ -3075,33 +3123,50 @@ function $$RegExp_prototype_$split(string, limit) {
   const rx = this;
   $$reSymThis(rx, "split");
   const s = __intrinsic_to_string(string);
-  const flags = __intrinsic_to_string(rx.flags);
+  // T81: a RegExp nobody changed: no `flags` getter and no splitter object; its own code runs
+  // anchored at each position (`$$reRun` ignores `y`), as a sticky copy would.
+  const plain = __intrinsic_regexp_plain(rx);
+  const flags = plain ? __intrinsic_regexp_data(rx)[2][7] : __intrinsic_to_string(rx.flags);
   const unicode = $$reHasFlag(flags, 117) || $$reHasFlag(flags, 118);
   const newFlags = $$reHasFlag(flags, 121) ? flags : flags + "y";
   // (Species: not implemented, the splitter is a RegExp.)
-  const splitter = $$RegExp(rx, newFlags);
+  const splitter = plain ? rx : $$RegExp(rx, newFlags);
+  // The code before ToUint32(limit), which can run user code (even `rx.compile`).
+  const data = __intrinsic_regexp_data(splitter);
+  const code = data[2];
   const a = [];
   const lim = limit === undefined ? 4294967295 : (+limit) >>> 0;
   if (lim === 0) {
     return a;
   }
+  // The built-in exec on the fresh splitter: run the matcher directly (no lastIndex writes or
+  // match arrays; the splitter isn't reachable from user code).
+  const direct = plain || __intrinsic_regexp_builtin_exec(splitter.exec);
   const size = s.length;
   if (size === 0) {
-    if ($$reExecAny(splitter, s) === null) {
+    if (direct ? $$reRun(code, s, 0) < 0 : $$reExecAny(splitter, s) === null) {
       $$append(a, s);
     }
     return a;
   }
-  const data = __intrinsic_regexp_data(splitter);
-  const code = data[2];
-  // The built-in exec on the fresh splitter: run the matcher directly (no lastIndex writes or
-  // match arrays; the splitter isn't reachable from user code).
-  const direct = __intrinsic_regexp_builtin_exec(splitter.exec);
+  // T81: with the matcher run directly, positions whose unit no match starts with are skipped
+  // (`$$reFirstSet`, as `$$reSearch`; null in Unicode mode or when a match can be empty).
+  const fset = direct ? code[10] : null;
+  const fascii = fset === null ? null : fset[0];
+  const fwide = fset === null ? null : fset[1];
+  const nwide = fset === null ? 0 : __intrinsic_i32_len(fwide);
   let p = 0;
   let q = 0;
   while (q < size) {
     let e = -1;
     let z = null;
+    if (fascii !== null) {
+      const c = __intrinsic_unit(s, q);
+      if (c < 128 ? __intrinsic_i32_get(fascii, c) === 0 : nwide === 0 || $$reInRanges(fwide, c) === 0) {
+        q++;
+        continue;
+      }
+    }
     if (direct) {
       e = $$reRun(code, s, q);
     } else {
@@ -3171,7 +3236,9 @@ function $$RegExp_prototype_$matchAll(string) {
   const rx = this;
   $$reSymThis(rx, "matchAll");
   const s = __intrinsic_to_string(string);
-  const flags = __intrinsic_to_string(rx.flags);
+  // T81: the flags from the data of a RegExp nobody changed.
+  const flags = __intrinsic_regexp_plain(rx) ? __intrinsic_regexp_data(rx)[2][7] :
+    __intrinsic_to_string(rx.flags);
   // (Species: not implemented, the matcher is a RegExp.)
   const matcher = $$RegExp(rx, flags);
   matcher.lastIndex = $$reToLength(rx.lastIndex);
