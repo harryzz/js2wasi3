@@ -1,5 +1,8 @@
 # Cloud batch (user's rule, 2026-10-05): T83 (shapes), unattended, on branch `shapes-batch`
 
+**Finished 2026-10-05** (T83 done, merged into `main` by T84). A cloud session that reads this now has nothing to
+run: stop and report.
+
 Earlier batch: T80 + T81 on `speed-batch`, finished 2026-10-05, merged into `main` by T82 (branch deleted).
 
 This rule applies to a session that runs this batch in Claude Code on the web (a cloud sandbox with only this

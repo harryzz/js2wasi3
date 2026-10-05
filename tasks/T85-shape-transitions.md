@@ -1,6 +1,6 @@
 # T85: cheap shape transitions (F362)
 
-Status: in progress (2026-10-05) | Depends on: T83, T84 (profile) | Local (user: cloud sessions use the same limits)
+Status: done (2026-10-05) | Depends on: T83, T84 (profile) | Local (user: cloud sessions use the same limits)
 
 ## Goal
 T83's `shape_child` (find or make the transition for an added key: a linked list of children, keys compared) is
@@ -27,12 +27,24 @@ After this task, one replay on a-03: below T82's 22.6 s → keep T83 and go on t
    a wasmtime smoke run, `cargo test -p js2wasi3-backend`.
 
 ## Acceptance
-- [ ] Micro-benchmark before/after; `shape_child` no longer a hot spot in it.
-- [ ] Fixtures pass, `cargo test`, validate, smoke run.
-- [ ] One replay on a-03 (ask first); the rule applied; docs and follow-ups.
+- [x] Micro-benchmark before/after; `shape_child` no longer a hot spot in it.
+- [x] Fixtures pass, `cargo test`, validate, smoke run.
+- [x] One replay on a-03 (ask first); the rule applied; docs and follow-ups.
 
 ## Notes / Result
-(to be written)
+- Cause: a large program fills the root shape's 64 transitions early; every later object with a new first key
+  scanned all 64, found no room and went to dictionary mode (no shape, so no cache either).
+- Change (`crates/backend/src/object.rs`, `runtime.rs`): `$shape` gets `table` (field 7, a `$vals`): past 8
+  transitions they're hashed (`string_hash(k) + 31 * attrs`, linear probing, rebuilt at half full, `shape_put`);
+  CHILD_MAX 64 → 4096 (the global budget of 65,536 shapes stays); a found transition in the short list moves to the
+  front. Fixture `builtins/object-shapes.js` gained a T85 section.
+- Micro-benchmark (laptop, min of 5, ms; node / T82 / T83 / T85): arguments 3/290/390/159, descriptors
+  6/138/183/79, generator 6/190/275/103, literals 3/83/255/30, spread 2/32/25/18.
+- Replay on a-03 (`t79/out-t85`): **22.63 s** (T82 22.59 s, T83 23.9 s; node 8.66 s), first minute 6.4 s, RSS
+  777 MB (grows as T82's), 13,478 publishes, the same 9 error lines. The rule said "22.6 s or more → revert": a tie;
+  the user chose to keep shapes and do F363 next, with a new rule (after F363 ≤ 21.5 s, else revert all shapes work).
+- Not run: full test262 with T85 (T83's had 0 regressions; T85 only changes how transitions are found).
+- Next: T86 (F363).
 
 ## Progress
 - 2026-10-05: task started (local, F362). Read `shape_child`, `add_shaped`, `IterResult`.

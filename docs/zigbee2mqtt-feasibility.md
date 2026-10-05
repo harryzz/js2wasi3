@@ -1,7 +1,23 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T85 hashed shape transitions on the T79 replay 2026-10-05: back to T82
+
+One replay on a-03 of 4c2b37d (T83 + T85: a shape hashes its transitions past 8, up to 4,096 instead of 64).
+Run dir `~/js2wasi3-prod-run/t79/out-t85`.
+
+| | CPU (903 s, 548 frames) | vs node (8.66 s) | first minute | peak RSS | publishes |
+|---|---|---|---|---|---|
+| T82 (no shapes) | 22.6 s (22.59) | 2.6× | 6.5 s | 782 MB | 13,478 |
+| T83 shapes (2 runs) | 23.9 / 24.0 s | 2.8× | 6.8 s | 778 MB | 13,478 |
+| **T85** | **22.6 s (22.63)** | **2.6×** | **6.4 s** | 777 MB | 13,478 |
+
+- T83's loss is gone, but no gain over T82 on the real workload (the micro-benchmark gained 1.7–8×: object building
+  isn't where zigbee2mqtt spends its time). RSS over the run grows as T82's (761 → 777 MB vs 769 → 781 MB).
+- User's decision (2026-10-05): keep shapes and do F363 (computed keys, ~3.6 s in T84's profile) next; if the
+  replay after F363 isn't clearly below T82 (≤ 21.5 s), revert all the shapes work.
 
 ## T83 shapes on the T79 replay 2026-10-05 (T84): no gain
 

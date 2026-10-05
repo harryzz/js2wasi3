@@ -8,13 +8,10 @@ Compiler: JavaScript → a WASI 0.3 Wasm component (WasmGC, native EH, P3 async)
 3. Run `scripts/check-tools.sh`. If tools changed, rerun `probes/run.sh` and update `TOOLS.md`.
 
 ## Cloud sessions (Claude Code on the web)
-If this session runs in a cloud sandbox (no `~/js2wasi3-prod-run`, no a-03), follow **`tasks/CLOUD-BATCH.md`**: it
-says which task to run unattended (T83, shapes), on which branch (`shapes-batch`, never `main`), and what the
-sandbox can't do.
+No cloud batch is open (`tasks/CLOUD-BATCH.md`: the T83 batch is finished and merged). User, 2026-10-05: cloud
+sessions use the same plan limits, so speed tasks run locally now.
 
-**Local sessions**: T83 runs in the cloud on `shapes-batch`. Until it's done there, there's no local speed task; when
-it is, the next task is **T84** (`tasks/T84-shapes-measure.md`): merge with the user as author, full test262 and one
-replay on a-03.
+**Local sessions**: the next task is **T86** (`tasks/T86-computed-keys.md`, F363).
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.
