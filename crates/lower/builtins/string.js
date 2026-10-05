@@ -764,14 +764,13 @@ function $$String_prototype_replaceAll(searchValue, replaceValue) {
   return r;
 }
 
-// `localeCompare` as node's ICU root collation orders ASCII (T25): control characters are
-// ignored; then, by primary weight, whitespace < punctuation and symbols (`$$collation`'s order)
-// < digits < letters (case-insensitive); then the first case difference (lowercase first).
-// Other characters, locales and options aren't implemented (they trap).
+// `localeCompare` (T25; T87: every string, the options) as levels like ICU's root collation: after NFD,
+// each code point gets a primary weight (control characters ignorable; whitespace < punctuation and
+// symbols in `$$collationWeight`'s order < digits < letters case-insensitively < other characters by
+// their lowercase code point), a secondary one (combining marks: accents) and a tertiary one (case,
+// lowercase first: tertiary 1, uppercase 2). Exact for ASCII and for Latin letters with accents; other scripts and letters
+// like `ø` only approximate ICU's order (F367). Locales are accepted and compare as the root locale.
 function $$collationWeight(c) {
-  if (c >= 128) {
-    __intrinsic_trap();
-  }
   if (c >= 97 && c <= 122) {
     return c;
   }
@@ -788,32 +787,136 @@ function $$collationWeight(c) {
   return 0;
 }
 
-// The next non-ignorable index at or after `i`, or `len`.
-function $$collationNext(s, i, len) {
-  while (i < len && $$collationWeight(__intrinsic_unit(s, i)) === 0) {
-    i++;
+let $$collationMarks = null;
+
+// The accent rank of combining mark `c` (`[mark, rank]` pairs by code point).
+function $$collationMarkRank(c) {
+  const r = $$collationMarks;
+  let lo = 0;
+  let hi = __intrinsic_i32_len(r) >> 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const k = __intrinsic_i32_get(r, 2 * mid);
+    if (k === c) {
+      return __intrinsic_i32_get(r, 2 * mid + 1);
+    }
+    if (k < c) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
   }
-  return i;
+  return c;
 }
 
-function $$String_prototype_localeCompare(that, locales, options) {
-  const s = $$thisString(this, "localeCompare");
-  const t = $$String(that);
-  if (locales !== undefined || options !== undefined) {
-    __intrinsic_trap();
-  }
-  const n = __intrinsic_str_len(s);
-  const m = __intrinsic_str_len(t);
-  let i = $$collationNext(s, 0, n);
-  let j = $$collationNext(t, 0, m);
-  while (i < n && j < m) {
-    const a = $$collationWeight(__intrinsic_unit(s, i));
-    const b = $$collationWeight(__intrinsic_unit(t, j));
-    if (a !== b) {
-      return a < b ? -1 : 1;
+// The collation elements of `s` for `localeCompare`: `[primary, secondary, tertiary]` per
+// non-ignorable code point (a digit run with `numeric`: primary 39, its length, then its digits).
+function $$collationElements(s, numeric, ignorePunctuation) {
+  const out = [];
+  let d = s;
+  for (let i = 0; i < s.length; i++) {
+    if (__intrinsic_unit(s, i) >= 0xc0) {
+      d = $$normalize(s, false, false);
+      break;
     }
-    i = $$collationNext(s, i + 1, n);
-    j = $$collationNext(t, j + 1, m);
+  }
+  const n = d.length;
+  for (let i = 0; i < n; i++) {
+    const c = $$caseCodePointAt(d, i);
+    if (c > 0xffff) {
+      i++;
+    }
+    if (c < 128) {
+      if (numeric && c >= 48 && c <= 57) {
+        let j = i;
+        while (j < n && __intrinsic_unit(d, j) === 48) {
+          j++;
+        }
+        let digits = "";
+        while (j < n && __intrinsic_unit(d, j) >= 48 && __intrinsic_unit(d, j) <= 57) {
+          digits = digits + __intrinsic_sub(d, j, j + 1);
+          j++;
+        }
+        if (digits === "") {
+          digits = "0";
+        }
+        // A run sorts among the digits (weight 39, as "0") by its value: its length, then its digits.
+        $$append(out, 39);
+        $$append(out, 1);
+        $$append(out, 1);
+        $$append(out, 40 + digits.length);
+        $$append(out, 1);
+        $$append(out, 1);
+        for (let k = 0; k < digits.length; k++) {
+          $$append(out, __intrinsic_unit(digits, k));
+          $$append(out, 1);
+          $$append(out, 1);
+        }
+        i = j - 1;
+        continue;
+      }
+      const w = $$collationWeight(c);
+      if (w === 0 || (ignorePunctuation && w <= 38)) {
+        continue;
+      }
+      $$append(out, w);
+      $$append(out, 1);
+      $$append(out, c >= 65 && c <= 90 ? 2 : 1);
+      continue;
+    }
+    if ($$normCcc === null) {
+      $$normalize("", false, false);
+    }
+    if ($$normClass(c) !== 0) {
+      // A combining mark: an accent on the previous element, ranked as node orders accents.
+      if ($$collationMarks === null) {
+        $$collationMarks = $$reDecode($$collationMarkRanks());
+      }
+      $$append(out, 0);
+      $$append(out, 2 + $$collationMarkRank(c));
+      $$append(out, 0);
+      continue;
+    }
+    if ($$caseLower === null) {
+      $$caseLower = $$reDecode($$caseRunsLower());
+      $$caseLowerSpecial = $$reDecode($$caseSpecialLower());
+    }
+    const lower = $$caseSimple($$caseLower, c);
+    $$append(out, 0x10000 + lower);
+    $$append(out, 1);
+    $$append(out, lower !== c ? 2 : 1);
+  }
+  return out;
+}
+
+// Compare level `level` (0: primary, 1: secondary, 2: tertiary) of two element lists, skipping the
+// zero weights of that level (accents have primary 0 but count at the secondary level).
+function $$collationLevel(a, b, level, upperFirst) {
+  let i = 0;
+  let j = 0;
+  const n = a.length;
+  const m = b.length;
+  for (;;) {
+    while (i < n && a[i + level] === 0) {
+      i += 3;
+    }
+    while (j < m && b[j + level] === 0) {
+      j += 3;
+    }
+    if (i >= n || j >= m) {
+      break;
+    }
+    let x = a[i + level];
+    let y = b[j + level];
+    if (level === 2 && upperFirst) {
+      x = 3 - x;
+      y = 3 - y;
+    }
+    if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+    i += 3;
+    j += 3;
   }
   if (i < n) {
     return 1;
@@ -821,19 +924,47 @@ function $$String_prototype_localeCompare(that, locales, options) {
   if (j < m) {
     return -1;
   }
-  // The same letters: the first case difference.
-  i = $$collationNext(s, 0, n);
-  j = $$collationNext(t, 0, m);
-  while (i < n) {
-    const a = __intrinsic_unit(s, i);
-    const b = __intrinsic_unit(t, j);
-    if (a !== b) {
-      return a > b ? -1 : 1;
-    }
-    i = $$collationNext(s, i + 1, n);
-    j = $$collationNext(t, j + 1, m);
-  }
   return 0;
+}
+
+function $$String_prototype_localeCompare(that, locales = undefined, options = undefined) {
+  const s = $$thisString(this, "localeCompare");
+  const t = $$String(that);
+  let sensitivity = "variant";
+  let numeric = false;
+  let ignorePunctuation = false;
+  let upperFirst = false;
+  if (options !== undefined) {
+    const o = Object(options);
+    if (o.sensitivity !== undefined) {
+      sensitivity = __intrinsic_to_string(o.sensitivity);
+      if (sensitivity !== "base" && sensitivity !== "accent" && sensitivity !== "case" && sensitivity !== "variant") {
+        throw new RangeError("Value " + sensitivity + " out of range for String.prototype.localeCompare options property sensitivity");
+      }
+    }
+    numeric = o.numeric !== undefined && !!o.numeric;
+    ignorePunctuation = o.ignorePunctuation !== undefined && !!o.ignorePunctuation;
+    upperFirst = o.caseFirst !== undefined && __intrinsic_to_string(o.caseFirst) === "upper";
+  }
+  if (s === t) {
+    return 0;
+  }
+  const a = $$collationElements(s, numeric, ignorePunctuation);
+  const b = $$collationElements(t, numeric, ignorePunctuation);
+  let r = $$collationLevel(a, b, 0, upperFirst);
+  if (r !== 0) {
+    return r;
+  }
+  if (sensitivity === "accent" || sensitivity === "variant") {
+    r = $$collationLevel(a, b, 1, upperFirst);
+    if (r !== 0) {
+      return r;
+    }
+  }
+  if (sensitivity === "case" || sensitivity === "variant") {
+    r = $$collationLevel(a, b, 2, upperFirst);
+  }
+  return r;
 }
 
 // `normalize(form)` (T25): strings no form changes (ASCII; below U+0300 for NFC) are returned

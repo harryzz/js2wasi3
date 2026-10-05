@@ -242,6 +242,25 @@ for (let i = 0; i < ccc.length; i += 3) {
   cccRanges.push(ccc[i], ccc[i + 1], ccc[i + 2]);
 }
 compose.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+// localeCompare's secondary level (T87): the combining marks (class ≠ 0) ranked as node's root collator
+// orders "a" + mark (equal ones share a rank).
+const collator = new Intl.Collator("und");
+const marks = [];
+for (let i = 0; i < cccRanges.length; i += 3) {
+  for (let c = cccRanges[i]; c <= cccRanges[i + 1]; c++) {
+    marks.push(c);
+  }
+}
+const byOrder = [...marks].sort((x, y) => collator.compare("a" + String.fromCodePoint(x), "a" + String.fromCodePoint(y)) || x - y);
+const markRank = new Map();
+let rank = 0;
+for (let i = 0; i < byOrder.length; i++) {
+  if (i > 0 && collator.compare("a" + String.fromCodePoint(byOrder[i - 1]), "a" + String.fromCodePoint(byOrder[i])) !== 0) {
+    rank++;
+  }
+  markRank.set(byOrder[i], rank);
+}
+const markRanks = marks.flatMap((c) => [c, markRank.get(c)]);
 
 caseJs += `
 // String.prototype.normalize (T87, string.js \`$$normalize\`): full decompositions \`[code point, n, c1…cn]\`
@@ -262,6 +281,12 @@ function $$normCombiningClasses() {
 
 function $$normComposites() {
   return "${encode(compose.flat())}";
+}
+
+// localeCompare's accent order (T87, string.js \`$$collationElements\`): \`[mark, rank]\` by code point, the
+// rank from node's root collator (${markRanks.length / 2} marks).
+function $$collationMarkRanks() {
+  return "${encode(markRanks)}";
 }
 `;
 writeFileSync(join(ROOT, "crates/lower/builtins/unicode-case.js"), caseJs);

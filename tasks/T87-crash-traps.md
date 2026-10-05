@@ -48,3 +48,10 @@ helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask 
   and UnicodeData.txt (combining classes). Also `normalize.length` 0 and a Symbol form → TypeError. New fixture
   `builtins/string-normalize.js` (all four forms over every code point, samples) = node; test262
   `String/prototype/normalize` 14/14 (5 fail → pass).
+- 2026-10-05: `localeCompare` (2 tests): every non-ASCII character and any `locales`/`options` argument trapped
+  (e.g. sorting names with accents). Now levels like ICU's root collation over NFD: primary (ASCII weights as
+  before; other characters by lowercase code point after ASCII letters), secondary (combining marks ranked by node's
+  root collator: `$$collationMarkRanks`, 968 marks, generated), tertiary (case); options `sensitivity`, `numeric`,
+  `caseFirst`, `ignorePunctuation`; locales accepted (root order). New fixture
+  `builtins/string-locale-compare.js` (60 words × 7 option sets, canonical equivalence) = node; test262
+  `String/prototype/localeCompare` 13/13 (3 fail → pass). Approximate beyond that: F367.
