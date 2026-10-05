@@ -344,7 +344,13 @@ checks, a WHATWG UTF-8 decoder, `base64url`, `subarray` giving a Buffer; `node/s
 pure-JS decoder. Functions of node's built-in modules and every CommonJS module's wrapper function keep no source text
 (F246: the 66 KB `buffer` module as a string constant cost 30 s in wasmtime). T78: `latin1`/`binary`/`ascii`
 decoding of a `Uint8Array`/Buffer is one native pass (`__intrinsic_typed_latin1(t, start, end, mask)`,
-`TypedOp::Latin1`), not a `+=` per byte; `utf8` is still JS (F339).)
+`TypedOp::Latin1`), not a `+=` per byte. T80: UTF-8 is native too, three `TypedOp`s that never build a JS array:
+`__intrinsic_typed_utf8_length(s)` (`Utf8Length`: a pair is 4 bytes, an unpaired surrogate U+FFFD's 3),
+`__intrinsic_typed_utf8_write(t, s, offset, limit)` (`Utf8Write`: whole characters while they fit, returns the bytes
+written) and `__intrinsic_typed_utf8_slice(t, start, end)` (`Utf8Slice`: the WHATWG decoder, U+FFFD per maximal invalid
+subpart, into a `$string` of `end - start` units cut to those written). `byteLength`, `write`/`Buffer.from(string)`,
+`toString()` (so `StringDecoder`) and `TextEncoder.encode` use them for a `Uint8Array` receiver; the JS code is the
+fallback for others. `TextEncoder.encodeInto` and `TextDecoder.decode` are still JS (F353).)
 (T59: **a command imports WASI interfaces** from JS like a user world's (`import { f } from "wasi:x/y@0.3.1"`,
 `component::COMMAND_WASI_IMPORTS`: those the runtime doesn't import itself); its boundary has only the interfaces
 its `import`s name (a boundary's types decide some of the runtime). The calls **block** (`ir::AbiSig::blocking`):
@@ -500,7 +506,13 @@ index, attributes and value (an accessor's getter, as accessors are updated in p
 flag getters; `regexp_plain(rx)` compares them, with `rx` having only its `lastIndex` (as made, a number) and
 state, so `[Symbol.replace]` with a `$`-free string can call the search directly (`$$reReplacePlain`): no `flags`
 getters, `exec` lookups or result arrays, the same `lastIndex` writes. A literal first character is found by a
-plain unit scan. `console.log` prints `/source/flags`. `RegExp.prototype[Symbol.match]` etc.
+plain unit scan. T81: under the same check `[Symbol.match]` (`$$reMatchPlain`: `$$reExec`, or with `g` `$$reSearch`
+and substrings), `[Symbol.search]` (`$$reSearch`, no array), `[Symbol.replace]` with a function or `$` (flags from
+`code[7]`, `$$reExec` without the `exec` lookup; all matches come before any replacement function runs),
+`[Symbol.split]` (no `flags` getter, no splitter: the RegExp's own code runs anchored, as `$$reRun` ignores `y`) and
+`[Symbol.matchAll]` (flags from `code[7]`) skip the observable steps; anything modified takes the spec path. A direct
+split also skips positions outside `code[10]`'s first-unit filter. `[Symbol.replace]` reads `flags` as the spec says;
+node reads `global`/`unicode` (F356). `console.log` prints `/source/flags`. `RegExp.prototype[Symbol.match]` etc.
 are prelude methods named `$$RegExp_prototype_$match` (a `$name` key is installed as `Symbol.name`), linked from
 RegExp creation only when the code names the string method; `String.prototype.split/replace` look up
 `Symbol.split/replace` first. Unicode data comes from node itself (`scripts/gen-unicode.mjs`, node's Unicode
