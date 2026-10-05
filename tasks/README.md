@@ -96,6 +96,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T83](T83-shapes.md) | shapes (hidden classes) and shape-keyed inline caches (F321); cloud batch, branch `shapes-batch` | done | T82 |
 | [T84](T84-shapes-measure.md) | merge T83, full test262 and one replay on a-03 (local) | done | T83 |
 | [T85](T85-shape-transitions.md) | cheap shape transitions (F362); replay decides keep/revert T83 | done | T84 |
+| [T88](T88-earley-boyer-miscompile.md) | EarleyBoyer's wrong result (F333): `var` redeclaring a parameter | in progress | — |
 | [T87](T87-crash-traps.md) | Wasm traps in test262 (36 crashes) | done | — |
 | [T86](T86-computed-keys.md) | computed-key and `.length` property access (F363); replay ≤ 21.5 s or revert shapes | done, reverted (branch `shapes`) | T85 |
 

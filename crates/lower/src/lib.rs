@@ -2675,14 +2675,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Ok(())
     }
 
-    /// Store a lowered function: prologue, `var`s set to `undefined`, statements.
+    /// Store a lowered function: `var`s set to `undefined`, prologue, statements. (T88: the `var`s
+    /// first, so a parameter binding the prologue fills (destructuring, rest, defaults) that a `var`
+    /// redeclares keeps its value.)
     fn finish(&mut self, mut cx: FnCx, prologue: Vec<Stmt>, stmts: Vec<Stmt>) {
-        let mut body = prologue;
-        body.extend(
-            cx.var_undefined
-                .iter()
-                .map(|l| Stmt::Set(*l, Expr::undefined())),
-        );
+        let mut body: Vec<Stmt> = cx
+            .var_undefined
+            .iter()
+            .map(|l| Stmt::Set(*l, Expr::undefined()))
+            .collect();
+        body.extend(prologue);
         body.extend(stmts);
         cx.func.body = body;
         let id = cx.id;
@@ -3796,9 +3798,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             if decl.init.is_none() && is_var {
                 // `var x;` doesn't reset `x`: it's `undefined` from function entry on (a captured
                 // one's cell starts as `undefined`, a global too).
+                // T88: a parameter redeclared by `var` keeps its argument (scheme2js output does it).
                 if plain {
                     let local = cx.locals[&sym];
-                    if !cx.var_undefined.contains(&local) {
+                    if local.0 >= cx.func.params && !cx.var_undefined.contains(&local) {
                         cx.var_undefined.push(local);
                     }
                 }
