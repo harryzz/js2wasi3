@@ -1,0 +1,39 @@
+# T87: Wasm traps in test262 (crashes instead of JS behaviour)
+
+Status: in progress (2026-10-05) | Depends on: — | Local
+
+## Goal
+Every test262 test that ends in a Wasm trap (`unreachable`, a failed cast, call stack exhausted) either passes or
+fails with a JS error like node's: a real program must never die of a trap for these. 36 tests in the full run of
+2026-10-05 (T84, a-03, `out/test262/results.tsv`).
+
+## Groups (36 tests)
+- Case mapping `$$caseMap` (`to{,Locale}{Lower,Upper}Case`: special casing, final sigma, supplementary plane): 13
+- `array_define` < `ordinary_set` (7), `array_resize` < `array_set_length` (4), `array_set_index` < `set` (1): 12
+- `String.prototype.normalize`: 3
+- `localeCompare` (`$$collationWeight`): 2
+- RegExp: call stack exhausted (`$$append`, `$$reDisjunction`): 2
+- `builtin_not_implemented` < `property_value` (2), `user_to_primitive_not_implemented` (1), cast failure in
+  `typeof` (1): 4
+
+## Tests
+Per group: the test262 files (`node scripts/test262.mjs <files>`), a small `scripts/diff.sh` reproduction where it
+helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask first).
+
+## Acceptance
+- [ ] No test262 test ends in a trap (or the rest recorded with reasons).
+- [ ] No regressions in the touched directories; full run on a-03.
+
+## Notes / Result
+(to be written)
+
+## Progress
+- 2026-10-05: task started; the 36 traps listed from a-03's `results.tsv` of the T84 run.
+- 2026-10-05: case mapping (12 tests): the BMP tables were hand-written for Latin-1/Extended-A, Greek, basic
+  Cyrillic and fullwidth only; every other cased character (`ș`, Armenian, Georgian, Latin Extended-B, …), the
+  supplementary planes and the multi-character mappings hit `__intrinsic_trap()`. Now `scripts/gen-unicode.mjs` also
+  generates, from node, `$$caseRunsUpper/Lower` (1,478 / 1,487 code points as runs), `$$caseSpecialUpper/Lower`
+  (102 / 1 one-to-several mappings) and the `Cased`/`Case_Ignorable` ranges; `$$caseMap` (string.js) looks up by
+  code point, applies Final_Sigma to Σ, keeps an ASCII fast path. New fixture `builtins/string-case.js` (every code
+  point both ways, specials, Σ contexts, lone surrogates) = node; test262 `String/prototype/to{,Locale}{Lower,Upper}
+  Case`: 110/110, 12 fail → pass. Found F365 (top-level `+=` loop quadratic).
