@@ -1,12 +1,32 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T80+T81 on the T79 replay 2026-10-05 (T82): 2.6× node
+
+One replay run on a-03 (same recording, 512 MiB GC heap) of `main` at 3c9aacb: T80 (native UTF-8 in `node:buffer`)
+and T81 (RegExp fast paths) together. The baseline and node weren't re-run (T79's runs, below). Run dir
+`~/js2wasi3-prod-run/t79/out-t80t81`.
+
+| | CPU (903 s, 548 frames) | vs node (8.66 s) | CPU per frame | first minute (CPU at 61 s) | peak RSS | publishes |
+|---|---|---|---|---|---|---|
+| node 24.21.0 (T79) | 8.66 s | 1× | | 4.5 s | 289 MB | 13,567 |
+| js2wasi3 before (T79, 512 MiB) | 39.1 s | 4.5× | 71.3 ms | 14.8 s | 784 MB | 13,476 |
+| **js2wasi3 with T80+T81** | **22.6 s** | **2.6×** | **41.2 ms** | **6.5 s** | 782 MB | 13,478 |
+
+- 42% less CPU in the steady window, 56% less in the first minute; RSS unchanged (peak of `cpu.csv`, 10⁶ bytes; the T79 table below gives MiB). The saving (16.5 s) is about
+  what T79's profile gave UTF-8 encoding (~36%) and RegExp (~9%), so no new profile was taken.
+- Same output as before: publishes within 2 of the baseline (node 13,567: F317), the same 9 error/exception lines
+  in `z2m.log`.
+- Build on a-03: `js2wasi3 build` 257 s / 1.7 GB, `wasmtime compile` with 512 MiB 50 s / 14.5 GB (F347's scripts work).
+- Next candidates (T79's profile, now larger shares): property-access helpers (~27% self then, F321 shapes),
+  wasmtime libcalls (~7%, F350), `box_number` (3%, F323/F334), one-byte strings (F352).
 
 ## Profile of a recorded production session 2026-10-04 (T79): the GC heap, then UTF-8
 
 Since T79 the zigbee2mqtt run scripts and README use a 512 MiB GC heap (`-O gc-heap-initial-size=536870912`, F347);
-wasmtime's rule for growing the heap (F304) is a limitation we work around, not report. Next: T80.
+wasmtime's rule for growing the heap (F304) is a limitation we work around, not report. T80+T81 (measured in T82, above): 22.6 s.
 
 Production's zigbee2mqtt (52 devices) was recorded once for 15 minutes under node through two recording proxies
 (coordinator and MQTT; `tasks/T79-files/`), then replayed offline on a-03 into node and into js2wasi3's build
@@ -20,6 +40,7 @@ CPU in the 903 s from zigbee2mqtt's start (548 device frames):
 | copying GC, 256 MiB heap (used so far) | 143–145 s | 16.5× | 37.9 s | 431 MB |
 | copying, 384 MiB | 42.8 s | 4.9× | 15.9 s | 639 MB |
 | copying, 512 MiB | 39.1 s | 4.5× | 14.8 s | 765 MB |
+| copying, 512 MiB, with T80+T81 (T82, 2026-10-05) | 22.6 s | 2.6× | 6.5 s | 763 MB |
 | copying, 768 MiB | 37.6 s | 4.3× | 14.4 s | 1.0 GB |
 | copying, 1 GiB | 35.9 s | 4.1× | 13.6 s | 1.3 GB |
 | null collector (never collects) | 37.0 s | 4.3× | | 3.4 GB |

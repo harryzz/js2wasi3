@@ -1,6 +1,6 @@
 # T82: measure T80 and T81 on the T79 replay (local: a-03)
 
-Status: in progress (step 1 done locally 2026-10-05) | Depends on: T80, T81 (done on `speed-batch`) | **Not for cloud sessions**: needs a-03, the
+Status: done (2026-10-05) | Depends on: T80, T81 (done on `speed-batch`) | **Not for cloud sessions**: needs a-03, the
 recording and the zigbee2mqtt build tree outside the repo (see `tasks/CLOUD-BATCH.md`).
 
 ## Goal
@@ -58,12 +58,24 @@ strings). WasmGC limits that make them larger: struct layouts fixed at compile t
 interior pointers (shared substrings need our own slice type), i31 is 31 bits.
 
 ## Acceptance
-- [ ] Step 1: T80/T81 on `main` authored by the user, no attribution anywhere; pushed after the user's OK.
-- [ ] Step 2: T80+T81 measured in one replay run; table in `docs/zigbee2mqtt-feasibility.md`.
-- [ ] The next item decided and recorded as a task or follow-ups.
+- [x] Step 1: T80/T81 on `main` authored by the user, no attribution anywhere; pushed after the user's OK.
+- [x] Step 2: T80+T81 measured in one replay run; table in `docs/zigbee2mqtt-feasibility.md`.
+- [x] The next item decided and recorded as a task or follow-ups.
 
 ## Notes / Result
-(to be written)
+- Step 1: speed-batch rebased onto `main` with `--reset-author` (fcc55cb T80, 428a7b3 T81, 3c9aacb docs), pushed
+  with 66f6684 by the user; `speed-batch` deleted on origin. `cargo build --release` and `scripts/diff.sh` on
+  `node/buffer-utf8.js`, `builtins/regex-observable.js`: PASS.
+- Step 2 (a-03, one run, `t79/out-t80t81`, started by the user: `build-p.sh` then `run-replay.sh
+  rec-20261004-1941 wasm t79/out-t80t81`): **22.6 s CPU in the 903 s window (was 39.1 s; node 8.66 s): 2.6× node
+  (was 4.5×)**, 41.2 ms per frame (was 71.3), first minute 6.5 s (was 14.8; node 4.5), peak RSS 782 MB
+  (unchanged), 13,478 publishes (was 13,476), the same 9 error lines. No profile: the saving matches T79's UTF-8 +
+  RegExp shares. Table in `docs/zigbee2mqtt-feasibility.md`.
+- Next item (user, 2026-10-05): F321 shapes → `tasks/T83-shapes.md`; F350, F323/F334, F352 stay follow-ups (F352
+  after T83).
+- Session note: the session's permission check blocked `git push`, the remote branch delete and starting runs on
+  a-03 over ssh; the user ran those (reading results over ssh worked).
+
 
 ## Progress
 - 2026-10-05: handoff written (the measurement part of the earlier T80 plan; F347's 512 MiB scripts are untested
@@ -79,3 +91,9 @@ interior pointers (shared substrings need our own slice type), i31 is 31 bits.
 - 2026-10-05: user OK'd push, deleting origin `speed-batch` and the a-03 replay. Repo rsynced to a-03. The session's
   permission check blocked `git push`, `git push --delete` and starting the build+replay over ssh: the user runs them
   (commands in the session report; replay log `~/js2wasi3-prod-run/t79/t82.log`, out dir `t79/out-t80t81`).
+- 2026-10-05: user started the a-03 build+replay (log `t79/t82.log`). Build on a-03 (code = 3c9aacb): cargo 26 s,
+  `js2wasi3 build` 257 s / 1.7 GB, `wasmtime compile` with 512 MiB 50 s / 14.5 GB (F347's scripts work); replay
+  running into `t79/out-t80t81`.
+- 2026-10-05: replay done: 22.6 s CPU (2.6× node; was 39.1 s / 4.5×), first minute 6.5 s, RSS 782 MB, 13,478
+  publishes. Written into `docs/zigbee2mqtt-feasibility.md`. Left: the next item (user's choice).
+- 2026-10-05: user chose F321 shapes next: T83 handoff written; T82 done.
