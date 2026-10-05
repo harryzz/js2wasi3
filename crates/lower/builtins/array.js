@@ -121,6 +121,21 @@ function $$describe(v) {
     if (mode >= 0) {
       return mode < 3 ? "[object Map Iterator]" : "[object Set Iterator]";
     }
+    // Primitive wrappers (T87): V8's "[object Symbol]" etc. (their prototypes' `constructor` may be a
+    // sentinel).
+    const prim = __intrinsic_unwrap(v);
+    if (prim !== v) {
+      const pt = typeof prim;
+      return pt === "symbol"
+        ? "[object Symbol]"
+        : pt === "string"
+          ? "[object String]"
+          : pt === "number"
+            ? "[object Number]"
+            : pt === "boolean"
+              ? "[object Boolean]"
+              : "[object BigInt]";
+    }
     let p = Object.getPrototypeOf(v);
     if (p === null) {
       return "[object Object]";

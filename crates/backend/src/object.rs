@@ -1951,6 +1951,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     let new_function = cx.helper(runtime::Helper::Func(func::Helper::New));
     // `length: 0` (Function.prototype, Array.prototype).
     let length = matches!(b, Builtin::Function | Builtin::Array).then(|| cx.str("length"));
+    let string_length = (b == Builtin::String).then(|| cx.str("length"));
     const O: u32 = 0;
     const M: u32 = 1;
     const PARENT: u32 = 2;
@@ -1996,6 +1997,12 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     s.local_tee(O).global_set(g);
     for (key, value) in props {
         s.local_get(O).ref_as_non_null().global_get(key);
+        // T87: `String.prototype` is a String object of length 0.
+        if Some(key) == string_length {
+            s.i32_const(0).ref_i31();
+            s.i32_const(HIDDEN | READONLY | FIXED).call(define);
+            continue;
+        }
         match value {
             Some(v) => s.global_get(v),
             None => s.global_get(G_BUILTIN),
@@ -3861,6 +3868,7 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
 /// returns the object (skipped), `Object.prototype.toString` gives `[object Tag]`; any other
 /// built-in traps.
 fn to_primitive(cx: &mut dyn Cx) -> Function {
+    let unwrap = cx.helper(runtime::Helper::Wrap(wrapper::Helper::Unwrap));
     let holder = h(cx, Helper::Holder);
     let own = h(cx, Helper::OwnGet);
     let obj_proto = h(cx, Helper::Proto(Builtin::Object));
@@ -4023,6 +4031,15 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
             s.typed_select(jsval()).return_();
             s.end();
         }
+        s.end();
+        // T87: `String.prototype`, `Number.prototype`, `Boolean.prototype` hold "", +0, false.
+        s.local_get(O).call(unwrap).local_tee(T);
+        s.local_get(O).ref_eq().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(T);
+        s.local_get(T).call(to_string);
+        s.local_get(KEY).global_get(value_of).ref_eq();
+        s.typed_select(jsval()).return_();
         s.end();
         s.local_get(KEY).global_get(value_of).ref_eq();
         s.if_(BlockType::Empty);

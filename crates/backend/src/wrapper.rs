@@ -68,6 +68,9 @@ impl Helper {
             Helper::New => new(cx),
             Helper::ToObject => to_object(cx),
             Helper::Unwrap => {
+                // T87: `String.prototype`, `Number.prototype` and `Boolean.prototype` are String,
+                // Number and Boolean objects too ("", +0, false).
+                let empty = cx.str("");
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
                 s.local_get(0).ref_test_non_null(wrapper());
@@ -76,7 +79,33 @@ impl Helper {
                     .ref_cast_non_null(wrapper())
                     .struct_get(T_WRAPPER, F_PRIM);
                 s.else_();
-                s.local_get(0);
+                {
+                    let protos = [
+                        (Builtin::String, 0u8),
+                        (Builtin::Number, 1),
+                        (Builtin::Boolean, 2),
+                    ];
+                    for (b, kind) in protos {
+                        s.local_get(0)
+                            .global_get(runtime::G_PROTOS + b.index())
+                            .ref_eq();
+                        s.if_(BlockType::Empty);
+                        match kind {
+                            0 => {
+                                s.global_get(empty);
+                            }
+                            1 => {
+                                s.i32_const(0).ref_i31();
+                            }
+                            _ => {
+                                s.global_get(runtime::G_FALSE);
+                            }
+                        }
+                        s.return_();
+                        s.end();
+                    }
+                    s.local_get(0);
+                }
                 s.end();
                 s.end();
                 f

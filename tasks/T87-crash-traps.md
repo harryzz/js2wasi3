@@ -55,3 +55,9 @@ helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask 
   `caseFirst`, `ignorePunctuation`; locales accepted (root order). New fixture
   `builtins/string-locale-compare.js` (60 words × 7 option sets, canonical equivalence) = node; test262
   `String/prototype/localeCompare` 13/13 (3 fail → pass). Approximate beyond that: F367.
+- 2026-10-05: built-in placeholders (3 tests): `String.prototype`, `Number.prototype`, `Boolean.prototype` are
+  String/Number/Boolean objects ("", +0, false): `wrapper::Unwrap` and `to_primitive` give those primitives (was a
+  TypeError or the `user_to_primitive_not_implemented` trap); `$$describe` names primitive wrappers like V8
+  ("[object Symbol]" …) instead of reading their prototype's `constructor` (a sentinel when the program doesn't
+  name it); `String.prototype.length` is 0 (read-only), not a sentinel. Repros = node; test262: 3 fail → pass, 0
+  regressions in `Symbol/keyFor`, `property-accessors`, `String/prototype/{toString,valueOf}`.
