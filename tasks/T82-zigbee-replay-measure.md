@@ -1,6 +1,6 @@
 # T82: measure T80 and T81 on the T79 replay (local: a-03)
 
-Status: todo (handoff written 2026-10-05, updated after the cloud batch) | Depends on: T80, T81 (done on `speed-batch`) | **Not for cloud sessions**: needs a-03, the
+Status: in progress (step 1 done locally 2026-10-05) | Depends on: T80, T81 (done on `speed-batch`) | **Not for cloud sessions**: needs a-03, the
 recording and the zigbee2mqtt build tree outside the repo (see `tasks/CLOUD-BATCH.md`).
 
 ## Goal
@@ -71,3 +71,11 @@ interior pointers (shared substrings need our own slice type), i31 is 31 bits.
 - 2026-10-05: cloud batch checked (local session): T80, T81 done on `origin/speed-batch` (3 commits, author Claude:
   re-author in step 1), `main` untouched, T82 left todo as the rule says. User: handoff for a new session with step 1
   (merge, author fixed) and step 2 (one replay of T80+T81).
+- 2026-10-05: step 1 done locally: speed-batch rebased onto main with `--reset-author` (fcc55cb T80, 428a7b3 T81,
+  3c9aacb docs; author and committer Zahari Zahariev, no attribution in messages or added lines), `main`
+  fast-forwarded, local `speed-merge` deleted. `cargo build --release` OK; `scripts/diff.sh` PASS on
+  `node/buffer-utf8.js` and `builtins/regex-observable.js`. Not pushed yet (waiting for the user's OK); origin
+  `speed-batch` not deleted yet (ask).
+- 2026-10-05: user OK'd push, deleting origin `speed-batch` and the a-03 replay. Repo rsynced to a-03. The session's
+  permission check blocked `git push`, `git push --delete` and starting the build+replay over ssh: the user runs them
+  (commands in the session report; replay log `~/js2wasi3-prod-run/t79/t82.log`, out dir `t79/out-t80t81`).
