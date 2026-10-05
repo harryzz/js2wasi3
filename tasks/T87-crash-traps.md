@@ -37,3 +37,7 @@ helps, `wasm-tools validate`, a smoke run. The full run at the end on a-03 (ask 
   code point, applies Final_Sigma to Σ, keeps an ASCII fast path. New fixture `builtins/string-case.js` (every code
   point both ways, specials, Σ contexts, lone surrogates) = node; test262 `String/prototype/to{,Locale}{Lower,Upper}
   Case`: 110/110, 12 fail → pass. Found F365 (top-level `+=` loop quadratic).
+- 2026-10-05: arrays (13 tests: `array_define`, `array_resize`, `array_set_index`): an index or length ≥ 2^26
+  (`MAX_DENSE`, no sparse storage) hit `unreachable`; now a RangeError ("Arrays with an index or length of 2^26 or
+  more (sparse arrays) aren't supported by js2wasi3 yet", `array::sparse_error`). Still failures in test262 (node
+  supports them), but catchable; sparse arrays: F366.

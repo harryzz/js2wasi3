@@ -34,6 +34,21 @@ pub const F_EATTRS: u32 = 9;
 /// Indices from here on trap.
 pub const MAX_DENSE: i32 = 1 << 26;
 
+/// The throw of the RangeError that stands for sparse arrays (an index or length at or past
+/// [`MAX_DENSE`]; not implemented, F366) instead of a trap (T87): the helper and the message.
+fn sparse_error(cx: &mut dyn Cx) -> (u32, u32) {
+    let throw = oh(cx, object::Helper::Throw(ErrorKind::RangeError));
+    let msg = cx.str(
+        "Arrays with an index or length of 2^26 or more (sparse arrays) aren't supported by js2wasi3 yet",
+    );
+    (throw, msg)
+}
+
+fn sparse(s: &mut InstructionSink, (throw, msg): (u32, u32)) {
+    s.global_get(msg).call(throw);
+    s.unreachable();
+}
+
 pub fn array() -> HeapType {
     HeapType::Concrete(T_ARRAY)
 }
@@ -347,6 +362,7 @@ fn define(cx: &mut dyn Cx, set: bool) -> Function {
     );
     let set_length = ah(cx, Helper::SetLength);
     let length = cx.str("length");
+    let sparse_ids = sparse_error(cx);
     const A: u32 = 0;
     const K: u32 = 1;
     const V: u32 = 2;
@@ -358,7 +374,7 @@ fn define(cx: &mut dyn Cx, set: bool) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(I).i64_const(MAX_DENSE as i64).i64_ge_u();
     s.if_(BlockType::Empty);
-    s.unreachable(); // sparse arrays aren't implemented
+    sparse(&mut s, sparse_ids); // sparse arrays aren't implemented (F366)
     s.end();
     s.local_get(A)
         .local_get(I)
@@ -416,6 +432,7 @@ fn ensure(s: &mut InstructionSink, a: u32, i: u32, tmp_cap: u32, tmp_new: u32) {
 
 /// [`Helper::SetIndex`] (`set`) or [`Helper::DefineIndex`].
 fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
+    let sparse_ids = sparse_error(cx);
     let concat = cx.helper(runtime::Helper::Concat);
     let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
@@ -460,7 +477,7 @@ fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
     let mut s = f.instructions();
     s.local_get(I).i32_const(MAX_DENSE).i32_ge_u();
     s.if_(BlockType::Empty);
-    s.unreachable();
+    sparse(&mut s, sparse_ids);
     s.end();
     // An absent element (a hole, or past the end) while the prototype chain may have index keys
     // (T34): OrdinarySet goes up the chain; a setter there is called, a read-only property there
@@ -750,6 +767,7 @@ fn set_length(cx: &mut dyn Cx) -> Function {
 /// `(a, len: i32)`: set the length (a valid one): shrinking deletes from the end and stops,
 /// with node's TypeError, at an element that isn't configurable; growing grows the store.
 fn resize(cx: &mut dyn Cx) -> Function {
+    let sparse_ids = sparse_error(cx);
     let this = ah(cx, Helper::Resize);
     let attrs = ah(cx, Helper::Attrs);
     let concat = cx.helper(runtime::Helper::Concat);
@@ -772,7 +790,7 @@ fn resize(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     s.local_get(L).i32_const(MAX_DENSE).i32_gt_u();
     s.if_(BlockType::Empty);
-    s.unreachable(); // sparse arrays aren't implemented
+    sparse(&mut s, sparse_ids); // sparse arrays aren't implemented (F366)
     s.end();
     s.local_get(L)
         .local_get(A)
