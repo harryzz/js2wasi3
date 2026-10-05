@@ -838,23 +838,209 @@ function $$String_prototype_localeCompare(that, locales, options) {
 
 // `normalize(form)` (T25): strings no form changes (ASCII; below U+0300 for NFC) are returned
 // as they are; the others need Unicode's tables (they trap).
-function $$String_prototype_normalize(form) {
+function $$String_prototype_normalize(form = undefined) {
   const s = $$thisString(this, "normalize");
   let f = "NFC";
   if (form !== undefined) {
-    f = $$String(form);
+    f = __intrinsic_to_string(form);
   }
   if (f !== "NFC" && f !== "NFD" && f !== "NFKC" && f !== "NFKD") {
     throw new RangeError("The normalization form should be one of NFC, NFD, NFKC, NFKD.");
   }
-  const limit = f === "NFC" ? 768 : 128;
+  // Below these units nothing changes (NFC: no combining marks before U+0300; the others: Latin-1
+  // letters decompose, the K forms map U+00A0 on).
+  const limit = f === "NFC" ? 0x300 : f === "NFD" ? 0xc0 : 0xa0;
   const n = __intrinsic_str_len(s);
   for (let i = 0; i < n; i++) {
     if (__intrinsic_unit(s, i) >= limit) {
-      __intrinsic_trap();
+      return $$normalize(s, f === "NFKC" || f === "NFKD", f === "NFC" || f === "NFKC");
     }
   }
   return s;
+}
+
+// Unicode normalization (UAX #15, T87) from unicode-case.js's tables (generated from node and
+// UnicodeData.txt by scripts/gen-unicode.mjs).
+let $$normCanon = null;
+let $$normCanonIdx = null;
+let $$normCompat = null;
+let $$normCompatIdx = null;
+let $$normCcc = null;
+let $$normPairs = null;
+
+// `[code point, position]…` of a decomposition list `[c, n, c1…cn]…`.
+function $$normIndex(list) {
+  const idx = [];
+  let i = 0;
+  const len = __intrinsic_i32_len(list);
+  while (i < len) {
+    $$append(idx, __intrinsic_i32_get(list, i));
+    $$append(idx, i);
+    i += 2 + __intrinsic_i32_get(list, i + 1);
+  }
+  return $$reI32(idx);
+}
+
+// The position of `c`'s entry in `list` by its index, or -1.
+function $$normFind(list, idx, c) {
+  let lo = 0;
+  let hi = __intrinsic_i32_len(idx) >> 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const k = __intrinsic_i32_get(idx, 2 * mid);
+    if (k === c) {
+      return __intrinsic_i32_get(idx, 2 * mid + 1);
+    }
+    if (k < c) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return -1;
+}
+
+// The canonical combining class of `c`.
+function $$normClass(c) {
+  if (c < 0x300) {
+    return 0;
+  }
+  const r = $$normCcc;
+  let lo = 0;
+  let hi = __intrinsic_i32_len(r) / 3;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (c < __intrinsic_i32_get(r, 3 * mid)) {
+      hi = mid;
+    } else if (c > __intrinsic_i32_get(r, 3 * mid + 1)) {
+      lo = mid + 1;
+    } else {
+      return __intrinsic_i32_get(r, 3 * mid + 2);
+    }
+  }
+  return 0;
+}
+
+// The primary composite of `a` and `b`, or -1 (Hangul: algorithmic).
+function $$normCompose(a, b) {
+  if (a >= 0x1100 && a < 0x1113 && b >= 0x1161 && b < 0x1176) {
+    return 0xac00 + ((a - 0x1100) * 21 + (b - 0x1161)) * 28;
+  }
+  if (a >= 0xac00 && a <= 0xd7a3 && (a - 0xac00) % 28 === 0 && b > 0x11a7 && b < 0x11c3) {
+    return a + (b - 0x11a7);
+  }
+  const p = $$normPairs;
+  let lo = 0;
+  let hi = __intrinsic_i32_len(p) / 3;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const x = __intrinsic_i32_get(p, 3 * mid);
+    const y = __intrinsic_i32_get(p, 3 * mid + 1);
+    if (x === a && y === b) {
+      return __intrinsic_i32_get(p, 3 * mid + 2);
+    }
+    if (x < a || (x === a && y < b)) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return -1;
+}
+
+function $$normalize(s, compat, compose) {
+  if ($$normCanon === null) {
+    $$normCanon = $$reDecode($$normDecompCanon());
+    $$normCanonIdx = $$normIndex($$normCanon);
+    $$normCcc = $$reDecode($$normCombiningClasses());
+    $$normPairs = $$reDecode($$normComposites());
+  }
+  if (compat && $$normCompat === null) {
+    $$normCompat = $$reDecode($$normDecompCompat());
+    $$normCompatIdx = $$normIndex($$normCompat);
+  }
+  // Decompose.
+  const cps = [];
+  const n = s.length;
+  for (let i = 0; i < n; i++) {
+    const c = $$caseCodePointAt(s, i);
+    if (c > 0xffff) {
+      i++;
+    }
+    if (c >= 0xac00 && c <= 0xd7a3) {
+      const si = c - 0xac00;
+      $$append(cps, 0x1100 + ((si / 588) | 0));
+      $$append(cps, 0x1161 + (((si % 588) / 28) | 0));
+      if (si % 28 !== 0) {
+        $$append(cps, 0x11a7 + (si % 28));
+      }
+      continue;
+    }
+    let list = $$normCanon;
+    let e = -1;
+    if (compat) {
+      e = $$normFind($$normCompat, $$normCompatIdx, c);
+      list = $$normCompat;
+    }
+    if (e < 0) {
+      list = $$normCanon;
+      e = $$normFind($$normCanon, $$normCanonIdx, c);
+    }
+    if (e < 0) {
+      $$append(cps, c);
+      continue;
+    }
+    const m = __intrinsic_i32_get(list, e + 1);
+    for (let j = 0; j < m; j++) {
+      $$append(cps, __intrinsic_i32_get(list, e + 2 + j));
+    }
+  }
+  // Canonical ordering: non-starters sorted by class, stably.
+  const len = cps.length;
+  for (let i = 1; i < len; i++) {
+    const c = cps[i];
+    const cc = $$normClass(c);
+    if (cc === 0) {
+      continue;
+    }
+    let j = i;
+    while (j > 0 && $$normClass(cps[j - 1]) > cc) {
+      cps[j] = cps[j - 1];
+      j--;
+    }
+    cps[j] = c;
+  }
+  let out = len;
+  if (compose && len > 0) {
+    // The reference algorithm (UAX #15): a mark joins the last starter unless blocked.
+    let starter = 0;
+    let last = $$normClass(cps[0]);
+    if (last !== 0) {
+      last = 256;
+    }
+    out = 1;
+    for (let i = 1; i < len; i++) {
+      const c = cps[i];
+      const cc = $$normClass(c);
+      const comp = $$normCompose(cps[starter], c);
+      if (comp >= 0 && (last < cc || last === 0)) {
+        cps[starter] = comp;
+        continue;
+      }
+      if (cc === 0) {
+        starter = out;
+      }
+      last = cc;
+      cps[out] = c;
+      out++;
+    }
+  }
+  const r = __intrinsic_str_new(out * 2);
+  let k = 0;
+  for (let i = 0; i < out; i++) {
+    k = $$casePut(r, k, cps[i]);
+  }
+  return __intrinsic_sub(r, 0, k);
 }
 
 function $$String_prototype_isWellFormed() {

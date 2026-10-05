@@ -194,6 +194,76 @@ function $$caseIgnorable() {
   return "${encode(caseIgnorable)}";
 }
 `;
+// String.prototype.normalize (T87): node's full decompositions per code point (Hangul syllables are
+// algorithmic), canonical combining classes (UnicodeData.txt), and the primary composites (a canonical
+// decomposition of two code points that NFC puts back together).
+const decCanon = [];
+const decCompat = [];
+for (let c = 0; c <= 0x10ffff; c++) {
+  if ((c >= 0xd800 && c <= 0xdfff) || (c >= 0xac00 && c <= 0xd7a3)) {
+    continue;
+  }
+  const ch = String.fromCodePoint(c);
+  const d = ch.normalize("NFD");
+  const kd = ch.normalize("NFKD");
+  if (d !== ch) {
+    const cps = [...d].map((x) => x.codePointAt(0));
+    decCanon.push(c, cps.length, ...cps);
+  }
+  if (kd !== d) {
+    const cps = [...kd].map((x) => x.codePointAt(0));
+    decCompat.push(c, cps.length, ...cps);
+  }
+}
+const ccc = [];
+const compose = [];
+for (const line of await ucd("UnicodeData.txt")) {
+  const f = line.split(";");
+  const c = parseInt(f[0], 16);
+  const cl = +f[3];
+  if (cl !== 0) {
+    if (ccc.length && ccc[ccc.length - 2] === c - 1 && ccc[ccc.length - 1] === cl) {
+      ccc[ccc.length - 2] = c;
+    } else {
+      ccc.push(c, c, cl);
+    }
+  }
+  if (f[5] && !f[5].startsWith("<")) {
+    const parts = f[5].split(" ").map((x) => parseInt(x, 16));
+    if (parts.length === 2 && String.fromCodePoint(...parts).normalize("NFC") === String.fromCodePoint(c)) {
+      compose.push([parts[0], parts[1], c]);
+    }
+  }
+}
+// The ranges above are [lo, hi, class] triples, merged only for equal classes (the line above wrote
+// [lo, hi, cl] with lo patched): rebuild them from the flat list.
+const cccRanges = [];
+for (let i = 0; i < ccc.length; i += 3) {
+  cccRanges.push(ccc[i], ccc[i + 1], ccc[i + 2]);
+}
+compose.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+
+caseJs += `
+// String.prototype.normalize (T87, string.js \`$$normalize\`): full decompositions \`[code point, n, c1…cn]\`
+// (canonical: ${decCanon.length} numbers; compatibility where it differs: ${decCompat.length}), canonical combining
+// classes \`[lo, hi, class]\` (${cccRanges.length / 3} ranges) and primary composites \`[a, b, composite]\`
+// (${compose.length}). Hangul syllables are algorithmic.
+function $$normDecompCanon() {
+  return "${encode(decCanon)}";
+}
+
+function $$normDecompCompat() {
+  return "${encode(decCompat)}";
+}
+
+function $$normCombiningClasses() {
+  return "${encode(cccRanges)}";
+}
+
+function $$normComposites() {
+  return "${encode(compose.flat())}";
+}
+`;
 writeFileSync(join(ROOT, "crates/lower/builtins/unicode-case.js"), caseJs);
 
 // ---- property escapes ----------------------------------------------------------------------
