@@ -1,11 +1,19 @@
 # T89: function calls without wasmtime libcalls (F350) and `F.prototype` directly (F369)
 
-Status: in progress (2026-10-06) | Depends on: T88 (profile) | Local
+Status: done (2026-10-06) | Depends on: T88 (profile) | Local
 
 ## Goal
 From T88's EarleyBoyer profile: `instanceof`/`new` read `F.prototype` through the generic `get` (F369), and
 wasmtime's libcalls (`get_interned_func_ref`, `is_subtype` and their trap-handler wrappers) are ~12% (F350, also
 ~7% of zigbee2mqtt in T79). Remove them from the hot paths; same results as node.
+
+## Notes / Result
+- `fn_prototype` for `new`/`instanceof` (F369), `test_object` instead of `ref.test $object` there; `$function`
+  code/construct as code-table slots with `call_indirect` (F350's `get_interned_func_ref`; the probe:
+  `probes/funcref.wat`, 5.4×). Generators' resume funcrefs and `is_subtype` elsewhere remain (F350 stays open).
+- EarleyBoyer (laptop, `fixed 0.05`): 15.4–17.5 s → 10.4–12.2 s. zigbee2mqtt replay (a-03): 22.59 → 22.07 s.
+- Full test262 on a-03: 28,099 pass, 0 regressions. Fixtures: 243 pass (see Progress). Found F370.
+- Next smallest step: F368 (property adds search the prototype chain each time: ~16% of EarleyBoyer).
 
 ## Progress
 - 2026-10-06: `fn_prototype` (func.rs): an ordinary function's `prototype` is its entry 2 (after `length`, `name`,
@@ -26,3 +34,4 @@ wasmtime's libcalls (`get_interned_func_ref`, `is_subtype` and their trap-handle
   full parallel load (their builds take ~55 s) and pass alone; `unsupported/bad-names.js` is an expected build
   error (checked by the cargo tests, not diff.sh). `cargo test -p js2wasi3-backend -p js2wasi3 -p js2wasi3-lower`
   ok. Probe added as `probes/run.sh` step 10.
+- 2026-10-06: full test262 on a-03 (`~/t262-t89.log`): 28,099 pass, 0 regressions; replay `t79/out-t89`: 22.07 s. Done.

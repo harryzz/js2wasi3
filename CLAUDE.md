@@ -11,8 +11,8 @@ Compiler: JavaScript → a WASI 0.3 Wasm component (WasmGC, native EH, P3 async)
 No cloud batch is open (`tasks/CLOUD-BATCH.md`: the T83 batch is finished and merged). User, 2026-10-05: cloud
 sessions use the same plan limits, so speed tasks run locally now.
 
-**Local sessions**: shapes (T83–T86) were reverted (branch `shapes`). T87 (test262 traps) is done; the next item is
-**F333** (EarleyBoyer wrong result; task file to write), then F338, then F350.
+**Local sessions**: shapes (T83–T86) were reverted (branch `shapes`). T87–T89 are done; the next item is **F368** (property adds
+search the prototype chain; task file to write), then F338.
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.

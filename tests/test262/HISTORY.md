@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-06: T88 `var` redeclaring a parameter, T89 code-table calls (full run)
+
+- Compiler (808ef05): a `var` redeclaring a parameter no longer resets it (T88, behind EarleyBoyer's wrong result);
+  `$function` code/construct are code-table slots called with `call_indirect`, `F.prototype` read directly in
+  `new`/`instanceof` (T89). Runner: unchanged.
+- Full run on `a-03` (31,461 tests, 1,297 s, -j 36): 28,099 of 28,984 run pass (96.9%), **0 regressions**; the same
+  26 changes since the baseline as after T87. Baseline not updated.
+
 ## 2026-10-05: T87 traps: case mapping, normalize, localeCompare, prototypes (full run)
 
 - Compiler (c68ad76; shapes reverted, so T82's objects): full Unicode case mapping and normalization from node's

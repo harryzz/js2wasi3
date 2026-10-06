@@ -1,7 +1,20 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T89 code-table calls on the T79 replay 2026-10-06: 22.07 s
+
+One replay on a-03 of 808ef05 (shapes reverted; T87 traps, T88 `var`/parameter fix, T89: `$function` code as
+code-table slots called with `call_indirect`, `F.prototype` direct). Run dir `~/js2wasi3-prod-run/t79/out-t89`.
+
+| | CPU (903 s) | vs node (8.66 s) | first minute | peak RSS | publishes |
+|---|---|---|---|---|---|
+| T82 | 22.59 s | 2.6× | 6.5 s | 782 MB | 13,478 |
+| **T89** | **22.07 s** | **2.55×** | **6.3 s** | 776 MB | 13,478 |
+
+- 0.5 s (2%) less, same output (the same 9 error lines). EarleyBoyer gained 30% from the same change: zigbee2mqtt
+  calls through function values far less per unit of work; its time is in property access (T84's profile).
 
 ## T86 `.length` paths on the T79 replay 2026-10-05: 22.18 s, the 21.5 s bar not reached
 
