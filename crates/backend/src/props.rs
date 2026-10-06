@@ -126,7 +126,7 @@ impl Helper {
         match self {
             Helper::Value => (vec![v, v], vec![v]),
             Helper::Set => (vec![o, s, v], vec![]),
-            Helper::SetNamed => (vec![o, s, v, I32], vec![]),
+            Helper::SetNamed => (vec![o, s, v, I32, I32], vec![]),
             Helper::CtorName => (vec![rt(true, T_OBJECT)], vec![rt(true, T_STRING)]),
             Helper::Desc => (vec![o], vec![s]),
             Helper::Put => (vec![o, s, v, I32], vec![]),
@@ -355,7 +355,8 @@ fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u3
     s.call(call_value).drop();
 }
 
-/// `ordinary_set(o, k, v)`; with `named`, `ordinary_set_named(o, k, v, hash)` (see [`Helper::SetNamed`]).
+/// `ordinary_set(o, k, v)`; with `named`, `ordinary_set_named(o, k, v, hash, site)` (see
+/// [`Helper::SetNamed`]).
 fn set(cx: &mut dyn Cx, named: bool) -> Function {
     let find = oh(cx, if named { object::Helper::FindOwnNamed } else { object::Helper::FindOwn });
     let define = oh(cx, if named { object::Helper::AppendNamed } else { object::Helper::Define });
@@ -370,9 +371,10 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
     const O: u32 = 0;
     const K: u32 = 1;
     const V: u32 = 2;
-    // With `named`, param 3 is the hash and the locals start one later.
+    // With `named`, params 3 and 4 are the hash and the site, and the locals start two later.
     const HV: u32 = 3;
-    let n = named as u32;
+    const SITE: u32 = 4;
+    let n = 2 * named as u32;
     let (e, a, p, x) = (3 + n, 4 + n, 5 + n, 6 + n);
     let find_k = |s: &mut InstructionSink| {
         s.local_get(K);
@@ -426,7 +428,22 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
     // The prototype chain: a setter, or a read-only property, forbids a new own property.
     s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(p);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
-    s.local_get(p).ref_is_null().br_if(1);
+    s.local_get(p).ref_is_null();
+    s.if_(BlockType::Empty);
+    if named {
+        // No `k` anywhere on the chain: the site remembers its start (T90). The objects are flagged,
+        // so a key added to any of them, or a new prototype, invalidates that.
+        let mark = oh(cx, object::Helper::MarkChain);
+        let store = oh(cx, object::Helper::SetIcStore);
+        s.local_get(O).struct_get(T_OBJECT, F_PROTO).call(mark);
+        s.local_get(SITE)
+            .local_get(O)
+            .struct_get(T_OBJECT, F_PROTO)
+            .global_get(runtime::G_EPOCH)
+            .call(store);
+    }
+    s.br(2);
+    s.end();
     if !named {
         s.local_get(p).ref_test_non_null(array::array());
         s.if_(BlockType::Empty);

@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-06: T90 property adds without the prototype-chain search (full run)
+
+- Compiler (83c660b + T90, uncommitted when run): a constant-key add (`o.k = v`, no own `k`) skips the chain walk
+  when the site's cached prototype is unchanged and `G_EPOCH` (bumped by adds to, and new prototypes of, flagged
+  prototypes) still matches. Runner: unchanged.
+- Full run on `a-03` (`--causes 25 subset`, 31,461 tests, 1,270 s, -j 36): 28,099 of 28,984 run pass (96.9%),
+  **0 regressions**; the same 26 changes since the baseline. Baseline not updated here (a-03's copy was).
+
 ## 2026-10-06: T88 `var` redeclaring a parameter, T89 code-table calls (full run)
 
 - Compiler (808ef05): a `var` redeclaring a parameter no longer resets it (T88, behind EarleyBoyer's wrong result);

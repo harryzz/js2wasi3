@@ -261,6 +261,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         code_table: Vec::new(),
         code_slots: HashMap::new(),
         ic_sites: 0,
+        set_sites: 0,
     };
     if js {
         // Functions with the `$code` signature use the runtime's type (`call_ref` needs it).
@@ -980,6 +981,8 @@ struct Emitter<'m> {
     code_slots: HashMap<u32, i32>,
     /// T74: the next inline-cache site of a constant-key read (`object::Helper::GetNamed`).
     ic_sites: u32,
+    /// T90: the next site of a constant-key write (`object::Helper::SetNamed`).
+    set_sites: u32,
 }
 
 impl runtime::Cx for Emitter<'_> {
@@ -1887,6 +1890,8 @@ impl Emitter<'_> {
                     s.global_get(g);
                     self.expr(s, frames, value)?;
                     s.i32_const(object::key_hash(units));
+                    s.i32_const(self.set_sites as i32);
+                    self.set_sites += 1;
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
                     return Ok(false);
                 }

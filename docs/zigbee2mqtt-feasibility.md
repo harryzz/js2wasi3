@@ -1,7 +1,20 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T90 property adds on the T79 replay 2026-10-06: 21.47 s
+
+One replay on a-03 of 83c660b + T90 (a constant-key add skips the prototype-chain search when the site's cached
+prototype and `G_EPOCH` still match). Run dir `~/js2wasi3-prod-run/t79/out-t90`.
+
+| | CPU (903 s) | vs node (8.66 s) | first minute | peak RSS | publishes |
+|---|---|---|---|---|---|
+| T89 | 22.07 s | 2.55× | 6.3 s | 776 MB | 13,478 |
+| **T90** | **21.47 s** | **2.48×** | **6.2 s** | 783 MB | 13,478 |
+
+- 0.6 s (2.7%) less, same output (139 exact matches, the same 9 error lines). EarleyBoyer: ~13.2 → ~12.2 s
+  (laptop), `find_own_named` 12.5% → 2.0% of its profile.
 
 ## T89 code-table calls on the T79 replay 2026-10-06: 22.07 s
 

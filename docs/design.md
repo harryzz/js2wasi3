@@ -133,6 +133,16 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   cache) were built and **reverted** 2026-10-05: on the zigbee2mqtt replay they gave 22.18 s vs 22.59 s without
   them, short of the user's bar (≤ 21.5 s), for ~2,000 lines of runtime code. The code is on branch `shapes`
   (8532edb); measurements in `docs/zigbee2mqtt-feasibility.md`, tasks T83–T86. Objects are T74's again.)
+  (T90: **adding a property** with a constant key (`this.x = v`) no longer searches the prototype chain each
+  time. `SetNamed` sites are numbered apart from the reads; `G_SET_IC` holds per site a prototype `P` and an
+  epoch tag (an i31), filled by `ordinary_set_named` when the walk from `P` reached the end without finding `k`
+  (after `mark_chain` flags every object on it `IS_PROTO`, 0x1000; the identity hash moved to bit 13). A key
+  added to a flagged object (`define`) or a new prototype of one (`set_proto`) bumps `G_EPOCH`. Deletes and
+  attribute changes don't: the fact cached is "no `k` at all on the chain", which they can't make false. A hit
+  (`set_named`): no own `k`, receiver extensible, `o.proto == P`, tag == `G_EPOCH` → `append_named`; an own
+  writable data property is written in place. `G_SET_IC` starts at 16 entries: wasmtime's copying collector
+  copies every live array on each collection, and a 1,024-entry ref array made the GC-bound default-heap runs
+  ~2× slower (T90 progress log).)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
   (T78: the benchmarks called for it: `s += x` copied the whole string each time (O(n²): 200,000 appends 10.3 s).
   A variable that is appended to (`x += e`, `x = x + e …`; `closures::Analysis::appended`), holds strings and is

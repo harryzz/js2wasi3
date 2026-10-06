@@ -78,6 +78,9 @@ pub const FROZEN: i32 = 0x400;
 /// `class` flag of an array: `length` is read-only (`defineProperty(a, "length", { writable: false })`,
 /// T32).
 pub const LENGTH_READONLY: i32 = 0x800;
+/// `class` flag (T90): a write site's cache depends on this object being on a prototype chain without
+/// some key; a key added to it, or a new prototype, bumps `G_EPOCH` ([`layout_changed`]).
+pub const IS_PROTO: i32 = 0x1000;
 
 /// Attribute bit: not enumerable.
 pub const HIDDEN: i32 = 1;
@@ -291,6 +294,11 @@ pub enum Helper {
     GetNamed,
     /// `(site: i32, e: i32)`: remember entry `e` for site `site` (T74), growing `G_IC`.
     IcStore,
+    /// `(site: i32, proto: (ref null $object), tag: i32)` (T90): remember for write site `site` that the
+    /// chain from `proto` had no such key at epoch `tag` (`G_SET_IC[2 site]`, `[2 site + 1]`).
+    SetIcStore,
+    /// `(p: (ref null $object))` (T90): flag every object from `p` to the end of its chain [`IS_PROTO`].
+    MarkChain,
     /// `(v: jsval) -> jsval`: `v.length` (T74): an array's or a string's directly, else [`Helper::Get`].
     GetLength,
     /// `(o, k, v: jsval, attrs: i32)`: set an own property (attributes only for a new one).
@@ -298,8 +306,11 @@ pub enum Helper {
     /// `(o, k, v, attrs, hash)`: a new own property `k` known to be absent, neither an array index nor
     /// `length`, with its hash (T74).
     AppendNamed,
-    /// `(v, k: (ref $string), value, hash: i32)`: `v.k = value` for a constant key that is neither an
-    /// array index, `length` nor `__proto__` (T74): objects through `ordinary_set_named`, others [`Helper::Set`].
+    /// `(v, k: (ref $string), value, hash: i32, site: i32)`: `v.k = value` for a constant key that is
+    /// neither an array index, `length` nor `__proto__` (T74): an own writable data property directly;
+    /// T90: a new property directly when the receiver is extensible and its prototype is the one the
+    /// site remembers at the current `G_EPOCH` (no `k` on that chain: no setter, nothing read-only);
+    /// other objects through `ordinary_set_named` (which remembers), others [`Helper::Set`].
     SetNamed,
     /// `(o: jsval (an object), k, v, hash)`: [`Helper::DefineProp`] for a constant key that is neither an
     /// array index nor `length` (T74; object literals).
@@ -427,6 +438,8 @@ impl Helper {
             Helper::LookupNamed => "lookup_named",
             Helper::GetNamed => "get_named",
             Helper::IcStore => "ic_store",
+            Helper::SetIcStore => "set_ic_store",
+            Helper::MarkChain => "mark_chain",
             Helper::GetLength => "get_length",
             Helper::Define => "define",
             Helper::AppendNamed => "append_named",
@@ -541,11 +554,13 @@ impl Helper {
             Helper::LookupNamed => (vec![on, s, I32], vec![v]),
             Helper::GetNamed => (vec![v, s, I32, I32], vec![v]),
             Helper::IcStore => (vec![I32, I32], vec![]),
+            Helper::SetIcStore => (vec![I32, rt(true, T_OBJECT), I32], vec![]),
+            Helper::MarkChain => (vec![rt(true, T_OBJECT)], vec![]),
             Helper::GetLength => (vec![v], vec![v]),
             Helper::Define => (vec![o, s, v, I32], vec![]),
             Helper::AppendNamed => (vec![o, s, v, I32, I32], vec![]),
             Helper::DefineNamed => (vec![v, s, v, I32], vec![]),
-            Helper::SetNamed => (vec![v, s, v, I32], vec![]),
+            Helper::SetNamed => (vec![v, s, v, I32, I32], vec![]),
             Helper::Remove => (vec![o, s], vec![]),
             Helper::Grow => (vec![o], vec![]),
             Helper::Reindex => (vec![o, I32], vec![]),
@@ -603,6 +618,8 @@ impl Helper {
             Helper::LookupNamed => lookup_named(cx),
             Helper::GetNamed => get_named(cx),
             Helper::IcStore => ic_store(),
+            Helper::SetIcStore => set_ic_store(),
+            Helper::MarkChain => mark_chain(),
             Helper::GetLength => get_length(cx),
             Helper::OwnGet => own_get(cx),
             Helper::Lookup => lookup(cx, false),
@@ -871,20 +888,106 @@ fn define_named(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `set_named(v, k, value, hash)`: `v.k = value` (see [`Helper::SetNamed`]).
+/// `set_named(v, k, value, hash, site)`: `v.k = value` (see [`Helper::SetNamed`]).
 fn set_named(cx: &mut dyn Cx) -> Function {
     let ordinary = rh(cx, runtime::Helper::Prop(props::Helper::SetNamed));
     let set = h(cx, Helper::Set);
+    let find = h(cx, Helper::FindOwnNamed);
+    let append = h(cx, Helper::AppendNamed);
     const V: u32 = 0;
     const K: u32 = 1;
     const X: u32 = 2;
     const H: u32 = 3;
-    let mut f = Function::new([]);
+    const SITE: u32 = 4;
+    const O: u32 = 5;
+    const E: u32 = 6;
+    const IC: u32 = 7;
+    let mut f = Function::new([
+        (1, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, rt(true, T_VALS)),
+    ]);
     let mut s = f.instructions();
     s.test_object(V);
     s.if_(BlockType::Empty);
     as_obj(&mut s, V);
-    s.local_get(K).local_get(X).local_get(H).call(ordinary);
+    s.local_set(O);
+    s.local_get(O).ref_as_non_null().local_get(K).local_get(H).call(find).local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Empty);
+    {
+        // An own writable data property.
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_ATTRS)
+            .local_get(E)
+            .array_get_u(T_BYTES)
+            .i32_const(ACCESSOR | READONLY)
+            .i32_and()
+            .i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .local_get(X)
+            .array_set(T_VALS);
+        s.return_();
+        s.end();
+    }
+    s.else_();
+    {
+        // A new property: the site's prototype, still without `k` on its chain (T90).
+        s.block(BlockType::Empty);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_CLASS)
+            .i32_const(NO_EXTEND)
+            .i32_and()
+            .br_if(0);
+        s.global_get(runtime::G_SET_IC).local_tee(IC).ref_is_null().br_if(0);
+        s.local_get(SITE)
+            .i32_const(1)
+            .i32_shl()
+            .local_tee(E)
+            .local_get(IC)
+            .array_len()
+            .i32_ge_u()
+            .br_if(0);
+        // The tag (an i31, null when unfilled), then the prototype.
+        s.local_get(IC)
+            .local_get(E)
+            .i32_const(1)
+            .i32_add()
+            .array_get(T_VALS)
+            .global_get(runtime::G_EPOCH)
+            .ref_i31()
+            .ref_eq()
+            .i32_eqz()
+            .br_if(0);
+        s.local_get(IC)
+            .local_get(E)
+            .array_get(T_VALS)
+            .local_get(O)
+            .struct_get(T_OBJECT, F_PROTO)
+            .ref_eq()
+            .i32_eqz()
+            .br_if(0);
+        s.local_get(O)
+            .ref_as_non_null()
+            .local_get(K)
+            .local_get(X)
+            .i32_const(0)
+            .local_get(H)
+            .call(append);
+        s.return_();
+        s.end();
+    }
+    s.end();
+    s.local_get(O)
+        .ref_as_non_null()
+        .local_get(K)
+        .local_get(X)
+        .local_get(H)
+        .local_get(SITE)
+        .call(ordinary);
     s.else_();
     s.local_get(V).local_get(K).local_get(X).call(set);
     s.end();
@@ -1201,6 +1304,99 @@ fn get_length(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// `set_ic_store(site, proto, tag)` (see [`Helper::SetIcStore`]): `G_SET_IC` grown (doubling, at least
+/// 16 entries) when needed.
+fn set_ic_store() -> Function {
+    const SITE: u32 = 0;
+    const P: u32 = 1;
+    const TAG: u32 = 2;
+    const SV: u32 = 3;
+    const NEW: u32 = 4;
+    const N: u32 = 5;
+    let mut f = Function::new([(2, rt(true, T_VALS)), (1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.local_get(SITE).i32_const(1).i32_shl().local_set(SITE);
+    s.global_get(runtime::G_SET_IC).local_tee(SV).ref_is_null();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(0);
+    s.else_();
+    s.local_get(SV).array_len();
+    s.end();
+    s.local_tee(N);
+    s.local_get(SITE).i32_const(1).i32_add().i32_le_u();
+    s.if_(BlockType::Empty);
+    {
+        // max(2 * n, 2 * site + 2, 16)
+        s.local_get(N).i32_const(1).i32_shl().local_tee(N);
+        s.local_get(SITE).i32_const(2).i32_add();
+        s.local_get(N).local_get(SITE).i32_const(2).i32_add().i32_gt_u();
+        s.select().local_tee(N);
+        s.i32_const(16);
+        s.local_get(N).i32_const(16).i32_gt_u();
+        s.select();
+        s.array_new_default(T_VALS).local_set(NEW);
+        s.local_get(SV).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(NEW)
+            .i32_const(0)
+            .local_get(SV)
+            .i32_const(0)
+            .local_get(SV)
+            .array_len()
+            .array_copy(T_VALS, T_VALS);
+        s.end();
+        s.local_get(NEW).local_tee(SV).global_set(runtime::G_SET_IC);
+    }
+    s.end();
+    s.local_get(SV).local_get(SITE).local_get(P).array_set(T_VALS);
+    s.local_get(SV)
+        .local_get(SITE)
+        .i32_const(1)
+        .i32_add()
+        .local_get(TAG)
+        .ref_i31()
+        .array_set(T_VALS);
+    s.end();
+    f
+}
+
+/// `mark_chain(p)` (see [`Helper::MarkChain`]).
+fn mark_chain() -> Function {
+    const P: u32 = 0;
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(P).ref_is_null().br_if(1);
+    s.local_get(P).ref_as_non_null();
+    s.local_get(P)
+        .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(IS_PROTO)
+        .i32_or();
+    s.struct_set(T_OBJECT, F_CLASS);
+    s.local_get(P).struct_get(T_OBJECT, F_PROTO).local_set(P);
+    s.br(0).end().end();
+    s.end();
+    f
+}
+
+/// The object in local `o` (a `$object` ref) gets a new key or prototype: bump `G_EPOCH` if a write
+/// site's cache may depend on it ([`IS_PROTO`], T90).
+pub fn layout_changed(s: &mut InstructionSink, o: u32) {
+    s.local_get(o)
+        .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(IS_PROTO)
+        .i32_and();
+    s.if_(BlockType::Empty);
+    // In [1, 2^30]: never 0, the tag of an unfilled site.
+    s.global_get(runtime::G_EPOCH)
+        .i32_const(0x3fff_ffff)
+        .i32_and()
+        .i32_const(1)
+        .i32_add()
+        .global_set(runtime::G_EPOCH);
+    s.end();
+}
+
 /// `ic_store(site, e)`: `G_IC[site] = e`, growing the array (doubling, at least 1,024) when needed.
 fn ic_store() -> Function {
     const SITE: u32 = 0;
@@ -1380,7 +1576,8 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     s.end();
     s.end();
     }
-    // A new entry at `count`.
+    // A new entry at `count` (T90: a key added to a flagged object).
+    layout_changed(&mut s, O);
     s.local_get(O).struct_get(T_OBJECT, F_COUNT);
     s.local_get(O).struct_get(T_OBJECT, F_KEYS).array_len();
     s.i32_eq();
@@ -2900,12 +3097,20 @@ fn new_object(cx: &mut dyn Cx) -> Function {
 fn set_proto() -> Function {
     const O: u32 = 0;
     const P: u32 = 1;
-    let mut f = Function::new([]);
+    const Q: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
     // An array with another prototype: its writes look at the chain (T34).
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
     s.i32_const(1).global_set(runtime::G_INDEX_PROTO);
+    s.end();
+    // T90: a new prototype of a flagged object.
+    s.local_get(O).ref_test_non_null(object());
+    s.if_(BlockType::Empty);
+    as_obj(&mut s, O);
+    s.local_set(Q);
+    layout_changed(&mut s, Q);
     s.end();
     s.test_object(P);
     s.if_(BlockType::Empty);

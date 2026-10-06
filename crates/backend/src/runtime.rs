@@ -193,8 +193,16 @@ pub const NUM_KEYS: i32 = 1024;
 /// per key of [`crate::object::REGEXP_PLAIN_KEYS`] its entry index (an i31), its value (an
 /// accessor's getter) and its attributes (an i31).
 pub const G_REGEXP_SNAP: u32 = G_NUM_KEYS + 1;
+/// `(mut i32)` (T90): starts at 1 and is bumped (never to 0) by every key added to, and every new
+/// prototype of, an object flagged `object::IS_PROTO`.
+pub const G_EPOCH: u32 = G_REGEXP_SNAP + 1;
+/// `(mut (ref null $vals))` (T90): per constant-key write site (`object::Helper::SetNamed`, numbered
+/// apart from the reads) two entries: the prototype from which the chain was found to have no such key,
+/// and the `G_EPOCH` then (an i31; null: none). Grown on demand from 16 entries: it's live in every
+/// collection, and wasmtime's copying collector runs often on a small heap.
+pub const G_SET_IC: u32 = G_EPOCH + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_REGEXP_SNAP + 1;
+pub const GLOBALS: u32 = G_SET_IC + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -992,6 +1000,23 @@ pub fn globals(
         &ConstExpr::ref_null(HeapType::Concrete(T_KEYS)),
     );
     // T76: the RegExp.prototype snapshot.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_VALS),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
+    );
+    // T90: the epoch and the prototypes of the write sites.
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(1),
+    );
     globals.global(
         GlobalType {
             val_type: rt(true, T_VALS),
