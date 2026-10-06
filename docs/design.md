@@ -46,7 +46,12 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   (T14: functions are `$function` structs, a subtype of `$object` holding a `$code` funcref
   `(self, this, args) -> jsval` and an environment array. Captured variables are boxed in cells, one per
   variable (flat closures); direct calls stay typed, calls through values use one uniform `call_ref`.
-  See `crates/backend/src/func.rs` and `crates/lower/src/closures.rs`.)
+  See `crates/backend/src/func.rs` and `crates/lower/src/closures.rs`.
+  T89: the `$code` is no longer a funcref in the struct but a slot in the module's code table (table 0, filled by
+  an active element segment, `Cx::code_slot`), and calls through values use `call_indirect`: wasmtime interns
+  funcrefs stored in the GC heap, so each read of one cost a `get_interned_func_ref` libcall (5.4× slower calls,
+  `probes/funcref.wat`). `construct` is a slot too (-1: not a constructor). `new`/`instanceof` read an ordinary
+  function's `prototype` from its entry 2 directly (`fn_prototype`).)
   (T15: arrays are `$array`, a subtype of `$object` with a dense `$vals` store (holes are Wasm null) and a length;
   symbols are `$symbol`, a subtype of `$string` compared by identity, so property keys stay string arrays.
   Iteration uses an internal `$iter` state with fast paths for arrays and strings and the protocol otherwise.

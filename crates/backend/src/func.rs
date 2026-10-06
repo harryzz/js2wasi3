@@ -1,10 +1,12 @@
 //! Function objects and calls through values (T14, design D1).
 //!
 //! # Layout
-//! `$function` is a final subtype of `$object`: the seven object fields, then `code: (ref $code)` and
+//! `$function` is a final subtype of `$object`: the seven object fields, then `code: i32` and
 //! `env: (ref null $vals)`. Every object helper takes a function unchanged (`ref.test $object` matches
 //! it); only `typeof`, `console.log` and calls look at the extra fields.
-//! - `code` has the uniform type `$code = (self, this, args: eqref) -> eqref`: `self` is the function
+//! - `code` is a slot in the module's code table (T89: `Cx::code_slot`, called with `call_indirect`; a
+//!   funcref in the GC struct cost a wasmtime libcall per call) of a function of the uniform type
+//!   `$code = (self, this, args: eqref) -> eqref`: `self` is the function
 //!   object, `args` a `$vals` array with exactly the arguments passed. The lowering generates the code
 //!   of each function used as a value (an adapter calling the typed function, see `crates/lower`).
 //! - `env` holds what the function captured: cells (`$cell_f64`, `$cell`) and plain values.
@@ -79,7 +81,7 @@ pub fn vals() -> HeapType {
 pub enum Helper {
     /// `(v: jsval) -> i32`: IsConstructor (T35).
     IsConstructor,
-    /// `(code: (ref $code), construct: (ref null $code), env: (ref null $vals), name: (ref $string),
+    /// `(code: i32, construct: i32 (code-table slots, T89; construct -1: none), env: (ref null $vals), name: (ref $string),
     /// length: i32, flags: i32) -> jsval`: a new function object (see the module docs and
     /// [`NEW_ORDINARY`], [`NEW_CLASS`]).
     New,
