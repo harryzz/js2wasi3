@@ -21,3 +21,8 @@ miscompile, fix it, add a fixture.
 - 2026-10-05: tests: `scripts/diff.sh` closures/, classes/, objects/, generators/, async/, commonjs/, modules/: 82
   pass; test262 `language/statements/{variable,function}`, `language/expressions/{function,arrow-function}`:
   0 regressions. Full run on a-03 next.
+- 2026-10-06: profile of the now-correct EarleyBoyer (laptop, perf, `fixed 0.05`, 14.5 s vs node 0.45 s): property
+  access ~55%: adds (`this.car = …` in constructors) search the object and the whole prototype chain each time
+  (`ordinary_set_named` → `find_own_named` 12.5%, `append_named` 2.8%; F368); cached reads still cost a helper call
+  (`get_named` self 18.7%; F359); `instanceof`/`new` read `F.prototype` through the generic `get` (~4–5%; F369);
+  wasmtime libcalls ~12% (F350). GC < 1%. User: F369 + F350 next (T89); the full test262 run covers T88 and T89.

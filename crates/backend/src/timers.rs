@@ -159,7 +159,7 @@ impl Helper {
                 s.global_get(g).return_();
                 s.end();
                 // node: setTimeout.length is 1 (callback), the clear functions' 1 (timer).
-                promise::native(&mut s, new, code, None, name, 1);
+                promise::native(cx, &mut s, new, code, None, name, 1);
                 s.ref_cast_non_null(runtime::object()).global_set(g);
                 s.global_get(g);
                 s.end();

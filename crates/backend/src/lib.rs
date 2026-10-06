@@ -68,7 +68,8 @@ use wasm_encoder::{
     BlockType, Catch, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
     Elements, ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType,
     ImportSection, IndirectNameMap, InstructionSink, MemorySection, MemoryType, NameMap,
-    NameSection, StartSection, TagKind, TagSection, TagType, TypeSection, ValType,
+    NameSection, StartSection, TableSection, TableType, TagKind, TagSection, TagType, TypeSection,
+    ValType,
 };
 
 /// Emit a core Wasm module for `module`.
@@ -257,6 +258,8 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         tables: false,
         shared,
         declared: Vec::new(),
+        code_table: Vec::new(),
+        code_slots: HashMap::new(),
         ic_sites: 0,
     };
     if js {
@@ -599,6 +602,19 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         out.section(&imports);
     }
     out.section(&funcs);
+    // The code table (T89): every function a `$function` holds, called with `call_indirect`.
+    if !e.code_table.is_empty() {
+        let mut tables = TableSection::new();
+        let n = e.code_table.len() as u64;
+        tables.table(TableType {
+            element_type: wasm_encoder::RefType::FUNCREF,
+            table64: false,
+            minimum: n,
+            maximum: Some(n),
+            shared: false,
+        });
+        out.section(&tables);
+    }
     if abi {
         out.section(&memory);
     }
@@ -612,9 +628,18 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     if let Some(function_index) = start {
         out.section(&StartSection { function_index });
     }
-    if !e.declared.is_empty() {
+    if !e.declared.is_empty() || !e.code_table.is_empty() {
         let mut elems = ElementSection::new();
-        elems.declared(Elements::Functions(e.declared.clone().into()));
+        if !e.code_table.is_empty() {
+            elems.active(
+                Some(0),
+                &ConstExpr::i32_const(0),
+                Elements::Functions(e.code_table.clone().into()),
+            );
+        }
+        if !e.declared.is_empty() {
+            elems.declared(Elements::Functions(e.declared.clone().into()));
+        }
         out.section(&elems);
     }
     // Data segments: the number → string tables (0, when used), then the constants' contents.
@@ -950,6 +975,9 @@ struct Emitter<'m> {
     shared: Vec<ir::FuncId>,
     /// Functions used by `ref.func` (a declarative element segment).
     declared: Vec<u32>,
+    /// The code table's functions, by slot (T89, `Cx::code_slot`).
+    code_table: Vec<u32>,
+    code_slots: HashMap<u32, i32>,
     /// T74: the next inline-cache site of a constant-key read (`object::Helper::GetNamed`).
     ic_sites: u32,
 }
@@ -996,6 +1024,16 @@ impl runtime::Cx for Emitter<'_> {
         if !self.declared.contains(&index) {
             self.declared.push(index);
         }
+    }
+
+    fn code_slot(&mut self, index: u32) -> i32 {
+        if let Some(&k) = self.code_slots.get(&index) {
+            return k;
+        }
+        let k = self.code_table.len() as i32;
+        self.code_table.push(index);
+        self.code_slots.insert(index, k);
+        k
     }
 
     fn string_to_number(&mut self) -> Option<u32> {
@@ -2312,39 +2350,39 @@ impl Emitter<'_> {
                     frames.push(Frame::Anon);
                 }
                 let code = self.func_base + c.code.0;
-                runtime::Cx::declare_func(self, code);
-                s.ref_func(code);
+                let slot = runtime::Cx::code_slot(self, code);
+                s.i32_const(slot);
                 let flags = match c.kind {
                     ir::FnKind::Plain => {
-                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        s.i32_const(-1);
                         0
                     }
                     ir::FnKind::Ordinary => {
-                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        s.i32_const(-1);
                         func::NEW_ORDINARY
                     }
                     ir::FnKind::OrdinaryWith { construct } => {
                         let construct = self.func_base + construct.0;
-                        runtime::Cx::declare_func(self, construct);
-                        s.ref_func(construct);
+                        let slot = runtime::Cx::code_slot(self, construct);
+                        s.i32_const(slot);
                         func::NEW_ORDINARY
                     }
                     ir::FnKind::Generator => {
-                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        s.i32_const(-1);
                         func::NEW_GENERATOR
                     }
                     ir::FnKind::Async => {
-                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        s.i32_const(-1);
                         func::NEW_ASYNC
                     }
                     ir::FnKind::AsyncGenerator => {
-                        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+                        s.i32_const(-1);
                         func::NEW_ASYNC_GENERATOR
                     }
                     ir::FnKind::Class { construct } => {
                         let construct = self.func_base + construct.0;
-                        runtime::Cx::declare_func(self, construct);
-                        s.ref_func(construct);
+                        let slot = runtime::Cx::code_slot(self, construct);
+                        s.i32_const(slot);
                         func::NEW_CLASS
                     }
                 };

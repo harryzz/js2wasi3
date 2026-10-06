@@ -22,3 +22,7 @@ wasm-tools parse timers.wat -o out/timers.core.wasm && wasm-tools component embe
 echo "9) blocking filesystem calls from a callback-lifted run (T59): expect 'hello from a preopened file'"
 mkdir -p out/fsdir && printf 'hello from a preopened file\n' > out/fsdir/hello.txt
 wasm-tools parse fs.wat -o out/fs.core.wasm && wasm-tools component embed wit --world cmdfs out/fs.core.wasm -o out/fs.emb.wasm && wasm-tools component new out/fs.emb.wasm -o out/fs.wasm && wasmtime run -Sp3 --dir out/fsdir::/ out/fs.wasm
+echo "10) T89 (F350): 50M calls through a funcref in a GC struct (call_ref) vs a table index (call_indirect)"
+wasm-tools parse funcref.wat -o out/funcref.wasm
+time wasmtime run --invoke run_struct out/funcref.wasm 2>/dev/null
+time wasmtime run --invoke run_table out/funcref.wasm 2>/dev/null

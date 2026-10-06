@@ -29,8 +29,8 @@ use crate::runtime::{
 /// `$function` field indices after the object's.
 pub const F_CODE: u32 = 7;
 pub const F_ENV: u32 = 8;
-/// `construct: (ref null $code)` (T16): what `new` runs, `(self, new_target, args)`; null: not a
-/// constructor.
+/// `construct: i32` (T16; T89: a code table slot): what `new` runs, `(self, new_target, args)`; -1: not
+/// a constructor. `code` is a slot too.
 pub const F_CONSTRUCT: u32 = 9;
 /// `kind: i32` (T16): [`KIND_FUNCTION`] or [`KIND_CLASS`].
 pub const F_KIND: u32 = 10;
@@ -96,6 +96,9 @@ pub enum Helper {
     /// `(new_target) -> jsval`: a new object whose prototype is `new_target.prototype` (or
     /// `Object.prototype` if that isn't an object).
     CreateThis,
+    /// `(f: jsval) -> jsval`: `f.prototype`, directly for an ordinary function's own (entry 2), else
+    /// `object::Helper::Get` (T89).
+    FnPrototype,
     /// `(parent) -> jsval`: check a class heritage (node's TypeErrors); the prototype's parent
     /// (`null` for `extends null`).
     ClassHeritage,
@@ -175,6 +178,7 @@ impl Helper {
             Helper::ConstructList => "construct_list",
             Helper::ConstructOrdinary => "construct_ordinary",
             Helper::CreateThis => "create_this",
+            Helper::FnPrototype => "fn_prototype",
             Helper::ClassHeritage => "class_heritage",
             Helper::ClassSetup => "class_setup",
             Helper::InstanceOfValue => "instanceof_value",
@@ -212,8 +216,8 @@ impl Helper {
         match self {
             Helper::New => (
                 vec![
-                    rt(false, T_CODE),
-                    rt(true, T_CODE),
+                    ValType::I32,
+                    ValType::I32,
                     rt(true, T_VALS),
                     s,
                     ValType::I32,
@@ -225,7 +229,7 @@ impl Helper {
             Helper::ConstructSame => (vec![v, rt(false, T_VALS), s], vec![v]),
             Helper::ConstructList => (vec![v, v, v, s], vec![v]),
             Helper::ConstructOrdinary => (vec![v, v, v], vec![v]),
-            Helper::CreateThis | Helper::ClassHeritage => (vec![v], vec![v]),
+            Helper::CreateThis | Helper::ClassHeritage | Helper::FnPrototype => (vec![v], vec![v]),
             Helper::ClassSetup => (vec![v, v, v], vec![v]),
             Helper::InstanceOfValue => (vec![v, v], vec![ValType::I32]),
             Helper::CtorReturn { .. } => (vec![v, v], vec![v]),
@@ -269,6 +273,7 @@ impl Helper {
             Helper::ConstructList => construct_list(cx),
             Helper::ConstructOrdinary => construct_ordinary(cx),
             Helper::CreateThis => create_this(cx),
+            Helper::FnPrototype => fn_prototype(cx),
             Helper::ClassHeritage => class_heritage(cx),
             Helper::ClassSetup => class_setup(cx),
             Helper::InstanceOfValue => instance_of_value(cx),
@@ -339,7 +344,8 @@ impl Helper {
                 s.local_get(0)
                     .ref_cast_non_null(function())
                     .struct_get(T_FUNCTION, F_CONSTRUCT)
-                    .ref_is_null()
+                    .i32_const(-1)
+                    .i32_eq()
                     .i32_eqz();
                 s.else_();
                 s.i32_const(0);
@@ -411,7 +417,7 @@ fn new(cx: &mut dyn Cx) -> Function {
     let alloc = oh(cx, object::Helper::Alloc);
     let define = oh(cx, object::Helper::Define);
     let ordinary = fh(cx, Helper::ConstructOrdinary);
-    cx.declare_func(ordinary);
+    let ordinary_slot = cx.code_slot(ordinary);
     let (length, name, prototype, constructor) = (
         cx.str("length"),
         cx.str("name"),
@@ -437,9 +443,9 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.local_get(CODE).local_get(ENV);
     // An ordinary function's construct entry: the shared one unless it has its own (T38).
     s.local_get(FLAGS).i32_const(NEW_ORDINARY).i32_and();
-    s.local_get(CONSTRUCT).ref_is_null().i32_and();
-    s.if_(BlockType::Result(rt(true, T_CODE)));
-    s.ref_func(ordinary);
+    s.local_get(CONSTRUCT).i32_const(-1).i32_eq().i32_and();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(ordinary_slot);
     s.else_();
     s.local_get(CONSTRUCT);
     s.end();
@@ -501,7 +507,8 @@ fn check_constructor(cx: &mut dyn Cx, s: &mut wasm_encoder::InstructionSink, f: 
     s.local_get(f)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_CONSTRUCT)
-        .ref_is_null();
+        .i32_const(-1)
+        .i32_eq();
     s.else_();
     s.i32_const(1);
     s.end();
@@ -524,9 +531,8 @@ fn construct(cx: &mut dyn Cx) -> Function {
     s.local_get(F).local_get(NT).local_get(ARGS);
     s.local_get(F)
         .ref_cast_non_null(function())
-        .struct_get(T_FUNCTION, F_CONSTRUCT)
-        .ref_as_non_null();
-    s.call_ref(T_CODE);
+        .struct_get(T_FUNCTION, F_CONSTRUCT);
+    s.call_indirect(0, T_CODE);
     s.end();
     f
 }
@@ -546,23 +552,67 @@ fn construct_list(cx: &mut dyn Cx) -> Function {
 }
 
 fn create_this(cx: &mut dyn Cx) -> Function {
-    let get = oh(cx, object::Helper::Get);
+    let fn_prototype = fh(cx, Helper::FnPrototype);
     let alloc = oh(cx, object::Helper::Alloc);
     let obj_proto = oh(cx, object::Helper::Proto(Builtin::Object));
-    let prototype = cx.str("prototype");
     const NT: u32 = 0;
     const P: u32 = 1;
     let mut f = Function::new([(1, jsval())]);
     let mut s = f.instructions();
     s.i32_const(object::CLASS_PLAIN);
-    s.local_get(NT).global_get(prototype).call(get).local_tee(P);
-    s.ref_test_non_null(runtime::object());
+    s.local_get(NT).call(fn_prototype).local_set(P);
+    // (`test_object`: no `is_subtype` libcall for the non-final `$object`, F350.)
+    s.test_object(P);
     s.if_(BlockType::Result(rt(true, T_OBJECT)));
     s.local_get(P).ref_cast_non_null(runtime::object());
     s.else_();
     s.call(obj_proto);
     s.end();
     s.call(alloc);
+    s.end();
+    f
+}
+
+/// `fn_prototype(f)`: `f.prototype` (see [`Helper::FnPrototype`]). An ordinary function's `prototype`
+/// is its entry 2 (after `length`, `name`: `new`), non-configurable, so it stays a data property there.
+fn fn_prototype(cx: &mut dyn Cx) -> Function {
+    let get = oh(cx, object::Helper::Get);
+    let value = cx.helper(runtime::Helper::Prop(crate::props::Helper::Value));
+    let prototype = cx.str("prototype");
+    const V: u32 = 0;
+    const F: u32 = 1;
+    const R: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_FUNCTION)), (1, jsval())]);
+    let mut s = f.instructions();
+    s.local_get(V).ref_test_non_null(function());
+    s.if_(BlockType::Empty);
+    s.local_get(V).ref_cast_non_null(function()).local_tee(F);
+    s.struct_get(T_FUNCTION, object::F_COUNT).i32_const(2).i32_gt_s();
+    s.if_(BlockType::Empty);
+    s.local_get(F)
+        .struct_get(T_FUNCTION, object::F_KEYS)
+        .i32_const(2)
+        .array_get(runtime::T_KEYS)
+        .global_get(prototype)
+        .ref_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(F)
+        .struct_get(T_FUNCTION, object::F_VALS)
+        .i32_const(2)
+        .array_get(runtime::T_VALS)
+        .local_tee(R);
+    // (An accessor or a built-in sentinel can't be there, but resolve them anyway.)
+    s.ref_test_non_null(HeapType::Concrete(runtime::T_ACCESSOR));
+    s.local_get(R).global_get(runtime::G_BUILTIN).ref_eq();
+    s.i32_or();
+    s.if_(BlockType::Empty);
+    s.local_get(R).local_get(V).call(value).return_();
+    s.end();
+    s.local_get(R).return_();
+    s.end();
+    s.end();
+    s.end();
+    s.local_get(V).global_get(prototype).call(get);
     s.end();
     f
 }
@@ -583,7 +633,7 @@ fn construct_ordinary(cx: &mut dyn Cx) -> Function {
     s.local_get(SELF)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_CODE);
-    s.call_ref(T_CODE).local_tee(R);
+    s.call_indirect(0, T_CODE).local_tee(R);
     s.ref_test_non_null(runtime::object());
     s.if_(BlockType::Result(jsval()));
     s.local_get(R);
@@ -630,7 +680,8 @@ fn class_heritage(cx: &mut dyn Cx) -> Function {
     s.local_get(V)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_CONSTRUCT)
-        .ref_is_null();
+        .i32_const(-1)
+        .i32_eq();
     s.else_();
     s.i32_const(1);
     s.end();
@@ -693,11 +744,12 @@ fn class_setup(cx: &mut dyn Cx) -> Function {
 
 fn instance_of_value(cx: &mut dyn Cx) -> Function {
     let get = oh(cx, object::Helper::Get);
+    let fn_prototype = fh(cx, Helper::FnPrototype);
     let concat = cx.helper(runtime::Helper::Concat);
     let to_string = cx.helper(runtime::Helper::ToString);
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
-    let prototype = cx.str("prototype");
     let not_callable = cx.str("Right-hand side of 'instanceof' is not callable");
+    let not_object = cx.str("Right-hand side of 'instanceof' is not an object");
     let (non_object, check) = (
         cx.str("Function has non-object prototype '"),
         cx.str("' in instanceof check"),
@@ -731,7 +783,12 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
     }
     s.local_get(F).ref_test_non_null(function()).i32_eqz();
     s.if_(BlockType::Empty);
-    s.global_get(not_callable).call(throw);
+    // A primitive: "not an object" (V8); an object that isn't a function: "not callable".
+    s.global_get(not_callable);
+    s.global_get(not_object);
+    s.test_object(F);
+    s.typed_select(rt(false, runtime::T_STRING));
+    s.call(throw);
     s.end();
     // A bound function: its target's (InstanceofOperator on [[BoundTargetFunction]]).
     s.block(BlockType::Empty).loop_(BlockType::Empty);
@@ -754,8 +811,8 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.i32_const(0).return_();
     s.end();
-    s.local_get(F).global_get(prototype).call(get).local_tee(P);
-    s.ref_test_non_null(runtime::object()).i32_eqz();
+    s.local_get(F).call(fn_prototype).local_set(P);
+    s.test_object(P).i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(non_object);
     s.local_get(P).call(to_string).call(concat);
@@ -832,7 +889,7 @@ fn error_ctor(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(g).return_();
     s.end();
-    s.ref_func(call).ref_func(construct);
+    s.i32_const(cx.code_slot(call)).i32_const(cx.code_slot(construct));
     s.ref_null(HeapType::Concrete(T_VALS));
     let length = match k {
         ErrorKind::AggregateError => 2,
@@ -879,7 +936,7 @@ fn call_value(cx: &mut dyn Cx) -> Function {
     s.local_get(F)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_CODE);
-    s.call_ref(T_CODE);
+    s.call_indirect(0, T_CODE);
     s.end();
     f
 }
@@ -1125,15 +1182,16 @@ fn bind(cx: &mut dyn Cx) -> Function {
     s.global_get(bound);
     s.end();
     s.local_set(NAME);
-    s.ref_func(call);
+    s.i32_const(cx.code_slot(call));
     s.local_get(THIS)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_CONSTRUCT)
-        .ref_is_null();
-    s.if_(BlockType::Result(rt(true, T_CODE)));
-    s.ref_null(HeapType::Concrete(T_CODE));
+        .i32_const(-1)
+        .i32_eq();
+    s.if_(BlockType::Result(ValType::I32));
+    s.i32_const(-1);
     s.else_();
-    s.ref_func(construct);
+    s.i32_const(cx.code_slot(construct));
     s.end();
     s.local_get(ENV);
     s.local_get(NAME).ref_as_non_null();
@@ -1366,10 +1424,10 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(g).return_();
     s.end();
-    s.ref_func(call);
+    s.i32_const(cx.code_slot(call));
     match construct {
-        Some(c) => s.ref_func(c),
-        None => s.ref_null(HeapType::Concrete(T_CODE)),
+        Some(c) => s.i32_const(cx.code_slot(c)),
+        None => s.i32_const(-1),
     };
     s.ref_null(HeapType::Concrete(T_VALS));
     s.global_get(name).i32_const(length as i32).i32_const(0);
@@ -1413,8 +1471,8 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.local_get(F)
             .ref_cast_non_null(runtime::object())
             .global_get(key);
-        s.ref_func(code);
-        s.ref_null(HeapType::Concrete(T_CODE));
+        s.i32_const(cx.code_slot(code));
+        s.i32_const(-1);
         s.ref_null(HeapType::Concrete(T_VALS));
         s.global_get(key).i32_const(len as i32).i32_const(0);
         s.call(new);
@@ -1487,8 +1545,8 @@ fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
         s.local_get(O)
             .ref_cast_non_null(runtime::object())
             .global_get(key);
-        s.ref_func(code);
-        s.ref_null(HeapType::Concrete(T_CODE));
+        s.i32_const(cx.code_slot(code));
+        s.i32_const(-1);
         s.ref_null(HeapType::Concrete(T_VALS));
         s.global_get(key).i32_const(len as i32).i32_const(0);
         s.call(new);

@@ -1019,8 +1019,8 @@ fn future_lower(cx: &mut dyn Cx, id: u32) -> Function {
         .call(boxed);
     s.array_new_fixed(runtime::T_VALS, 1).local_set(ENV);
     s.local_get(V).call(resolve).ref_cast_non_null(promise::promise());
-    promise::native(&mut s, func_new, write, Some(ENV), empty, 1);
-    promise::native(&mut s, func_new, abandon, Some(ENV), empty, 1);
+    promise::native(cx, &mut s, func_new, write, Some(ENV), empty, 1);
+    promise::native(cx, &mut s, func_new, abandon, Some(ENV), empty, 1);
     s.ref_null(promise::promise());
     s.call(then);
     s.global_get(lib + G_PENDING_N).i32_const(1).i32_add();

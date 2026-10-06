@@ -546,7 +546,7 @@ fn await_return(cx: &mut dyn Cx) -> Function {
     s.local_get(P)
         .ref_cast_non_null(HeapType::Concrete(T_PROMISE));
     for code in handlers {
-        promise::native(&mut s, new_function, code, Some(ENV), empty, 1);
+        promise::native(cx, &mut s, new_function, code, Some(ENV), empty, 1);
     }
     s.ref_null(HeapType::Concrete(T_PROMISE));
     s.call(perform_then);

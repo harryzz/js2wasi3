@@ -30,7 +30,7 @@ use wasm_encoder::{BlockType, Catch, Function, HeapType, InstructionSink, ValTyp
 use crate::func::{self, F_ENV, function, vals};
 use crate::runtime::{
     self, Cx, G_FALSE, G_JOB_HEAD, G_JOB_TAIL, G_JOBS, G_PROMISE_CTOR, G_QUEUE_MICROTASK,
-    G_REJECTED, G_REJECTED_N, G_TRUE, G_UNDEFINED, T_BYTES, T_CODE, T_FUNCTION, T_I32S, T_KEYS,
+    G_REJECTED, G_REJECTED_N, G_TRUE, G_UNDEFINED, T_BYTES, T_FUNCTION, T_I32S, T_KEYS,
     T_OBJECT, T_PROMISE, T_REACTION, T_VALS, TAG, jsval, rt, string_ref,
 };
 use crate::{array, iter, object, props};
@@ -415,7 +415,7 @@ impl Helper {
                 s.if_(BlockType::Empty);
                 s.global_get(G_QUEUE_MICROTASK).return_();
                 s.end();
-                native(&mut s, new, code, None, name, 1);
+                native(cx, &mut s, new, code, None, name, 1);
                 s.ref_cast_non_null(runtime::object())
                     .global_set(G_QUEUE_MICROTASK);
                 s.global_get(G_QUEUE_MICROTASK);
@@ -541,6 +541,7 @@ pub(crate) fn env(s: &mut InstructionSink) {
 /// Push a new function object (not a constructor) running `code`, with the environment in local
 /// `env` (or none).
 pub(crate) fn native(
+    cx: &mut dyn Cx,
     s: &mut InstructionSink,
     new: u32,
     code: u32,
@@ -548,8 +549,8 @@ pub(crate) fn native(
     name: u32,
     len: i32,
 ) {
-    s.ref_func(code);
-    s.ref_null(HeapType::Concrete(T_CODE));
+    s.i32_const(cx.code_slot(code));
+    s.i32_const(-1);
     match env {
         Some(e) => s.local_get(e),
         None => s.ref_null(vals()),
@@ -664,7 +665,7 @@ fn ctor(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(G_PROMISE_CTOR).return_();
     s.end();
-    s.ref_func(call).ref_func(construct);
+    s.i32_const(cx.code_slot(call)).i32_const(cx.code_slot(construct));
     s.ref_null(vals());
     s.global_get(name).i32_const(1).i32_const(0);
     s.call(new).local_tee(F);
@@ -680,7 +681,7 @@ fn ctor(cx: &mut dyn Cx) -> Function {
     for (code, name, len) in statics {
         s.local_get(F).ref_cast_non_null(runtime::object());
         s.global_get(name);
-        native(&mut s, new, code, None, name, len);
+        native(cx, &mut s, new, code, None, name, len);
         s.i32_const(object::HIDDEN).call(define);
     }
     s.local_get(F);
@@ -771,8 +772,8 @@ fn resolvers(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     s.local_get(P).global_get(G_FALSE);
     s.array_new_fixed(T_VALS, 2).local_set(ENV);
-    native(&mut s, new, resolve, Some(ENV), empty, 1);
-    native(&mut s, new, reject, Some(ENV), empty, 1);
+    native(cx, &mut s, new, resolve, Some(ENV), empty, 1);
+    native(cx, &mut s, new, reject, Some(ENV), empty, 1);
     s.end();
     f
 }
@@ -1084,9 +1085,9 @@ fn finally(cx: &mut dyn Cx) -> Function {
     s.local_get(F).ref_test_non_null(function());
     s.if_(BlockType::Empty);
     s.local_get(F).array_new_fixed(T_VALS, 1).local_set(ENV);
-    native(&mut s, new, then_finally, Some(ENV), empty, 1);
+    native(cx, &mut s, new, then_finally, Some(ENV), empty, 1);
     s.local_set(TF);
-    native(&mut s, new, catch_finally, Some(ENV), empty, 1);
+    native(cx, &mut s, new, catch_finally, Some(ENV), empty, 1);
     s.local_set(CF);
     s.end();
     s.local_get(THIS).global_get(then);
@@ -1117,7 +1118,7 @@ fn finally_fn(cx: &mut dyn Cx, catch: bool) -> Function {
     arg(cx, &mut s, 0);
     s.array_new_fixed(T_VALS, 1).local_set(ENV);
     s.local_get(P).global_get(then);
-    native(&mut s, new, thunk, Some(ENV), empty, 0);
+    native(cx, &mut s, new, thunk, Some(ENV), empty, 0);
     s.array_new_fixed(T_VALS, 1);
     s.call(invoke);
     s.end();
@@ -1251,9 +1252,9 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
                                 // then(resolve, rejectElement)
                                 s.local_get(RES);
                             }
-                            native(s, new_function, code, Some(ENV), empty, 1);
+                            native(cx, s, new_function, code, Some(ENV), empty, 1);
                             match rejected {
-                                Some(code) => native(s, new_function, code, Some(ENV), empty, 1),
+                                Some(code) => native(cx, s, new_function, code, Some(ENV), empty, 1),
                                 None if c == Combinator::Any => {}
                                 None => {
                                     s.local_get(REJ);
@@ -1760,7 +1761,7 @@ fn throw_arg_type(cx: &mut dyn Cx) -> Function {
     s.global_get(code).array_new_fixed(T_VALS, 1).local_set(ENV);
     s.local_get(E).ref_cast_non_null(runtime::object());
     s.global_get(to_string_key);
-    native(&mut s, new, to_string, Some(ENV), to_string_key, 0);
+    native(cx, &mut s, new, to_string, Some(ENV), to_string_key, 0);
     s.i32_const(object::HIDDEN).call(define);
     s.local_get(E)
         .global_get(code_key)

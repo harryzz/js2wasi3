@@ -316,6 +316,10 @@ pub trait Cx {
     fn main_func(&mut self) -> (u32, bool);
     /// `ref.func` will be used on function `index` (it goes into a declarative element segment).
     fn declare_func(&mut self, index: u32);
+    /// The slot of function `index` (a `$code`) in the code table (table 0, funcref): `$function`s
+    /// hold slots and calls go through `call_indirect`. (T89, F350: a funcref read from a GC struct
+    /// costs wasmtime's `get_interned_func_ref` libcall on every call.)
+    fn code_slot(&mut self, index: u32) -> i32;
     /// Function index of the prelude's StringToNumber `(jsval) -> f64`, if the module has it (T21).
     fn string_to_number(&mut self) -> Option<u32>;
     /// The prelude's `$$DateCall` `$code` function index (T26): `Date` as a value's call entry.
@@ -573,9 +577,10 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
     // Element attributes (T32): null while every element has the default ones.
     array_fields.push(field(StorageType::Val(rt(true, T_BYTES)), true));
     let mut function_fields = object_fields.clone();
-    function_fields.push(field(StorageType::Val(rt(false, T_CODE)), false));
+    // `code` and `construct` (T89): slots in the code table (-1: none), not funcrefs.
+    function_fields.push(field(StorageType::Val(ValType::I32), false));
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
-    function_fields.push(field(StorageType::Val(rt(true, T_CODE)), false));
+    function_fields.push(field(StorageType::Val(ValType::I32), false));
     function_fields.push(field(StorageType::Val(ValType::I32), false));
     function_fields.push(field(StorageType::Val(rt(true, T_STRING)), true));
     let mut generator_fields = object_fields.clone();

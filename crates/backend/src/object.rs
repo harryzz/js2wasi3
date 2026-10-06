@@ -1979,15 +1979,15 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     if b == Builtin::Function {
         // `Function.prototype` is a function (F47): `$function` fields after the object's.
         let empty = cx.helper(runtime::Helper::Func(func::Helper::Empty));
-        cx.declare_func(empty);
+        let empty_slot = cx.code_slot(empty);
         s.i32_const(0).array_new_default(T_KEYS);
         s.i32_const(0).array_new_default(T_VALS);
         s.i32_const(0).array_new_default(T_BYTES);
         s.i32_const(0);
         s.ref_null(wasm_encoder::HeapType::Concrete(T_I32S));
-        s.ref_func(empty);
+        s.i32_const(empty_slot);
         s.ref_null(func::vals());
-        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.i32_const(-1);
         s.i32_const(func::KIND_FUNCTION);
         s.ref_null(wasm_encoder::HeapType::Concrete(T_STRING));
         s.struct_new(runtime::T_FUNCTION);
@@ -2018,8 +2018,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.local_get(O).ref_as_non_null();
         s.call(sym)
             .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
-        s.ref_func(code);
-        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.i32_const(cx.code_slot(code));
+        s.i32_const(-1);
         s.ref_null(func::vals());
         s.global_get(name)
             .i32_const(len)
@@ -2032,8 +2032,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     }
     let exec = (b == Builtin::RegExp).then(|| cx.str("exec"));
     for (keys, name, code, len, getter, flags) in real {
-        s.ref_func(code);
-        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.i32_const(cx.code_slot(code));
+        s.i32_const(-1);
         s.ref_null(func::vals());
         s.global_get(name)
             .i32_const(len)
@@ -2087,8 +2087,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.local_get(O).ref_as_non_null();
         s.call(sym)
             .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
-        s.ref_func(code);
-        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.i32_const(cx.code_slot(code));
+        s.i32_const(-1);
         s.ref_null(func::vals());
         s.global_get(name)
             .i32_const(0)
@@ -2107,8 +2107,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.local_get(O).ref_as_non_null();
         s.call(sym)
             .ref_cast_non_null(wasm_encoder::HeapType::Concrete(T_STRING));
-        s.ref_func(code);
-        s.ref_null(wasm_encoder::HeapType::Concrete(runtime::T_CODE));
+        s.i32_const(cx.code_slot(code));
+        s.i32_const(-1);
         s.ref_null(func::vals());
         s.global_get(name)
             .i32_const(0)
