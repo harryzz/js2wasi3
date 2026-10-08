@@ -1193,10 +1193,21 @@ fn get_named(cx: &mut dyn Cx) -> Function {
         (1, jsval()),
     ]);
     let mut s = f.instructions();
-    s.test_object(V);
-    s.if_(BlockType::Result(jsval()));
+    // Not an object: a string's methods come from `String.prototype` (a constant key is never
+    // `length` or an index); anything else through `get`.
+    runtime::object_or(&mut s, V, |s| {
+        runtime::is_string(s, V);
+        s.if_(BlockType::Result(jsval()));
+        s.call(sproto);
+        s.local_get(K).local_get(H).call(lookup);
+        s.local_get(V);
+        s.call(value);
+        s.else_();
+        s.local_get(V).local_get(K).call(get);
+        s.end();
+        s.return_();
+    });
     {
-        as_obj(&mut s, V);
         s.local_set(O);
         // The cached entry.
         s.global_get(runtime::G_IC).local_tee(IC).ref_is_null().i32_eqz();
@@ -1251,18 +1262,6 @@ fn get_named(cx: &mut dyn Cx) -> Function {
         s.local_get(V);
         s.call(value);
     }
-    s.else_();
-    // A string's methods: `String.prototype` (a constant key is never `length` or an index).
-    runtime::is_string(&mut s, V);
-    s.if_(BlockType::Result(jsval()));
-    s.call(sproto);
-    s.local_get(K).local_get(H).call(lookup);
-    s.local_get(V);
-    s.call(value);
-    s.else_();
-    s.local_get(V).local_get(K).call(get);
-    s.end();
-    s.end();
     s.end();
     f
 }

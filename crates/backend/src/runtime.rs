@@ -528,6 +528,44 @@ impl JsTest for InstructionSink<'_> {
     }
 }
 
+/// Push local `v` as a `(ref $object)`, or run `not_object` (which must not fall through: it returns
+/// or branches out) when `v` isn't an object (T92). One chain does the test and the cast: the abstract
+/// `struct` test, the two non-object structs a value commonly is, then `br_on_cast` to the final
+/// `$function`, `$array` and `$map` and last to `$object`, which is inline for a plain object. A
+/// separate `ref.test`/`ref.cast (ref $object)` calls wasmtime's `is_subtype` for every object that
+/// isn't exactly `$object` (`$object` isn't final): twice per method call on a `Map`, an array or a
+/// function. The other final subtypes (promise, typed array, …) still take that call, in the last
+/// `br_on_cast`.
+pub fn object_or(s: &mut InstructionSink, v: u32, not_object: impl FnOnce(&mut InstructionSink)) {
+    s.block(BlockType::Result(rt(false, T_OBJECT)));
+    s.block(BlockType::Empty);
+    s.local_get(v)
+        .ref_test_non_null(HeapType::Abstract {
+            shared: false,
+            ty: wasm_encoder::AbstractHeapType::Struct,
+        })
+        .i32_eqz()
+        .br_if(0);
+    s.local_get(v).ref_test_non_null(number());
+    s.local_get(v).ref_test_non_null(oddball());
+    s.i32_or().br_if(0);
+    s.local_get(v);
+    for t in [T_FUNCTION, T_ARRAY, T_MAP, T_OBJECT] {
+        s.br_on_cast(
+            1,
+            RefType::EQREF,
+            RefType {
+                nullable: false,
+                heap_type: HeapType::Concrete(t),
+            },
+        );
+    }
+    s.drop();
+    s.end();
+    not_object(s);
+    s.end();
+}
+
 pub fn object() -> HeapType {
     HeapType::Concrete(T_OBJECT)
 }
