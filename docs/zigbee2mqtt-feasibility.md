@@ -1,7 +1,26 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T91 `Map` hashes on the T79 replay 2026-10-08: 21.26 / 21.51 s
+
+Two replays on a-03 of the T91 build (`Map`/`Set` hashes stored in the index slots, number keys hashed with 64-bit
+mixing). Run dirs `~/js2wasi3-prod-run/t79/out-t91` and `out-t91b` (same `p.cwasm`).
+
+| | CPU (903 s) | vs node (8.66 s) | first minute | peak RSS | publishes |
+|---|---|---|---|---|---|
+| T90 | 21.47 s | 2.48× | 6.2 s | 764 MB | 13,478 |
+| T91 run 1 | 21.51 s | 2.48× | 6.4 s | 764 MB | 13,526 |
+| **T91 run 2** | **21.26 s** | **2.45×** | — | — | 13,478 |
+
+- CPU unchanged within noise (−1% / +0.2%): zigbee2mqtt doesn't spend its time in string-keyed `Map`s
+  (knucleotide, which does: −13%).
+- Run 2's output equals T90's (139 exact matches, 1 unmatched, the same 9 error lines). Run 1 differed (13,526
+  publishes, 17 error lines, 7 unmatched requests: zigbee2mqtt's requests took recorded answers out of order, then
+  `assocGetWithAddress` timeouts after 6,000 ms); the same build gave both results, so it is replay timing (run 1's
+  startup took 12.2 s wall vs 10.5 s, with the same CPU). First sign that this replay isn't fully deterministic:
+  compare a code change's output over two runs before calling it different.
 
 ## T90 property adds on the T79 replay 2026-10-06: 21.47 s
 

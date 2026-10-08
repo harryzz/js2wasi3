@@ -1,6 +1,6 @@
 # T91: `Map` with string keys (F338)
 
-Status: in progress (code done 2026-10-08 in a cloud session; full test262 + one replay left, local) | Depends on: T90 | Local
+Status: done (2026-10-08) | Depends on: T90 | Local
 
 ## Goal
 Benchmarks Game knucleotide (`tests/bench/patched/knucleotide.js`, fasta 250,000): `Map` lookups and inserts with
@@ -51,13 +51,20 @@ results must stay the same as node (SameValueZero, insertion order, iterators th
 ## Acceptance
 - [x] A string-key hit normally does one `string_eq`; results = node (fixtures).
 - [x] Micro-benchmark and knucleotide before/after in Notes.
-- [ ] Full test262 0 regressions; one replay; docs (design.md done, HISTORY.md, feasibility doc), follow-ups (done:
-  F373, F374).
+- [x] Full test262 0 regressions; one replay (two); docs (design.md, HISTORY.md, feasibility doc), follow-ups
+  (F373, F374, F375).
 
 ## Notes / Result
-Code part done 2026-10-08 in a cloud session (4 cores, noisy; tools installed there at the pinned versions). Left
-for a local session: full test262 on a-03 (0 regressions expected: no semantics changed), one zigbee2mqtt replay
-vs T90's 21.47 s, then HISTORY.md (test262) and `docs/zigbee2mqtt-feasibility.md`, and tick F338.
+Done 2026-10-08. Code, measurements and fixtures in a cloud session (4 cores, noisy; tools installed there at the
+pinned versions); full test262 and the replays on a-03, run by the user by hand (`~/t91-run.sh`).
+
+**a-03**: full test262 0 regressions (the same 26 changes since the baseline as after T87–T90, all to pass; the
+baseline is now updated). zigbee2mqtt replay: CPU 21.51 s and 21.26 s (T90 21.47 s): unchanged. Run 2's output =
+T90's (13,478 publishes, 9 error lines); run 1 differed (13,526, 17) by replay timing (same build, see
+`docs/zigbee2mqtt-feasibility.md`).
+
+**Full fixture suite** (cloud, `-j 4`): 246 pass, 19 skip, 3 fail, none from T91: `dgram` (no IPv6) and
+`fetch-https` (proxy) fail before T91 too; `child-process-shell` was a cached node run made under load (F375).
 
 **What changed** (`crates/backend/src/mapset.rs`, `runtime.rs` type of `$mtable`):
 - The hash index holds pairs: `[2i]` = entry + 1, `[2i + 1]` = the entry's hash. `map_find` compares the slot's
@@ -93,8 +100,7 @@ knucleotide`; perf (`linux-tools` 6.8, `--profile=perfmap`).
 **Unsupported / unchanged**: string hashes aren't cached on the string (each call hashes the key: `string_hash`
 4.9%); method lookups (F359, F373).
 
-**Next smallest step**: the local finish above; then F373 (cast to the exact final type in `get_named`), which is
-~7.5% of knucleotide.
+**Next smallest step**: F373 (cast to the exact final type in `get_named`, ~7.5% of knucleotide), with F359.
 
 ## Progress
 - 2026-10-06: handoff written after T90 (user: F338 next, in a new session). Timings and profile above.
@@ -155,3 +161,6 @@ knucleotide`; perf (`linux-tools` 6.8, `--profile=perfmap`).
   worktree's cache was empty, so node ran fresh: 1 chunk); with `DIFF_NODE_CACHE=0` it passes with T91. So 0
   regressions. Follow-up F375. Separately, a seeded random Map/Set sequence (40 × 3,000 ops: number/string/object
   keys, -0, NaN, deletes during iteration, clear) gives output identical to node.
+- 2026-10-08: second replay (`t79/out-t91b`, same build): CPU 21.26 s, 13,478 publishes, 9 error lines, 139 exact,
+  1 unmatched = T90's output. So run 1's difference was replay timing. Docs (feasibility doc), README, F338 ticked.
+  Done.
