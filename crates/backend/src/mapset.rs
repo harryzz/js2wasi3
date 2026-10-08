@@ -6,11 +6,14 @@
 //! - `$map`: a final subtype of `$object` (class [`CLASS_MAP`] or [`CLASS_SET`]) with
 //!   `table: mut (ref $mtable)`.
 //! - `$mtable { keys: mut (ref $vals), vals: mut (ref $vals), index: mut (ref $i32s), used: mut i32,
-//!   size: mut i32, next: mut (ref null $mtable), removed: mut (ref null $i32s) }`: entries
-//!   `0..used` in insertion order (a deleted entry has a Wasm null key), `size` live ones. `index`
-//!   is an open-addressing hash index (linear probing, a power of 2 ≥ twice the capacity) mapping
-//!   slots to `entry + 1` (0: empty); a deleted entry keeps its slot until the next rehash. Sets
-//!   store `undefined` values.
+//!   size: mut i32, next: mut (ref null $mtable), removed: mut (ref null $i32s),
+//!   hashes: mut (ref $i32s) }`: entries `0..used` in insertion order (a deleted entry has a Wasm
+//!   null key), `size` live ones, each entry's hash in `hashes` (T91: a rehash reuses them).
+//!   `index` is an open-addressing hash index (linear probing, a power of 2 ≥ twice the capacity
+//!   slots) of pairs: `[2i]` = `entry + 1` (0: empty), `[2i + 1]` = the entry's hash, which a probe
+//!   compares before SameValueZero (T91: a probe that misses touches one cache line, not the
+//!   entry's key and string); a deleted entry keeps its slot until the next rehash. Sets store
+//!   `undefined` values.
 //! - `$mapiter`: a final subtype of `$object` with `table: mut (ref null $mtable)` (null: done
 //!   for good), `pos: mut i32` (the next entry to look at) and `mode: i32` (`MAP_ITER_*` + 3 × the
 //!   map's kind).
@@ -24,7 +27,8 @@
 //! ones, and never visits an entry twice.
 //!
 //! # Hashing (SameValueZero)
-//! Numbers by value (`i31ref` and `$number` alike, `-0` as `+0`, every NaN the same), strings and
+//! Numbers by value (`i31ref` and `$number` alike, `-0` as `+0`, every NaN the same; the f64's bits
+//! mixed in 64 bits so that the low bits, which the index takes, vary), strings and
 //! symbols by content (symbols then compare by identity), objects by an identity hash kept in the
 //! high bits of `class` (assigned on first use from `G_ID_HASH`), anything else a constant.
 
@@ -54,6 +58,7 @@ pub const T_USED: u32 = 3;
 pub const T_SIZE: u32 = 4;
 const T_NEXT: u32 = 5;
 const T_REMOVED: u32 = 6;
+const T_HASHES: u32 = 7;
 /// `$mapiter` fields after the object's.
 pub const I_TABLE: u32 = 7;
 pub const I_POS: u32 = 8;
@@ -173,7 +178,8 @@ fn table_of(s: &mut InstructionSink, m: u32) {
         .struct_get(T_MAP, M_TABLE);
 }
 
-/// `$map_new_table(cap)`: `index` has the smallest power of 2 ≥ 2 × cap slots (at least 1).
+/// `$map_new_table(cap)`: `index` has the smallest power of 2 ≥ 2 × cap slots (at least 1), two
+/// `i32`s each.
 fn new_table() -> Function {
     const CAP: u32 = 0;
     const N: u32 = 1;
@@ -191,9 +197,13 @@ fn new_table() -> Function {
     s.br(0).end().end();
     s.local_get(CAP).array_new_default(T_VALS);
     s.local_get(CAP).array_new_default(T_VALS);
-    s.local_get(N).array_new_default(T_I32S);
+    s.local_get(N)
+        .i32_const(1)
+        .i32_shl()
+        .array_new_default(T_I32S);
     s.i32_const(0).i32_const(0);
     s.ref_null(mtable()).ref_null(HeapType::Concrete(T_I32S));
+    s.local_get(CAP).array_new_default(T_I32S);
     s.struct_new(T_MTABLE);
     s.end();
     f
@@ -300,13 +310,19 @@ fn hash_f64(s: &mut InstructionSink, bits: u32) {
     s.if_(BlockType::Empty);
     s.i64_const(0x7ff8_0000_0000_0000).local_set(bits);
     s.end();
+    // T91: x = bits ^ (bits >> 32); x *= odd; x ^ (x >> 32). A small integer's bits end in zeros,
+    // and so did the old `(lo ^ hi) * odd` (the index takes the low bits: integer keys shared a
+    // few slots); the high half of the 64-bit product is mixed.
     s.local_get(bits)
         .local_get(bits)
         .i64_const(32)
         .i64_shr_u()
         .i64_xor();
+    s.i64_const(0x9E37_79B9_7F4A_7C15_u64 as i64)
+        .i64_mul()
+        .local_tee(bits);
+    s.local_get(bits).i64_const(32).i64_shr_u().i64_xor();
     s.i32_wrap_i64();
-    s.i32_const(0x9E37_79B1_u32 as i32).i32_mul();
 }
 
 fn hash(cx: &mut dyn Cx) -> Function {
@@ -358,7 +374,7 @@ fn hash(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// SameValueZero (after `ref.eq` failed: numbers by value, strings by content).
+/// SameValueZero (after `ref.eq` failed: strings by content, numbers by value).
 fn same(cx: &mut dyn Cx) -> Function {
     let is_number = cx.helper(runtime::Helper::IsNumber);
     let to_number = cx.helper(runtime::Helper::ToNumber);
@@ -373,6 +389,19 @@ fn same(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.i32_const(1).return_();
     s.end();
+    // T91: strings first (the common case with different refs); a string equals only a string.
+    runtime::is_string(&mut s, A);
+    s.if_(BlockType::Empty);
+    runtime::is_string(&mut s, B);
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(A).ref_cast_non_null(runtime::string());
+    s.local_get(B).ref_cast_non_null(runtime::string());
+    s.call(str_eq);
+    s.else_();
+    s.i32_const(0);
+    s.end();
+    s.return_();
+    s.end();
     s.local_get(A).call(is_number);
     s.local_get(B).call(is_number);
     s.i32_and();
@@ -384,14 +413,6 @@ fn same(cx: &mut dyn Cx) -> Function {
     s.local_get(Y).local_get(Y).f64_ne();
     s.i32_and().i32_or();
     s.return_();
-    s.end();
-    runtime::is_string(&mut s, A);
-    runtime::is_string(&mut s, B);
-    s.i32_and();
-    s.if_(BlockType::Empty);
-    s.local_get(A).ref_cast_non_null(runtime::string());
-    s.local_get(B).ref_cast_non_null(runtime::string());
-    s.call(str_eq).return_();
     s.end();
     if cx.bigint() {
         // T40: BigInts by value.
@@ -410,7 +431,7 @@ fn same(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$map_find(t, key, hash)`.
+/// `$map_find(t, key, hash)`: SameValueZero only on slots with the same hash (T91).
 fn find(cx: &mut dyn Cx) -> Function {
     let same = mh(cx, Helper::Same);
     const T: u32 = 0;
@@ -421,23 +442,43 @@ fn find(cx: &mut dyn Cx) -> Function {
     const I: u32 = 5;
     const E: u32 = 6;
     const KEY: u32 = 7;
-    let mut f = Function::new([(1, rt(false, T_I32S)), (3, ValType::I32), (1, jsval())]);
+    const KS: u32 = 8;
+    let mut f = Function::new([
+        (1, rt(false, T_I32S)),
+        (3, ValType::I32),
+        (1, jsval()),
+        (1, rt(false, T_VALS)),
+    ]);
     let mut s = f.instructions();
+    s.local_get(T).struct_get(T_MTABLE, T_KEYS_F).local_set(KS);
     s.local_get(T).struct_get(T_MTABLE, T_INDEX).local_tee(IDX);
-    s.array_len().i32_const(1).i32_sub().local_tee(MASK);
+    index_mask(&mut s);
+    s.local_tee(MASK);
     s.local_get(H).i32_and().local_set(I);
     s.loop_(BlockType::Empty);
-    s.local_get(IDX).local_get(I).array_get(T_I32S).local_tee(E);
+    s.local_get(IDX)
+        .local_get(I)
+        .i32_const(1)
+        .i32_shl()
+        .array_get(T_I32S)
+        .local_tee(E);
     s.i32_eqz();
     s.if_(BlockType::Empty);
     s.i32_const(-1).return_();
     s.end();
-    s.local_get(T)
-        .struct_get(T_MTABLE, T_KEYS_F)
-        .local_get(E)
+    s.local_get(IDX)
+        .local_get(I)
         .i32_const(1)
-        .i32_sub()
-        .local_tee(E)
+        .i32_shl()
+        .i32_const(1)
+        .i32_add()
+        .array_get(T_I32S)
+        .local_get(H)
+        .i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(E).i32_const(1).i32_sub().local_set(E);
+    s.local_get(KS)
+        .local_get(E)
         .array_get(T_VALS)
         .local_tee(KEY);
     s.ref_is_null().i32_eqz();
@@ -449,6 +490,7 @@ fn find(cx: &mut dyn Cx) -> Function {
     s.local_get(KEY).local_get(K).call(same);
     s.if_(BlockType::Empty);
     s.local_get(E).return_();
+    s.end();
     s.end();
     s.end();
     s.local_get(I)
@@ -464,13 +506,24 @@ fn find(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// The index (on the stack) → its slot mask.
+fn index_mask(s: &mut InstructionSink) {
+    s.array_len()
+        .i32_const(1)
+        .i32_shr_u()
+        .i32_const(1)
+        .i32_sub();
+}
+
 /// Put entry `e` (local) with hash `h` (local) into index `idx` (local, mask in `mask`), using
-/// local `i`.
+/// local `i` (left at the slot's first `i32`).
 fn insert_index(s: &mut InstructionSink, idx: u32, mask: u32, h: u32, e: u32, i: u32) {
     s.local_get(h).local_get(mask).i32_and().local_set(i);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(idx)
         .local_get(i)
+        .i32_const(1)
+        .i32_shl()
         .array_get(T_I32S)
         .i32_eqz()
         .br_if(1);
@@ -481,8 +534,12 @@ fn insert_index(s: &mut InstructionSink, idx: u32, mask: u32, h: u32, e: u32, i:
         .i32_and()
         .local_set(i);
     s.br(0).end().end();
+    s.local_get(i).i32_const(1).i32_shl().local_set(i);
     s.local_get(idx).local_get(i);
     s.local_get(e).i32_const(1).i32_add();
+    s.array_set(T_I32S);
+    s.local_get(idx).local_get(i).i32_const(1).i32_add();
+    s.local_get(h);
     s.array_set(T_I32S);
 }
 
@@ -490,7 +547,6 @@ fn insert_index(s: &mut InstructionSink, idx: u32, mask: u32, h: u32, e: u32, i:
 /// old one becomes obsolete (`removed`: the entries dropped).
 fn rehash(cx: &mut dyn Cx) -> Function {
     let new_table = mh(cx, Helper::NewTable);
-    let hash = mh(cx, Helper::Hash);
     const M: u32 = 0;
     const OLD: u32 = 1;
     const NEW: u32 = 2;
@@ -529,7 +585,8 @@ fn rehash(cx: &mut dyn Cx) -> Function {
     s.select();
     s.call(new_table).local_tee(NEW);
     s.struct_get(T_MTABLE, T_INDEX).local_tee(IDX);
-    s.array_len().i32_const(1).i32_sub().local_set(MASK);
+    index_mask(&mut s);
+    s.local_set(MASK);
     s.local_get(USED)
         .local_get(OLD)
         .struct_get(T_MTABLE, T_SIZE)
@@ -559,7 +616,13 @@ fn rehash(cx: &mut dyn Cx) -> Function {
         .local_get(E)
         .array_get(T_VALS);
     s.array_set(T_VALS);
-    s.local_get(K).call(hash).local_set(H);
+    s.local_get(OLD)
+        .struct_get(T_MTABLE, T_HASHES)
+        .local_get(E)
+        .array_get(T_I32S)
+        .local_set(H);
+    s.local_get(NEW).struct_get(T_MTABLE, T_HASHES);
+    s.local_get(N).local_get(H).array_set(T_I32S);
     insert_index(&mut s, IDX, MASK, H, N, I);
     s.local_get(N).i32_const(1).i32_add().local_set(N);
     s.end();
@@ -586,8 +649,10 @@ fn obsolete_drop(s: &mut InstructionSink, t: u32) {
     s.struct_set(T_MTABLE, T_KEYS_F);
     s.local_get(t).i32_const(0).array_new_default(T_VALS);
     s.struct_set(T_MTABLE, T_VALS_F);
-    s.local_get(t).i32_const(1).array_new_default(T_I32S);
+    s.local_get(t).i32_const(2).array_new_default(T_I32S);
     s.struct_set(T_MTABLE, T_INDEX);
+    s.local_get(t).i32_const(0).array_new_default(T_I32S);
+    s.struct_set(T_MTABLE, T_HASHES);
 }
 
 /// `get(m, key)` (`has`: whether it's there).
@@ -680,6 +745,8 @@ fn set(cx: &mut dyn Cx) -> Function {
     s.local_get(E).local_get(K).array_set(T_VALS);
     s.local_get(T).struct_get(T_MTABLE, T_VALS_F);
     s.local_get(E).local_get(V).array_set(T_VALS);
+    s.local_get(T).struct_get(T_MTABLE, T_HASHES);
+    s.local_get(E).local_get(H).array_set(T_I32S);
     s.local_get(T).local_get(E).i32_const(1).i32_add();
     s.struct_set(T_MTABLE, T_USED);
     s.local_get(T);
@@ -689,7 +756,8 @@ fn set(cx: &mut dyn Cx) -> Function {
         .i32_add();
     s.struct_set(T_MTABLE, T_SIZE);
     s.local_get(T).struct_get(T_MTABLE, T_INDEX).local_tee(IDX);
-    s.array_len().i32_const(1).i32_sub().local_set(MASK);
+    index_mask(&mut s);
+    s.local_set(MASK);
     insert_index(&mut s, IDX, MASK, H, E, I);
     s.end();
     f

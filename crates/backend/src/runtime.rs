@@ -758,7 +758,7 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
             true,
             Some(T_OBJECT),
         ),
-        // $mtable: keys, vals, index, used, size, next, removed (see `mapset.rs`).
+        // $mtable: keys, vals, index, used, size, next, removed, hashes (see `mapset.rs`).
         sub(CompositeInnerType::Struct(StructType {
             fields: Box::new([
                 field(StorageType::Val(rt(false, T_VALS)), true),
@@ -768,6 +768,7 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
                 field(StorageType::Val(ValType::I32), true),
                 field(StorageType::Val(rt(true, T_MTABLE)), true),
                 field(StorageType::Val(rt(true, T_I32S)), true),
+                field(StorageType::Val(rt(false, T_I32S)), true),
             ]),
         })),
         sub_of(

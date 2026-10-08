@@ -611,6 +611,12 @@ holds an ordered SameValueZero hash table (`crates/backend/src/mapset.rs`: inser
 objects hashed by an identity hash in `class`'s high bits); `builtins/map.js` implements the methods over
 `__intrinsic_map_*`. Iterators survive rehash and `clear` by V8's obsolete-table transitions. `new Map(…)` is a
 direct call of `$$Map`; `Map` itself isn't a value yet.)
+(T91: the hash index stores pairs, `[2i]` = entry + 1 and `[2i + 1]` = the entry's hash; a probe compares the hash
+before SameValueZero, so a string-key hit costs one `string_hash` and normally one `string_eq`, and a probe that
+misses reads one cache line. Each entry's hash is also kept in `$mtable.hashes`, so a rehash never hashes a key
+again. SameValueZero tests strings before numbers. Numbers hash as `x = bits ^ bits >> 32; x *= 0x9E3779B97F4A7C15;
+x ^ x >> 32` of the f64: the old `(lo ^ hi) * odd` left a small integer's low bits zero, and integer keys piled into
+a few index slots.)
 (T25 slice 3: `Function.prototype.bind` is native (`func.rs`, bound functions are `$function`s of kind `KIND_BOUND`);
 `arguments` makes a function lower as `f(...args)`. `Function.prototype` is itself a `$function` (returns `undefined`).
 `$function` has a nullable `source` field: user functions get their source text (the span, methods from the key)
