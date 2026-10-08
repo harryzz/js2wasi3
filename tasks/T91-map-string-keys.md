@@ -139,3 +139,11 @@ knucleotide`; perf (`linux-tools` 6.8, `--profile=perfmap`).
   and pushed (5186053); HISTORY.md entry. Replay: `t79/t91.log` ends in a different report (JSON: startup 12.2 s,
   steady 903 s, 548 events, 39.25 ms CPU per event) instead of T90's "replay seconds, publishes, error lines";
   waiting for the matching number before comparing with 21.47 s.
+- 2026-10-08: replay found: T90's "21.47 s" is `cpu_steady_s`. T91 (`t79/out-t91`): cpu_steady 21.51 s (T90 21.47),
+  peak RSS 764 MB (same), CPU at 60 s 6.37 (6.24), startup wall 12.17 s (11.11). **Output differs**: 13,526
+  publishes (T82–T90 always 13,478), 17 error lines (9): 4 `set state` publishes failed `SRSP - UTIL -
+  assocGetWithAddress after 6000ms`, ZNP `RangeError: Attempt to access memory outside buffer bounds` 5× (1× in
+  T90), replayer unmatched 7 (5 `UTIL.assocGetWithAddress`, 2 `AF.dataRequest`; T90 1), exact 136 (139). Likely
+  replay timing (the parse error occurs in T90's run too; frames anchored in time), but six earlier runs were
+  identical, so not accepted yet: asked the user for a second replay (`t79/out-t91b`). If it repeats, look at
+  zigbee-herdsman's number-keyed `Map`s against the new number hash.
