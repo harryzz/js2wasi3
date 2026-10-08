@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-08: T91 `Map`/`Set` hashes in the index slots (full run)
+
+- Compiler (`claude/tender-cerf-lb9yx0` at the T91 code commit): the `Map`/`Set` hash index stores each entry's hash
+  beside it and probes compare it before SameValueZero; numbers hash with 64-bit mixing. Runner: unchanged.
+- Full run on `a-03` (`~/t91-run.sh`, log `~/t262-t91.log`): **0 regressions**; the same 26 changes since the
+  baseline as after T87, T89 and T90 (all to pass, T87's), so the same results as T90's run (28,099 of 28,984 run
+  pass). **Baseline updated** this time (`baseline.json`, 32,039 entries; commit 5186053), so those 26 are in it.
+
 ## 2026-10-06: T90 property adds without the prototype-chain search (full run)
 
 - Compiler (83c660b + T90, uncommitted when run): a constant-key add (`o.k = v`, no own `k`) skips the chain walk

@@ -134,3 +134,8 @@ knucleotide`; perf (`linux-tools` 6.8, `--profile=perfmap`).
   `cargo test -p js2wasi3-backend` ok; validate + smoke ok. Interleaved knucleotide before/after with node 24:
   before 8.74–10.45, after 7.60–8.46, node 1.84–2.22 s. Docs: design.md (T25 paragraph), Notes, follow-ups F373
   (`get_named` is_subtype libcalls on a `$map`), F374 (index size). Left local: full test262, replay.
+- 2026-10-08: a-03 (run by the user by hand: no Claude credits there; `~/t91-run.sh` = `~/t90-run.sh` with t90→t91):
+  full test262 0 regressions, the same 26 changes since the baseline as T87/T89/T90 (all to pass); baseline updated
+  and pushed (5186053); HISTORY.md entry. Replay: `t79/t91.log` ends in a different report (JSON: startup 12.2 s,
+  steady 903 s, 548 events, 39.25 ms CPU per event) instead of T90's "replay seconds, publishes, error lines";
+  waiting for the matching number before comparing with 21.47 s.
