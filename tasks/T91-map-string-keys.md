@@ -147,3 +147,11 @@ knucleotide`; perf (`linux-tools` 6.8, `--profile=perfmap`).
   replay timing (the parse error occurs in T90's run too; frames anchored in time), but six earlier runs were
   identical, so not accepted yet: asked the user for a second replay (`t79/out-t91b`). If it repeats, look at
   zigbee-herdsman's number-keyed `Map`s against the new number hash.
+- 2026-10-08: full fixture suite (user asked; `scripts/diff.sh -j 4`, node 24.21.0): 6 min 20 s, 246 pass, 19 skip,
+  3 fail. `node/dgram.js` (node: `bind EAFNOSUPPORT ::1`, no IPv6 in the sandbox) and `node/fetch-https.js`
+  (wasmtime's HTTP doesn't use the sandbox proxy) fail with the pre-T91 compiler (c940818, worktree) too.
+  `node/child-process-shell.js` looked like a regression (fails 4/4 with T91, passes 3/3 at c940818) but is node's
+  cached output: run under `-j 4` load, node got dash's line as 3 stderr chunks and `out/node-cache/` kept it (the
+  worktree's cache was empty, so node ran fresh: 1 chunk); with `DIFF_NODE_CACHE=0` it passes with T91. So 0
+  regressions. Follow-up F375. Separately, a seeded random Map/Set sequence (40 × 3,000 ops: number/string/object
+  keys, -0, NaN, deletes during iteration, clear) gives output identical to node.
