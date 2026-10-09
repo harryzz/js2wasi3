@@ -21,7 +21,7 @@ over all units); `Map`'s `get` then `set` of the same key hash it twice (knucleo
 
 ## Acceptance
 - [x] Before/after for knucleotide, the computed-key micro and plain objects in Notes; results = node.
-- [x] Docs (design.md), follow-ups (F381; F363, F371 updated).
+- [x] Docs (design.md), follow-ups (F381; F363 updated).
 
 ## Notes / Result
 **What changed**: a one-entry memo in `string_hash` (`object.rs` `hash()`): globals `G_HASH_KEY` (the last
@@ -40,9 +40,8 @@ visible to JS are never mutated (`$strbuf`'s buffer never escapes; `str_buf_get`
 - Plain objects (`T92-files/props.js`, 8 rounds): reads median ~355 / ~362 ms, methods ~493 / ~505: unchanged within
   noise (they don't call `string_hash`).
 
-**Found**: the keys-built-at-run-time case is GC-bound, not the property path: perf ~70% in wasmtime's root
-scanning (`trace_vmctx_roots` 23%, `RegisteredType::root` 26%) on the default heap; with `-O
-gc-heap-initial-size=268435456` the same case takes 315 ms instead of 5,800 ms. Added to F371.
+**Keys built at run time**: GC-bound on the default heap, the known root-scanning cost of string-constant
+globals (F322, F371); 315 ms instead of 5,800 ms with `-O gc-heap-initial-size=268435456`. Not the property path.
 
 **Commands**: full `scripts/diff.sh -j 4`: 247 pass, 19 skip, 2 known sandbox failures (`dgram`, `fetch-https`);
 `cargo test -p js2wasi3-backend` ok; `cargo test -p js2wasi3` 30 pass, 4 `*_compose_with_wac` fail (no `wac` here);
@@ -59,4 +58,4 @@ keys: the zigbee2mqtt replay should show first how much of F363's ~15% is left (
   no hash today) pay a hash: chose a one-entry memo in `string_hash` instead (plan 1).
 - 2026-10-09: implemented the memo; validates. keys.js: prototype hits −20%, misses/read-write −7%, own hits equal;
   knucleotide median −8.6%; plain objects unchanged. Keys built at run time: ~5,800 ms, GC root scanning on the
-  default heap (315 ms with a 256 MiB heap): F371. Full suite 247 pass; cargo test ok (wac missing). Done.
+  default heap (315 ms with a 256 MiB heap): the known F322/F371 cost. Full suite 247 pass; cargo test ok (wac missing). Done.
