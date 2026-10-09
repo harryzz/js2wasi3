@@ -572,6 +572,18 @@ pub fn object_or(s: &mut InstructionSink, v: u32, not_object: impl FnOnce(&mut I
     s.end();
 }
 
+/// If local `v` is an object, run `body` with it as a `(ref $object)` on the stack (`body` consumes it; it may
+/// return or fall through); otherwise skip `body` (T96). The `object_or` chain: no `is_subtype` for an
+/// object that isn't exactly `$object`, where `test_object` + `ref.cast (ref $object)` called it twice.
+pub fn object_then(s: &mut InstructionSink, v: u32, body: impl FnOnce(&mut InstructionSink)) {
+    s.block(BlockType::Empty);
+    object_or(s, v, |s| {
+        s.br(1);
+    });
+    body(s);
+    s.end();
+}
+
 pub fn object() -> HeapType {
     HeapType::Concrete(T_OBJECT)
 }
@@ -1515,13 +1527,10 @@ fn to_number(cx: &mut dyn Cx) -> Function {
     s.end();
     // An object's ToPrimitive is a string: "" is 0; one starting with `[` ("[object Object]") or a
     // letter other than `I` (an error's "Name: message") can't be numeric, so NaN. Others: parsed.
-    s.test_object(V);
-    s.if_(BlockType::Empty);
-    s.local_get(V)
-        .ref_cast_non_null(object())
-        .call(to_primitive_num);
-    s.return_();
-    s.end();
+    object_then(&mut s, V, |s| {
+        s.call(to_primitive_num);
+        s.return_();
+    });
     // undefined → NaN, null/false → 0, true → 1.
     kind(&mut s, V);
     s.local_set(K);
@@ -1869,14 +1878,9 @@ fn loose_eq(cx: &mut dyn Cx) -> Function {
     s.local_get(NA).local_get(NB).i32_and().return_();
     s.end();
     for v in [0, 1] {
-        s.test_object(v);
-        s.if_(BlockType::Empty);
-        s.local_get(v)
-            .ref_cast_non_null(object())
-            .i32_const(0)
-            .call(to_primitive)
-            .local_set(v);
-        s.end();
+        object_then(&mut s, v, |s| {
+            s.i32_const(0).call(to_primitive).local_set(v);
+        });
     }
     // A symbol equals only itself (T25).
     s.local_get(0).ref_test_non_null(symbol());
@@ -2116,15 +2120,9 @@ fn to_string(cx: &mut dyn Cx) -> Function {
         s.i32_const(10).call(big_to_string).return_();
         s.end();
     }
-    s.test_object(V);
-    s.if_(BlockType::Empty);
-    s.local_get(V)
-        .ref_cast_non_null(object())
-        .i32_const(2)
-        .call(to_primitive)
-        .call(to_string)
-        .return_();
-    s.end();
+    object_then(&mut s, V, |s| {
+        s.i32_const(2).call(to_primitive).call(to_string).return_();
+    });
     kind(&mut s, V);
     s.local_set(K);
     for (k, g) in names[..3].iter().enumerate() {
@@ -2919,14 +2917,9 @@ fn js_add(cx: &mut dyn Cx) -> Function {
     s.call(concat).return_();
     s.end();
     for v in [0, 1] {
-        s.test_object(v);
-        s.if_(BlockType::Empty);
-        s.local_get(v)
-            .ref_cast_non_null(object())
-            .i32_const(0)
-            .call(to_primitive)
-            .local_set(v);
-        s.end();
+        object_then(&mut s, v, |s| {
+            s.i32_const(0).call(to_primitive).local_set(v);
+        });
     }
     s.test_string(0);
     s.test_string(1);

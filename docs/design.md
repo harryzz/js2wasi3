@@ -150,7 +150,9 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   plain object); `get_named` uses it (knucleotide −9.6%). Each exact final-type test costs ~1.5 ns, so chains stay
   short: testing all 10 final subtypes at every site made plain-object reads 65% slower. T93: `set_named` and
   `instanceof` use it too, and `new` tests the constructor's result with `test_object` (a bare `ref.test (ref $object)`
-  on its usual `undefined` called `is_subtype`); `is_subtype` is ≤ 0.4% of every benchmark since.)
+  on its usual `undefined` called `is_subtype`); `is_subtype` is ≤ 0.4% of every benchmark since. T96: the generic `get`/`set`
+  too, and `runtime::object_then` (run code with the object when the value is one) in the ToPrimitive paths
+  (`to_string`, `to_number`, `js_add`, `to_property_key`), `get_prototype_of`, `regexp_plain`.)
   (T94: **`string_hash` memo**. Globals `G_HASH_KEY`/`G_HASH_VAL` keep the last string hashed and its hash; the
   same string object (`ref.eq`) gets the stored hash, so a computed key is hashed once per lookup (not per indexed
   prototype level) and once across back-to-back uses (`m.get(k)`, `m.set(k, …)`). Relies on strings visible to JS

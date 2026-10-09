@@ -2435,14 +2435,9 @@ fn to_key(cx: &mut dyn Cx) -> Function {
     s.end();
     s.end();
     // An object: its ToPrimitive (hint string), which may be a symbol.
-    s.test_object(0);
-    s.if_(BlockType::Empty);
-    s.local_get(0)
-        .ref_cast_non_null(runtime::object())
-        .i32_const(2)
-        .call(to_primitive)
-        .local_set(0);
-    s.end();
+    runtime::object_then(&mut s, 0, |s| {
+        s.i32_const(2).call(to_primitive).local_set(0);
+    });
     s.local_get(0).ref_test_non_null(runtime::symbol());
     s.if_(BlockType::Result(string_ref()));
     s.local_get(0).ref_cast_non_null(string());
@@ -2627,11 +2622,16 @@ fn get(cx: &mut dyn Cx) -> Function {
     s.unreachable();
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
-    s.test_object(V);
-    s.if_(BlockType::Result(jsval()));
-    as_obj(&mut s, V);
+    // T96: one test-and-cast chain (`object_or`): no `is_subtype` for an object that isn't exactly
+    // `$object` (a typed array's `.length` comes here from `get_length`).
+    s.block(BlockType::Result(jsval()));
+    s.block(BlockType::Empty);
+    runtime::object_or(&mut s, V, |s| {
+        s.br(1); // to the primitive path below
+    });
     s.local_get(K).ref_as_non_null().call(lookup);
-    s.else_();
+    s.br(1);
+    s.end();
     runtime::is_string(&mut s, V);
     s.if_(BlockType::Empty);
     {
@@ -2721,7 +2721,12 @@ fn set(cx: &mut dyn Cx) -> Function {
     const K: u32 = 3;
     let set_index = cx.helper(runtime::Helper::Arr(array::Helper::SetIndex));
     const X: u32 = 4;
-    let mut f = Function::new([(1, rt(true, T_STRING)), (1, ValType::F64)]);
+    const O: u32 = 5;
+    let mut f = Function::new([
+        (1, rt(true, T_STRING)),
+        (1, ValType::F64),
+        (1, rt(true, T_OBJECT)),
+    ]);
     let mut s = f.instructions();
     let k = |s: &mut InstructionSink| {
         s.local_get(K).ref_as_non_null();
@@ -2810,21 +2815,26 @@ fn set(cx: &mut dyn Cx) -> Function {
     s.call(throw);
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
-    s.test_object(V);
-    s.if_(BlockType::Empty);
+    // T96: one test-and-cast chain (`object_or`) into `O`: no `is_subtype` for an object that isn't
+    // exactly `$object`. Not an object: past this block.
+    s.block(BlockType::Empty);
+    runtime::object_or(&mut s, V, |s| {
+        s.br(1);
+    });
+    s.local_set(O);
     {
         // `o.__proto__ = p` runs Object.prototype's `__proto__` setter.
         k(&mut s);
         s.global_get(proto_key).call(str_eq);
         s.if_(BlockType::Empty);
-        as_obj(&mut s, V);
+        s.local_get(O).ref_as_non_null();
         k(&mut s);
         s.call(holder).call(obj_proto).ref_eq();
         s.if_(BlockType::Empty);
         s.local_get(V).local_get(VAL).call(set_proto).return_();
         s.end();
         s.end();
-        as_obj(&mut s, V);
+        s.local_get(O).ref_as_non_null();
         k(&mut s);
         s.local_get(VAL).call(prop_set).return_();
     }
@@ -3692,9 +3702,9 @@ fn regexp_plain(cx: &mut dyn Cx) -> Function {
         s.i32_const(0).return_();
         s.end();
     };
-    s.test_object(V);
-    fail_unless(&mut s);
-    as_obj(&mut s, V);
+    runtime::object_or(&mut s, V, |s| {
+        s.i32_const(0).return_();
+    });
     s.local_tee(O).struct_get(T_OBJECT, F_CLASS);
     s.i32_const(CLASS_MASK)
         .i32_and()
@@ -3890,15 +3900,13 @@ fn get_prototype_of(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(convert).call(throw);
     s.end();
-    s.test_object(V);
-    s.if_(BlockType::Empty);
-    as_obj(&mut s, V);
-    s.struct_get(T_OBJECT, F_PROTO).local_tee(P).ref_is_null();
-    s.if_(BlockType::Empty);
-    s.global_get(G_NULL).return_();
-    s.end();
-    s.local_get(P).return_();
-    s.end();
+    runtime::object_then(&mut s, V, |s| {
+        s.struct_get(T_OBJECT, F_PROTO).local_tee(P).ref_is_null();
+        s.if_(BlockType::Empty);
+        s.global_get(G_NULL).return_();
+        s.end();
+        s.local_get(P).return_();
+    });
     primitive_proto(cx, &mut s, V);
     s.end();
     f
