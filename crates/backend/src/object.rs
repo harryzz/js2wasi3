@@ -908,9 +908,11 @@ fn set_named(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_VALS)),
     ]);
     let mut s = f.instructions();
-    s.test_object(V);
-    s.if_(BlockType::Empty);
-    as_obj(&mut s, V);
+    // Not an object: the generic `set` (T93: one test-and-cast chain, as in `get_named`).
+    runtime::object_or(&mut s, V, |s| {
+        s.local_get(V).local_get(K).local_get(X).call(set);
+        s.return_();
+    });
     s.local_set(O);
     s.local_get(O).ref_as_non_null().local_get(K).local_get(H).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
@@ -988,9 +990,6 @@ fn set_named(cx: &mut dyn Cx) -> Function {
         .local_get(H)
         .local_get(SITE)
         .call(ordinary);
-    s.else_();
-    s.local_get(V).local_get(K).local_get(X).call(set);
-    s.end();
     s.end();
     f
 }

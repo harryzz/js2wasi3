@@ -148,7 +148,9 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   object (a `Map`, array, function…). `runtime::object_or` tests and casts in one chain: abstract `struct`,
   `$number`/`$oddball` out, `br_on_cast` to the final `$function`, `$array`, `$map`, then `$object` (inline for a
   plain object); `get_named` uses it (knucleotide −9.6%). Each exact final-type test costs ~1.5 ns, so chains stay
-  short: testing all 10 final subtypes at every site made plain-object reads 65% slower. Other sites: F376.)
+  short: testing all 10 final subtypes at every site made plain-object reads 65% slower. T93: `set_named` and
+  `instanceof` use it too, and `new` tests the constructor's result with `test_object` (a bare `ref.test (ref $object)`
+  on its usual `undefined` called `is_subtype`); `is_subtype` is ≤ 0.4% of every benchmark since.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
   (T78: the benchmarks called for it: `s += x` copied the whole string each time (O(n²): 200,000 appends 10.3 s).
   A variable that is appended to (`x += e`, `x = x + e …`; `closures::Analysis::appended`), holds strings and is

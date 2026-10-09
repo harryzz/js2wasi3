@@ -635,8 +635,10 @@ fn construct_ordinary(cx: &mut dyn Cx) -> Function {
     s.local_get(SELF)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_CODE);
-    s.call_indirect(0, T_CODE).local_tee(R);
-    s.ref_test_non_null(runtime::object());
+    s.call_indirect(0, T_CODE).local_set(R);
+    // T93: `test_object`, not `ref.test (ref $object)`: the usual result, `undefined`, isn't an exact
+    // `$object`, and the plain test called wasmtime's `is_subtype` on every `new`.
+    s.test_object(R);
     s.if_(BlockType::Result(jsval()));
     s.local_get(R);
     s.else_();
@@ -808,11 +810,11 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
         .array_get(T_VALS)
         .local_set(F);
     s.br(0).end().end();
-    s.test_object(V)
-        .i32_eqz();
-    s.if_(BlockType::Empty);
-    s.i32_const(0).return_();
-    s.end();
+    // V as an object in `O` (T93: one chain, no `is_subtype` for an array or function instance), or false.
+    runtime::object_or(&mut s, V, |s| {
+        s.i32_const(0).return_();
+    });
+    s.local_set(O);
     s.local_get(F).call(fn_prototype).local_set(P);
     s.test_object(P).i32_eqz();
     s.if_(BlockType::Empty);
@@ -821,8 +823,8 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
     s.global_get(check).call(concat);
     s.call(throw);
     s.end();
-    s.local_get(V)
-        .ref_cast_non_null(runtime::object())
+    s.local_get(O)
+        .ref_as_non_null()
         .struct_get(T_OBJECT, object::F_PROTO)
         .local_set(O);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
