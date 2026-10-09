@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-09: T96 generic `get`/`set` and ToPrimitive paths without `is_subtype` (full run)
+
+- Compiler (`claude/tender-cerf-lb9yx0` at beeb7f1): `get`, `set` test and cast objects with `runtime::object_or`;
+  `to_string`, `to_number`, `js_add`, loose equality, `to_property_key`, `get_prototype_of` with
+  `runtime::object_then`; `regexp_plain` with `object_or`. Runner: unchanged.
+- Full run on `a-03` (`~/t262-t96.log`): **no changes since the baseline**: 0 regressions, the same results.
+
 ## 2026-10-09: T94 `string_hash` memo (full run)
 
 - Compiler (`claude/tender-cerf-lb9yx0` at 3d6d3c7): a one-entry memo in `string_hash` (the same string object gets the

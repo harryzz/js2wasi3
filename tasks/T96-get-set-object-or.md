@@ -1,6 +1,6 @@
 # T96: the generic `get`/`set` without wasmtime's `is_subtype` (F379)
 
-Status: done (2026-10-09, cloud session; full test262 on a-03 pending: F383) | Depends on: T95 | Cloud
+Status: done (2026-10-09, cloud session; full test262 on a-03: no changes) | Depends on: T95 | Cloud
 
 ## Goal
 zigbee2mqtt's replay still spends ~2.4% in wasmtime's `is_subtype` (T94 profile). `subtype_sites.py` (fixed to
@@ -16,7 +16,7 @@ arrays and strings (`get_length`): typed arrays (Buffers) pay `test_object`'s fa
    `cargo test`, validate, smoke; full test262 on a-03 (user: no replay).
 
 ## Acceptance
-- [x] Before/after in Notes; results = node; test262: pending on a-03 (F383).
+- [x] Before/after in Notes; results = node; test262 on a-03: no changes since the baseline.
 - [x] Docs, follow-ups (F382, F383; F379 ticked).
 
 ## Notes / Result
@@ -37,9 +37,11 @@ which walks to `%TypedArray%.prototype` and calls its getter. zigbee2mqtt reads 
 **Commands**: full `scripts/diff.sh -j 4`: 247 pass, 19 skip, 2 known sandbox failures; `cargo test -p
 js2wasi3-backend` ok; `cargo test -p js2wasi3` 30 pass, 4 `wac` tests (tool missing); validate + smoke.
 
-**Not done**: full test262 (F383; user: no replay). Remaining `test_object` + cast sites not in the profile.
+**a-03**: full test262 no changes since the baseline (0 regressions). No replay (user).
 
-**Next smallest step**: F383 on a-03; then F382 (typed-array `.length` fast path, guarded against a redefined or
+**Not done**: Remaining `test_object` + cast sites not in the profile.
+
+**Next smallest step**: F382 (typed-array `.length` fast path, guarded against a redefined or
 deleted getter).
 
 ## Progress
@@ -49,3 +51,4 @@ deleted getter).
   get_prototype_of, to_key; regexp_plain `object_or`. Validates. nonplain.js: arr[k]=v −18%, fn[k] −11%, arr[k]
   −9%, "" + arr −9%, buf.length −7%; plain objects unchanged/better. Found: typed `.length` ~250 ns (F382). Full
   suite 247 pass; cargo test ok (wac missing). Docs; F379 ticked; F382, F383. Done (test262 pending on a-03).
+- 2026-10-09: a-03 (user): full test262 no changes since the baseline; HISTORY.md; F383 ticked.
