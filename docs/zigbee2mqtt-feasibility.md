@@ -1,7 +1,21 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T93/T94 profiled replays (2026-10-09), T92 `get_named` without `is_subtype` on the T79 replay (2026-10-09), T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T93–T97 on the T79 replay (2026-10-09), T93/T94 profiled replays (2026-10-09), T92 `get_named` without `is_subtype` on the T79 replay (2026-10-09), T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T93–T97 on the T79 replay 2026-10-09: 20.28 s
+
+One unprofiled replay on a-03 of the T97 build (T93 object tests, T94 `string_hash` memo, T96 generic `get`/`set`
+without `is_subtype`, T97 typed-array `.length` fast path). Run dir `~/js2wasi3-prod-run/t79/out-t97`.
+
+| | CPU (903 s) | vs node (8.66 s) | ms CPU per event | publishes / errors |
+|---|---|---|---|---|
+| T90 | 21.47 s | 2.48× | 39.18 | 13,478 / 9 |
+| T92 | 21.00 s | 2.42× | 38.32 | — |
+| **T97** | **20.28 s** | **2.34×** | **37.01** | 13,478 / 9 |
+
+- 0.72 s (3.4%) less than T92, 1.19 s (5.5%) less than T90; output = T90's (139 exact, 1 unmatched, the same 9
+  error lines). Startup 11.0 s wall, 1.44 s CPU (as before).
 
 ## T93/T94 profiled replays 2026-10-09 (under perf, not comparable to unprofiled runs)
 

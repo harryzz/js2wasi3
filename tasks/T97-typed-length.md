@@ -47,7 +47,8 @@ fixture collects results and prints after restoring.)
 **Commands**: full `scripts/diff.sh -j 4`: 248 pass, 19 skip, 2 known sandbox failures; `cargo test -p
 js2wasi3-backend` ok; `cargo test -p js2wasi3` 30 pass, 4 `wac` (tool missing); validate + smoke.
 
-**a-03**: full test262 no changes since the baseline (0 regressions).
+**a-03**: full test262 no changes since the baseline (0 regressions). zigbee2mqtt replay (user, unprofiled, T93–T97
+together): CPU **20.28 s** (T92 21.00 s, T90 21.47 s: −3.4% / −5.5%), output = T90's (13,478 publishes, 9 errors).
 
 **Not done**: `byteLength`/`byteOffset` getters
 take the slow path still (not in a profile).
@@ -60,3 +61,4 @@ take the slow path still (not in a profile).
   515–583 → 44–52 ms. Fixture typed-length.js (node needed results printed after restoring: its console.log breaks
   while Uint8Array.prototype.length is overridden): pass. Full suite 248 pass; cargo test ok (wac missing). Done.
 - 2026-10-09: a-03 (user): full test262 no changes since the baseline; HISTORY.md; F384 ticked.
+- 2026-10-09: a-03 replay (user) of the T97 build: cpu_steady 20.28 s (T92 21.00, T90 21.47), 37.01 ms CPU per event, 13,478 publishes / 9 errors / 139 exact = T90. Feasibility doc.
