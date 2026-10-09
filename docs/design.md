@@ -151,6 +151,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   short: testing all 10 final subtypes at every site made plain-object reads 65% slower. T93: `set_named` and
   `instanceof` use it too, and `new` tests the constructor's result with `test_object` (a bare `ref.test (ref $object)`
   on its usual `undefined` called `is_subtype`); `is_subtype` is ≤ 0.4% of every benchmark since.)
+  (T94: **`string_hash` memo**. Globals `G_HASH_KEY`/`G_HASH_VAL` keep the last string hashed and its hash; the
+  same string object (`ref.eq`) gets the stored hash, so a computed key is hashed once per lookup (not per indexed
+  prototype level) and once across back-to-back uses (`m.get(k)`, `m.set(k, …)`). Relies on strings visible to JS
+  never being mutated (`$strbuf` buffers never escape). Prototype hits −20%, knucleotide −8.6%.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
   (T78: the benchmarks called for it: `s += x` copied the whole string each time (O(n²): 200,000 appends 10.3 s).
   A variable that is appended to (`x += e`, `x = x + e …`; `closures::Analysis::appended`), holds strings and is

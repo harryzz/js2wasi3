@@ -201,8 +201,14 @@ pub const G_EPOCH: u32 = G_REGEXP_SNAP + 1;
 /// and the `G_EPOCH` then (an i31; null: none). Grown on demand from 16 entries: it's live in every
 /// collection, and wasmtime's copying collector runs often on a small heap.
 pub const G_SET_IC: u32 = G_EPOCH + 1;
+/// `(mut (ref null $string))` and `(mut i32)` (T94): the last string `object::Helper::Hash` hashed and its
+/// hash. The same string object again (`ref.eq`) gives the stored hash: a key is hashed once across the
+/// prototype levels of one lookup and across back-to-back uses (`m.get(k)` then `m.set(k, …)`). Strings
+/// visible to JS are never mutated, so the hash stays right.
+pub const G_HASH_KEY: u32 = G_SET_IC + 1;
+pub const G_HASH_VAL: u32 = G_HASH_KEY + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_SET_IC + 1;
+pub const GLOBALS: u32 = G_HASH_VAL + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -1063,6 +1069,23 @@ pub fn globals(
             shared: false,
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
+    );
+    // T94: the string hash memo (key, hash).
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_STRING),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(string()),
+    );
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0),
     );
     for _ in 0..extra {
         globals.global(

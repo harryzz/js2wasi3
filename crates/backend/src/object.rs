@@ -836,6 +836,11 @@ fn hash() -> Function {
     const N: u32 = 3;
     let mut f = Function::new([(3, ValType::I32)]);
     let mut s = f.instructions();
+    // T94: the same string as last time: its hash (see `runtime::G_HASH_KEY`).
+    s.local_get(S).global_get(runtime::G_HASH_KEY).ref_eq();
+    s.if_(BlockType::Empty);
+    s.global_get(runtime::G_HASH_VAL).return_();
+    s.end();
     s.i32_const(0x811c9dc5_u32 as i32).local_set(H);
     s.local_get(S).array_len().local_set(N);
     count_loop(&mut s, I, N, |s| {
@@ -848,6 +853,8 @@ fn hash() -> Function {
             .i32_mul()
             .local_set(H);
     });
+    s.local_get(S).global_set(runtime::G_HASH_KEY);
+    s.local_get(H).global_set(runtime::G_HASH_VAL);
     s.local_get(H);
     s.end();
     f
