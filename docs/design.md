@@ -167,6 +167,11 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   receiver has no own properties, its prototype is one of two cached at the current `G_EPOCH` (the chain to
   `%TypedArray%.prototype` checked for another `length` and flagged with `mark_chain`, T90), and the entry still
   holds the snapshot getter. Redefining, deleting or shadowing `length` falls back to `get`. ~12× faster.)
+  (T98: **GC heap reserved at start**. wasmtime's copying collector grows its heap only when the live data fills a
+  semi-space, so on its small default heap programs collect constantly (27–60% of allocation-heavy benchmarks). The
+  start function allocates and drops a byte array of `build --gc-reserve` MiB (default 16, 0 off): the heap grows
+  once and stays. RayTrace +73%, EarleyBoyer +28%, DeltaBlue +25%; ~2× the size in memory, ~8 ms at start. wasmtime's
+  DRC collector was 7–15× slower.)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
   (T78: the benchmarks called for it: `s += x` copied the whole string each time (O(n²): 200,000 appends 10.3 s).
   A variable that is appended to (`x += e`, `x = x + e …`; `closures::Analysis::appended`), holds strings and is

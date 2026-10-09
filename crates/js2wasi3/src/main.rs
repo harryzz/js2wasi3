@@ -52,6 +52,12 @@ enum Cmd {
         /// program fails with the reason) or `none` (ignored; test262 hosts don't fail on them).
         #[arg(long, value_name = "MODE", default_value = "throw", value_parser = ["throw", "none"])]
         unhandled_rejections: String,
+        /// MiB of GC heap to reserve at start (T98): a throwaway allocation grows wasmtime's heap
+        /// once, so collections are rarer (wasmtime's default heap is small; a reservation costs
+        /// about twice its size in memory). 0: none. As `wasmtime -O gc-heap-initial-size`, which
+        /// still works on top.
+        #[arg(long, value_name = "MIB", default_value_t = 16, value_parser = clap::value_parser!(u32).range(0..=1024))]
+        gc_reserve: u32,
     },
 }
 
@@ -508,6 +514,7 @@ fn main() -> anyhow::Result<()> {
             command,
             include,
             unhandled_rejections,
+            gc_reserve,
         } => {
             let ignore_unhandled = unhandled_rejections == "none";
             let source = read(&entry)?;
@@ -529,6 +536,7 @@ fn main() -> anyhow::Result<()> {
                 let (boundary, names) = match_world(&program, &user)?;
                 let mut ir = js2wasi3_lower::lower_with(&program, Some(&boundary))?;
                 ir.ignore_unhandled = ignore_unhandled;
+                ir.gc_reserve_mib = gc_reserve;
                 for e in &mut ir.exports {
                     e.name = names[&e.name].clone();
                 }
@@ -584,6 +592,7 @@ fn main() -> anyhow::Result<()> {
             };
             let mut ir = js2wasi3_lower::lower_with(&program, wasi.as_ref())?;
             ir.ignore_unhandled = ignore_unhandled;
+            ir.gc_reserve_mib = gc_reserve;
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?
             } else {

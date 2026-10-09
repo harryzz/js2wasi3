@@ -1340,6 +1340,13 @@ impl Emitter<'_> {
         for (j, chunk) in self.strings.chunks(CONST_CHUNK).enumerate() {
             let mut f = Function::new([]);
             let mut s = f.instructions();
+            if j + 1 == chunks && self.m.gc_reserve_mib > 0 {
+                // T98: the start function first grows the GC heap once (`build --gc-reserve`): a
+                // dropped byte array of that size, so later collections are rarer.
+                s.i32_const((self.m.gc_reserve_mib << 20) as i32)
+                    .array_new_default(runtime::T_BYTES)
+                    .drop();
+            }
             for (k, c) in chunk.iter().enumerate() {
                 s.i32_const(bytes.len() as i32);
                 let (maker, len) = match c {

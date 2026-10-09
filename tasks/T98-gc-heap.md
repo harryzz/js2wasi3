@@ -1,6 +1,6 @@
 # T98: GC cost on the default heap (F371, F322)
 
-Status: in progress (started 2026-10-09, cloud session; measurements done, design decision pending) | Depends on: T97
+Status: done (2026-10-09, cloud session; test262 on a-03 pending: F385) | Depends on: T97
 
 ## Goal
 Programs run without wasmtime's `-O gc-heap-initial-size` flag (the default, e.g. any command a user runs) spend a
@@ -34,8 +34,33 @@ large share of their time in the copying collector. zigbee2mqtt runs with 512 Mi
   would cost an array load on every constant use (every `obj.x` key); zigbee2mqtt's root scanning is ~1% at
   512 MiB, so likely neutral or negative there; worth it only where collections stay frequent.
 
-## Decision (user)
-A default heap reservation emitted by the compiler (size? build option to change or disable it), or opt-in only.
+## Decision (user, 2026-10-09)
+A 16 MiB reservation by default, with a build option to change or disable it.
+
+## Notes / Result
+**What changed**: `build --gc-reserve=<MiB>` (default 16, 0–1024; `crates/js2wasi3/src/main.rs`) sets
+`ir::Module::gc_reserve_mib`; the start function (the last `consts$init` chunk, `crates/backend/src/lib.rs`) first
+does `i32.const (MiB << 20); array.new_default $bytes; drop`: wasmtime's heap grows once and stays, so later
+collections are rarer. A module without string constants has no start function and no reservation (not expected in
+practice: the prelude has constants). `wasmtime -O gc-heap-initial-size` still works on top. README updated.
+
+**Measurements** (cloud, 2 rounds each, `--gc-reserve=0` → default 16): RayTrace score 380–389 → 638–696 (+73%),
+EarleyBoyer 1,197–1,255 → 1,575–1,583 (+28%), DeltaBlue 345–411 → 431–512 (+25%), Splay 760–781 → 863–891
+(+13%); peak RSS small programs 20 → 51 MB, big ones unchanged (EarleyBoyer 61 → 53 MB, Splay 531 → 533 MB).
+hello-world: 7 → 15 ms.
+
+**Commands**: full `scripts/diff.sh -j 4` (builds with the default): 248 pass, 19 skip, 2 known sandbox failures;
+`cargo test -p js2wasi3-backend` ok; `cargo test -p js2wasi3` 30 pass, 4 `wac` (tool missing); validate + smoke.
+
+**Not done**: F322 (constants in one array): fewer roots, but a load on every constant use; with the reservation
+collections are rarer, so its gain shrinks; left open with these numbers. The copying collector's cost per collection
+(copying the live set) stays: only a bigger heap reduces it. Full test262 (F385).
+
+**Next smallest step**: F385 on a-03; a zigbee2mqtt replay isn't needed (it runs with 512 MiB already; the
+reservation is then inside that heap).
 
 ## Progress
 - 2026-10-09: task created (user: F371/F322 first, zigbee2mqtt is the reference). Measurements above.
+- 2026-10-09: user chose 16 MiB default + flag. Implemented `--gc-reserve` (ir field, start-function allocation).
+  RayTrace +73%, EarleyBoyer +28%, DeltaBlue +25%, Splay +13%; hello 7 → 15 ms, small-program RSS 20 → 51 MB. Full
+  suite 248 pass; cargo test ok (wac missing). README, design.md, F371 ticked, F322 note, F385. Done.

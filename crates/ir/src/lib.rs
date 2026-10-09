@@ -125,6 +125,9 @@ pub struct Module {
     pub promise_statics: Vec<BuiltinMethod>,
     /// `build --unhandled-rejections=none` (T50): unhandled rejections are ignored.
     pub ignore_unhandled: bool,
+    /// `build --gc-reserve=<MiB>` (T98): the start function allocates (and drops) a byte array of this
+    /// many MiB, so wasmtime's GC heap grows once and later collections are rarer (0: none).
+    pub gc_reserve_mib: u32,
     /// The entry is a CommonJS module (T60): after its code node runs the `nextTick` queue before
     /// the microtasks (after an ES module's, the microtasks first).
     pub cjs_main: bool,
