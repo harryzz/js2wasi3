@@ -407,6 +407,13 @@ pub enum Helper {
     RegExpPlain,
     /// `(o: $object)` (T76): fill `G_REGEXP_SNAP` from `RegExp.prototype` `o` as just built.
     RegExpSnapshot,
+    /// `(o: $object)` (T97): `G_TLEN`'s snapshot (`length`'s entry index and getter) from
+    /// `%TypedArray%.prototype` `o` as just built.
+    TypedLengthSnapshot,
+    /// `(p: (ref null $object)) -> i32` (T97): does the chain from `p` reach `%TypedArray%.prototype` without
+    /// another `length`? If so, flag it (`mark_chain`, so a `length` added later bumps `G_EPOCH`) and cache `p`
+    /// with the current `G_EPOCH` in `G_TLEN`.
+    TypedLengthFill,
     /// `(v) -> jsval`: a RegExp's data; `null` for `RegExp.prototype`; `undefined` otherwise.
     RegExpData,
     /// `(data) -> jsval`: a new Date holding `data` (T26).
@@ -527,6 +534,8 @@ impl Helper {
             Helper::RegExpNew => "regexp_new",
             Helper::RegExpPlain => "regexp_plain",
             Helper::RegExpSnapshot => "regexp_snapshot",
+            Helper::TypedLengthSnapshot => "typed_length_snapshot",
+            Helper::TypedLengthFill => "typed_length_fill",
             Helper::RegExpData => "regexp_data",
             Helper::DateNew => "date_new",
             Helper::ModuleNew => "module_new",
@@ -598,6 +607,8 @@ impl Helper {
             Helper::BuiltinToString => (vec![v], vec![I32]),
             Helper::RegExpPlain => (vec![v], vec![I32]),
             Helper::RegExpSnapshot => (vec![o], vec![]),
+            Helper::TypedLengthSnapshot => (vec![o], vec![]),
+            Helper::TypedLengthFill => (vec![on], vec![I32]),
             Helper::MakeArguments
             | Helper::RegExpNew
             | Helper::RegExpData
@@ -697,6 +708,8 @@ impl Helper {
             Helper::RegExpNew => regexp_new(cx),
             Helper::RegExpPlain => regexp_plain(cx),
             Helper::RegExpSnapshot => regexp_snapshot(cx),
+            Helper::TypedLengthSnapshot => typed_length_snapshot(cx),
+            Helper::TypedLengthFill => typed_length_fill(cx),
             Helper::RegExpData => regexp_data(cx),
             Helper::DateNew => state_new(cx, CLASS_DATE, Builtin::Date),
             Helper::StackNew(false) => state_new(cx, CLASS_STACK, Builtin::DisposableStack),
@@ -1277,9 +1290,30 @@ fn get_length(cx: &mut dyn Cx) -> Function {
     let get = h(cx, Helper::Get);
     let box_ = rh(cx, runtime::Helper::Box);
     let length = cx.str("length");
+    let typed = cx.names("$typed");
     const V: u32 = 0;
     const N: u32 = 1;
-    let mut f = Function::new([(1, ValType::I32)]);
+    const T: u32 = 2;
+    const SNAP: u32 = 3;
+    const P: u32 = 4;
+    const E: u32 = 5;
+    const H: u32 = 6;
+    const X: u32 = 7;
+    let mut f = Function::new([
+        (1, ValType::I32),
+        (
+            1,
+            ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
+                heap_type: crate::typed::typed(),
+            }),
+        ),
+        (1, rt(true, T_VALS)),
+        (1, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, rt(true, T_OBJECT)),
+        (1, jsval()),
+    ]);
     let mut s = f.instructions();
     let number = |s: &mut InstructionSink| {
         // An i31 below 2^30 (the runtime's small integers), else a boxed number.
@@ -1302,6 +1336,85 @@ fn get_length(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(string()).array_len();
     number(&mut s);
     s.else_();
+    if typed {
+        // T97: a typed array whose `length` is still `%TypedArray%.prototype`'s built-in getter: its length
+        // field, without the chain walk and the getter call (see `runtime::G_TLEN`). Any check failing: `get`.
+        let fill = h(cx, Helper::TypedLengthFill);
+        let length_t = crate::typed::Length::new(cx);
+        s.block(BlockType::Empty);
+        s.local_get(V)
+            .ref_test_non_null(crate::typed::typed())
+            .i32_eqz()
+            .br_if(0);
+        s.local_get(V)
+            .ref_cast_non_null(crate::typed::typed())
+            .local_set(T);
+        s.global_get(runtime::G_TLEN)
+            .local_tee(SNAP)
+            .ref_is_null()
+            .br_if(0);
+        // No own properties (so no own `length`).
+        s.local_get(T).struct_get(T_OBJECT, F_COUNT).br_if(0);
+        // The prototype: one of the two cached at the current epoch, or cached now.
+        s.local_get(T).struct_get(T_OBJECT, F_PROTO).local_set(P);
+        let slot = |s: &mut InstructionSink, k: i32| {
+            s.local_get(SNAP).i32_const(k).array_get(T_VALS);
+            s.local_get(P).ref_eq();
+            s.local_get(SNAP).i32_const(k + 1).array_get(T_VALS);
+            s.global_get(runtime::G_EPOCH).ref_i31().ref_eq();
+            s.i32_and();
+        };
+        slot(&mut s, 2);
+        slot(&mut s, 4);
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        s.else_();
+        s.local_get(P).call(fill).i32_eqz().br_if(1);
+        s.end();
+        // `%TypedArray%.prototype`'s entry: still `length` with the snapshot getter.
+        s.global_get(G_PROTOS + Builtin::TypedArray.index())
+            .local_tee(H)
+            .ref_is_null()
+            .br_if(0);
+        s.local_get(SNAP)
+            .i32_const(0)
+            .array_get(T_VALS)
+            .ref_cast_non_null(HeapType::I31)
+            .i31_get_s()
+            .local_tee(E);
+        s.local_get(H)
+            .ref_as_non_null()
+            .struct_get(T_OBJECT, F_COUNT)
+            .i32_lt_u()
+            .i32_eqz()
+            .br_if(0);
+        s.local_get(H)
+            .ref_as_non_null()
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(E)
+            .array_get(T_KEYS)
+            .global_get(length)
+            .ref_eq()
+            .i32_eqz()
+            .br_if(0);
+        s.local_get(H)
+            .ref_as_non_null()
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .array_get(T_VALS)
+            .local_tee(X);
+        s.ref_test_non_null(props::accessor()).i32_eqz().br_if(0);
+        s.local_get(X)
+            .ref_cast_non_null(props::accessor())
+            .struct_get(runtime::T_ACCESSOR, 0);
+        s.local_get(SNAP).i32_const(1).array_get(T_VALS);
+        s.ref_eq().i32_eqz().br_if(0);
+        s.local_get(T).ref_as_non_null();
+        length_t.emit(&mut s);
+        number(&mut s);
+        s.return_();
+        s.end();
+    }
     s.local_get(V).global_get(length).call(get);
     s.end();
     s.end();
@@ -2262,6 +2375,11 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
     if b == Builtin::RegExp {
         // T76: remember what `RegExpPlain` checks.
         let snap = h(cx, Helper::RegExpSnapshot);
+        s.local_get(O).ref_as_non_null().call(snap);
+    }
+    if b == Builtin::TypedArray {
+        // T97: remember `length`'s getter for `GetLength`.
+        let snap = h(cx, Helper::TypedLengthSnapshot);
         s.local_get(O).ref_as_non_null().call(snap);
     }
     if let Builtin::Error(k) = b {
@@ -3622,6 +3740,103 @@ pub const REGEXP_PLAIN_KEYS: [&str; 10] = [
     "unicodeSets",
     "sticky",
 ];
+
+/// `$typed_length_snapshot(o)` (T97), see [`Helper::TypedLengthSnapshot`]. No `length` accessor (not
+/// expected) leaves `G_TLEN` null: no fast path then.
+fn typed_length_snapshot(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwnNamed);
+    let length = cx.str("length");
+    let units: Vec<u16> = "length".encode_utf16().collect();
+    const O: u32 = 0;
+    const E: u32 = 1;
+    const V: u32 = 2;
+    const SNAP: u32 = 3;
+    let mut f = Function::new([(1, ValType::I32), (1, jsval()), (1, rt(true, T_VALS))]);
+    let mut s = f.instructions();
+    s.local_get(O)
+        .global_get(length)
+        .i32_const(key_hash(&units))
+        .call(find)
+        .local_tee(E);
+    s.i32_const(0).i32_lt_s();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .array_get(T_VALS)
+        .local_tee(V);
+    s.ref_test_non_null(props::accessor()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.return_();
+    s.end();
+    s.i32_const(6).array_new_default(T_VALS).local_tee(SNAP);
+    s.i32_const(0).local_get(E).ref_i31().array_set(T_VALS);
+    s.local_get(SNAP).i32_const(1);
+    s.local_get(V)
+        .ref_cast_non_null(props::accessor())
+        .struct_get(runtime::T_ACCESSOR, 0);
+    s.array_set(T_VALS);
+    s.local_get(SNAP).global_set(runtime::G_TLEN);
+    s.end();
+    f
+}
+
+/// `$typed_length_fill(p) -> i32` (T97), see [`Helper::TypedLengthFill`].
+fn typed_length_fill(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwnNamed);
+    let mark = h(cx, Helper::MarkChain);
+    let length = cx.str("length");
+    let units: Vec<u16> = "length".encode_utf16().collect();
+    const P: u32 = 0;
+    const O: u32 = 1;
+    const T: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (1, rt(true, T_VALS))]);
+    let mut s = f.instructions();
+    s.global_get(runtime::G_TLEN).local_tee(T).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(P).local_set(O);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(O).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(O)
+        .global_get(G_PROTOS + Builtin::TypedArray.index())
+        .ref_eq()
+        .br_if(1);
+    s.local_get(O)
+        .ref_as_non_null()
+        .global_get(length)
+        .i32_const(key_hash(&units))
+        .call(find)
+        .i32_const(0)
+        .i32_ge_s();
+    s.if_(BlockType::Empty);
+    s.i32_const(0).return_();
+    s.end();
+    s.local_get(O).ref_as_non_null().struct_get(T_OBJECT, F_PROTO).local_set(O);
+    s.br(0).end().end();
+    s.local_get(P).call(mark);
+    // The older slot gives way: [4], [5] = [2], [3]; [2], [3] = p, epoch.
+    for (dst, src) in [(4, 2), (5, 3)] {
+        s.local_get(T).i32_const(dst);
+        s.local_get(T).i32_const(src).array_get(T_VALS);
+        s.array_set(T_VALS);
+    }
+    s.local_get(T).i32_const(2).local_get(P).array_set(T_VALS);
+    s.local_get(T)
+        .i32_const(3)
+        .global_get(runtime::G_EPOCH)
+        .ref_i31()
+        .array_set(T_VALS);
+    s.i32_const(1);
+    s.end();
+    f
+}
 
 /// `$regexp_snapshot(o)` (T76), see [`Helper::RegExpSnapshot`]. A key that isn't there leaves the
 /// snapshot unset (no RegExp is then plain).

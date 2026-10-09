@@ -207,8 +207,13 @@ pub const G_SET_IC: u32 = G_EPOCH + 1;
 /// visible to JS are never mutated, so the hash stays right.
 pub const G_HASH_KEY: u32 = G_SET_IC + 1;
 pub const G_HASH_VAL: u32 = G_HASH_KEY + 1;
+/// `(mut (ref null $vals))` (T97): for a typed array's `.length` without its getter (`object::Helper::GetLength`):
+/// `[0]` `length`'s entry index in `%TypedArray%.prototype` as built (an i31) and `[1]` its getter (snapshot,
+/// `object::Helper::TypedLengthSnapshot`), then two cached prototypes with the `G_EPOCH` at which their chain to
+/// `%TypedArray%.prototype` had no other `length` (`[2]`, `[3]` and `[4]`, `[5]`; `object::Helper::TypedLengthFill`).
+pub const G_TLEN: u32 = G_HASH_VAL + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_HASH_VAL + 1;
+pub const GLOBALS: u32 = G_TLEN + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -1098,6 +1103,15 @@ pub fn globals(
             shared: false,
         },
         &ConstExpr::i32_const(0),
+    );
+    // T97: the typed-array `.length` snapshot and prototype cache.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_VALS),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
     );
     for _ in 0..extra {
         globals.global(
