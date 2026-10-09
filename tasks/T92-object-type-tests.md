@@ -50,6 +50,8 @@ js2wasi3-backend` ok; `wasm-tools validate` + smoke; perf (`--profile=perfmap`).
 the libcall for non-plain objects (F376). zigbee2mqtt replay (a-03, 2026-10-09, run by the user): CPU 21.00 s (T91 21.26 / 21.51 s, T90 21.47 s), matching
 as T90 (139 exact, 1 unmatched): no loss, 1–2% less (within noise). F377 done.
 
+**Not run**: full test262 (F378, with T93 on the next a-03 run).
+
 **Next smallest step**: F376 in the next helper a profile shows (`set_named` for `map.size`-style writes, or the
 generic `get`), with the same before/after checks.
 
