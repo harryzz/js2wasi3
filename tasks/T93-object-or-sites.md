@@ -80,3 +80,7 @@ remaining share is unknown until a replay is profiled (F379). Full test262 (F378
   `own_get` ← `lookup` ← generic `get`), `find_own_named` 4.6%, `get` 4.5%, `call_value` 3.1%, GC forward 2.7%,
   `string_hash` 2.6% (inside `find_own` ← `get`: run-time keys hashed per access). `is_subtype` share pending
   (asked for a `-g none` report, F379).
+- 2026-10-09: zigbee2mqtt perf (`-g none`, T93 replay): `is_subtype*` ≈ 2.6% (1.58 + 0.66 + 0.39; T79 ~3.4%),
+  `get_interned_func_ref` ~0.1%. Benchmarks don't show these callers; asked the user to run `subtype_sites.py` on
+  `p.wasm` (F379). Computed-key path (`get`/`find_own`/`own_get`/`string_hash`/`to_property_key`) ≈ 15%: F363 updated
+  (string-hash caching doesn't need shapes).
