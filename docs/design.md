@@ -155,6 +155,11 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   same string object (`ref.eq`) gets the stored hash, so a computed key is hashed once per lookup (not per indexed
   prototype level) and once across back-to-back uses (`m.get(k)`, `m.set(k, …)`). Relies on strings visible to JS
   never being mutated (`$strbuf` buffers never escape). Prototype hits −20%, knucleotide −8.6%.)
+  (T95: **no inline cache for computed keys**. Per-site caches keyed on the key string were measured in three
+  designs (a separate helper with megamorphic states, the same with number keys kept on `get`, the cache inside
+  `get`): stable-key sites up to 2.3× faster, but varying-key sites and untyped array code 5–14% slower and the
+  programs net negative, so none was kept (T95's Notes). A cache that helps varying keys needs the object layout
+  as its key (shapes, F321).)
 - Strings: `(array i16)` (UTF-16, as JS requires), ropes added later only if a benchmark calls for them.
   (T78: the benchmarks called for it: `s += x` copied the whole string each time (O(n²): 200,000 appends 10.3 s).
   A variable that is appended to (`x += e`, `x = x + e …`; `closures::Analysis::appended`), holds strings and is

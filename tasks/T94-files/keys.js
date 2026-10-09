@@ -1,6 +1,6 @@
 "use strict";
 // T94 micro-benchmark: computed-key property access (`o[k]`), the generic path.
-// Usage: node keys.js [case] [n]; case: own | proto | miss | built | rw | all (default all).
+// Usage: node keys.js [case] [n]; case: own | proto | miss | built | rw | stable | all (default all).
 const which = process.argv[2] || "all";
 const n = Number(process.argv[3] || 2000000);
 const names = [];
@@ -49,7 +49,19 @@ function rw() {
   for (let i = 0; i < n; i++) { const k = names[i & 31]; o[k] = o[k] + 1; }
   return o.field3;
 }
-const cases = { own, proto, miss, built, rw };
+// One key per site (T95): an accessor helper called with the same key, as code like `get(obj, "x")` does.
+function read(o, k) {
+  return o[k];
+}
+function stable() {
+  const o = {};
+  for (const k of names) o[k] = 2;
+  const k = names[7];
+  let s = 0;
+  for (let i = 0; i < n; i++) s += read(o, k);
+  return s;
+}
+const cases = { own, proto, miss, built, rw, stable };
 for (const name of which === "all" ? Object.keys(cases) : [which]) {
   const t = Date.now();
   const r = cases[name]();
