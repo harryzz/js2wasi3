@@ -9,9 +9,12 @@ import re, sys
 wat, syms = sys.argv[1], sys.argv[2]
 sites = {}; names = {}; cur = None
 for line in open(wat):
-    m = re.match(r'\s*\(func \$(?:"#func\d+ (\S+?)"|(\S+)) \(;(\d+);\)', line)
+    # `(func $name (;N;)` or, for a repeated name, `(func $"#funcN name" (@name "name") (;N;)`.
+    m = re.match(r'\s*\(func \$(?:"[^"]*"|\S+)(?: \(@name "([^"]*)"\))? \(;(\d+);\)', line)
     if m:
-        cur = int(m.group(3)); names[cur] = m.group(1) or m.group(2); continue
+        cur = int(m.group(2))
+        names[cur] = m.group(1) or re.match(r'\s*\(func \$(\S+)', line).group(1)
+        continue
     if cur is not None and re.search(r'ref\.(test|cast) \(ref (null )?4\)', line):
         sites[cur] = sites.get(cur, 0) + 1
 sub = 0.0; rows = []
