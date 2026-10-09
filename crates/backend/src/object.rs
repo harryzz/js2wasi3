@@ -286,6 +286,10 @@ pub enum Helper {
     /// `(o: (ref null $object), k, hash: i32) -> jsval`: [`Helper::Lookup`] for a key that is neither an
     /// array index nor `length` (so no array own-get), with its hash given (T74).
     LookupNamed,
+    /// `(p: (ref null $object), k: (ref $string), hash: i32, site: i32) -> jsval` (T99): [`Helper::LookupNamed`]
+    /// for a [`Helper::GetNamed`] site whose receiver has no own `k`: the site's prototype-hit cache
+    /// (`G_PIC`) first, filled on a hit of the walk.
+    LookupNamedCached,
     /// `(v: jsval, k: (ref $string), hash: i32, site: i32) -> jsval`: `v.k` for a constant key that is
     /// neither an array index nor `length` (T74): an object first tries the entry its site's inline cache
     /// remembers (`G_IC[site]`, valid when that entry's key is `k` itself), then
@@ -443,6 +447,7 @@ impl Helper {
             Helper::Holder => "holder",
             Helper::FindOwnNamed => "find_own_named",
             Helper::LookupNamed => "lookup_named",
+            Helper::LookupNamedCached => "lookup_named_cached",
             Helper::GetNamed => "get_named",
             Helper::IcStore => "ic_store",
             Helper::SetIcStore => "set_ic_store",
@@ -561,6 +566,7 @@ impl Helper {
             Helper::Holder => (vec![on, s], vec![on]),
             Helper::FindOwnNamed => (vec![o, s, I32], vec![I32]),
             Helper::LookupNamed => (vec![on, s, I32], vec![v]),
+            Helper::LookupNamedCached => (vec![on, s, I32, I32], vec![v]),
             Helper::GetNamed => (vec![v, s, I32, I32], vec![v]),
             Helper::IcStore => (vec![I32, I32], vec![]),
             Helper::SetIcStore => (vec![I32, rt(true, T_OBJECT), I32], vec![]),
@@ -627,6 +633,7 @@ impl Helper {
             Helper::FindOwn => find_own(cx, false),
             Helper::FindOwnNamed => find_own(cx, true),
             Helper::LookupNamed => lookup_named(cx),
+            Helper::LookupNamedCached => lookup_named_cached(cx),
             Helper::GetNamed => get_named(cx),
             Helper::IcStore => ic_store(),
             Helper::SetIcStore => set_ic_store(),
@@ -1187,12 +1194,167 @@ fn lookup_named(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// `lookup_named_cached(p, k, hash, site)` (T99), see [`Helper::LookupNamedCached`]. `G_PIC[4 site ..]`:
+/// `P`, `H`, epoch tag, entry. A hit: `p` is `P`, the tag is the current `G_EPOCH`, and `H`'s entry still has key
+/// `k` (a delete nulls it; a re-define elsewhere on the chain bumps the epoch, as do a key added to or a new
+/// prototype of any object from `P` up, all flagged by `mark_chain` at the fill). The value is read fresh.
+fn lookup_named_cached(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwnNamed);
+    let mark = h(cx, Helper::MarkChain);
+    const P: u32 = 0;
+    const K: u32 = 1;
+    const HV: u32 = 2;
+    const SITE: u32 = 3;
+    const C: u32 = 4;
+    const O: u32 = 5;
+    const E: u32 = 6;
+    const N: u32 = 7;
+    const NEW: u32 = 8;
+    let mut f = Function::new([
+        (1, rt(true, T_VALS)),
+        (1, rt(true, T_OBJECT)),
+        (2, ValType::I32),
+        (1, rt(true, T_VALS)),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(SITE).i32_const(2).i32_shl().local_set(SITE); // 4 slots per site
+    // The cached holder.
+    s.block(BlockType::Empty);
+    s.global_get(runtime::G_PIC).local_tee(C).ref_is_null().br_if(0);
+    s.local_get(SITE).i32_const(3).i32_add();
+    s.local_get(C).array_len().i32_ge_u().br_if(0);
+    s.local_get(C).local_get(SITE).array_get(T_VALS);
+    s.local_get(P).ref_eq().i32_eqz().br_if(0);
+    s.local_get(C).local_get(SITE).i32_const(2).i32_add().array_get(T_VALS);
+    s.global_get(runtime::G_EPOCH).ref_i31().ref_eq().i32_eqz().br_if(0);
+    s.local_get(C)
+        .local_get(SITE)
+        .i32_const(1)
+        .i32_add()
+        .array_get(T_VALS)
+        .ref_cast_non_null(object())
+        .local_set(O);
+    s.local_get(C)
+        .local_get(SITE)
+        .i32_const(3)
+        .i32_add()
+        .array_get(T_VALS)
+        .ref_cast_non_null(HeapType::I31)
+        .i31_get_s()
+        .local_tee(E);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).i32_ge_u().br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(E)
+        .array_get(T_KEYS)
+        .local_get(K)
+        .ref_eq()
+        .i32_eqz()
+        .br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .array_get(T_VALS)
+        .return_();
+    s.end();
+    // The walk (as `lookup_named`); a hit fills the site.
+    s.local_get(P).local_set(O);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(O).ref_is_null().br_if(1);
+    s.local_get(O)
+        .ref_as_non_null()
+        .local_get(K)
+        .local_get(HV)
+        .call(find)
+        .local_tee(E);
+    s.i32_const(0).i32_ge_s();
+    s.if_(BlockType::Empty);
+    {
+        // A site already filled for another prototype at the current epoch (receivers of different
+        // classes) keeps its entry: refilling on every alternation cost more than the walk.
+        s.global_get(runtime::G_PIC).local_tee(C).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(SITE).i32_const(3).i32_add().local_get(C).array_len().i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(C).local_get(SITE).i32_const(2).i32_add().array_get(T_VALS);
+        s.global_get(runtime::G_EPOCH).ref_i31().ref_eq();
+        s.if_(BlockType::Empty);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .array_get(T_VALS)
+            .return_();
+        s.end();
+        s.end();
+        s.end();
+        s.local_get(P).call(mark);
+        // Room for the site: max(2 n, 4 site + 4, 64) slots.
+        s.global_get(runtime::G_PIC).local_tee(C).ref_is_null();
+        s.if_(BlockType::Result(ValType::I32));
+        s.i32_const(0);
+        s.else_();
+        s.local_get(C).array_len();
+        s.end();
+        s.local_tee(N);
+        s.local_get(SITE).i32_const(4).i32_add().i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(N).i32_const(1).i32_shl().local_tee(N);
+        s.local_get(SITE).i32_const(4).i32_add();
+        s.local_get(N).local_get(SITE).i32_const(4).i32_add().i32_gt_u();
+        s.select().local_tee(N);
+        s.i32_const(64);
+        s.local_get(N).i32_const(64).i32_gt_u();
+        s.select();
+        s.array_new_default(T_VALS).local_set(NEW);
+        s.local_get(C).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(NEW)
+            .i32_const(0)
+            .local_get(C)
+            .i32_const(0)
+            .local_get(C)
+            .array_len()
+            .array_copy(T_VALS, T_VALS);
+        s.end();
+        s.local_get(NEW).local_tee(C).global_set(runtime::G_PIC);
+        s.end();
+        s.local_get(C).local_get(SITE).local_get(P).array_set(T_VALS);
+        s.local_get(C).local_get(SITE).i32_const(1).i32_add().local_get(O).array_set(T_VALS);
+        s.local_get(C)
+            .local_get(SITE)
+            .i32_const(2)
+            .i32_add()
+            .global_get(runtime::G_EPOCH)
+            .ref_i31()
+            .array_set(T_VALS);
+        s.local_get(C)
+            .local_get(SITE)
+            .i32_const(3)
+            .i32_add()
+            .local_get(E)
+            .ref_i31()
+            .array_set(T_VALS);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(E)
+            .array_get(T_VALS)
+            .return_();
+    }
+    s.end();
+    s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(O);
+    s.br(0).end().end();
+    s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
+    s.end();
+    f
+}
+
 /// `get_named(v, k, hash, site)`: `v.k` (see [`Helper::GetNamed`]); the same steps as [`get`] for such a
 /// key. A cached entry index is only a guess: it's used when that entry's key is `k` (keys are unique
 /// within an object, and a deleted entry's key is null).
 fn get_named(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwnNamed);
-    let lookup = h(cx, Helper::LookupNamed);
+    let lookup = h(cx, Helper::LookupNamedCached);
+    let lookup_plain = h(cx, Helper::LookupNamed);
     let store = h(cx, Helper::IcStore);
     let get = h(cx, Helper::Get);
     let sproto = h(cx, Helper::Proto(Builtin::String));
@@ -1218,7 +1380,7 @@ fn get_named(cx: &mut dyn Cx) -> Function {
         runtime::is_string(s, V);
         s.if_(BlockType::Result(jsval()));
         s.call(sproto);
-        s.local_get(K).local_get(H).call(lookup);
+        s.local_get(K).local_get(H).call(lookup_plain);
         s.local_get(V);
         s.call(value);
         s.else_();
@@ -1275,8 +1437,9 @@ fn get_named(cx: &mut dyn Cx) -> Function {
             .local_get(E)
             .array_get(T_VALS);
         s.else_();
+        // T99: through the site's prototype-hit cache.
         s.local_get(O).struct_get(T_OBJECT, F_PROTO);
-        s.local_get(K).local_get(H).call(lookup);
+        s.local_get(K).local_get(H).local_get(SITE).call(lookup);
         s.end();
         s.local_get(V);
         s.call(value);
