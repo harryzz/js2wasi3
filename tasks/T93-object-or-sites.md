@@ -74,3 +74,9 @@ remaining share is unknown until a replay is profiled (F379). Full test262 (F378
   Validates; fixtures with instanceof/new/class pass (library/ nested ones fail on T91 too). EarleyBoyer 1.4 → 0.1%,
   RayTrace 1.1 → 0.4%; Octane scores and plain-object micros within noise. Full suite 247 pass; cargo test ok
   (wac tests: tool missing). Docs, F379. Done.
+- 2026-10-09: a-03 (user): full test262 "No changes since the baseline" (0 regressions, T92 + T93); HISTORY.md;
+  F378 ticked. Replay with `PERF=` (`t79/out-t93`): cpu_steady 21.7 s under perf (not comparable to 21.00 s),
+  matching as T90 (139 exact, 1 unmatched). perf head (call graphs): `get_named` 8.0%, `find_own` 5.1% (from
+  `own_get` ← `lookup` ← generic `get`), `find_own_named` 4.6%, `get` 4.5%, `call_value` 3.1%, GC forward 2.7%,
+  `string_hash` 2.6% (inside `find_own` ← `get`: run-time keys hashed per access). `is_subtype` share pending
+  (asked for a `-g none` report, F379).

@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-09: T92 + T93 object tests without `is_subtype` (full run)
+
+- Compiler (`claude/tender-cerf-lb9yx0` at a47f0f2): `get_named`, `set_named` and `instanceof` test and cast objects
+  in one inline chain (`runtime::object_or`); `new` tests the constructor's result with `test_object`. Runner: unchanged.
+- Full run on `a-03` (`~/t262-t93.log`): **no changes since the baseline** (T91's run): 0 regressions, the same
+  results (28,099 of 28,984 run pass). Baseline rewritten unchanged.
+
 ## 2026-10-08: T91 `Map`/`Set` hashes in the index slots (full run)
 
 - Compiler (`claude/tender-cerf-lb9yx0` at the T91 code commit): the `Map`/`Set` hash index stores each entry's hash
