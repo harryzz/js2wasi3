@@ -16,6 +16,10 @@ without `is_subtype`, T97 typed-array `.length` fast path). Run dir `~/js2wasi3-
 
 - 0.72 s (3.4%) less than T92, 1.19 s (5.5%) less than T90; output = T90's (139 exact, 1 unmatched, the same 9
   error lines). Startup 11.0 s wall, 1.44 s CPU (as before).
+- T98 (2026-10-09, after this run) reserves 16 MiB of GC heap at start (`build --gc-reserve`). The replay runs
+  with `-O gc-heap-initial-size=536870912` (F347), so the reservation sits inside that heap and changes nothing
+  here (not replayed). Without the flag, `--gc-reserve` is what a user gets by default; zigbee2mqtt's live set is
+  larger than 16 MiB, so keep the 512 MiB flag (or a reservation of that order) for it.
 
 ## T93/T94 profiled replays 2026-10-09 (under perf, not comparable to unprofiled runs)
 
