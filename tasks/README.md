@@ -104,6 +104,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T95](T95-computed-key-cache.md) | An inline cache for computed-key reads (F363 remainder): three designs measured, all net losses; **no code kept** | done | T94 |
 | [T96](T96-get-set-object-or.md) | The generic `get`/`set`, ToPrimitive paths without wasmtime's `is_subtype` (F379; `arr[k]=v` −18%, `fn[k]` −11%) | done | T95 |
 | [T97](T97-typed-length.md) | A typed array's / Buffer's `.length` without the getter call (F382; ~12× faster) | done | T96 |
+| [T98](T98-gc-heap.md) | GC cost on the default heap (F371, F322): measured; design decision pending | in progress | T97 |
 | [T89](T89-call-paths.md) | function calls without wasmtime libcalls (F350), `F.prototype` directly (F369) | done | T88 |
 | [T88](T88-earley-boyer-miscompile.md) | EarleyBoyer's wrong result (F333): `var` redeclaring a parameter | done | — |
 | [T87](T87-crash-traps.md) | Wasm traps in test262 (36 crashes) | done | — |
