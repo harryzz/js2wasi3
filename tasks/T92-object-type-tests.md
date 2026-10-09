@@ -47,8 +47,8 @@ reads 65% slower (Progress).
 js2wasi3-backend` ok; `wasm-tools validate` + smoke; perf (`--profile=perfmap`).
 
 **Not done**: the other 69 `test_object` + `as_obj` sites (set_named, the generic `get`/`set`, calls…) still pay
-the libcall for non-plain objects (F376). No zigbee2mqtt replay (a-03): `get_named` is that workload's hottest
-helper and plain objects are unchanged, so no change is expected; one replay would confirm (F377).
+the libcall for non-plain objects (F376). zigbee2mqtt replay (a-03, 2026-10-09, run by the user): CPU 21.00 s (T91 21.26 / 21.51 s, T90 21.47 s), matching
+as T90 (139 exact, 1 unmatched): no loss, 1–2% less (within noise). F377 done.
 
 **Next smallest step**: F376 in the next helper a profile shows (`set_named` for `map.size`-style writes, or the
 generic `get`), with the same before/after checks.
@@ -68,3 +68,4 @@ generic `get`), with the same before/after checks.
   output same); props.js reads equal or better (best 372 → 358), methods (meth.js, 12 rounds) median 752 = 752;
   array/function method micro unchanged. Full fixture suite 247 pass, 2 known sandbox fails; cargo test ok; perf: no
   `is_subtype` in knucleotide. Docs, follow-ups F376, F377. Done.
+- 2026-10-09: replay on a-03 (user): cpu_steady 21.00 s, 38.32 ms CPU per event, 139 exact / 1 unmatched (= T90). Feasibility doc; F377 ticked.

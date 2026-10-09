@@ -1,7 +1,22 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T92 `get_named` without `is_subtype` on the T79 replay (2026-10-09), T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T92 `get_named` without `is_subtype` on the T79 replay 2026-10-09: 21.00 s
+
+One replay on a-03 of the T92 build (`get_named` tests and casts objects in one inline chain). Run dir
+`~/js2wasi3-prod-run/t79/out-t92`.
+
+| | CPU (903 s) | vs node (8.66 s) | ms CPU per event |
+|---|---|---|---|
+| T90 | 21.47 s | 2.48× | 39.18 |
+| T91 (2 runs) | 21.51 / 21.26 s | 2.48× / 2.45× | 39.25 / 38.80 |
+| **T92** | **21.00 s** | **2.42×** | **38.32** |
+
+- 1–2% less than T91, within this replay's run-to-run spread; no loss (plain objects are this workload's
+  property accesses, measured unchanged). Matching as T90 (139 exact, 7 by command, 2 by name, 1 unmatched);
+  publishes and error lines not counted for this run.
 
 ## T91 `Map` hashes on the T79 replay 2026-10-08: 21.26 / 21.51 s
 
