@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-09: T97 typed-array `.length` fast path (full run)
+
+- Compiler (`claude/tender-cerf-lb9yx0` at 6862446): `get_length` reads a typed array's length field when
+  `%TypedArray%.prototype`'s getter is the snapshot one and nothing on the chain shadows `length` (`G_TLEN`,
+  `G_EPOCH`). Runner: unchanged.
+- Full run on `a-03` (`~/t262-t97.log`): **no changes since the baseline**: 0 regressions, the same results.
+
 ## 2026-10-09: T96 generic `get`/`set` and ToPrimitive paths without `is_subtype` (full run)
 
 - Compiler (`claude/tender-cerf-lb9yx0` at beeb7f1): `get`, `set` test and cast objects with `runtime::object_or`;

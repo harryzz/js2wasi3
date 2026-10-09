@@ -1,6 +1,6 @@
 # T97: a typed array's / Buffer's `.length` without the getter call (F382)
 
-Status: done (2026-10-09, cloud session; test262 on a-03 pending: F384) | Depends on: T96 | Cloud
+Status: done (2026-10-09, cloud session; full test262 on a-03: no changes) | Depends on: T96 | Cloud
 
 ## Goal
 `buf.length` / `u8.length` cost ~250 ns (node 2–4 ns): `get_length` sends them to `get`, which walks Buffer.prototype
@@ -20,7 +20,7 @@ constantly.
    `diff.sh`, `cargo test`, validate, smoke; test262 on a-03 (typed arrays redefine `length` in tests).
 
 ## Acceptance
-- [x] Before/after in Notes; results = node (new fixture `builtins/typed-length.js`); test262: pending (F384).
+- [x] Before/after in Notes; results = node (new fixture `builtins/typed-length.js`); test262 on a-03: no changes since the baseline.
 - [x] Docs, follow-ups (F382 ticked, F384).
 
 ## Notes / Result
@@ -47,13 +47,16 @@ fixture collects results and prints after restoring.)
 **Commands**: full `scripts/diff.sh -j 4`: 248 pass, 19 skip, 2 known sandbox failures; `cargo test -p
 js2wasi3-backend` ok; `cargo test -p js2wasi3` 30 pass, 4 `wac` (tool missing); validate + smoke.
 
-**Not done**: full test262 (F384; test262 redefines typed `length` in places). `byteLength`/`byteOffset` getters
+**a-03**: full test262 no changes since the baseline (0 regressions).
+
+**Not done**: `byteLength`/`byteOffset` getters
 take the slow path still (not in a profile).
 
-**Next smallest step**: F384 on a-03.
+**Next smallest step**: `byteLength`/`byteOffset` the same way if a profile shows them.
 
 ## Progress
 - 2026-10-09: task created (user: F382). Design from T76's RegExp snapshot + T90's epoch.
 - 2026-10-09: implemented snapshot + fill + fast path; validates; buf.length 522–684 → 44–80 ms, u8.length
   515–583 → 44–52 ms. Fixture typed-length.js (node needed results printed after restoring: its console.log breaks
   while Uint8Array.prototype.length is overridden): pass. Full suite 248 pass; cargo test ok (wac missing). Done.
+- 2026-10-09: a-03 (user): full test262 no changes since the baseline; HISTORY.md; F384 ticked.
