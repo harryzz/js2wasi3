@@ -1,7 +1,30 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T92 `get_named` without `is_subtype` on the T79 replay (2026-10-09), T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T93/T94 profiled replays (2026-10-09), T92 `get_named` without `is_subtype` on the T79 replay (2026-10-09), T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T93/T94 profiled replays 2026-10-09 (under perf, not comparable to unprofiled runs)
+
+Replays with `PERF=` (perf `-g` at 499 Hz adds overhead): T93 (`out-t93`) 21.7 s, T94 (`out-t94`) 21.38 s CPU;
+matching as T90 (139 exact, 1 unmatched). Self time (`-g none`), T93 → T94:
+
+| | T93 | T94 |
+|---|---|---|
+| `get_named` | 8.01% | 8.06% |
+| `find_own` | 5.14% | 5.27% |
+| `find_own_named` | 4.56% | 4.98% |
+| `get` (generic, computed keys) | 4.45% | 4.88% |
+| `call_value` | 3.07% | 3.01% |
+| `string_hash` | 2.59% | **1.56%** |
+| `own_get` | 1.78% | 1.52% |
+| `to_property_key` | 1.65% | 1.43% |
+| `is_subtype*` (3 symbols) | 2.63% | ~2.6% |
+| GC (`forward` + `scan_field` + `collect_increment`) | 6.0% | 5.9% |
+
+- T94's memo removed ~40% of the hashing; the computed-key path (`get` → `lookup` → `own_get` → `find_own`, plus
+  `to_property_key`, `string_hash`) is still ~14.7%, now mostly `find_own`'s probe and compare and `get`'s
+  dispatch: a per-site cache for computed keys is the next step there (F363). Storing hashes in strings would save
+  at most the remaining ~1.6%.
 
 ## T92 `get_named` without `is_subtype` on the T79 replay 2026-10-09: 21.00 s
 

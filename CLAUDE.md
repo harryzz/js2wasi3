@@ -12,7 +12,7 @@ No cloud batch is open (`tasks/CLOUD-BATCH.md`: the T83 batch is finished and me
 sessions use the same plan limits, so speed tasks run locally now.
 
 **Local sessions**: shapes (T83–T86) were reverted (branch `shapes`). T87–T94 are done (T91: `Map`/`Set` hashes; T92/T93: object tests without `is_subtype`; T94: `string_hash` memo;
-2026-10-08/09). Next task: to be chosen with the user (open: F381 on a-03, then F363's remainder; F379; F371).
+2026-10-08/09). Next task: to be chosen with the user (open: F363's remainder, a per-site cache for computed keys; F379; F371).
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.

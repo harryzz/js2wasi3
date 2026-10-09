@@ -1,6 +1,6 @@
 # T94: computed-key property access: hash a key once (F363)
 
-Status: done (2026-10-09, cloud session; replay + test262 on a-03: F381) | Depends on: T93 | Cloud (+ a-03: test262, replay)
+Status: done (2026-10-09, cloud session; test262 + profiled replay on a-03 done) | Depends on: T93 | Cloud (+ a-03: test262, replay)
 
 ## Goal
 Computed-key access (`o[k]`, `get_length` on non-arrays, RegExp internals) is ~15% of the zigbee2mqtt replay
@@ -47,6 +47,9 @@ globals (F322, F371); 315 ms instead of 5,800 ms with `-O gc-heap-initial-size=2
 `cargo test -p js2wasi3-backend` ok; `cargo test -p js2wasi3` 30 pass, 4 `*_compose_with_wac` fail (no `wac` here);
 validate + smoke; perf.
 
+**a-03** (user, 2026-10-09): full test262 no changes since the baseline; profiled replay CPU 21.38 s (T93's
+profiled 21.7 s), `string_hash` 2.59% → 1.56%, computed-key path ~15.6% → ~14.7% (feasibility doc).
+
 **Not done**: caching hashes in the strings themselves (representation change) and per-site caches for computed
 keys: the zigbee2mqtt replay should show first how much of F363's ~15% is left (F381). Full test262 (F381).
 
@@ -59,3 +62,7 @@ keys: the zigbee2mqtt replay should show first how much of F363's ~15% is left (
 - 2026-10-09: implemented the memo; validates. keys.js: prototype hits −20%, misses/read-write −7%, own hits equal;
   knucleotide median −8.6%; plain objects unchanged. Keys built at run time: ~5,800 ms, GC root scanning on the
   default heap (315 ms with a 256 MiB heap): the known F322/F371 cost. Full suite 247 pass; cargo test ok (wac missing). Done.
+- 2026-10-09: a-03 (user): test262 no changes (0 regressions); profiled replay 21.38 s (T93 profiled 21.7 s),
+  `string_hash` 2.59 → 1.56%; `find_own` 5.27%, `get` 4.88%, `own_get` 1.52%, `to_property_key` 1.43%. Decision for
+  F363: hashes in strings ≤ 1.6% left, not worth a representation change; next is a per-site cache for computed
+  keys (find_own + get ≈ 10%). F381 ticked; F363 updated; feasibility doc, HISTORY.md.

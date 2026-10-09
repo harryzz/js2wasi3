@@ -3,6 +3,12 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-09: T94 `string_hash` memo (full run)
+
+- Compiler (`claude/tender-cerf-lb9yx0` at 3d6d3c7): a one-entry memo in `string_hash` (the same string object gets the
+  stored hash). Runner: unchanged.
+- Full run on `a-03` (`~/t262-t94.log`): **no changes since the baseline**: 0 regressions, the same results.
+
 ## 2026-10-09: T92 + T93 object tests without `is_subtype` (full run)
 
 - Compiler (`claude/tender-cerf-lb9yx0` at a47f0f2): `get_named`, `set_named` and `instanceof` test and cast objects
