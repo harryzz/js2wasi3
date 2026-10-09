@@ -1,6 +1,6 @@
 # T98: GC cost on the default heap (F371, F322)
 
-Status: done (2026-10-09, cloud session; test262 on a-03 pending: F385) | Depends on: T97
+Status: done (2026-10-09, cloud session; full test262 on a-03: 0 regressions, 6 timeouts now pass) | Depends on: T97
 
 ## Goal
 Programs run without wasmtime's `-O gc-heap-initial-size` flag (the default, e.g. any command a user runs) spend a
@@ -54,9 +54,12 @@ hello-world: 7 → 15 ms.
 
 **Not done**: F322 (constants in one array): fewer roots, but a load on every constant use; with the reservation
 collections are rarer, so its gain shrinks; left open with these numbers. The copying collector's cost per collection
-(copying the live set) stays: only a bigger heap reduces it. Full test262 (F385).
+(copying the live set) stays: only a bigger heap reduces it. 
 
-**Next smallest step**: F385 on a-03; a zigbee2mqtt replay isn't needed (it runs with 512 MiB already; the
+**a-03**: full test262: 6 changes, 0 regressions: six timeouts now pass (Array every/filter/forEach/some, decodeURI,
+decodeURIComponent stress tests: GC-bound, now in time).
+
+**Next smallest step**: none required; a zigbee2mqtt replay isn't needed (it runs with 512 MiB already; the
 reservation is then inside that heap).
 
 ## Progress
@@ -64,3 +67,4 @@ reservation is then inside that heap).
 - 2026-10-09: user chose 16 MiB default + flag. Implemented `--gc-reserve` (ir field, start-function allocation).
   RayTrace +73%, EarleyBoyer +28%, DeltaBlue +25%, Splay +13%; hello 7 → 15 ms, small-program RSS 20 → 51 MB. Full
   suite 248 pass; cargo test ok (wac missing). README, design.md, F371 ticked, F322 note, F385. Done.
+- 2026-10-09: a-03 (user): full test262 6 changes, 0 regressions (6 timeouts → pass); HISTORY.md; F385 ticked.

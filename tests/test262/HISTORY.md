@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-09: T98 GC heap reserved at start (full run)
+
+- Compiler (`claude/tender-cerf-lb9yx0` at ae0d3bc): every test's start function reserves 16 MiB of GC heap
+  (`build --gc-reserve`, default 16), so wasmtime's copying collector runs less often. Runner: unchanged.
+- Full run on `a-03` (`~/t262-t98.log`): **6 changes since the baseline, 0 regressions**: six timeouts now pass
+  (`Array/prototype/{every,filter,forEach,some}/15.4.4.1x-…-c-ii-…`, `decodeURI/S15.1.3.1_A2.5_T1`,
+  `decodeURIComponent/S15.1.3.2_A2.5_T1`): GC-bound loops that finish in time now. Baseline updated.
+
 ## 2026-10-09: T97 typed-array `.length` fast path (full run)
 
 - Compiler (`claude/tender-cerf-lb9yx0` at 6862446): `get_length` reads a typed array's length field when
