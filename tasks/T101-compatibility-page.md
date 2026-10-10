@@ -145,3 +145,9 @@ step: re-run `node scripts/compat.mjs` at the end of tasks that add node APIs (a
   Totals: supported 638, present 306, partial 16, refused 162, missing 570, no module 298, not probed 1,051, n/a 3.
 - 2026-10-10: user: benchmarks on a-03, then publish. `bench <results.tsv> [machine]` records the machine; a-03 run started (`~/t101-bench.sh`, log `~/t101-bench.log`, `scripts/bench.sh -r 3 -o ~/t101-bench`, all programs). Pages workflow `.github/workflows/pages.yml` (checkout v7, configure-pages v6, upload-pages-artifact v5, deploy-pages v5) deploys `site/`. Links: README, design.md (Testing). `bench.sh` no longer names the missing docs/benchmarks.md. F387, F388 added.
 - 2026-10-10: a-03 benchmarks done (7 min, all SAME): imported (machine shown by its hardware, not its host name), re-rendered. Docs, F380 ticked. Publishing (user: yes).
+- 2026-10-10: published: Pages enabled (`gh api -X POST repos/harryzz/js2wasi3/pages -f build_type=workflow`),
+  workflow run 38048976449 deployed; https://harryzz.github.io/js2wasi3/ and `compatibility.json` serve (200).
+  Then found: the Language tab counted all of `baseline.json` (32,039 entries: `--update` merges, so runs of other
+  directories stay); now only `SUBSET`'s directories (from scripts/test262.mjs): 31,461 tests. And the repo's
+  baseline lacked T98's six timeout → pass changes (only a-03's copy had them, and this task's rsync to a-03
+  overwrote that copy): restored from `~/t262-t98.log`; the page now says 28,105 of 28,984 = HISTORY.

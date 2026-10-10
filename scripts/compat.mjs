@@ -426,9 +426,14 @@ function language() {
   const file = path.join(ROOT, "tests/test262/baseline.json");
   const base = JSON.parse(fs.readFileSync(file, "utf8"));
   const date = execFileSync("git", ["log", "-1", "--format=%cs", "--", file], { cwd: ROOT, encoding: "utf8" }).trim();
+  // Only the agreed subset (`SUBSET` in scripts/test262.mjs): `--update` merges runs, so the baseline also keeps
+  // results of other directories run once.
+  const runner = fs.readFileSync(path.join(ROOT, "scripts/test262.mjs"), "utf8");
+  const subset = [...runner.slice(runner.indexOf("const SUBSET = ["), runner.indexOf("];", runner.indexOf("const SUBSET = ["))).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   const dirs = new Map();
   const total = { pass: 0, run: 0, skip: 0 };
   for (const [test, res] of Object.entries(base)) {
+    if (!subset.some((d) => test.startsWith(`${d}/`))) continue;
     const parts = test.split("/");
     const dir = parts[0] === "built-ins" || parts[0] === "language" ? parts.slice(0, 2).join("/") : parts[0];
     const d = dirs.get(dir) ?? { dir, pass: 0, run: 0, skip: 0 };

@@ -75,19 +75,17 @@ can still differ from node in details. Language conformance is the test262 secti
 
 ## Language (test262)
 
-test262 subset, `tests/test262/baseline.json` of 2026-10-08: **28542 of 29560** tests run pass (96.6%), 2479 skipped. History: [tests/test262/HISTORY.md](../tests/test262/HISTORY.md); keywords: [docs/keywords.md](keywords.md).
+test262 subset, `tests/test262/baseline.json` of 2026-10-08: **28105 of 28984** tests run pass (97.0%), 2477 skipped. History: [tests/test262/HISTORY.md](../tests/test262/HISTORY.md); keywords: [docs/keywords.md](keywords.md).
 
 | Directory | Pass | Run | Pass % |
 |---|---|---|---|
 | annexB | 33 | 35 | 94.3% |
-| built-ins/Array | 2918 | 3030 | 96.3% |
-| built-ins/ArrayBuffer | 17 | 17 | 100.0% |
+| built-ins/Array | 2922 | 3030 | 96.4% |
 | built-ins/AsyncDisposableStack | 101 | 103 | 98.1% |
 | built-ins/BigInt | 75 | 76 | 98.7% |
-| built-ins/DataView | 426 | 559 | 76.2% |
 | built-ins/Date | 579 | 583 | 99.3% |
-| built-ins/decodeURI | 52 | 55 | 94.5% |
-| built-ins/decodeURIComponent | 53 | 56 | 94.6% |
+| built-ins/decodeURI | 53 | 55 | 96.4% |
+| built-ins/decodeURIComponent | 54 | 56 | 96.4% |
 | built-ins/DisposableStack | 90 | 92 | 97.8% |
 | built-ins/encodeURI | 29 | 31 | 93.5% |
 | built-ins/encodeURIComponent | 29 | 31 | 93.5% |
