@@ -15,7 +15,7 @@ sessions use the same plan limits, so speed tasks run locally now.
 2026-10-08/09). T95 (computed-key caches) was measured and dropped, no code kept. T96 (generic `get`/`set` without `is_subtype`) is done. T97 (typed-array `.length` fast path) and T98 (16 MiB GC heap reserved at start, `build --gc-reserve`) are done.
 T99 (prototype-hit cache, F359) was measured and dropped on 2026-10-10 (replay 20.64 s vs 20.28 s), no code kept.
 T100 (string constants as one GC root, F322) was measured and dropped on 2026-10-10 (benchmarks 3–7% slower), no code kept.
-Next task: none chosen.
+Next task: **T101** (`tasks/T101-compatibility-page.md`, F380: a generated Node.js compatibility page).
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.
