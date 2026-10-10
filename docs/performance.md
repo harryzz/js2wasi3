@@ -144,3 +144,108 @@ reason.
 2. `var x;` with every read after a write stays `f64` (F389): mandelbrot's 77%.
 3. Regex literals compiled to Wasm ahead of time (F336): octane-regexp, regexredux.
 4. Numbers in object fields and arrays without boxing (F323): needs shapes (F321) for fields.
+
+## Same programs under scriptc
+
+[scriptc](https://github.com/vercel-labs/scriptc) 0.2.7 compiles TypeScript and JavaScript ahead of time to native
+executables (LLVM) or to `wasm32-wasi` modules (WASI preview 1, linear memory), each with its own runtime library
+(reference counting and a cycle collector); with TypeScript types it compiles typed values directly. Run 2026-10-10 on
+the machine above with `scripts/vs-scriptc/prep.sh` and `run.sh`:
+
+- **One source file per program**, the same bytes for every runtime (checksummed before and after the run):
+  - set A: the 18 benchmarks as `scripts/bench.sh` builds them, and scriptc's 13 single-file workloads
+    (`benchmarks/runtime/workloads`, commit `1bf547a`, its arguments) with the types stripped by node
+    (`module.stripTypeScriptTypes`);
+  - set B: the 13 workloads' `.ts` files. node and scriptc read them; js2wasi3 has no TypeScript front end and runs
+    its build of the same file with the types stripped (set A's module).
+- Two changes in the shared benchmark files so that scriptc can build them: `var window;` before Octane's base.js
+  (`Cannot find name 'window'`) and `Number(process.argv[i])` for `+process.argv[i]` (scriptc: `comparing non-number,
+  non-string values are not supported yet`). node's output on every shared file equals its output on the original.
+- Builds: `scriptc build` (default release mode, no `--dynamic`: no QuickJS in the executables);
+  `SCRIPTC_TARGET=wasm32-wasi` with `@scriptc/runtime-wasm32-wasi` 0.2.7 and zig 0.17.0 as the linker; js2wasi3
+  `build` (release). Both Wasm kinds precompiled (`wasmtime compile`) and run by wasmtime 49.0.2.
+- 3 interleaved rounds per program (node, scriptc native, scriptc Wasm, js2wasi3), wall time, median. A runtime's
+  output (stdout + stderr + exit status) must equal node's byte for byte, otherwise it is "fails" and not timed.
+  "no build": the compiler rejects the file.
+
+**Set A: JavaScript (identical .js/.mjs file for all four)**
+
+| program | node s | scriptc native s | scriptc Wasm s | js2wasi3 s | js2wasi3 / scriptc Wasm |
+|---|---|---|---|---|---|
+| binarytrees | 0.38 | 6.32 | 10.36 | 9.14 | 0.88× |
+| fannkuchredux | 0.39 | 36.49 | 69.46 | 9.02 | 0.13× |
+| fasta | 0.25 | 5.18 | 8.53 | 0.96 | 0.11× |
+| knucleotide | 1.20 | 2.85 | 4.74 | 5.18 | 1.09× |
+| mandelbrot | 0.18 | 4.43 | 7.08 | 3.90 | 0.55× |
+| nbody | 0.15 | 46.01 | 95.54 | 6.06 | 0.06× |
+| pidigits | 0.36 | fails | fails | 0.99 |  |
+| regexredux | 0.42 | 1.03 | 1.38 | 3.01 | 2.18× |
+| revcomp | 0.09 | fails | fails | 0.52 |  |
+| spectralnorm | 0.12 | 9.12 | 15.57 | 1.26 | 0.08× |
+| octane-richards | 0.13 | fails | fails | 5.02 |  |
+| octane-deltablue | 0.14 | fails | fails | 3.74 |  |
+| octane-raytrace | 0.21 | no build | no build | 7.27 |  |
+| octane-navier-stokes | 0.20 | fails | fails | 3.44 |  |
+| octane-crypto | 0.26 | no build | no build | 5.83 |  |
+| octane-splay | 0.21 | no build | no build | 3.62 |  |
+| octane-earley-boyer | 0.51 | no build | no build | 10.21 |  |
+| octane-regexp | 0.40 | fails | fails | 22.33 |  |
+| json-records | 0.58 | 1.34 | 2.10 | 3.91 | 1.86× |
+| regex-logs | 0.28 | 0.23 | 0.41 | 2.55 | 6.18× |
+| ast-interp | 0.29 | fails | fails | 2.38 |  |
+| records-sort | 0.29 | 2.77 | 4.42 | 4.93 | 1.12× |
+| template-render | 0.21 | 0.19 | 0.29 | 1.10 | 3.81× |
+| functional-pipeline | 0.35 | 2.72 | 3.96 | 4.66 | 1.18× |
+| async-pipeline | 0.11 | fails | fails | 0.28 |  |
+| word-graph | 0.60 | 1.27 | 1.97 | 2.49 | 1.26× |
+| alloc-trees | 0.16 | 6.77 | 13.19 | 2.06 | 0.16× |
+| numeric-kernels | 0.17 | fails | fails | 0.95 |  |
+| validate-errors | 0.78 | 1.37 | 2.22 | 3.30 | 1.49× |
+| csv-numbers | 0.62 | 0.42 | 0.77 | 4.78 | 6.23× |
+| log-lines | 0.72 | 0.35 | 0.82 | 0.60 | 0.73× |
+
+geomean over the 18 programs all four run: scriptc native / node 6.69×, scriptc Wasm / node 11.35×, scriptc Wasm / native 1.70×, js2wasi3 / node 8.59×, js2wasi3 / scriptc Wasm 0.76×
+
+runs with node's output: node 31/31, scriptc native 18, scriptc Wasm 18, js2wasi3 31 of 31
+
+**Set B: TypeScript (identical .ts file; js2wasi3: the same file with node's type stripping)**
+
+| program | node s | scriptc native s | scriptc Wasm s | js2wasi3 s | js2wasi3 / scriptc Wasm |
+|---|---|---|---|---|---|
+| json-records | 0.60 | 0.23 | 0.47 | 3.85 | 8.29× |
+| regex-logs | 0.36 | 0.19 | 0.36 | 2.54 | 7.11× |
+| ast-interp | 0.33 | 0.25 | 0.53 | 2.37 | 4.51× |
+| records-sort | 0.33 | 0.17 | 0.35 | 4.89 | 14.06× |
+| template-render | 0.31 | 0.10 | 0.17 | 1.11 | 6.42× |
+| functional-pipeline | 0.38 | 0.14 | 0.31 | 4.62 | 14.71× |
+| async-pipeline | 0.15 | 0.04 | 0.09 | 0.27 | 3.09× |
+| word-graph | 0.66 | 0.28 | 0.48 | 2.50 | 5.19× |
+| alloc-trees | 0.23 | 0.08 | 0.22 | 2.04 | 9.34× |
+| numeric-kernels | 0.23 | 0.07 | 0.12 | 0.95 | 7.63× |
+| validate-errors | 0.84 | 0.22 | 0.41 | 3.29 | 8.03× |
+| csv-numbers | 0.68 | 0.27 | 0.50 | 4.76 | 9.50× |
+| log-lines | 0.79 | 0.15 | 0.39 | 0.61 | 1.56× |
+
+geomean over the 13 programs all four run: scriptc native / node 0.36×, scriptc Wasm / node 0.75×, scriptc Wasm / native 2.06×, js2wasi3 / node 4.99×, js2wasi3 / scriptc Wasm 6.63×
+
+runs with node's output: node 13/13, scriptc native 13, scriptc Wasm 13, js2wasi3 13 of 13
+
+scriptc's failures, the same natively and in Wasm: raytrace, crypto, splay, earley-boyer don't build (TypeScript
+errors in Octane's code: `Cannot find name 'DV'`, `Variable 'Flog' is used before being assigned`, `Cannot find
+namespace 'SplayTree'`, `Cannot find name 'jsstring2string'`); at run time pidigits (`comparing non-number,
+non-string values`, BigInt), revcomp (`'string.toString' ... has no scriptc lowering yet`), richards, navier-stokes,
+regexp (`value.toPrecision is not a function`), deltablue (`inheritsFrom is not a function`), ast-interp (`spreading
+'unknown' into Math.max`), async-pipeline (`Promise.all with this combined result type`), numeric-kernels (`Checked
+array construction exceeds the native allocation limit`).
+
+**What the measurements say** (only what the tables show):
+- JavaScript, both in Wasm on the same wasmtime: js2wasi3 runs all 31 programs with node's output, scriptc 18; on
+  those 18 js2wasi3 takes 0.76× scriptc's time (geomean): less on 8 (nbody 0.06×, spectralnorm 0.08×, fasta 0.11×,
+  fannkuchredux 0.13×, alloc-trees 0.16×, mandelbrot 0.55×, log-lines 0.73×, binarytrees 0.88×), more on 10
+  (csv-numbers 6.2×, regex-logs 6.2×, template-render 3.8×, regexredux 2.2×, json-records 1.9×, validate-errors 1.5×,
+  word-graph 1.3×, functional-pipeline 1.2×, records-sort 1.1×, knucleotide 1.1×).
+- The same 13 workloads with types (set B) and without (set A): scriptc's Wasm takes 4.8× longer without them
+  (geomean of the 10 that run both ways; alloc-trees 60×, functional-pipeline 13×, records-sort 13×, csv-numbers
+  1.5×, regex-logs 1.1×). With types it is 0.75× node's time, and js2wasi3 (the same module either way) 6.6× its time.
+- scriptc's Wasm build against its native build: 1.70× (JavaScript), 2.06× (TypeScript), geomean.
+- Not shown by these runs: which part of js2wasi3 makes up its gap on any one program. For that, the profiles above.
