@@ -836,6 +836,9 @@ deployed by `.github/workflows/pages.yml` when `site/` changes on `main`). `inve
 list for a new node version; `bench <results.tsv>` imports a `scripts/bench.sh` run; `render` alone reuses
 `docs/compat/probe.json`. Known partial APIs are hand-kept in `docs/compat/partial.json`.
 
+**Profiles** (2026-10-10): `scripts/profile.sh <benchdir> <outdir>` records perf profiles of the benchmarks under
+node and js2wasi3; `scripts/profile-compare.py <outdir>` splits CPU by category. Results: `docs/performance.md`.
+
 **test262** (T23): `node scripts/test262.mjs [-j N] [--list] [--causes N] [--update] <dir | file | subset>...`
 - test262 is a blobless sparse clone in `test262/` (gitignored) at the commit pinned in `TOOLS.md`: `scripts/fetch-test262.sh`.
 - Each test is compiled as one ES module (always strict; T54: the work directory's `package.json` says `"type":
