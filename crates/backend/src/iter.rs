@@ -10,8 +10,8 @@
 //! - [`ARRAY_LIKE`]: `Array.prototype.values` on another object (T25): `length` and `obj[i]`.
 //! - [`ARRAY_KEYS`], [`ARRAY_ENTRIES`]: `Array.prototype.keys`/`entries` (T25), the same way.
 //!
-//! Arrays and strings don't look at `Symbol.iterator` (a replaced `Array.prototype[Symbol.iterator]`
-//! isn't seen).
+//! Arrays and strings skip the protocol while the built-in iteration is intact (T102: watched
+//! entries, `object::WATCH_ITER`); a replaced `[Symbol.iterator]` or `next` makes them use it.
 
 use crate::runtime::JsTest;
 use js2wasi3_ir::ErrorKind;
@@ -352,39 +352,40 @@ fn open(cx: &mut dyn Cx) -> Function {
         null_eq(s);
         s.struct_new(T_ITER).return_();
     };
-    // Arrays and strings by index, unless their `[Symbol.iterator]` was replaced (T25: looked up
-    // only when the code names `iterator`).
-    let checked = cx.names("iterator");
-    // (After the type test on the stack: `test && [Symbol.iterator] is a built-in values`.)
-    let fast = |s: &mut InstructionSink| {
-        if checked {
-            s.if_(BlockType::Result(ValType::I32));
-            s.local_get(V)
-                .global_get(G_SYM_ITERATOR)
-                .call(get)
-                .local_tee(M);
-            s.ref_test_non_null(func::function());
-            s.if_(BlockType::Result(ValType::I32));
-            s.local_get(M)
-                .ref_cast_non_null(func::function())
-                .struct_get(runtime::T_FUNCTION, func::F_KIND)
-                .i32_const(func::KIND_VALUES)
-                .i32_eq();
-            s.else_();
-            s.i32_const(0);
-            s.end();
-            s.else_();
-            s.i32_const(0);
-            s.end();
-        }
+    // Arrays and strings by index while the built-in iteration is intact (T102: `WATCH_ITER` covers
+    // `Array.prototype[Symbol.iterator]` and `%ArrayIteratorPrototype%.next`, `WATCH_STRITER`
+    // `String.prototype[Symbol.iterator]`). An array qualifies with `Array.prototype` as its prototype and
+    // no own properties (an own `[Symbol.iterator]`); anything else takes the protocol.
+    let intact = |s: &mut InstructionSink, bit: i32| {
+        s.global_get(runtime::G_INTACT)
+            .i32_const(bit >> object::WATCH_SHIFT)
+            .i32_and()
+            .i32_const(0)
+            .i32_ne();
     };
     s.local_get(V).ref_test_non_null(array::array());
-    fast(&mut s);
+    s.if_(BlockType::Result(ValType::I32));
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(runtime::T_ARRAY, object::F_PROTO)
+        .global_get(runtime::G_PROTOS + js2wasi3_ir::Builtin::Array.index())
+        .ref_eq();
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(runtime::T_ARRAY, object::F_COUNT)
+        .i32_eqz()
+        .i32_and();
+    intact(&mut s, object::WATCH_ITER);
+    s.i32_and();
+    s.else_();
+    s.i32_const(0);
+    s.end();
     s.if_(BlockType::Empty);
     simple(&mut s, ARRAY);
     s.end();
     runtime::is_string(&mut s, V);
-    fast(&mut s);
+    intact(&mut s, object::WATCH_STRITER);
+    s.i32_and();
     s.if_(BlockType::Empty);
     simple(&mut s, STRING);
     s.end();

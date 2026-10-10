@@ -56,6 +56,14 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   symbols are `$symbol`, a subtype of `$string` compared by identity, so property keys stay string arrays.
   Iteration uses an internal `$iter` state with fast paths for arrays and strings and the protocol otherwise.
   See `crates/backend/src/{array,iter,inspect}.rs` and `crates/lower/src/patterns.rs`.)
+  (T102: **watchpoints**, JSC's idea: the built-in entries a fast path relies on carry a watch bit in their attribute
+  byte (`object::WATCH_ITER`: `Array.prototype[Symbol.iterator]` and `%ArrayIteratorPrototype%.next`;
+  `WATCH_STRITER`: `String.prototype[Symbol.iterator]`; `WATCH_REGEXP`: the `RegExp.prototype` keys `regexp_plain`
+  relies on), set when the prototype is made. Any change of such an entry (a write, `defineProperty`, an attribute
+  change, a delete) clears its group's bit in the global `G_INTACT` for good (`object::watch_fire`); `set_named`'s
+  usual write tests the bits with `ACCESSOR | READONLY`, so it costs nothing. Arrays (prototype `Array.prototype`, no
+  own properties) and strings skip the iteration protocol only while their bit is set; `regexp_plain` tests one bit
+  instead of comparing ten entries with a snapshot (template-render −4%).)
   (T16: `$function` has a `construct` entry `(self, new_target, args)` (null: not a constructor) and a kind;
   a class's code throws, its construct entry runs the constructor, which is keyed by the class scope in the closure
   analysis (constructor body + instance field initializers). Accessors are an attribute bit whose value slot holds

@@ -189,13 +189,13 @@ pub const G_IC: u32 = G_REGEXP_EXEC + 1;
 pub const G_NUM_KEYS: u32 = G_IC + 1;
 /// How many integer keys `G_NUM_KEYS` holds.
 pub const NUM_KEYS: i32 = 1024;
-/// `(mut (ref null $vals))` (T76): `RegExp.prototype` as built, for `object::Helper::RegExpPlain`:
-/// per key of [`crate::object::REGEXP_PLAIN_KEYS`] its entry index (an i31), its value (an
-/// accessor's getter) and its attributes (an i31).
-pub const G_REGEXP_SNAP: u32 = G_NUM_KEYS + 1;
+/// `(mut i32)` (T102): which built-in invariants still hold, a bit per watch group
+/// ([`crate::object::WATCH_ITER`] … shifted right by [`crate::object::WATCH_SHIFT`]). All set at start; the first
+/// change of a watched entry clears its group's bit for good (`object::Helper::WatchFire`).
+pub const G_INTACT: u32 = G_NUM_KEYS + 1;
 /// `(mut i32)` (T90): starts at 1 and is bumped (never to 0) by every key added to, and every new
 /// prototype of, an object flagged `object::IS_PROTO`.
-pub const G_EPOCH: u32 = G_REGEXP_SNAP + 1;
+pub const G_EPOCH: u32 = G_INTACT + 1;
 /// `(mut (ref null $vals))` (T90): per constant-key write site (`object::Helper::SetNamed`, numbered
 /// apart from the reads) two entries: the prototype from which the chain was found to have no such key,
 /// and the `G_EPOCH` then (an i31; null: none). Grown on demand from 16 entries: it's live in every
@@ -1061,14 +1061,14 @@ pub fn globals(
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_KEYS)),
     );
-    // T76: the RegExp.prototype snapshot.
+    // T102: the intact invariants.
     globals.global(
         GlobalType {
-            val_type: rt(true, T_VALS),
+            val_type: ValType::I32,
             mutable: true,
             shared: false,
         },
-        &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
+        &ConstExpr::i32_const(crate::object::WATCHED >> crate::object::WATCH_SHIFT),
     );
     // T90: the epoch and the prototypes of the write sites.
     globals.global(

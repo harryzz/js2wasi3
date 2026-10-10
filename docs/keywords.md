@@ -56,7 +56,7 @@ What's most needed, in order: the rest of the built-in library (`Intl` beyond `D
 | `final` | ➖ | Removed in ES5. |
 | `finally` | ✅ | Completion dispatch for every jump, also around `yield`/`await` (T12, T18, T19). |
 | `float` | ➖ | Removed in ES5. |
-| `for` | ✅ | `for`, `for-in`, `for-of` (iterator protocol, destructuring), `for await` (T20). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). T52: array destructuring closes its iterator on every abrupt exit (also a generator's `return()`) and evaluates member targets before stepping. |
+| `for` | ✅ | `for`, `for-in`, `for-of` (iterator protocol, destructuring), `for await` (T20). A replaced or own `Symbol.iterator` of arrays/strings is used (T25). T52: array destructuring closes its iterator on every abrupt exit (also a generator's `return()`) and evaluates member targets before stepping. T102: a replaced, deleted or getter-backed `%ArrayIteratorPrototype%.next` or `Array.prototype`/`String.prototype[Symbol.iterator]` is honoured by `for-of`, spread, destructuring and `Array.from` (watchpoint flags; plain arrays and strings keep the index path). |
 | `function` | 🟡 | Declarations, expressions, closures, defaults, rest, destructuring params, generators (`function*`), `call`/`apply`/`bind`, `arguments`, `toString` (source text, T25), names from computed keys (T25). Missing: `"" + f` in code that never names `toString` traps (F104); assigning to a function declaration's name inside a block or to an exported one (F45, F257; T60: allowed directly in a function body or at the top level). |
 | `goto` | ➖ | Removed in ES5; never a JS statement. |
 | `if` | ✅ | |

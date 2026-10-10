@@ -90,6 +90,32 @@ pub const READONLY: i32 = 2;
 pub const FIXED: i32 = 4;
 /// Attribute bit: an accessor property; the value slot holds an `$accessor` (T16).
 pub const ACCESSOR: i32 = 8;
+/// Attribute bits of watched built-in entries (T102): a change of the entry clears its group's bit in
+/// [`runtime::G_INTACT`]. `WATCH_ITER`: `Array.prototype[Symbol.iterator]` and `%ArrayIteratorPrototype%.next`
+/// (array iteration by index, `iter::Helper::Open`); `WATCH_STRITER`: `String.prototype[Symbol.iterator]`;
+/// `WATCH_REGEXP`: [`REGEXP_PLAIN_KEYS`] on `RegExp.prototype` ([`Helper::RegExpPlain`]).
+pub const WATCH_ITER: i32 = 16;
+pub const WATCH_STRITER: i32 = 32;
+pub const WATCH_REGEXP: i32 = 64;
+pub const WATCHED: i32 = WATCH_ITER | WATCH_STRITER | WATCH_REGEXP;
+/// `G_INTACT`'s bit of a group: its attribute bit shifted right by this.
+pub const WATCH_SHIFT: i32 = 4;
+
+/// Fire the watch groups of the attribute byte the closure pushes (T102): clear their bits in
+/// `G_INTACT`. Nothing for an unwatched entry. Emitted where an existing entry's value or attributes
+/// change, or the entry is removed.
+pub fn watch_fire(s: &mut InstructionSink, attrs: impl FnOnce(&mut InstructionSink)) {
+    s.global_get(runtime::G_INTACT);
+    attrs(s);
+    s.i32_const(WATCHED)
+        .i32_and()
+        .i32_const(WATCH_SHIFT)
+        .i32_shr_u()
+        .i32_const(-1)
+        .i32_xor()
+        .i32_and()
+        .global_set(runtime::G_INTACT);
+}
 /// Attribute bit: a private member (`#x`, T16); its key is a private symbol. Invisible to
 /// everything but the private-name helpers (not frozen, not listed).
 pub const PRIVATE: i32 = 16;
@@ -405,8 +431,9 @@ pub enum Helper {
     RegExpNew,
     /// `(v) -> i32` (T76): see `Intrinsic::RegExpPlain`.
     RegExpPlain,
-    /// `(o: $object)` (T76): fill `G_REGEXP_SNAP` from `RegExp.prototype` `o` as just built.
-    RegExpSnapshot,
+    /// `(o: $object, k: $string, bits: i32)` (T102): watch `o`'s own entry `k` for the groups `bits`
+    /// (`WATCH_*`), as the built-in prototype `o` is made; no such entry clears the groups at once.
+    WatchMark,
     /// `(o: $object)` (T97): `G_TLEN`'s snapshot (`length`'s entry index and getter) from
     /// `%TypedArray%.prototype` `o` as just built.
     TypedLengthSnapshot,
@@ -533,7 +560,7 @@ impl Helper {
             Helper::MakeArguments => "make_arguments",
             Helper::RegExpNew => "regexp_new",
             Helper::RegExpPlain => "regexp_plain",
-            Helper::RegExpSnapshot => "regexp_snapshot",
+            Helper::WatchMark => "watch_mark",
             Helper::TypedLengthSnapshot => "typed_length_snapshot",
             Helper::TypedLengthFill => "typed_length_fill",
             Helper::RegExpData => "regexp_data",
@@ -606,7 +633,7 @@ impl Helper {
             Helper::BuiltinTag => (vec![o], vec![v]),
             Helper::BuiltinToString => (vec![v], vec![I32]),
             Helper::RegExpPlain => (vec![v], vec![I32]),
-            Helper::RegExpSnapshot => (vec![o], vec![]),
+            Helper::WatchMark => (vec![o, s, I32], vec![]),
             Helper::TypedLengthSnapshot => (vec![o], vec![]),
             Helper::TypedLengthFill => (vec![on], vec![I32]),
             Helper::MakeArguments
@@ -707,7 +734,7 @@ impl Helper {
             Helper::ObjectRest => object_rest(cx),
             Helper::RegExpNew => regexp_new(cx),
             Helper::RegExpPlain => regexp_plain(cx),
-            Helper::RegExpSnapshot => regexp_snapshot(cx),
+            Helper::WatchMark => watch_mark(cx),
             Helper::TypedLengthSnapshot => typed_length_snapshot(cx),
             Helper::TypedLengthFill => typed_length_fill(cx),
             Helper::RegExpData => regexp_data(cx),
@@ -889,6 +916,10 @@ fn define_named(cx: &mut dyn Cx) -> Function {
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
     // An existing property: now a data property with this value (the other attributes stay).
+    watch_fire(&mut s, |s| {
+        as_obj(s, O);
+        s.struct_get(T_OBJECT, F_ATTRS).local_get(E).array_get_u(T_BYTES);
+    });
     as_obj(&mut s, O);
     s.struct_get(T_OBJECT, F_VALS).local_get(E).local_get(V).array_set(T_VALS);
     as_obj(&mut s, O);
@@ -938,12 +969,12 @@ fn set_named(cx: &mut dyn Cx) -> Function {
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
     {
-        // An own writable data property.
+        // An own writable data property (a watched one takes the general path, which fires it: T102).
         s.local_get(O)
             .struct_get(T_OBJECT, F_ATTRS)
             .local_get(E)
             .array_get_u(T_BYTES)
-            .i32_const(ACCESSOR | READONLY)
+            .i32_const(ACCESSOR | READONLY | WATCHED)
             .i32_and()
             .i32_eqz();
         s.if_(BlockType::Empty);
@@ -1666,6 +1697,12 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     s.local_get(O).local_get(K).call(find).local_tee(e);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
+    watch_fire(&mut s, |s| {
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_ATTRS)
+            .local_get(e)
+            .array_get_u(T_BYTES);
+    });
     s.local_get(O)
         .struct_get(T_OBJECT, F_VALS)
         .local_get(e)
@@ -1798,6 +1835,12 @@ fn remove(cx: &mut dyn Cx) -> Function {
     s.local_get(O).local_get(K).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
+    watch_fire(&mut s, |s| {
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_ATTRS)
+            .local_get(E)
+            .array_get_u(T_BYTES);
+    });
     s.local_get(O)
         .struct_get(T_OBJECT, F_KEYS)
         .local_get(E)
@@ -2372,10 +2415,21 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             }
         }
     }
-    if b == Builtin::RegExp {
-        // T76: remember what `RegExpPlain` checks.
-        let snap = h(cx, Helper::RegExpSnapshot);
-        s.local_get(O).ref_as_non_null().call(snap);
+    // T102: the entries the fast paths rely on (see `WATCH_ITER`).
+    let watched: Vec<(u32, i32)> = match b {
+        Builtin::Array => vec![(runtime::G_SYM_ITERATOR, WATCH_ITER)],
+        Builtin::ArrayIterator => vec![(cx.str("next"), WATCH_ITER)],
+        Builtin::String => vec![(runtime::G_SYM_ITERATOR, WATCH_STRITER)],
+        Builtin::RegExp => REGEXP_PLAIN_KEYS.iter().map(|k| (cx.str(k), WATCH_REGEXP)).collect(),
+        _ => vec![],
+    };
+    if !watched.is_empty() {
+        let mark = h(cx, Helper::WatchMark);
+        for (key, bits) in watched {
+            s.local_get(O).ref_as_non_null();
+            s.global_get(key).ref_cast_non_null(string());
+            s.i32_const(bits).call(mark);
+        }
     }
     if b == Builtin::TypedArray {
         // T97: remember `length`'s getter for `GetLength`.
@@ -3838,59 +3892,31 @@ fn typed_length_fill(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$regexp_snapshot(o)` (T76), see [`Helper::RegExpSnapshot`]. A key that isn't there leaves the
-/// snapshot unset (no RegExp is then plain).
-fn regexp_snapshot(cx: &mut dyn Cx) -> Function {
-    let find = h(cx, Helper::FindOwnNamed);
+/// `$watch_mark(o, k, bits)` (T102), see [`Helper::WatchMark`].
+fn watch_mark(cx: &mut dyn Cx) -> Function {
+    let find = h(cx, Helper::FindOwn);
     const O: u32 = 0;
-    const SNAP: u32 = 1;
-    const E: u32 = 2;
-    const V: u32 = 3;
-    let mut f = Function::new([(1, rt(true, T_VALS)), (1, ValType::I32), (1, jsval())]);
+    const K: u32 = 1;
+    const BITS: u32 = 2;
+    const E: u32 = 3;
+    let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
-    s.i32_const(3 * REGEXP_PLAIN_KEYS.len() as i32)
-        .array_new_default(T_VALS)
-        .local_set(SNAP);
-    for (k, key) in REGEXP_PLAIN_KEYS.iter().enumerate() {
-        let units: Vec<u16> = key.encode_utf16().collect();
-        let g = cx.str(key);
-        s.local_get(O)
-            .global_get(g)
-            .i32_const(key_hash(&units))
-            .call(find);
-        s.local_tee(E).i32_const(0).i32_lt_s();
-        s.if_(BlockType::Empty);
-        s.return_();
-        s.end();
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_VALS)
-            .local_get(E)
-            .array_get(T_VALS);
-        s.local_tee(V).ref_test_non_null(props::accessor());
-        s.if_(BlockType::Empty);
-        s.local_get(V)
-            .ref_cast_non_null(props::accessor())
-            .struct_get(runtime::T_ACCESSOR, 0)
-            .local_set(V);
-        s.end();
-        let k = 3 * k as i32;
-        s.local_get(SNAP)
-            .i32_const(k)
-            .local_get(E)
-            .ref_i31()
-            .array_set(T_VALS);
-        s.local_get(SNAP)
-            .i32_const(k + 1)
-            .local_get(V)
-            .array_set(T_VALS);
-        s.local_get(SNAP).i32_const(k + 2);
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_ATTRS)
-            .local_get(E)
-            .array_get_u(T_BYTES);
-        s.ref_i31().array_set(T_VALS);
-    }
-    s.local_get(SNAP).global_set(runtime::G_REGEXP_SNAP);
+    s.local_get(O).local_get(K).call(find).local_tee(E);
+    s.i32_const(0).i32_lt_s();
+    s.if_(BlockType::Empty);
+    watch_fire(&mut s, |s| {
+        s.local_get(BITS);
+    });
+    s.return_();
+    s.end();
+    s.local_get(O).struct_get(T_OBJECT, F_ATTRS).local_get(E);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .array_get_u(T_BYTES)
+        .local_get(BITS)
+        .i32_or();
+    s.array_set(T_BYTES);
     s.end();
     f
 }
@@ -3900,16 +3926,8 @@ fn regexp_plain(cx: &mut dyn Cx) -> Function {
     let last_index = cx.str("lastIndex");
     const V: u32 = 0;
     const O: u32 = 1;
-    const P: u32 = 2;
-    const SNAP: u32 = 3;
-    const E: u32 = 4;
-    const X: u32 = 5;
-    let mut f = Function::new([
-        (2, rt(true, T_OBJECT)),
-        (1, rt(true, T_VALS)),
-        (1, ValType::I32),
-        (1, jsval()),
-    ]);
+    const X: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_OBJECT)), (1, jsval())]);
     let mut s = f.instructions();
     let fail_unless = |s: &mut InstructionSink| {
         s.i32_eqz();
@@ -3956,50 +3974,11 @@ fn regexp_plain(cx: &mut dyn Cx) -> Function {
         .ref_test_non_null(HeapType::Concrete(runtime::T_NUMBER))
         .i32_or();
     fail_unless(&mut s);
-    // `RegExp.prototype` as snapshot.
-    s.global_get(runtime::G_REGEXP_SNAP)
-        .local_tee(SNAP)
-        .ref_is_null()
-        .i32_eqz();
+    // `RegExp.prototype`'s keys as built (T102: watched, `WATCH_REGEXP`).
+    s.global_get(runtime::G_INTACT)
+        .i32_const(WATCH_REGEXP >> WATCH_SHIFT)
+        .i32_and();
     fail_unless(&mut s);
-    s.global_get(G_PROTOS + Builtin::RegExp.index())
-        .local_set(P);
-    for (k, key) in REGEXP_PLAIN_KEYS.iter().enumerate() {
-        let g = cx.str(key);
-        let k = 3 * k as i32;
-        s.local_get(SNAP).i32_const(k).array_get(T_VALS);
-        s.ref_cast_non_null(HeapType::I31).i31_get_s().local_tee(E);
-        s.local_get(P).struct_get(T_OBJECT, F_COUNT).i32_lt_u();
-        fail_unless(&mut s);
-        s.local_get(P)
-            .struct_get(T_OBJECT, F_KEYS)
-            .local_get(E)
-            .array_get(T_KEYS);
-        s.global_get(g).ref_eq();
-        fail_unless(&mut s);
-        s.local_get(P)
-            .struct_get(T_OBJECT, F_ATTRS)
-            .local_get(E)
-            .array_get_u(T_BYTES);
-        s.local_get(SNAP).i32_const(k + 2).array_get(T_VALS);
-        s.ref_cast_non_null(HeapType::I31).i31_get_s().i32_eq();
-        fail_unless(&mut s);
-        s.local_get(P)
-            .struct_get(T_OBJECT, F_VALS)
-            .local_get(E)
-            .array_get(T_VALS);
-        s.local_tee(X).ref_test_non_null(props::accessor());
-        s.if_(BlockType::Empty);
-        s.local_get(X)
-            .ref_cast_non_null(props::accessor())
-            .struct_get(runtime::T_ACCESSOR, 0)
-            .local_set(X);
-        s.end();
-        s.local_get(X);
-        s.local_get(SNAP).i32_const(k + 1).array_get(T_VALS);
-        s.ref_eq();
-        fail_unless(&mut s);
-    }
     s.i32_const(1);
     s.end();
     f

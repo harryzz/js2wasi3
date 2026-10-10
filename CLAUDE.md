@@ -16,7 +16,8 @@ sessions use the same plan limits, so speed tasks run locally now.
 T99 (prototype-hit cache, F359) was measured and dropped on 2026-10-10 (replay 20.64 s vs 20.28 s), no code kept.
 T100 (string constants as one GC root, F322) was measured and dropped on 2026-10-10 (benchmarks 3–7% slower), no code kept.
 T101 (the Node.js compatibility page, `scripts/compat.mjs`, https://harryzz.github.io/js2wasi3/) is done: re-run
-`node scripts/compat.mjs` after tasks that add node APIs. Next task: none chosen.
+`node scripts/compat.mjs` after tasks that add node APIs. T102 (watchpoint flags, F390: iteration sees a replaced
+`next`, `regexp_plain` one bit) is done. Next task: none chosen.
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.

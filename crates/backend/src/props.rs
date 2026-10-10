@@ -203,8 +203,9 @@ fn attrs(s: &mut InstructionSink, o: u32, e: u32) {
         .array_get_u(T_BYTES);
 }
 
-/// `o.attrs[e] = <value pushed by f>`.
+/// `o.attrs[e] = <value pushed by f>`. Fires the entry's watch groups (T102).
 fn set_attrs(s: &mut InstructionSink, o: u32, e: u32, f: impl FnOnce(&mut InstructionSink)) {
+    object::watch_fire(s, |s| attrs(s, o, e));
     s.local_get(o).struct_get(T_OBJECT, F_ATTRS).local_get(e);
     f(s);
     s.array_set(T_BYTES);
@@ -403,6 +404,9 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
         s.if_(BlockType::Empty);
         throw_read_only(cx, &mut s, O, K);
         s.end();
+        object::watch_fire(&mut s, |s| {
+            s.local_get(a);
+        });
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
             .local_get(e)
@@ -1029,6 +1033,12 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     let apply = |s: &mut InstructionSink, elem: bool| {
         load_attrs(s, elem);
         s.local_set(A);
+        if !elem {
+            // T102: a watched built-in entry is about to change.
+            object::watch_fire(s, |s| {
+                s.local_get(A);
+            });
+        }
         for (bit, attr) in [(D_ENUM, HIDDEN), (D_CONF, FIXED)] {
             s.local_get(HAS).i32_const(bit).i32_and();
             s.if_(BlockType::Empty);

@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-10: T102 watchpoint flags (full run)
+
+- Compiler (`main` at f4b5abb + T102, uncommitted at the run): watch bits on `Array.prototype[Symbol.iterator]`,
+  `%ArrayIteratorPrototype%.next`, `String.prototype[Symbol.iterator]` and the `RegExp.prototype` keys; array and
+  string iteration skip the protocol, and `regexp_plain` skips its snapshot comparison, only while `G_INTACT` says
+  they are unchanged. Runner: unchanged.
+- Full run on `a-03` (`~/t262-t102.log`, 1,267 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-10: T99 prototype-hit cache (full run)
 
 - Compiler (`claude/tender-cerf-lb9yx0` at 0f86f8f): `get_named`'s own-miss path used a per-site prototype-hit
