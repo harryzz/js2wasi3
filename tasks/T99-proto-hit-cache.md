@@ -1,6 +1,6 @@
 # T99: a prototype-hit cache for constant-key reads (F359)
 
-Status: in progress (started 2026-10-09, cloud session) | Depends on: T98 | Cloud (+ a-03: test262, replay)
+Status: done, no code kept (2026-10-10: slower on the zigbee2mqtt replay; fixture kept) | Depends on: T98 | Cloud (+ a-03: test262, replay)
 
 ## Goal
 A constant-key read that finds `k` on a prototype (a method call `o.m()`, `counts.get`) misses `get_named`'s
@@ -22,11 +22,25 @@ more.
    `cargo test`, validate, smoke; test262 + one replay on a-03.
 
 ## Acceptance
-- [ ] Before/after in Notes; results = node; test262 0 regressions.
-- [ ] Docs, follow-ups.
+- [x] Before/after in Notes; results = node; test262 0 regressions.
+- [x] Docs, follow-ups.
 
 ## Notes / Result
-(to be written)
+- Built `G_PIC` + `lookup_named_cached` (commit 0f86f8f) and **reverted the code** (2026-10-10): the cache does
+  not pay on the reference.
+- Benchmarks (cloud, 5 rounds avg, ±5% noise): Richards 351 → 362, DeltaBlue 454 → 461, RayTrace 641 → 630,
+  EarleyBoyer 1,455 → 1,503, knucleotide 4,132 → 4,254 ms: neutral.
+- a-03, T99 build: test262 full run **no changes since the baseline**; zigbee2mqtt replay **20.64 s** vs T97's
+  20.28 s (+0.36 s, +1.8%, above the ~1% replay noise; 37.66 vs 37.01 ms CPU/event; output identical: 13,478
+  publishes, 9 errors, 139 exact, 1 unmatched). The rule set before the run (≤ 20.0 keep, 20.1–20.5 revert,
+  slower revert) → revert.
+- Why it loses (likely, not profiled): the prototype hit was at most ~2.5–3% of the replay (T93 call graph), and
+  the cache adds work on every own-miss: the site lookup, epoch and key checks, and on fills `mark_chain`, which
+  flags more objects `IS_PROTO`, so more key adds bump `G_EPOCH` and invalidate T90's add caches and this one.
+- Kept: `tests/fixtures/objects/proto-cache.js` (prototype replace/shadow/delete/`setPrototypeOf`/getter cases)
+  as a regression fixture; it passes with the reverted code.
+- Next smallest step: none on this path. A prototype hit would need to be cheaper than one chain probe without
+  flagging new prototypes, i.e. shapes (F359 stays parked, branch `shapes`). Open: F322 (GC heap).
 
 ## Progress
 - 2026-10-09: task created (user: docs, then F359). Re-estimated the gain from the T93 call graph: ~2.5–3% on
@@ -42,3 +56,5 @@ more.
   as the small share predicts. Full suite 249 pass (2 known sandbox failures); cargo test ok (wac missing).
   Committed as in progress: the zigbee2mqtt replay (the reference, ~1% noise) decides keep or revert; test262 in
   the same a-03 run.
+- 2026-10-10: a-03 results: test262 no changes; replay 20.64 s (T97 20.28 s, +1.8%). Reverted object.rs and
+  runtime.rs to faa2cf6; release build ok; objects/proto-cache.js passes. Task closed, no code kept.

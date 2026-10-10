@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-10: T99 prototype-hit cache (full run)
+
+- Compiler (`claude/tender-cerf-lb9yx0` at 0f86f8f): `get_named`'s own-miss path used a per-site prototype-hit
+  cache (`G_PIC`, `G_EPOCH`). Runner: unchanged.
+- Full run on `a-03`: **no changes since the baseline**. The code was reverted afterwards (slower on the
+  zigbee2mqtt replay), so the baseline stands.
+
 ## 2026-10-09: T98 GC heap reserved at start (full run)
 
 - Compiler (`claude/tender-cerf-lb9yx0` at ae0d3bc): every test's start function reserves 16 MiB of GC heap

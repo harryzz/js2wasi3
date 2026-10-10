@@ -1,7 +1,13 @@
 # Feasibility: zigbee2mqtt on js2wasi3 (WASI 0.3)
 
-Sections: T93–T97 on the T79 replay (2026-10-09), T93/T94 profiled replays (2026-10-09), T92 `get_named` without `is_subtype` on the T79 replay (2026-10-09), T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
+Sections: T99 prototype-hit cache (2026-10-10), T93–T97 on the T79 replay (2026-10-09), T93/T94 profiled replays (2026-10-09), T92 `get_named` without `is_subtype` on the T79 replay (2026-10-09), T91 `Map` hashes on the T79 replay (2026-10-08), T90 property adds on the T79 replay (2026-10-06), T89 code-table calls on the T79 replay (2026-10-06), T86 `.length` paths on the T79 replay (2026-10-05), T85 hashed shape transitions on the T79 replay (2026-10-05), T83 shapes on the T79 replay (T84, 2026-10-05), T80+T81 on the T79 replay (T82, 2026-10-05), the profile of a recorded production session (T79, 2026-10-04), the production runs and test-rig runs of 2026-10-04 (after T76, T78), the production trial (2026-10-03), OTA downloads (T72), the frontend run (T71), the live run against a real coordinator and MQTT broker (T68, 2026-10-03), the measured survey of
 2026-10-01 (T62, after T54–T61), then the original estimate of 2026-09-29 (kept as written).
+
+## T99 prototype-hit cache on the T79 replay 2026-10-10: 20.64 s (dropped)
+
+One unprofiled replay on a-03 of the T99 build (T98 + a per-site prototype-hit cache in `get_named`): **20.64 s**
+CPU, 37.66 ms per event (T97 20.28 s, 37.01 ms): +1.8%, above the ~1% noise. Output identical (13,478 publishes,
+9 errors, 139 exact, 1 unmatched). Code reverted; T97's 20.28 s stays the reference. Details: T99's Notes.
 
 ## T93–T97 on the T79 replay 2026-10-09: 20.28 s
 

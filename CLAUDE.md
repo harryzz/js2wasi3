@@ -13,7 +13,8 @@ sessions use the same plan limits, so speed tasks run locally now.
 
 **Local sessions**: shapes (T83–T86) were reverted (branch `shapes`). T87–T98 are done (T91: `Map`/`Set` hashes; T92/T93: object tests without `is_subtype`; T94: `string_hash` memo;
 2026-10-08/09). T95 (computed-key caches) was measured and dropped, no code kept. T96 (generic `get`/`set` without `is_subtype`) is done. T97 (typed-array `.length` fast path) and T98 (16 MiB GC heap reserved at start, `build --gc-reserve`) are done.
-Next task: **T99** (`tasks/T99-proto-hit-cache.md`, F359), in progress since 2026-10-09.
+T99 (prototype-hit cache, F359) was measured and dropped on 2026-10-10 (replay 20.64 s vs 20.28 s), no code kept.
+Next task: none chosen (open: F322).
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.
