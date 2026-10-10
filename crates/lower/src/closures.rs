@@ -65,6 +65,9 @@ pub struct Analysis {
     pub captures: HashMap<ScopeId, Vec<Cap>>,
     /// Variables that live in cells.
     pub captured: HashSet<SymbolId>,
+    /// Uncaptured function-local `var`s written before every read (T103, `definite.rs`): `var x;`
+    /// doesn't store `undefined` into them. Filled after this analysis.
+    pub definite: HashSet<SymbolId>,
     /// Captured `let`/`const` that a closure made before the declaration ends can read: their cell is
     /// created uninitialized at the start of their block and closures check it.
     pub tdz: HashSet<SymbolId>,

@@ -113,7 +113,8 @@ node:
   struct, and every operation on a `jsval` tests and unboxes it. Locals that only ever hold numbers are `f64`
   already (D1), but:
   - mandelbrot (77%): `var Zr, Zi, Cr, Ci, Tr, Ti` are declared without a value, so their type includes `undefined`
-    and they stay `jsval`, although every read follows a write (F389);
+    and they stay `jsval`, although every read follows a write (F389; **fixed by T103**, 2026-10-10: 3,955 → 254 ms on
+    a-03, node ~180 ms);
   - nbody, navier-stokes, spectralnorm, crypto: the numbers live in object properties and arrays, which hold `jsval`s
     (F323).
 - **GC** (wasmtime's `CopyingHeap::forward`/`scan_field`/`collect`): leads splay (78%), binarytrees (57%),
@@ -141,7 +142,8 @@ reason.
 ## Next steps, by expected gain per effort
 
 1. A write guess in `set_named` like `get_named`'s (F372): up to 15% of nbody, 11% of richards.
-2. `var x;` with every read after a write stays `f64` (F389): mandelbrot's 77%.
+2. ~~`var x;` with every read after a write stays `f64` (F389): mandelbrot's 77%.~~ Done (T103: mandelbrot 15.6×
+   faster, the other 17 benchmarks unchanged).
 3. Regex literals compiled to Wasm ahead of time (F336): octane-regexp, regexredux.
 4. Numbers in object fields and arrays without boxing (F323): needs shapes (F321) for fields.
 

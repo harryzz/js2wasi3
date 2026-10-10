@@ -94,6 +94,7 @@
 mod builtins;
 mod classes;
 mod closures;
+mod definite;
 mod generators;
 mod patterns;
 mod unicode_props;
@@ -195,7 +196,8 @@ pub fn lower_with(
     boundary: Option<&Boundary>,
 ) -> Result<ir::Module, Diagnostics> {
     let mut facts = Facts::default();
-    let an = closures::analyze(&program.semantic);
+    let mut an = closures::analyze(&program.semantic);
+    an.definite = definite::analyze(&program.semantic, &an);
     loop {
         let mut extra = Vec::new();
         if facts.string_to_number {
@@ -3794,6 +3796,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     continue;
                 }
             };
+            // T103: a `var` written before every read needs no `undefined` (it can stay `f64`).
+            if decl.init.is_none() && is_var && plain && self.an.definite.contains(&sym) {
+                continue;
+            }
             let v = self.store(slot, ty, v);
             if decl.init.is_none() && is_var {
                 // `var x;` doesn't reset `x`: it's `undefined` from function entry on (a captured

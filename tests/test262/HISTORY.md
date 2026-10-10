@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-11: T103 `var x;` definite assignment (full run)
+
+- Compiler (`main` at 2c08c25 + T103, uncommitted at the run): an uncaptured function-local `var` declared without a
+  value whose every read follows a write (`crates/lower/src/definite.rs`) stores no `undefined` and can be `f64`.
+  Runner: unchanged.
+- Full run on `a-03` (`~/t262-t103.log`, 1,302 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-10: T102 watchpoint flags (full run)
 
 - Compiler (`main` at f4b5abb + T102, uncommitted at the run): watch bits on `Array.prototype[Symbol.iterator]`,

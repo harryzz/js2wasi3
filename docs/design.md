@@ -29,7 +29,9 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   `false` are singleton structs, so `null` is never a JS value.
   (T08: integers in [-2^30, 2^30) except -0 are `i31ref`; the singletons are one `$oddball` struct type
   with a kind field. Variables, params and results are `f64` unless a non-number is ever stored in them:
-  see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.)
+  see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.
+  T103: a function-local `var x;` that every read follows a write of (definite assignment, `crates/lower/src/definite.rs`)
+  stores no `undefined`, so it can be `f64` too.)
   (T13: objects are `$object` dictionaries: entries in insertion order in GC arrays, a hash index past 8 entries, a
   prototype. Built-in prototypes are created lazily; their methods are sentinels that trap when read until functions
   exist (T14/T21). Errors are objects of class `error`. See `crates/backend/src/object.rs`.
