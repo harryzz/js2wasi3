@@ -3,7 +3,7 @@
 Status: todo (handoff written 2026-10-10) | Depends on: T100 | Local
 
 ## Goal
-One generated page that says, per Node.js 24 API, whether js2wasi3 supports it, and how we know, in the spirit of
+Published at **https://harryzz.github.io/js2wasi3** (GitHub Pages; user, 2026-10-10). One generated page that says, per Node.js 24 API, whether js2wasi3 supports it, and how we know, in the spirit of
 https://scriptc.dev/compatibility (not a copy). Plus two short tabs the user asked for: the language (test262)
 and benchmarks against node. Generated from data in the repo, re-runnable after every task; **doesn't touch the
 compiler**.
@@ -58,15 +58,33 @@ roll-ups, search and filters; one JSON dataset.
    **Benchmarks** (one table: program, node, js2wasi3, ratio, date, from the latest measured numbers in the task
    files; or, if the user agrees, one `scripts/bench.sh -r 3` run of all programs: ask first, it takes a while).
    This also creates the `docs/benchmarks.md` that `bench.sh` names, or fix that reference to point at the page.
-5. Link the page from README ("What works") and `docs/design.md` (Testing). A published web page (an Artifact
-   or anything outside the repo) only if the user asks: ask first.
-6. Tests: the generator runs from a clean checkout in a few minutes; spot-check 20 rows by hand against node
+5. **Site for GitHub Pages** (https://harryzz.github.io/js2wasi3): the generator also writes a static site to
+   `site/` (committed): `index.html` (the summary, then per module a collapsible table; a search box and status
+   filters in plain inline JS, no framework, no external requests), `compatibility.json` (the dataset, fetched by
+   the page), and the Language and Benchmarks sections as their own short pages or tabs. Light/dark via
+   `prefers-color-scheme`, readable on a phone. Plain HTML/CSS/JS so Pages serves it as is (`.nojekyll`).
+   Deploy with a workflow `.github/workflows/pages.yml` (`actions/upload-pages-artifact` + `actions/deploy-pages`
+   on pushes to `main` that touch `site/`), or Pages "deploy from a branch" with `/site` not possible (only `/` or
+   `/docs`): so the workflow, or the generator writes into `docs/` instead; pick one and write it in Progress.
+   **Before enabling** (outward actions, ask the user each time):
+   - the repo is **private** (checked 2026-10-10, `gh api repos/harryzz/js2wasi3`): Pages on a private repo needs a
+     paid plan (Pro or above), and the site is then **public** even though the repo isn't (no private Pages outside
+     Enterprise). Ask: is the account on a plan with Pages for private repos, or should the repo (or a separate
+     public repo for the site only) be used? Don't change the repo's visibility without an explicit yes.
+   - enabling Pages (`gh api -X POST repos/harryzz/js2wasi3/pages -f build_type=workflow`, or the repo settings)
+     and pushing the workflow: ask first; then check the URL loads.
+   - the page lists only what's in the repo's own files (no secrets, no paths from the user's machines, no a-03 or
+     test-rig addresses): check the generated files before the first deploy.
+6. Link the page (the Pages URL and `docs/compatibility.md`) from README ("What works") and `docs/design.md`
+   (Testing).
+7. Tests: the generator runs from a clean checkout in a few minutes; spot-check 20 rows by hand against node
    (5 supported, 5 missing, 5 refused, 5 partial) and write them in Progress.
 
 ## Acceptance
 - [ ] `scripts/compat.mjs` regenerates `docs/compatibility.md` + the JSON from the repo (and the pinned inventory).
 - [ ] Every row has a status and a basis; spot-check of 20 rows in Progress.
 - [ ] Language and Benchmarks sections; README links the page; F380 ticked; follow-ups for anything left.
+- [ ] `site/` generated; after the user's yes, Pages enabled and https://harryzz.github.io/js2wasi3 serves it.
 
 ## Notes / Result
 (to be written)
