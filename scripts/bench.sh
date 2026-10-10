@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# T78: run-time benchmarks against node: the Benchmarks Game's programs and Octane 2 (tests/bench, docs/benchmarks.md).
+# T78: run-time benchmarks against node: the Benchmarks Game's programs and Octane 2 (tests/bench; results on the compatibility page: `node scripts/compat.mjs bench <outdir>/results.tsv`).
 #
 # Usage: scripts/bench.sh [-r runs] [-s small|official] [-g] [-o outdir] [name...]
 #   name: a Benchmarks Game program (binarytrees, fannkuchredux, fasta, knucleotide, mandelbrot, nbody, pidigits,

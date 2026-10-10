@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>js2wasi3 Node.js compatibility</title>
+<meta name="description" content="Which Node.js 24 APIs js2wasi3 supports, how each status is known, test262 conformance and benchmarks against node.">
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #ffffff; --text: #1d1f23; --muted: #5d636e; --line: #e3e4e8; --accent: #2457c5;
+  --supported: #1f8a4c; --present: #6aa84f; --partial: #c99a16; --refused: #c4672a; --missing: #c43d3d;
+  --nomodule: #8a5a9e; --notprobed: #9aa0aa; --na: #c5c8ce; --chip: #f0f1f4;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171b; --panel: #1c1f24; --text: #e6e7ea; --muted: #9aa0aa; --line: #2c3038; --accent: #7aa2ff;
+    --supported: #3fb06c; --present: #86c26a; --partial: #e0b33a; --refused: #e08a4f; --missing: #e46464;
+    --nomodule: #b483c9; --notprobed: #6b717c; --na: #474c55; --chip: #262a31;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+h2 { font-size: 18px; margin: 28px 0 8px; }
+p { margin: 6px 0; }
+a { color: var(--accent); }
+code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.muted { color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 16px 0; }
+.bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--line); margin: 10px 0 8px; }
+.bar span { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.legend button, .chips button { font: inherit; color: inherit; background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.legend button[aria-pressed="false"] { opacity: 0.45; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-top: 20px; }
+.tabs button { font: inherit; color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; cursor: pointer; }
+.tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0; }
+input[type="search"] { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; flex: 1 1 260px; min-width: 0; }
+details.mod { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 8px 0; }
+details.mod > summary { cursor: pointer; padding: 10px 14px; display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 12px; align-items: center; list-style: none; }
+details.mod > summary::-webkit-details-marker { display: none; }
+details.mod > summary .name { font-weight: 600; overflow-wrap: anywhere; }
+details.mod > summary .bar { margin: 0; height: 10px; }
+.tablewrap { overflow-x: auto; border-top: 1px solid var(--line); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.api code { overflow-wrap: anywhere; }
+.status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.empty { padding: 24px; text-align: center; color: var(--muted); }
+@media (max-width: 640px) {
+  details.mod > summary { grid-template-columns: 1fr; }
+  .hide-sm { display: none; }
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>js2wasi3: Node.js compatibility</h1>
+  <p class="muted" id="sub">Loading…</p>
+  <div class="panel">
+    <div class="bar" id="totalbar" aria-hidden="true"></div>
+    <div class="legend" id="legend"></div>
+    <p class="muted" style="font-size:13px;margin-top:10px" id="how"></p>
+  </div>
+  <div class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="apis">APIs</button>
+    <button role="tab" aria-selected="false" data-tab="language">Language (test262)</button>
+    <button role="tab" aria-selected="false" data-tab="bench">Benchmarks</button>
+  </div>
+  <section id="apis">
+    <div class="controls">
+      <input type="search" id="q" placeholder="Search an API, e.g. readFile, Buffer.from, createServer" aria-label="Search APIs">
+      <span class="muted" id="count"></span>
+    </div>
+    <div id="mods"></div>
+  </section>
+  <section id="language" hidden></section>
+  <section id="bench" hidden></section>
+  <p class="muted" style="margin-top:32px;font-size:13px">Generated by <code>scripts/compat.mjs</code> in
+    <a href="https://github.com/harryzz/js2wasi3">harryzz/js2wasi3</a>; the same data as
+    <a href="compatibility.json">compatibility.json</a> and
+    <a href="https://github.com/harryzz/js2wasi3/blob/main/docs/compatibility.md">docs/compatibility.md</a>.</p>
+</main>
+<script>
+"use strict";
+const COLORS = { supported: "--supported", present: "--present", partial: "--partial", refused: "--refused",
+  missing: "--missing", "no module": "--nomodule", "not probed": "--notprobed", "n/a": "--na" };
+const color = (s) => `var(${COLORS[s]})`;
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "text") e.textContent = v;
+    else if (k === "style") e.style.cssText = v;
+    else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+};
+const bar = (counts, order, total) => {
+  const b = el("div", { class: "bar", "aria-hidden": "true" });
+  for (const s of order) if (counts[s]) b.append(el("span", { style: `width:${(100 * counts[s]) / total}%;background:${color(s)}`, title: `${s}: ${counts[s]}` }));
+  return b;
+};
+const shown = new Set();
+let data;
+
+function renderApis() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const mods = document.getElementById("mods");
+  mods.replaceChildren();
+  let n = 0;
+  for (const c of data.chapters) {
+    const rows = c.rows.filter((r) => shown.has(r.status) && (!q || `${r.api} ${r.path ?? ""} ${c.title}`.toLowerCase().includes(q)));
+    if (!rows.length) continue;
+    n += rows.length;
+    const total = c.rows.length;
+    const summary = el("summary", {}, el("span", { class: "name" }, c.title, c.spec ? el("span", { class: "muted", text: `  node:${c.spec}` }) : null,
+      el("span", { class: "muted", text: `  ${rows.length}${rows.length !== total ? ` of ${total}` : ""}` })), bar(c.counts, data.meta.statuses, total));
+    const d = el("details", { class: "mod" }, summary);
+    if (q) d.open = true;
+    d.addEventListener("toggle", () => {
+      if (!d.open || d.dataset.filled) return;
+      d.dataset.filled = "1";
+      const tb = el("tbody");
+      for (const r of rows) {
+        const how = r.test ? `${r.basis}: ${r.test}` : r.basis;
+        tb.append(el("tr", {},
+          el("td", { class: "api" }, el("code", { text: r.api })),
+          el("td", { class: "hide-sm muted", text: r.kind }),
+          el("td", {}, el("span", { class: "status" }, el("span", { class: "dot", style: `background:${color(r.status)}` }), r.status)),
+          el("td", { class: "hide-sm muted", text: how }),
+          el("td", { text: r.note ?? "" })));
+      }
+      d.append(el("div", { class: "tablewrap" }, el("table", {}, el("thead", {}, el("tr", {},
+        el("th", { text: "API" }), el("th", { class: "hide-sm", text: "Kind" }), el("th", { text: "Status" }),
+        el("th", { class: "hide-sm", text: "How we know" }), el("th", { text: "Note" }))), tb)));
+    });
+    if (q) d.dispatchEvent(new Event("toggle"));
+    mods.append(d);
+  }
+  if (!n) mods.append(el("div", { class: "empty", text: "No API matches." }));
+  document.getElementById("count").textContent = `${n} rows`;
+}
+
+function renderLanguage() {
+  const L = data.language;
+  const pct = (a, b) => (b ? `${((100 * a) / b).toFixed(1)}%` : "–");
+  const sec = document.getElementById("language");
+  const tb = el("tbody");
+  for (const d of L.dirs) tb.append(el("tr", {}, el("td", {}, el("code", { text: d.dir })), el("td", { class: "num", text: d.pass }),
+    el("td", { class: "num", text: d.run }), el("td", { class: "num", text: pct(d.pass, d.run) })));
+  sec.replaceChildren(
+    el("h2", { text: `${L.total.pass.toLocaleString("en")} of ${L.total.run.toLocaleString("en")} test262 tests pass (${pct(L.total.pass, L.total.run)})` }),
+    el("p", { class: "muted", text: `The repo's test262 subset, baseline of ${L.date}; ${L.total.skip} tests skipped (features out of scope). Each test is compiled to a component and run on wasmtime.` }),
+    el("div", { class: "panel tablewrap", style: "padding:0" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", { text: "Directory" }),
+      el("th", { class: "num", text: "Pass" }), el("th", { class: "num", text: "Run" }), el("th", { class: "num", text: "Pass %" }))), tb)));
+}
+
+function renderBench() {
+  const B = data.benchmarks;
+  const sec = document.getElementById("bench");
+  if (!B) {
+    sec.replaceChildren(el("p", { class: "muted", text: "Not measured yet." }));
+    return;
+  }
+  const tb = el("tbody");
+  for (const b of B.rows) tb.append(el("tr", {}, el("td", {}, el("code", { text: b.program })), el("td", { class: "hide-sm muted", text: b.arg }),
+    el("td", { class: "num", text: `${(b.node_ms / 1000).toFixed(2)} s` }), el("td", { class: "num", text: `${(b.wasm_ms / 1000).toFixed(2)} s` }),
+    el("td", { class: "num", text: `${(b.wasm_ms / b.node_ms).toFixed(1)}×` }), el("td", { text: b.same ? "yes" : "no" })));
+  sec.replaceChildren(
+    el("h2", { text: "Run time against node" }),
+    el("p", { class: "muted", text: `${B.how}; ${B.date}, ${B.commit}${B.machine ? `, ${B.machine}` : ""}, ${B.wasmtime.split(" (")[0]}, node ${B.node}. Programs from the Benchmarks Game and Octane 2 (tests/bench).` }),
+    el("div", { class: "panel tablewrap", style: "padding:0" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", { text: "Program" }),
+      el("th", { class: "hide-sm", text: "Input" }), el("th", { class: "num", text: "node" }), el("th", { class: "num", text: "js2wasi3" }),
+      el("th", { class: "num", text: "× node" }), el("th", { text: "Output = node" }))), tb)));
+}
+
+function init(d) {
+  data = d;
+  const m = d.meta;
+  const total = Object.values(d.totals).reduce((a, b) => a + b, 0);
+  document.getElementById("sub").textContent = `${total.toLocaleString("en")} APIs from node ${m.node}'s documentation, checked against js2wasi3 at ${m.commit} on ${m.generated}.`;
+  document.getElementById("how").textContent = "Each name is probed under node and under js2wasi3 (wasmtime); stubs that throw are found in js2wasi3's sources; " +
+    "\"supported\" means a fixture checked against node uses it. Presence isn't conformance: details can still differ from node.";
+  document.getElementById("totalbar").replaceWith(bar(d.totals, m.statuses, total));
+  const legend = document.getElementById("legend");
+  for (const s of m.statuses) {
+    shown.add(s);
+    const b = el("button", { "aria-pressed": "true", title: m.legend[s] }, el("span", { class: "dot", style: `background:${color(s)}` }), `${s} ${d.totals[s] ?? 0}`);
+    b.addEventListener("click", () => {
+      const on = b.getAttribute("aria-pressed") === "true";
+      b.setAttribute("aria-pressed", String(!on));
+      on ? shown.delete(s) : shown.add(s);
+      renderApis();
+    });
+    legend.append(b);
+  }
+  document.getElementById("q").addEventListener("input", renderApis);
+  for (const t of document.querySelectorAll(".tabs button")) {
+    t.addEventListener("click", () => {
+      for (const u of document.querySelectorAll(".tabs button")) u.setAttribute("aria-selected", String(u === t));
+      for (const id of ["apis", "language", "bench"]) document.getElementById(id).hidden = id !== t.dataset.tab;
+    });
+  }
+  renderApis();
+  renderLanguage();
+  renderBench();
+}
+
+fetch("compatibility.json").then((r) => r.json()).then(init).catch((e) => {
+  document.getElementById("sub").textContent = `Couldn't load compatibility.json: ${e.message}`;
+});
+</script>
+</body>
+</html>

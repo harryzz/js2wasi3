@@ -1,0 +1,190 @@
+{
+ "date": "2026-10-10",
+ "commit": "db0b31b",
+ "wasmtime": "wasmtime 49.0.2 (3c8a3e79a 2026-10-02)",
+ "node": "v24.21.0",
+ "machine": "a Xeon Gold 6240 server (72 threads, WSL2)",
+ "how": "scripts/bench.sh (default flags: 16 MiB GC heap reserved at start), minimum of the runs",
+ "rows": [
+  {
+   "program": "binarytrees",
+   "arg": "16",
+   "node_ms": 381,
+   "wasm_ms": 9173,
+   "node_median_ms": 408,
+   "wasm_median_ms": 9196,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "fannkuchredux",
+   "arg": "10",
+   "node_ms": 386,
+   "wasm_ms": 8958,
+   "node_median_ms": 399,
+   "wasm_median_ms": 8972,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "fasta",
+   "arg": "250000",
+   "node_ms": 251,
+   "wasm_ms": 950,
+   "node_median_ms": 258,
+   "wasm_median_ms": 953,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "knucleotide",
+   "arg": "250000",
+   "node_ms": 1176,
+   "wasm_ms": 5172,
+   "node_median_ms": 1177,
+   "wasm_median_ms": 5180,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "mandelbrot",
+   "arg": "1000",
+   "node_ms": 184,
+   "wasm_ms": 3888,
+   "node_median_ms": 198,
+   "wasm_median_ms": 3890,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "nbody",
+   "arg": "500000",
+   "node_ms": 155,
+   "wasm_ms": 6044,
+   "node_median_ms": 166,
+   "wasm_median_ms": 6056,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "pidigits",
+   "arg": "2000",
+   "node_ms": 345,
+   "wasm_ms": 987,
+   "node_median_ms": 369,
+   "wasm_median_ms": 988,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "regexredux",
+   "arg": "500000",
+   "node_ms": 427,
+   "wasm_ms": 2986,
+   "node_median_ms": 438,
+   "wasm_median_ms": 3008,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "revcomp",
+   "arg": "250000",
+   "node_ms": 95,
+   "wasm_ms": 507,
+   "node_median_ms": 104,
+   "wasm_median_ms": 517,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "spectralnorm",
+   "arg": "500",
+   "node_ms": 124,
+   "wasm_ms": 1277,
+   "node_median_ms": 127,
+   "wasm_median_ms": 1282,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-richards",
+   "arg": "fixed 0.05",
+   "node_ms": 117,
+   "wasm_ms": 5036,
+   "node_median_ms": 138,
+   "wasm_median_ms": 5063,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-deltablue",
+   "arg": "fixed 0.05",
+   "node_ms": 128,
+   "wasm_ms": 3749,
+   "node_median_ms": 132,
+   "wasm_median_ms": 3766,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-raytrace",
+   "arg": "fixed 0.05",
+   "node_ms": 217,
+   "wasm_ms": 7300,
+   "node_median_ms": 220,
+   "wasm_median_ms": 7324,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-navier-stokes",
+   "arg": "fixed 0.05",
+   "node_ms": 182,
+   "wasm_ms": 3407,
+   "node_median_ms": 189,
+   "wasm_median_ms": 3425,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-crypto",
+   "arg": "fixed 0.05",
+   "node_ms": 261,
+   "wasm_ms": 5840,
+   "node_median_ms": 269,
+   "wasm_median_ms": 5847,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-splay",
+   "arg": "fixed 0.05",
+   "node_ms": 214,
+   "wasm_ms": 3437,
+   "node_median_ms": 220,
+   "wasm_median_ms": 3459,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-earley-boyer",
+   "arg": "fixed 0.05",
+   "node_ms": 489,
+   "wasm_ms": 10172,
+   "node_median_ms": 491,
+   "wasm_median_ms": 10191,
+   "runs": 3,
+   "same": true
+  },
+  {
+   "program": "octane-regexp",
+   "arg": "fixed 0.05",
+   "node_ms": 410,
+   "wasm_ms": 22285,
+   "node_median_ms": 418,
+   "wasm_median_ms": 22405,
+   "runs": 3,
+   "same": true
+  }
+ ]
+}

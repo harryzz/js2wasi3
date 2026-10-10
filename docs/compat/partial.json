@@ -1,0 +1,17 @@
+{
+  "child_process.spawn": "every spawn fails with ENOENT, as for a missing program (no processes under WASI)",
+  "child_process.spawnSync": "every spawn fails with ENOENT, as for a missing program (no processes under WASI)",
+  "child_process.execFile": "every spawn fails with ENOENT, as for a missing program (no processes under WASI)",
+  "child_process.execFileSync": "every spawn fails with ENOENT, as for a missing program (no processes under WASI)",
+  "child_process.fork": "every spawn fails with ENOENT, as for a missing program (no processes under WASI)",
+  "child_process.exec": "shell commands fail as with a /bin/sh that finds no program (exit code 127)",
+  "child_process.execSync": "shell commands fail as with a /bin/sh that finds no program (exit code 127)",
+  "crypto.createHash": "md5, sha1, sha224, sha256, sha384, sha512",
+  "crypto.createHmac": "md5, sha1, sha224, sha256, sha384, sha512",
+  "crypto.createCipheriv": "AES-128/192/256 in ECB, CBC, CTR and CCM",
+  "crypto.createDecipheriv": "AES-128/192/256 in ECB, CBC, CTR and CCM",
+  "module.createRequire": "the require it returns fails with MODULE_NOT_FOUND (modules are linked at build time)",
+  "dgram.Socket.prototype.bind": "no `fd` option (WASI has no socket file descriptors)",
+  "TextDecoder": "UTF-8, UTF-16 and windows-1252",
+  "process.stdout": "`write` takes strings only (a Buffer or Uint8Array is rejected, F332)"
+}

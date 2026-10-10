@@ -801,6 +801,7 @@ Test host: wasmtime 49.0.2 (`TOOLS.md`). JS oracle: `node`.
 | Components | `crates/js2wasi3/tests/build.rs`, `crates/backend/tests/emit.rs` | exports called with `wasmtime run --invoke` and compared with node's results (`x.out`, or values in the test); `console.js` against `console.out`/`.err` so `cargo test` covers a command without node |
 | Commands | `scripts/diff.sh` | node vs js2wasi3 + `wasmtime run -Sp3`: stdout, stderr and exit status |
 | Conformance | `scripts/test262.mjs` | a test262 subset (T23); only at the end of a task or on request |
+| Node API coverage | `scripts/compat.mjs` | every API in node's docs probed under node and js2wasi3, stubs found in `crates/frontend/node`, fixtures as test backing: `docs/compatibility.md`, `site/` (T101) |
 
 **Differential harness** (T11): `scripts/diff.sh [-j jobs] [fixture.js | dir]...`
 - The default is `tests/fixtures` and its subdirectories (T12: `exceptions/`), except `tests/fixtures/unsupported/`
@@ -828,6 +829,12 @@ Test host: wasmtime 49.0.2 (`TOOLS.md`). JS oracle: `node`.
 - Timers (T19): node refreshes its clock whenever a timer is made (ms steps), so the order of near-tied deadlines,
   or of a timer made inside a callback against others due soon, depends on node's speed and the machine's load.
   Keep such deadlines far apart in fixtures (see `tests/fixtures/async/timers.js`).
+
+**Compatibility page** (T101): `node scripts/compat.mjs` (after `cargo build --release`) probes and renders
+`docs/compatibility.md`, `docs/compat/compatibility.json` and `site/` (GitHub Pages, https://harryzz.github.io/js2wasi3/,
+deployed by `.github/workflows/pages.yml` when `site/` changes on `main`). `inventory <all.json>` re-derives the API
+list for a new node version; `bench <results.tsv>` imports a `scripts/bench.sh` run; `render` alone reuses
+`docs/compat/probe.json`. Known partial APIs are hand-kept in `docs/compat/partial.json`.
 
 **test262** (T23): `node scripts/test262.mjs [-j N] [--list] [--causes N] [--update] <dir | file | subset>...`
 - test262 is a blobless sparse clone in `test262/` (gitignored) at the commit pinned in `TOOLS.md`: `scripts/fetch-test262.sh`.
