@@ -109,6 +109,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   function whose compile time grows superlinearly with their count and length (10k short strings: 11 s; now
   ~20 µs per constant). Uses are unchanged (`global.get`, non-null), and so is identity: each constant is made once,
   at instantiation, as before. Every program with strings changed (uniformly); no run-time cost measured.)
+  (T100: one string-constant global each costs root scanning on every collection (60,000 constant globals: ~30% of
+  a GC-heavy loop on the default heap); all constants in one `(ref $strs)` array removed that but made every
+  benchmark 3–7% slower (each use a bounds-checked `array.get`), and with T98's reservation the benchmarks' roots
+  are ~0.3%. Not kept: `tasks/T100-files/one-array.patch`, F386.)
   (T74: **constant-key property access**. The backend routes `GetProp`/`SetProp`/`DefineProp` whose key is a
   string constant other than an array index or `length` (`object::named_key`; and not `__proto__` for sets) to
   named helpers that take the key's FNV-1a hash computed at build time (`object::key_hash`): no ToPropertyKey, no

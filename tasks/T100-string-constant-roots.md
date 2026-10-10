@@ -1,6 +1,6 @@
 # T100: string constants as one GC root (F322)
 
-Status: todo (handoff written 2026-10-10) | Depends on: T98 | Local
+Status: done, no code kept (2026-10-10) | Depends on: T98 | Local
 
 ## Goal
 Every string constant in a module is its own mutable `(ref $string)` global (T57): ~600–2,000 in the benchmarks,
@@ -49,12 +49,71 @@ whether that pays. **Measure first; implement only if step 1 says so** (F322's o
    and one zigbee2mqtt replay against T97's 20.28 s.
 
 ## Acceptance
-- [ ] Step 1's numbers in Progress, and the user's decision.
-- [ ] If implemented: benchmarks before/after in Notes; full test262 0 regressions; one replay; docs (design.md
-  T57 note, HISTORY.md, feasibility doc), follow-ups; F322 ticked. If not: F322 closed with the numbers.
+- [x] Step 1's numbers in Progress, and the user's decision (implement, then measure).
+- [x] Implemented and measured; every benchmark slower, so reverted (user, 2026-10-10): F322 closed with the
+  numbers, F386 for the many-constants case. No test262 run or replay (no code kept).
 
 ## Notes / Result
-(to be written)
+**Result: no code kept** (user's decision, 2026-10-10). The implementation is kept as a patch,
+`tasks/T100-files/one-array.patch` (applies to e267c0c; `git apply`), with the site-rewriting script
+`tasks/T100-files/fix_str_sites.py` (reads rustc's JSON errors, turns `global_get(<Str>)` into `str_get`).
+
+**Measured** (laptop, wasmtime 49.0.2, default flags, i.e. with T98's 16 MiB reservation):
+- Root scanning in the benchmarks is now small: RayTrace ~0.4%, DeltaBlue ~0.2% (T98 before the reservation:
+  19.8% / 7.9%), with ~1,100 constant globals each.
+- The cost is per GC-ref global, not per traced field (`T100-files/gen.mjs` probe, a GC-heavy loop with n extra
+  strings, min of 5): 60,000 constant globals 1,755 ms vs the same strings in one array 805 ms (none: 724);
+  roots ~30% of the 60,000-globals profile (`RegisteredType::root` 15.9%, `trace_vmctx_roots` 14.2%).
+- With all string constants in one `(ref $strs)` global: the probe's roots 30% → 0.16%, but each constant use is
+  `global.get` + `i32.const` + a bounds-checked `array.get` instead of one `global.get`, and every benchmark got
+  slower: RayTrace 6.88 (8.01) → 8.13 (8.23) s, DeltaBlue 4.11 (4.12) → 4.26 (4.27), EarleyBoyer 11.29 (11.37) →
+  11.36 (12.21), knucleotide 5.62 (5.73) → 5.85 (6.10) (min (median) of 3, all outputs = node); `.wasm` +4–7%.
+
+**What the patch did**: runtime type `$strs` (29; `$bigint` 30) and global `G_STRS`, filled by `consts$init<k>`;
+`Cx::string`/`str` return `runtime::Str`, pushed by `StrGet::str_get`; `KeyConst` for key lists that mix string
+constants and `G_SYM_ITERATOR`; BigInt constants kept their globals. Tests passed with it: `cargo test`, fixtures
+builtins/objects/classes/modules/commonjs.
+
+**Commands**: `scripts/bench.sh -r 1/-r 3` (RayTrace, DeltaBlue, EarleyBoyer, knucleotide), baseline from a
+worktree at e267c0c; perf (`--profile=perfmap`); `node tasks/T100-files/gen.mjs <n> globals|array`;
+`scripts/diff.sh` on five fixture directories; `cargo test`; `wasm-tools validate` + a hello-world run.
+
+**Not done / next**: a hybrid (only constants used at module level, or used once, in the array) wasn't tried;
+it would help only programs with tens of thousands of constants that run on the default heap (F386). Next
+smallest step: none in this area; zigbee2mqtt runs with a 512 MiB heap, where roots are ~1%.
 
 ## Progress
 - 2026-10-10: handoff written (user: F322 next, in a new session).
+- 2026-10-10: started; tools unchanged. Step 1 (laptop, wasmtime 49.0.2, default flags, so T98's 16 MiB
+  reservation applies; release compiler at e267c0c):
+  - perf, `scripts/bench.sh` builds (`fixed 0.05`): RayTrace 9.98 s (node 0.38), DeltaBlue 6.15 s (node 0.19).
+    Root share (`RegisteredType::root` + `trace_vmctx_roots` + `from_wasm_type` + its `Drop`): **RayTrace ~0.4%,
+    DeltaBlue ~0.2%** (T98 before the reservation: 19.8% / 7.9%). Copying (`forward`, `scan_field`,
+    `collect_increment`, memmove) <1% too. Globals: RayTrace 1,221 (1,134 `mut (ref …)`), DeltaBlue 1,103 (1,023).
+    So the benchmarks have nothing left to gain.
+  - Probe `T100-files/gen.mjs` (3M iterations allocating `{a, b: [..]}`; n extra strings as n unused string
+    literals = n constant globals, or built at run time into one array = one root), min of 5 runs (noisy laptop,
+    load ~1.5), ms: none 724; globals 1,000: 679, 10,000: 1,089, **60,000: 1,755**; array 1,000: 833, 10,000: 812,
+    **60,000: 805**. perf of 60,000 globals: `RegisteredType::root` 15.9% + `trace_vmctx_roots` 14.2% (~30%);
+    60,000 in an array: roots not in the top. The cost is per **global**, not per traced field: +1.0 s for 60,000
+    globals vs +0.08 s for a 60,000-entry array in the same run (no collection count available).
+  - So: matters only for programs with tens of thousands of constants that collect often: zigbee2mqtt (~60,000)
+    without the 512 MiB flag; at 512 MiB its root share is ~1% (T98). Benchmarks (~1,100): ~0. Cost not yet
+    measured: one `array.get` (bounds check) per constant use. Asking the user.
+- 2026-10-10: user: implement, then measure. Implemented: runtime type `$strs` = `(array (mut (ref $string)))`
+  (index 29; `$bigint` now 30, `TYPES` 30); runtime global `G_STRS` (immutable `(ref $strs)`, made by
+  `array.new` of the empty string × the string count, filled by `consts$init<k>` with `array.set`). `Cx::string`/
+  `str` return `runtime::Str` (an index), pushed by `StrGet::str_get` (`global.get G_STRS; i32.const i; array.get`);
+  `KeyConst` for key lists mixing string constants and `G_SYM_ITERATOR`. BigInt constants keep their globals
+  (`const_index` numbers strings and BigInts apart). The ~560 use sites were moved by the type change: a script
+  (`scratchpad`, rustc JSON spans) rewrote `global_get(<Str>)` → `str_get` (528 sites), the rest by hand (helper
+  parameters in promise, props, inspect, numstr, host, array, object, func). Builds without warnings; hello world
+  validates and runs (154 globals left).
+- 2026-10-10: tests: `cargo test` ok; `scripts/diff.sh` builtins 72 (+1 skip), objects 13, classes 12, modules 14, commonjs 15: all pass. Probe after: 60,000 literals 1,081 ms min (before 1,755; empty 896 in this round: noisy laptop), roots 30% → 0.16% of its profile. Benchmarks before (worktree at e267c0c) / after running.
+- 2026-10-10: step 3, `scripts/bench.sh -r 3` per benchmark, before (worktree e267c0c) then after, laptop,
+  default flags; s, min (median); all SAME as node: RayTrace 6.88 (8.01) → 8.13 (8.23); DeltaBlue 4.11 (4.12) →
+  4.26 (4.27); EarleyBoyer 11.29 (11.37) → 11.36 (12.21); knucleotide 5.62 (5.73) → 5.85 (6.10). Every one slower
+  (~+1–18% min, +3–7% median); `.wasm` +4–7% (394 → 411, 248 → 262, 958 → 1000, 1,382 → 1,473 KB: a use is three
+  instructions instead of one). The benchmarks gain nothing (roots ~0.2–0.4% with the reservation) and pay the
+  `global.get G_STRS` + bounds-checked `array.get` at every constant use. Asking the user (revert, or keep for the
+  many-constants case).

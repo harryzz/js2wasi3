@@ -1,0 +1,4433 @@
+diff --git a/crates/backend/src/abi.rs b/crates/backend/src/abi.rs
+index ab2287e..c1a7c18 100644
+--- a/crates/backend/src/abi.rs
++++ b/crates/backend/src/abi.rs
+@@ -14,6 +14,7 @@
+ //! - An export that may throw (T12) also goes through an adapter: it catches the JS exception
+ //!   and returns `result<T, js-error>` through a return area (see [`adapter`]).
+ 
++use crate::runtime::StrGet;
+ use js2wasi3_ir::{
+     self as ir, AbiSig, AbiType, ErrType, ErrorKind, Payload, StreamOp, Type, WitType,
+ };
+@@ -320,7 +321,7 @@ impl Helper {
+                     .i32_const(promise::PENDING)
+                     .i32_eq();
+                 s.if_(BlockType::Empty);
+-                s.global_get(pending)
++                s.str_get(pending)
+                     .global_get(runtime::G_UNDEFINED)
+                     .call(new_error)
+                     .throw(runtime::TAG);
+@@ -981,7 +982,7 @@ fn future_read(cx: &mut dyn Cx, id: u32) -> Function {
+     s.call(resolve);
+     s.else_();
+     s.local_get(P).ref_cast_non_null(promise::promise());
+-    s.global_get(dropped)
++    s.str_get(dropped)
+         .global_get(runtime::G_UNDEFINED)
+         .call(new_error)
+         .call(reject);
+@@ -2417,17 +2418,17 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode)
+             object::is_error(&mut s, exc);
+             s.if_(BlockType::Result(runtime::string_ref()));
+             s.local_get(exc)
+-                .global_get(name)
++                .str_get(name)
+                 .call(get)
+                 .call(value_to_string);
+             s.else_();
+-            s.global_get(empty);
++            s.str_get(empty);
+             s.end();
+             store_string(&mut s, to_utf8, payload);
+             object::is_error(&mut s, exc);
+             s.if_(BlockType::Result(runtime::string_ref()));
+             s.local_get(exc)
+-                .global_get(message)
++                .str_get(message)
+                 .call(get)
+                 .call(value_to_string);
+             s.else_();
+@@ -2448,9 +2449,9 @@ pub fn adapter(cx: &mut dyn Cx, bump: u32, func: u32, sig: &AbiSig, mode: Mode)
+             let key = cx.str("payload");
+             s.local_get(exc).call(nullish).i32_eqz();
+             s.if_(BlockType::Empty);
+-            s.local_get(exc).global_get(key).call(has_own);
++            s.local_get(exc).str_get(key).call(has_own);
+             s.if_(BlockType::Empty);
+-            s.local_get(exc).global_get(key).call(get).local_set(exc);
++            s.local_get(exc).str_get(key).call(get).local_set(exc);
+             s.else_();
+             object::is_error(&mut s, exc);
+             s.if_(BlockType::Empty);
+diff --git a/crates/backend/src/array.rs b/crates/backend/src/array.rs
+index 69e2807..5a229d1 100644
+--- a/crates/backend/src/array.rs
++++ b/crates/backend/src/array.rs
+@@ -17,6 +17,7 @@
+ //! Built like the other prototypes (`crate::object`), with real `push`, `pop`, `join` and
+ //! `toString`; the other methods are sentinels (T21).
+ 
++use crate::runtime::StrGet;
+ use js2wasi3_ir::{Builtin, ErrorKind};
+ use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
+ 
+@@ -36,7 +37,7 @@ pub const MAX_DENSE: i32 = 1 << 26;
+ 
+ /// The throw of the RangeError that stands for sparse arrays (an index or length at or past
+ /// [`MAX_DENSE`]; not implemented, F50/F160) instead of a trap (T87): the helper and the message.
+-fn sparse_error(cx: &mut dyn Cx) -> (u32, u32) {
++fn sparse_error(cx: &mut dyn Cx) -> (u32, runtime::Str) {
+     let throw = oh(cx, object::Helper::Throw(ErrorKind::RangeError));
+     let msg = cx.str(
+         "Arrays with an index or length of 2^26 or more (sparse arrays) aren't supported by js2wasi3 yet",
+@@ -44,8 +45,8 @@ fn sparse_error(cx: &mut dyn Cx) -> (u32, u32) {
+     (throw, msg)
+ }
+ 
+-fn sparse(s: &mut InstructionSink, (throw, msg): (u32, u32)) {
+-    s.global_get(msg).call(throw);
++fn sparse(s: &mut InstructionSink, (throw, msg): (u32, runtime::Str)) {
++    s.str_get(msg).call(throw);
+     s.unreachable();
+ }
+ 
+@@ -336,7 +337,7 @@ fn own_get(cx: &mut dyn Cx) -> Function {
+         .array_get(T_VALS)
+         .return_();
+     s.end();
+-    s.local_get(K).global_get(length).call(str_eq);
++    s.local_get(K).str_get(length).call(str_eq);
+     s.if_(BlockType::Empty);
+     // Below MAX_DENSE: always an i31.
+     s.local_get(A).struct_get(T_ARRAY, F_LENGTH).ref_i31();
+@@ -383,7 +384,7 @@ fn define(cx: &mut dyn Cx, set: bool) -> Function {
+         .call(set_index);
+     s.i32_const(1).return_();
+     s.end();
+-    s.local_get(K).global_get(length).call(str_eq);
++    s.local_get(K).str_get(length).call(str_eq);
+     s.if_(BlockType::Empty);
+     s.local_get(A).local_get(V).call(set_length);
+     s.i32_const(1).return_();
+@@ -527,14 +528,14 @@ fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
+                     .local_tee(X);
+                 s.global_get(G_UNDEFINED).ref_eq();
+                 s.if_(BlockType::Empty);
+-                s.global_get(set_prop);
++                s.str_get(set_prop);
+                 s.local_get(KEY).ref_as_non_null().call(concat);
+-                s.global_get(only_getter).call(concat);
++                s.str_get(only_getter).call(concat);
+                 s.call(throw);
+                 s.end();
+                 s.local_get(X).local_get(A);
+                 s.local_get(V).array_new_fixed(T_VALS, 1);
+-                s.global_get(setter).call(call_value).drop();
++                s.str_get(setter).call(call_value).drop();
+                 s.return_();
+                 s.end();
+                 // A data property: read-only forbids the write, else the array gets its own element.
+@@ -564,9 +565,9 @@ fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
+                 s.end();
+                 s.i32_const(object::READONLY).i32_and();
+                 s.if_(BlockType::Empty);
+-                s.global_get(read_only);
++                s.str_get(read_only);
+                 s.local_get(KEY).ref_as_non_null().call(concat);
+-                s.global_get(of_array).call(concat);
++                s.str_get(of_array).call(concat);
+                 s.call(throw);
+                 s.end();
+                 s.br(2);
+@@ -604,7 +605,7 @@ fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
+             .i32_const(object::ACCESSOR | object::READONLY | object::HIDDEN)
+             .i32_and();
+         s.if_(BlockType::Empty);
+-        s.global_get(redefine);
++        s.str_get(redefine);
+         s.local_get(I).f64_convert_i32_u().call(number_to_string);
+         s.call(concat);
+         s.call(throw);
+@@ -638,23 +639,23 @@ fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
+             .local_tee(X);
+         s.global_get(G_UNDEFINED).ref_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(set_prop);
++        s.str_get(set_prop);
+         s.local_get(I).f64_convert_i32_u().call(number_to_string);
+         s.call(concat);
+-        s.global_get(only_getter).call(concat);
++        s.str_get(only_getter).call(concat);
+         s.call(throw);
+         s.end();
+         s.local_get(X).local_get(A);
+         s.local_get(V).array_new_fixed(T_VALS, 1);
+-        s.global_get(setter).call(call_value).drop();
++        s.str_get(setter).call(call_value).drop();
+         s.return_();
+         s.end();
+         s.local_get(T).i32_const(object::READONLY).i32_and();
+         s.if_(BlockType::Empty);
+-        s.global_get(read_only);
++        s.str_get(read_only);
+         s.local_get(I).f64_convert_i32_u().call(number_to_string);
+         s.call(concat);
+-        s.global_get(of_array).call(concat);
++        s.str_get(of_array).call(concat);
+         s.call(throw);
+         s.end();
+         s.end();
+@@ -665,7 +666,7 @@ fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
+         .i32_const(object::LENGTH_READONLY)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(length_read_only).call(throw);
++    s.str_get(length_read_only).call(throw);
+     s.end();
+     s.end();
+     // Frozen: elements are read-only; not extensible: no new elements (T16).
+@@ -694,17 +695,17 @@ fn set_index(cx: &mut dyn Cx, set: bool) -> Function {
+         .i32_const(object::FROZEN)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(read_only);
++    s.str_get(read_only);
+     s.local_get(I).f64_convert_i32_u().call(number_to_string);
+     s.call(concat);
+-    s.global_get(of_array).call(concat);
++    s.str_get(of_array).call(concat);
+     s.call(throw);
+     s.end();
+     s.else_();
+-    s.global_get(add);
++    s.str_get(add);
+     s.local_get(I).f64_convert_i32_u().call(number_to_string);
+     s.call(concat);
+-    s.global_get(not_ext).call(concat);
++    s.str_get(not_ext).call(concat);
+     s.call(throw);
+     s.end();
+     s.end();
+@@ -749,7 +750,7 @@ fn set_length(cx: &mut dyn Cx) -> Function {
+         .i32_const(object::FROZEN | object::LENGTH_READONLY)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(read_only).call(type_error);
++    s.str_get(read_only).call(type_error);
+     s.end();
+     // ArraySetLength: ToUint32(v) must equal ToNumber(v) (two conversions, as the spec does).
+     s.local_get(V).call(to_number).local_set(N);
+@@ -757,7 +758,7 @@ fn set_length(cx: &mut dyn Cx) -> Function {
+     s.local_get(N).call(to_int32).f64_convert_i32_u();
+     s.local_get(N2).f64_ne();
+     s.if_(BlockType::Empty);
+-    s.global_get(invalid).call(throw);
++    s.str_get(invalid).call(throw);
+     s.end();
+     s.local_get(A).local_get(N2).i32_trunc_f64_u().call(resize);
+     s.end();
+@@ -831,14 +832,14 @@ fn resize(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         // Keep the elements up to this one, then throw.
+         s.local_get(A).local_get(K).call(this);
+-        s.global_get(cannot);
++        s.str_get(cannot);
+         s.local_get(K)
+             .i32_const(1)
+             .i32_sub()
+             .f64_convert_i32_u()
+             .call(number_to_string);
+         s.call(concat);
+-        s.global_get(of_array).call(concat);
++        s.str_get(of_array).call(concat);
+         s.call(type_error);
+         s.end();
+         s.end();
+@@ -943,7 +944,7 @@ fn join(cx: &mut dyn Cx) -> Function {
+         .local_set(PARTS);
+     s.block(BlockType::Empty).loop_(BlockType::Empty);
+     s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+-    s.global_get(empty).local_set(P);
++    s.str_get(empty).local_set(P);
+     s.local_get(I)
+         .local_get(A)
+         .struct_get(T_ARRAY, F_LENGTH)
+@@ -992,7 +993,7 @@ fn join(cx: &mut dyn Cx) -> Function {
+     // Pass 2: one string, the parts and separators copied in.
+     s.local_get(N).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(empty).return_();
++    s.str_get(empty).return_();
+     s.end();
+     s.local_get(N).i32_const(1).i32_eq();
+     s.if_(BlockType::Empty);
+@@ -1137,7 +1138,7 @@ fn this_array(cx: &mut dyn Cx, s: &mut InstructionSink, name: &str) {
+             let msg = cx.str(&format!(
+                 "Array.prototype.{name} is only implemented for arrays (js2wasi3)"
+             ));
+-            s.global_get(msg).call(throw);
++            s.str_get(msg).call(throw);
+         }
+     }
+     s.end();
+@@ -1184,7 +1185,7 @@ fn proto_push(cx: &mut dyn Cx) -> Function {
+         .i32_const(object::LENGTH_READONLY | object::FROZEN)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(length_read_only).call(throw);
++    s.str_get(length_read_only).call(throw);
+     s.end();
+     // `length = len + argc`, even for elements a setter took.
+     s.local_get(1)
+@@ -1235,7 +1236,7 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
+         .i32_const(object::LENGTH_READONLY | object::FROZEN)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(length_read_only).call(throw);
++    s.str_get(length_read_only).call(throw);
+     s.end();
+     s.global_get(G_UNDEFINED).return_();
+     s.end();
+@@ -1260,10 +1261,10 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
+         .call(attrs);
+     s.i32_const(object::FIXED).i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(cannot);
++    s.str_get(cannot);
+     s.local_get(L).f64_convert_i32_u().call(number_to_string);
+     s.call(concat);
+-    s.global_get(of_array).call(concat);
++    s.str_get(of_array).call(concat);
+     s.call(throw);
+     s.end();
+     s.end();
+@@ -1273,7 +1274,7 @@ fn proto_pop(cx: &mut dyn Cx) -> Function {
+         .i32_const(object::LENGTH_READONLY | object::FROZEN)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(length_read_only).call(throw);
++    s.str_get(length_read_only).call(throw);
+     s.end();
+     s.local_get(1)
+         .ref_cast_non_null(array())
+@@ -1322,7 +1323,7 @@ fn proto_join(cx: &mut dyn Cx) -> Function {
+         .global_get(G_UNDEFINED)
+         .ref_eq();
+     s.if_(BlockType::Result(string_ref()));
+-    s.global_get(comma);
++    s.str_get(comma);
+     s.else_();
+     s.local_get(2)
+         .ref_cast_non_null(vals())
+@@ -1331,7 +1332,7 @@ fn proto_join(cx: &mut dyn Cx) -> Function {
+         .call(to_string);
+     s.end();
+     s.else_();
+-    s.global_get(comma);
++    s.str_get(comma);
+     s.end();
+     s.call(join);
+     s.end();
+@@ -1345,7 +1346,7 @@ fn proto_to_string(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     this_array(cx, &mut s, "toString");
+     s.local_get(1).ref_cast_non_null(array());
+-    s.global_get(comma).call(join);
++    s.str_get(comma).call(join);
+     s.end();
+     f
+ }
+diff --git a/crates/backend/src/asyncgen.rs b/crates/backend/src/asyncgen.rs
+index 5a3de7a..1220f6d 100644
+--- a/crates/backend/src/asyncgen.rs
++++ b/crates/backend/src/asyncgen.rs
+@@ -17,6 +17,7 @@
+ //! - The state is the generator's `status`: [`SUSPENDED`], [`EXECUTING`] (also while awaiting a
+ //!   `return` value: new requests just queue), [`COMPLETED`].
+ 
++use crate::runtime::StrGet;
+ use js2wasi3_ir::{Builtin, ErrorKind, RESUME_NEXT, RESUME_RETURN, RESUME_THROW};
+ use wasm_encoder::{BlockType, Catch, Function, HeapType, InstructionSink, ValType};
+ 
+@@ -392,7 +393,7 @@ fn method(cx: &mut dyn Cx, mode: i32) -> Function {
+     s.if_(BlockType::Empty);
+     {
+         s.local_get(P).ref_as_non_null();
+-        s.global_get(incompatible);
++        s.str_get(incompatible);
+         s.local_get(THIS).call(describe).call(concat);
+         s.global_get(G_UNDEFINED).call(new_error);
+         s.call(reject);
+diff --git a/crates/backend/src/bigint.rs b/crates/backend/src/bigint.rs
+index 5c8871c..6824866 100644
+--- a/crates/backend/src/bigint.rs
++++ b/crates/backend/src/bigint.rs
+@@ -9,6 +9,7 @@
+ //! algorithm D for division (Hacker's Delight's `divmnu`), and `& | ^` on two's-complement copies.
+ //! Results over 2^30 bits throw V8's RangeError.
+ 
++use crate::runtime::StrGet;
+ use crate::runtime::JsTest;
+ use js2wasi3_ir::{BinOp, ErrorKind, NumericOp};
+ use wasm_encoder::{
+@@ -259,7 +260,7 @@ fn throw_range(cx: &mut dyn Cx, s: &mut InstructionSink, msg: &str) {
+         ErrorKind::RangeError,
+     )));
+     let g = cx.str(msg);
+-    s.global_get(g).call(throw).unreachable();
++    s.str_get(g).call(throw).unreachable();
+ }
+ 
+ fn throw_type(cx: &mut dyn Cx, s: &mut InstructionSink, msg: &str) {
+@@ -267,7 +268,7 @@ fn throw_type(cx: &mut dyn Cx, s: &mut InstructionSink, msg: &str) {
+         ErrorKind::TypeError,
+     )));
+     let g = cx.str(msg);
+-    s.global_get(g).call(throw).unreachable();
++    s.str_get(g).call(throw).unreachable();
+ }
+ 
+ fn throw_size(cx: &mut dyn Cx, s: &mut InstructionSink) {
+@@ -1634,7 +1635,7 @@ fn to_string(cx: &mut dyn Cx) -> Function {
+     limbs(&mut s, A);
+     s.local_tee(N).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(zero).return_();
++    s.str_get(zero).return_();
+     s.end();
+     // d = radix^k < 2^32
+     s.local_get(RADIX).i64_extend_i32_u().local_set(D);
+diff --git a/crates/backend/src/func.rs b/crates/backend/src/func.rs
+index 477f35e..dbff9d1 100644
+--- a/crates/backend/src/func.rs
++++ b/crates/backend/src/func.rs
+@@ -18,6 +18,7 @@
+ //! Built like the other prototypes ([`crate::object`]), but a `$function` itself (F47): callable
+ //! ([`Helper::Empty`]), not a constructor; `length: 0`, `name: ""`, real `call`, `apply`, `bind`.
+ 
++use crate::runtime::StrGet;
+ use crate::runtime::JsTest;
+ use js2wasi3_ir::{Builtin, ErrorKind};
+ use wasm_encoder::{BlockType, Function, HeapType, ValType};
+@@ -301,7 +302,7 @@ impl Helper {
+                 if matches!(self, Helper::ErrorConstruct(_)) {
+                     s.local_get(NT).local_get(SELF).ref_eq().i32_eqz();
+                     s.if_(BlockType::Empty);
+-                    s.local_get(NT).global_get(prototype).call(get).local_tee(P);
++                    s.local_get(NT).str_get(prototype).call(get).local_tee(P);
+                     s.ref_test_non_null(runtime::object());
+                     s.if_(BlockType::Empty);
+                     s.local_get(E).ref_cast_non_null(runtime::object());
+@@ -369,7 +370,7 @@ impl Helper {
+                 s.local_get(0).local_get(NT).local_get(2).call(code).local_set(R);
+                 s.test_object(NT);
+                 s.if_(BlockType::Empty);
+-                s.local_get(NT).global_get(prototype).call(get).local_set(P);
++                s.local_get(NT).str_get(prototype).call(get).local_set(P);
+                 // Not an object (`null` too): the built-in's own prototype stays.
+                 s.test_object(P);
+                 s.if_(BlockType::Empty);
+@@ -390,7 +391,7 @@ impl Helper {
+                 });
+                 let mut f = Function::new([]);
+                 let mut s = f.instructions();
+-                s.global_get(msg).call(throw);
++                s.str_get(msg).call(throw);
+                 s.unreachable().end();
+                 f
+             }
+@@ -472,12 +473,12 @@ fn new(cx: &mut dyn Cx) -> Function {
+     s.ref_null(HeapType::Concrete(runtime::T_STRING));
+     s.struct_new(T_FUNCTION).local_set(F);
+     // `length` and `name`: read-only, configurable.
+-    s.local_get(F).ref_as_non_null().global_get(length);
++    s.local_get(F).ref_as_non_null().str_get(length);
+     s.local_get(LEN).ref_i31();
+     s.i32_const(object::HIDDEN | object::READONLY).call(define);
+     s.local_get(F)
+         .ref_as_non_null()
+-        .global_get(name)
++        .str_get(name)
+         .local_get(NAME);
+     s.i32_const(object::HIDDEN | object::READONLY).call(define);
+     s.local_get(FLAGS).i32_const(NEW_ORDINARY).i32_and();
+@@ -487,10 +488,10 @@ fn new(cx: &mut dyn Cx) -> Function {
+         .call(alloc)
+         .local_tee(P)
+         .ref_as_non_null();
+-    s.global_get(constructor).local_get(F);
++    s.str_get(constructor).local_get(F);
+     s.i32_const(object::HIDDEN).call(define);
+     // `prototype`: writable, not configurable.
+-    s.local_get(F).ref_as_non_null().global_get(prototype);
++    s.local_get(F).ref_as_non_null().str_get(prototype);
+     s.local_get(P);
+     s.i32_const(object::HIDDEN | object::FIXED).call(define);
+     s.end();
+@@ -516,7 +517,7 @@ fn check_constructor(cx: &mut dyn Cx, s: &mut wasm_encoder::InstructionSink, f:
+     s.end();
+     s.if_(BlockType::Empty);
+     s.local_get(what)
+-        .global_get(not_ctor)
++        .str_get(not_ctor)
+         .call(concat)
+         .call(throw);
+     s.end();
+@@ -595,7 +596,7 @@ fn fn_prototype(cx: &mut dyn Cx) -> Function {
+         .struct_get(T_FUNCTION, object::F_KEYS)
+         .i32_const(2)
+         .array_get(runtime::T_KEYS)
+-        .global_get(prototype)
++        .str_get(prototype)
+         .ref_eq();
+     s.if_(BlockType::Empty);
+     s.local_get(F)
+@@ -614,7 +615,7 @@ fn fn_prototype(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.end();
+     s.end();
+-    s.local_get(V).global_get(prototype).call(get);
++    s.local_get(V).str_get(prototype).call(get);
+     s.end();
+     f
+ }
+@@ -690,18 +691,18 @@ fn class_heritage(cx: &mut dyn Cx) -> Function {
+     s.i32_const(1);
+     s.end();
+     s.if_(BlockType::Empty);
+-    s.global_get(extends);
++    s.str_get(extends);
+     show(&mut s, V);
+     s.call(concat);
+-    s.global_get(not_ctor).call(concat);
++    s.str_get(not_ctor).call(concat);
+     s.call(throw);
+     s.end();
+-    s.local_get(V).global_get(prototype).call(get).local_tee(P);
++    s.local_get(V).str_get(prototype).call(get).local_tee(P);
+     s.ref_test_non_null(runtime::object());
+     s.local_get(P).global_get(G_NULL).ref_eq();
+     s.i32_or().i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(bad_proto);
++    s.str_get(bad_proto);
+     show(&mut s, P);
+     s.call(concat);
+     s.call(throw);
+@@ -735,10 +736,10 @@ fn class_setup(cx: &mut dyn Cx) -> Function {
+     s.ref_null(HeapType::Concrete(T_OBJECT));
+     s.end();
+     s.call(alloc).local_set(P);
+-    s.local_get(P).ref_as_non_null().global_get(constructor);
++    s.local_get(P).ref_as_non_null().str_get(constructor);
+     s.local_get(C).i32_const(object::HIDDEN).call(define);
+     s.local_get(C).ref_cast_non_null(runtime::object());
+-    s.global_get(prototype).local_get(P);
++    s.str_get(prototype).local_get(P);
+     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+         .call(define);
+     s.local_get(P);
+@@ -780,7 +781,7 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         s.local_get(P).local_get(F);
+         s.local_get(V).array_new_fixed(T_VALS, 1);
+-        s.global_get(what).call(call_value);
++        s.str_get(what).call(call_value);
+         s.call(to_boolean).return_();
+         s.end();
+         s.end();
+@@ -788,8 +789,8 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
+     s.local_get(F).ref_test_non_null(function()).i32_eqz();
+     s.if_(BlockType::Empty);
+     // A primitive: "not an object" (V8); an object that isn't a function: "not callable".
+-    s.global_get(not_callable);
+-    s.global_get(not_object);
++    s.str_get(not_callable);
++    s.str_get(not_object);
+     s.test_object(F);
+     s.typed_select(rt(false, runtime::T_STRING));
+     s.call(throw);
+@@ -818,9 +819,9 @@ fn instance_of_value(cx: &mut dyn Cx) -> Function {
+     s.local_get(F).call(fn_prototype).local_set(P);
+     s.test_object(P).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(non_object);
++    s.str_get(non_object);
+     s.local_get(P).call(to_string).call(concat);
+-    s.global_get(check).call(concat);
++    s.str_get(check).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(O)
+@@ -859,11 +860,11 @@ fn ctor_return(cx: &mut dyn Cx, derived: bool) -> Function {
+     if derived {
+         s.local_get(V).global_get(G_UNDEFINED).ref_eq().i32_eqz();
+         s.if_(BlockType::Empty);
+-        s.global_get(only).call(throw_type);
++        s.str_get(only).call(throw_type);
+         s.end();
+         s.local_get(THIS).ref_is_null();
+         s.if_(BlockType::Empty);
+-        s.global_get(uninit).call(throw_ref);
++        s.str_get(uninit).call(throw_ref);
+         s.end();
+     }
+     s.local_get(THIS);
+@@ -900,15 +901,15 @@ fn error_ctor(cx: &mut dyn Cx, k: ErrorKind) -> Function {
+         ErrorKind::SuppressedError => 3,
+         _ => 1,
+     };
+-    s.global_get(name).i32_const(length).i32_const(0);
++    s.str_get(name).i32_const(length).i32_const(0);
+     s.call(new).local_tee(F);
+     s.ref_cast_non_null(runtime::object()).global_set(g);
+     s.call(proto).local_set(P);
+     s.local_get(F).ref_cast_non_null(runtime::object());
+-    s.global_get(prototype).local_get(P);
++    s.str_get(prototype).local_get(P);
+     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+         .call(define);
+-    s.local_get(P).ref_as_non_null().global_get(constructor);
++    s.local_get(P).ref_as_non_null().str_get(constructor);
+     s.local_get(F).i32_const(object::HIDDEN).call(define);
+     s.local_get(F);
+     s.end();
+@@ -931,7 +932,7 @@ fn call_value(cx: &mut dyn Cx) -> Function {
+     s.local_get(F).ref_test_non_null(function()).i32_eqz();
+     s.if_(BlockType::Empty);
+     s.local_get(WHAT)
+-        .global_get(not_fn)
++        .str_get(not_fn)
+         .call(concat)
+         .call(throw);
+     s.unreachable();
+@@ -1002,7 +1003,7 @@ fn call(cx: &mut dyn Cx) -> Function {
+         .array_get(T_VALS);
+     s.end();
+     s.local_get(REST).ref_as_non_null();
+-    s.global_get(what);
++    s.str_get(what);
+     s.call(call_value);
+     s.end();
+     f
+@@ -1029,7 +1030,7 @@ fn apply(cx: &mut dyn Cx) -> Function {
+         s.global_get(G_UNDEFINED);
+         s.end();
+     }
+-    s.global_get(what);
++    s.str_get(what);
+     s.call(call_list);
+     s.end();
+     f
+@@ -1069,7 +1070,7 @@ fn list_from_array_like(cx: &mut dyn Cx) -> Function {
+     s.test_object(V)
+         .i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(not_obj).call(throw);
++    s.str_get(not_obj).call(throw);
+     s.end();
+     s.local_get(V).ref_test_non_null(crate::array::array());
+     s.if_(BlockType::Result(ValType::I32));
+@@ -1077,7 +1078,7 @@ fn list_from_array_like(cx: &mut dyn Cx) -> Function {
+         .ref_cast_non_null(crate::array::array())
+         .struct_get(runtime::T_ARRAY, crate::array::F_LENGTH);
+     s.else_();
+-    s.local_get(V).global_get(length).call(get).call(to_number);
++    s.local_get(V).str_get(length).call(get).call(to_number);
+     s.i32_trunc_sat_f64_u();
+     s.end();
+     s.local_tee(N).array_new_default(T_VALS).local_set(OUT);
+@@ -1128,7 +1129,7 @@ fn bind(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(THIS).ref_test_non_null(function()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(not_fn).call(throw);
++    s.str_get(not_fn).call(throw);
+     s.end();
+     s.local_get(ARGS)
+         .ref_cast_non_null(vals())
+@@ -1161,7 +1162,7 @@ fn bind(cx: &mut dyn Cx) -> Function {
+     s.end();
+     // length: max(0, ToIntegerOrInfinity(target.length) - bound args), if it's a number.
+     s.f64_const(0.0.into()).local_set(L);
+-    s.local_get(THIS).global_get(length).call(get).local_tee(X);
++    s.local_get(THIS).str_get(length).call(get).local_tee(X);
+     s.call(is_number);
+     s.if_(BlockType::Empty);
+     s.local_get(X).call(to_number).f64_trunc();
+@@ -1175,15 +1176,15 @@ fn bind(cx: &mut dyn Cx) -> Function {
+     s.local_set(L);
+     s.end();
+     // name: "bound " + target.name (if a string).
+-    s.local_get(THIS).global_get(name).call(get).local_set(X);
++    s.local_get(THIS).str_get(name).call(get).local_set(X);
+     runtime::is_string(&mut s, X);
+     s.if_(BlockType::Result(string_ref()));
+-    s.global_get(bound);
++    s.str_get(bound);
+     s.local_get(X)
+         .ref_cast_non_null(runtime::string())
+         .call(concat);
+     s.else_();
+-    s.global_get(bound);
++    s.str_get(bound);
+     s.end();
+     s.local_set(NAME);
+     s.i32_const(cx.code_slot(call));
+@@ -1260,7 +1261,7 @@ fn bound_call(cx: &mut dyn Cx, construct: bool) -> Function {
+         s.else_();
+         s.local_get(THIS);
+         s.end();
+-        s.global_get(what);
++        s.str_get(what);
+         s.call(construct_fn);
+     } else {
+         s.local_get(ENV)
+@@ -1268,7 +1269,7 @@ fn bound_call(cx: &mut dyn Cx, construct: bool) -> Function {
+             .i32_const(1)
+             .array_get(T_VALS);
+         s.local_get(ALL).ref_as_non_null();
+-        s.global_get(what);
++        s.str_get(what);
+         s.call(call_value);
+     }
+     s.end();
+@@ -1295,7 +1296,7 @@ fn to_string(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(THIS).ref_test_non_null(function()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(not_function).call(throw);
++    s.str_get(not_function).call(throw);
+     s.end();
+     s.local_get(THIS).ref_cast_non_null(function()).local_tee(F);
+     s.struct_get(T_FUNCTION, F_SOURCE);
+@@ -1305,18 +1306,18 @@ fn to_string(cx: &mut dyn Cx) -> Function {
+         .i32_const(KIND_BOUND)
+         .i32_eq();
+     s.if_(BlockType::Empty);
+-    s.global_get(anonymous).return_();
++    s.str_get(anonymous).return_();
+     s.end();
+-    s.local_get(THIS).global_get(name).call(get).local_set(N);
++    s.local_get(THIS).str_get(name).call(get).local_set(N);
+     runtime::is_string(&mut s, N);
+     s.if_(BlockType::Result(string_ref()));
+-    s.global_get(open);
++    s.str_get(open);
+     s.local_get(N)
+         .ref_cast_non_null(runtime::string())
+         .call(concat);
+-    s.global_get(close).call(concat);
++    s.str_get(close).call(concat);
+     s.else_();
+-    s.global_get(anonymous);
++    s.str_get(anonymous);
+     s.end();
+     s.end();
+     f
+@@ -1336,7 +1337,7 @@ fn set_name(cx: &mut dyn Cx) -> Function {
+     let mut f = Function::new([]);
+     let mut s = f.instructions();
+     s.local_get(F).ref_cast_non_null(runtime::object());
+-    s.global_get(name);
++    s.str_get(name);
+     s.local_get(PREFIX).ref_cast_non_null(runtime::string());
+     s.local_get(KEY).ref_test_non_null(runtime::symbol());
+     s.if_(BlockType::Result(string_ref()));
+@@ -1348,11 +1349,11 @@ fn set_name(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Result(string_ref()));
+         s.array_new_fixed(runtime::T_STRING, 0);
+         s.else_();
+-        s.global_get(open);
++        s.str_get(open);
+         s.local_get(KEY)
+             .ref_cast_non_null(runtime::string())
+             .call(concat);
+-        s.global_get(close).call(concat);
++        s.str_get(close).call(concat);
+         s.end();
+     }
+     s.else_();
+@@ -1409,7 +1410,7 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
+     if let Some(c) = construct {
+         cx.declare_func(c);
+     }
+-    let statics: Vec<(u32, u32, u32)> = cx
++    let statics: Vec<(runtime::Str, u32, u32)> = cx
+         .builtin_statics(b)
+         .into_iter()
+         .map(|(key, code, len)| {
+@@ -1434,15 +1435,15 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
+         None => s.i32_const(-1),
+     };
+     s.ref_null(HeapType::Concrete(T_VALS));
+-    s.global_get(name).i32_const(length as i32).i32_const(0);
++    s.str_get(name).i32_const(length as i32).i32_const(0);
+     s.call(new).local_tee(F);
+     s.ref_cast_non_null(runtime::object()).global_set(g);
+     s.call(proto).local_set(P);
+     s.local_get(F).ref_cast_non_null(runtime::object());
+-    s.global_get(prototype).local_get(P);
++    s.str_get(prototype).local_get(P);
+     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+         .call(define);
+-    s.local_get(P).ref_as_non_null().global_get(constructor);
++    s.local_get(P).ref_as_non_null().str_get(constructor);
+     s.local_get(F).i32_const(object::HIDDEN).call(define);
+     if b == Builtin::Number {
+         define_constants(cx, &mut s, F, &js2wasi3_ir::NUMBER_CONSTANTS);
+@@ -1462,7 +1463,7 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
+             };
+             s.local_get(F)
+                 .ref_cast_non_null(runtime::object())
+-                .global_get(key);
++                .str_get(key);
+             match value {
+                 Some(h) => s.call(h),
+                 None => s.global_get(runtime::G_SYM_ITERATOR),
+@@ -1474,11 +1475,11 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
+     for (key, code, len) in statics {
+         s.local_get(F)
+             .ref_cast_non_null(runtime::object())
+-            .global_get(key);
++            .str_get(key);
+         s.i32_const(cx.code_slot(code));
+         s.i32_const(-1);
+         s.ref_null(HeapType::Concrete(T_VALS));
+-        s.global_get(key).i32_const(len as i32).i32_const(0);
++        s.str_get(key).i32_const(len as i32).i32_const(0);
+         s.call(new);
+         s.i32_const(object::HIDDEN).call(define);
+     }
+@@ -1500,7 +1501,7 @@ pub(crate) fn define_constants(
+         let key = cx.str(key);
+         s.local_get(o)
+             .ref_cast_non_null(runtime::object())
+-            .global_get(key);
++            .str_get(key);
+         s.f64_const((*v).into()).call(box_);
+         s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+             .call(define);
+@@ -1516,7 +1517,7 @@ fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
+     let alloc = oh(cx, object::Helper::Alloc);
+     let obj_proto = oh(cx, object::Helper::Proto(Builtin::Object));
+     let define = oh(cx, object::Helper::Define);
+-    let methods: Vec<(u32, u32, u32)> = cx
++    let methods: Vec<(runtime::Str, u32, u32)> = cx
+         .namespace_methods(ns)
+         .into_iter()
+         .map(|(key, code, len)| {
+@@ -1548,11 +1549,11 @@ fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
+     for (key, code, len) in methods {
+         s.local_get(O)
+             .ref_cast_non_null(runtime::object())
+-            .global_get(key);
++            .str_get(key);
+         s.i32_const(cx.code_slot(code));
+         s.i32_const(-1);
+         s.ref_null(HeapType::Concrete(T_VALS));
+-        s.global_get(key).i32_const(len as i32).i32_const(0);
++        s.str_get(key).i32_const(len as i32).i32_const(0);
+         s.call(new);
+         s.i32_const(object::HIDDEN).call(define);
+     }
+diff --git a/crates/backend/src/generator.rs b/crates/backend/src/generator.rs
+index 2584bb7..ad8d29c 100644
+--- a/crates/backend/src/generator.rs
++++ b/crates/backend/src/generator.rs
+@@ -18,6 +18,7 @@
+ //! an iterator object); [`Helper::DelegateStep`] does one `next`/`throw`/`return` on it (see
+ //! `Intrinsic::DelegateStep`).
+ 
++use crate::runtime::StrGet;
+ use js2wasi3_ir::{Builtin, ErrorKind, RESUME_NEXT, RESUME_RETURN, RESUME_THROW};
+ use wasm_encoder::{BlockType, Catch, Function, HeapType, InstructionSink, ValType};
+ 
+@@ -125,8 +126,8 @@ impl Helper {
+                 let mut f = Function::new([(1, jsval())]);
+                 let mut s = f.instructions();
+                 s.call(new_object).local_set(R);
+-                s.local_get(R).global_get(value).local_get(V).call(define);
+-                s.local_get(R).global_get(done);
++                s.local_get(R).str_get(value).local_get(V).call(define);
++                s.local_get(R).str_get(done);
+                 s.global_get(G_TRUE).global_get(G_FALSE).local_get(DONE);
+                 s.typed_select(jsval());
+                 s.call(define);
+@@ -204,11 +205,11 @@ fn resume(cx: &mut dyn Cx) -> Function {
+     s.local_get(THIS).ref_test_non_null(generator()).i32_eqz();
+     s.if_(BlockType::Empty);
+     {
+-        s.global_get(incompatible[0]);
+-        s.global_get(incompatible[1]);
++        s.str_get(incompatible[0]);
++        s.str_get(incompatible[1]);
+         s.local_get(MODE).i32_const(RESUME_NEXT).i32_eq();
+         s.typed_select(runtime::string_ref());
+-        s.global_get(incompatible[2]);
++        s.str_get(incompatible[2]);
+         s.local_get(MODE).i32_const(RESUME_RETURN).i32_ne();
+         s.typed_select(runtime::string_ref());
+         s.local_get(THIS).call(describe).call(concat);
+@@ -220,7 +221,7 @@ fn resume(cx: &mut dyn Cx) -> Function {
+         .i32_const(EXECUTING)
+         .i32_eq();
+     s.if_(BlockType::Empty);
+-    s.global_get(running).call(throw);
++    s.str_get(running).call(throw);
+     s.end();
+     gen_(&mut s, THIS);
+     s.struct_get(T_GENERATOR, F_STATUS)
+@@ -320,7 +321,7 @@ fn delegate_step(cx: &mut dyn Cx) -> Function {
+         s.local_get(MODE).i32_const(RESUME_THROW).i32_eq();
+         s.if_(BlockType::Empty);
+         s.local_get(IT).i32_const(0).call(close);
+-        s.global_get(no_throw).call(throw);
++        s.str_get(no_throw).call(throw);
+         s.end();
+         s.local_get(IT).call(step);
+         s.if_(BlockType::Result(jsval()));
+@@ -341,7 +342,7 @@ fn delegate_step(cx: &mut dyn Cx) -> Function {
+     s.else_();
+     it(&mut s);
+     s.struct_get(T_ITER, iter::F_OBJ);
+-    s.global_get(names[1]).global_get(names[2]);
++    s.str_get(names[1]).str_get(names[2]);
+     s.local_get(MODE).i32_const(RESUME_THROW).i32_eq();
+     s.typed_select(runtime::string_ref());
+     s.call(get);
+@@ -359,15 +360,15 @@ fn delegate_step(cx: &mut dyn Cx) -> Function {
+         s.end();
+         // No `throw`: close the inner iterator, then a TypeError.
+         s.local_get(IT).i32_const(0).call(close);
+-        s.global_get(no_throw).call(throw);
++        s.str_get(no_throw).call(throw);
+     }
+     s.end();
+     s.local_get(M);
+     it(&mut s);
+     s.struct_get(T_ITER, iter::F_OBJ);
+     s.local_get(V).array_new_fixed(T_VALS, 1);
+-    s.global_get(names[0]);
+-    s.global_get(names[1]).global_get(names[2]);
++    s.str_get(names[0]);
++    s.str_get(names[1]).str_get(names[2]);
+     s.local_get(MODE).i32_const(RESUME_THROW).i32_eq();
+     s.typed_select(runtime::string_ref());
+     s.local_get(MODE).i32_const(RESUME_NEXT).i32_eq();
+@@ -375,9 +376,9 @@ fn delegate_step(cx: &mut dyn Cx) -> Function {
+     s.call(call_value).local_tee(R);
+     s.ref_test_non_null(runtime::object()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(result_s);
++    s.str_get(result_s);
+     s.local_get(R).call(inspect).call(concat);
+-    s.global_get(not_obj).call(concat);
++    s.str_get(not_obj).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(R);
+diff --git a/crates/backend/src/host.rs b/crates/backend/src/host.rs
+index 093f0d0..73df106 100644
+--- a/crates/backend/src/host.rs
++++ b/crates/backend/src/host.rs
+@@ -29,6 +29,7 @@
+ //! Per stream, [`G_PHASE`]: 0 unused, 1 open, 2 waiting for a write, 3 waiting for the future, 4 done,
+ //! 5 the reader went away (later output is dropped; the stream still gets closed, and `run` fails).
+ 
++use crate::runtime::StrGet;
+ use wasm_encoder::{BlockType, Catch, EntityType, Function, ImportSection, MemArg, ValType};
+ 
+ use crate::runtime::{self, Cx, G_LOOP_NOW, G_WAIT, G_WAIT_AT};
+@@ -508,9 +509,9 @@ impl Helper {
+                 let (prefix, newline) = (cx.str("Uncaught "), cx.str("\n"));
+                 let mut f = Function::new([]);
+                 let mut s = f.instructions();
+-                s.global_get(prefix);
++                s.str_get(prefix);
+                 s.local_get(0).call(concat);
+-                s.global_get(newline).call(concat);
++                s.str_get(newline).call(concat);
+                 s.call(append);
+                 s.i32_const(1).global_set(err);
+                 s.end();
+@@ -1078,7 +1079,15 @@ fn catches(exits: bool) -> Vec<Catch> {
+ /// [`Helper::Environment`]: call `get-environment` (0), `get-arguments` (1) or `get-initial-cwd`
+ /// (2) with a return area from `cabi_realloc` and make one string of the result: the strings each
+ /// followed by a NUL (a variable is its name and value), or the directory ("" for `none`).
+-fn environment(im: &Imports, k: u8, realloc: u32, utf8: u32, concat: u32, empty: u32, nul: u32) -> Function {
++fn environment(
++    im: &Imports,
++    k: u8,
++    realloc: u32,
++    utf8: u32,
++    concat: u32,
++    empty: runtime::Str,
++    nul: runtime::Str,
++) -> Function {
+     const RET: u32 = 0;
+     const PTR: u32 = 1;
+     const LEN: u32 = 2;
+@@ -1106,7 +1115,7 @@ fn environment(im: &Imports, k: u8, realloc: u32, utf8: u32, concat: u32, empty:
+         // `option<string>`: the discriminant, then the string at 4.
+         s.local_get(RET).i32_load8_u(mem8(0)).i32_eqz();
+         s.if_(BlockType::Empty);
+-        s.global_get(empty).return_();
++        s.str_get(empty).return_();
+         s.end();
+         s.local_get(RET).i32_load(mem(4));
+         s.local_get(RET).i32_load(mem(8));
+@@ -1117,7 +1126,7 @@ fn environment(im: &Imports, k: u8, realloc: u32, utf8: u32, concat: u32, empty:
+     let (stride, strings) = if k == 0 { (16, 2) } else { (8, 1) };
+     s.local_get(RET).i32_load(mem(0)).local_set(PTR);
+     s.local_get(RET).i32_load(mem(4)).local_set(LEN);
+-    s.global_get(empty).local_set(OUT);
++    s.str_get(empty).local_set(OUT);
+     s.block(BlockType::Empty);
+     s.loop_(BlockType::Empty);
+     s.local_get(I).local_get(LEN).i32_ge_u().br_if(1);
+@@ -1126,7 +1135,7 @@ fn environment(im: &Imports, k: u8, realloc: u32, utf8: u32, concat: u32, empty:
+         s.local_get(PTR).i32_load(mem(8 * j));
+         s.local_get(PTR).i32_load(mem(8 * j + 4));
+         s.call(utf8).call(concat);
+-        s.global_get(nul).call(concat).local_set(OUT);
++        s.str_get(nul).call(concat).local_set(OUT);
+     }
+     s.local_get(PTR).i32_const(stride).i32_add().local_set(PTR);
+     s.local_get(I).i32_const(1).i32_add().local_set(I);
+diff --git a/crates/backend/src/inspect.rs b/crates/backend/src/inspect.rs
+index c5d5f14..137be49 100644
+--- a/crates/backend/src/inspect.rs
++++ b/crates/backend/src/inspect.rs
+@@ -14,6 +14,7 @@
+ //! Anything else traps (`inspect_object_not_implemented`, F24): other objects, arrays with extra
+ //! properties or more than 100 elements, objects with symbol keys, nested errors.
+ 
++use crate::runtime::StrGet;
+ use crate::runtime::JsTest;
+ use wasm_encoder::{BlockType, Function, InstructionSink, ValType};
+ 
+@@ -251,9 +252,9 @@ fn format(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.local_get(V).ref_test_non_null(runtime::symbol());
+     s.if_(BlockType::Empty);
+-    s.global_get(sym_open);
++    s.str_get(sym_open);
+     s.local_get(V).ref_cast_non_null(string()).call(concat);
+-    s.global_get(sym_close).call(concat).return_();
++    s.str_get(sym_close).call(concat).return_();
+     s.end();
+     if cx.bigint() {
+         // T40: `123n`.
+@@ -263,7 +264,7 @@ fn format(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         s.local_get(V).ref_cast_non_null(crate::bigint::bigint());
+         s.i32_const(10).call(big_to_string);
+-        s.global_get(suffix).call(concat).return_();
++        s.str_get(suffix).call(concat).return_();
+         s.end();
+     }
+     if let Some(custom) = custom {
+@@ -298,8 +299,8 @@ fn format(cx: &mut dyn Cx) -> Function {
+             .i32_eq();
+         s.if_(BlockType::Result(string_ref()));
+         {
+-            s.global_get(class_open);
+-            s.local_get(V).global_get(name).call(get).local_set(N);
++            s.str_get(class_open);
++            s.local_get(V).str_get(name).call(get).local_set(N);
+             runtime::is_string(&mut s, N);
+             s.if_(BlockType::Result(ValType::I32));
+             s.local_get(N).ref_cast_non_null(string()).array_len();
+@@ -309,7 +310,7 @@ fn format(cx: &mut dyn Cx) -> Function {
+             s.if_(BlockType::Result(string_ref()));
+             s.local_get(N).ref_cast_non_null(string());
+             s.else_();
+-            s.global_get(anon_class);
++            s.str_get(anon_class);
+             s.end();
+             s.call(concat);
+             // Derived: ` extends Parent`.
+@@ -325,24 +326,24 @@ fn format(cx: &mut dyn Cx) -> Function {
+                 .i32_eqz()
+                 .i32_and();
+             s.if_(BlockType::Result(string_ref()));
+-            s.global_get(extends);
+-            s.local_get(P).global_get(name).call(get).local_set(N);
++            s.str_get(extends);
++            s.local_get(P).str_get(name).call(get).local_set(N);
+             runtime::is_string(&mut s, N);
+             s.if_(BlockType::Result(string_ref()));
+             s.local_get(N).ref_cast_non_null(string());
+             s.else_();
+-            s.global_get(anon_class);
++            s.str_get(anon_class);
+             s.end();
+             s.call(concat);
+             s.else_();
+-            s.global_get(empty);
++            s.str_get(empty);
+             s.end();
+             s.call(concat);
+-            s.global_get(close).call(concat);
++            s.str_get(close).call(concat);
+         }
+         s.else_();
+         {
+-            s.local_get(V).global_get(name).call(get).local_set(N);
++            s.local_get(V).str_get(name).call(get).local_set(N);
+             runtime::is_string(&mut s, N);
+             s.if_(BlockType::Result(ValType::I32));
+             s.local_get(N).ref_cast_non_null(string()).array_len();
+@@ -365,16 +366,16 @@ fn format(cx: &mut dyn Cx) -> Function {
+                 )
+             });
+             let pick = |s: &mut InstructionSink,
+-                        plain: u32,
+-                        generator: u32,
+-                        async_: u32,
+-                        async_gen: Option<u32>| {
++                        plain: runtime::Str,
++                        generator: runtime::Str,
++                        async_: runtime::Str,
++                        async_gen: Option<runtime::Str>| {
+                 // (`select` keeps its first operand when the condition holds.)
+                 if let Some(g) = async_gen {
+-                    s.global_get(g);
++                    s.str_get(g);
+                 }
+-                s.global_get(async_);
+-                s.global_get(generator).global_get(plain);
++                s.str_get(async_);
++                s.str_get(generator).str_get(plain);
+                 is_kind(s, func::KIND_GENERATOR);
+                 s.typed_select(string_ref());
+                 is_kind(s, func::KIND_ASYNC);
+@@ -393,7 +394,7 @@ fn format(cx: &mut dyn Cx) -> Function {
+                 async_gen.map(|g| g.0),
+             );
+             s.local_get(N).ref_cast_non_null(string()).call(concat);
+-            s.global_get(close).call(concat);
++            s.str_get(close).call(concat);
+             s.else_();
+             pick(
+                 &mut s,
+@@ -415,7 +416,7 @@ fn format(cx: &mut dyn Cx) -> Function {
+             .ref_eq();
+         s.if_(BlockType::Empty);
+         s.local_get(B).ref_as_non_null();
+-        s.global_get(object_suffix).call(concat).local_set(B);
++        s.str_get(object_suffix).call(concat).local_set(B);
+         s.end();
+         s.local_get(V)
+             .ref_cast_non_null(runtime::object())
+@@ -430,7 +431,7 @@ fn format(cx: &mut dyn Cx) -> Function {
+         s.local_get(DEPTH).local_get(INDENT);
+         s.local_get(B)
+             .ref_as_non_null()
+-            .global_get(space)
++            .str_get(space)
+             .call(concat);
+         s.call(f_object);
+         s.else_();
+@@ -492,7 +493,7 @@ fn format(cx: &mut dyn Cx) -> Function {
+         let (stack, errors) = (cx.str("stack"), cx.str("errors"));
+         let (errors_key, brace, rbrace) = (cx.str("[errors]: "), cx.str(" {"), cx.str("}"));
+         s.local_get(V).ref_cast_non_null(runtime::object());
+-        s.global_get(stack).call(own_get).local_set(STK);
++        s.str_get(stack).call(own_get).local_set(STK);
+         if cx.names("stack") {
+             // T63: only a `stack` without frames counts (every error's can be a string then).
+             object::frameless_stack(cx, &mut s, V, STK);
+@@ -506,19 +507,19 @@ fn format(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         trap(cx, &mut s);
+         s.end();
+-        s.global_get(open);
++        s.str_get(open);
+         runtime::is_string(&mut s, STK);
+         s.if_(BlockType::Result(string_ref()));
+         s.local_get(STK).ref_cast_non_null(string());
+         s.else_();
+         s.local_get(V).call(to_string);
+         s.end();
+-        s.call(concat).global_get(close).call(concat).local_set(B);
++        s.call(concat).str_get(close).call(concat).local_set(B);
+         s.local_get(V).ref_cast_non_null(runtime::object());
+-        s.global_get(errors).call(own_get).local_tee(ERRS);
++        s.str_get(errors).call(own_get).local_tee(ERRS);
+         s.ref_test_non_null(array::array());
+         s.if_(BlockType::Empty);
+-        s.global_get(errors_key);
++        s.str_get(errors_key);
+         s.local_get(ERRS);
+         s.local_get(DEPTH).i32_const(1).i32_add();
+         s.local_get(INDENT).i32_const(2).i32_add();
+@@ -526,9 +527,9 @@ fn format(cx: &mut dyn Cx) -> Function {
+         s.array_new_fixed(T_KEYS, 1).i32_const(1).local_get(INDENT);
+         s.local_get(B)
+             .ref_as_non_null()
+-            .global_get(brace)
++            .str_get(brace)
+             .call(concat);
+-        s.global_get(rbrace);
++        s.str_get(rbrace);
+         s.i32_const(0).i32_const(0).call(layout).return_();
+         s.end();
+         s.local_get(B).ref_as_non_null().return_();
+@@ -538,9 +539,9 @@ fn format(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         trap(cx, &mut s);
+         s.end();
+-        s.global_get(open);
++        s.str_get(open);
+         s.local_get(V).call(to_string).call(concat);
+-        s.global_get(close).call(concat).return_();
++        s.str_get(close).call(concat).return_();
+     }
+     s.end();
+     s.local_get(V).ref_cast_non_null(runtime::object());
+@@ -559,7 +560,7 @@ fn format(cx: &mut dyn Cx) -> Function {
+         .i64_const(i64::MIN)
+         .i64_eq();
+     s.if_(BlockType::Empty);
+-    s.global_get(minus_zero).return_();
++    s.str_get(minus_zero).return_();
+     s.end();
+     s.end();
+     s.local_get(V).call(to_string);
+@@ -609,7 +610,7 @@ fn format_array(cx: &mut dyn Cx) -> Function {
+         .i32_ne();
+     s.i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(deep).return_();
++    s.str_get(deep).return_();
+     s.end();
+     s.local_get(A).struct_get(T_ARRAY, F_LENGTH).local_set(LEN);
+     // Its other properties (T25), after the elements and `... n more items`.
+@@ -675,7 +676,7 @@ fn format_array(cx: &mut dyn Cx) -> Function {
+         s.br(0).end().end();
+         s.i32_const(0).local_set(NUMBERS);
+         s.local_get(OUT).local_get(N);
+-        s.global_get(lt);
++        s.str_get(lt);
+         s.local_get(J)
+             .local_get(I)
+             .i32_sub()
+@@ -684,9 +685,9 @@ fn format_array(cx: &mut dyn Cx) -> Function {
+         s.call(concat);
+         s.local_get(J).local_get(I).i32_sub().i32_const(1).i32_eq();
+         s.if_(BlockType::Result(string_ref()));
+-        s.global_get(item);
++        s.str_get(item);
+         s.else_();
+-        s.global_get(items);
++        s.str_get(items);
+         s.end();
+         s.call(concat);
+         s.array_set(T_KEYS);
+@@ -719,14 +720,14 @@ fn format_array(cx: &mut dyn Cx) -> Function {
+     s.local_get(I).local_get(LEN).i32_lt_u();
+     s.if_(BlockType::Empty);
+     s.local_get(OUT).ref_as_non_null().local_get(N);
+-    s.global_get(more);
++    s.str_get(more);
+     s.local_get(LEN)
+         .local_get(I)
+         .i32_sub()
+         .f64_convert_i32_u()
+         .call(number_to_string)
+         .call(concat);
+-    s.global_get(more_item).global_get(more_items);
++    s.str_get(more_item).str_get(more_items);
+     s.local_get(LEN)
+         .local_get(I)
+         .i32_sub()
+@@ -772,9 +773,9 @@ fn format_array(cx: &mut dyn Cx) -> Function {
+         .array_len()
+         .i32_add()
+         .local_get(INDENT);
+-    s.global_get(open);
++    s.str_get(open);
+     s.local_get(A).call(ref_open);
+-    s.global_get(close);
++    s.str_get(close);
+     s.i32_const(1).local_get(NUMBERS).call(layout);
+     s.end();
+     f
+@@ -833,7 +834,7 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
+     s.local_get(N).i32_const(0).i32_ne();
+     s.i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(set_deep).global_get(map_deep);
++    s.str_get(set_deep).str_get(map_deep);
+     s.local_get(SET).typed_select(string_ref());
+     s.return_();
+     s.end();
+@@ -875,9 +876,9 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
+     // A map's ` => value`.
+     s.local_get(SET);
+     s.if_(BlockType::Result(string_ref()));
+-    s.global_get(empty);
++    s.str_get(empty);
+     s.else_();
+-    s.global_get(arrow);
++    s.str_get(arrow);
+     s.local_get(T)
+         .struct_get(runtime::T_MTABLE, T_VALS_F)
+         .local_get(E)
+@@ -897,14 +898,14 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
+     s.local_get(SIZE).local_get(N).i32_gt_u();
+     s.if_(BlockType::Empty);
+     s.local_get(OUT).ref_as_non_null().local_get(N);
+-    s.global_get(more);
++    s.str_get(more);
+     s.local_get(SIZE)
+         .local_get(N)
+         .i32_sub()
+         .f64_convert_i32_u()
+         .call(number_to_string)
+         .call(concat);
+-    s.global_get(more_item).global_get(more_items);
++    s.str_get(more_item).str_get(more_items);
+     s.local_get(SIZE)
+         .local_get(N)
+         .i32_sub()
+@@ -927,13 +928,13 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
+         .array_len()
+         .i32_add()
+         .local_get(INDENT);
+-    s.global_get(set_open).global_get(map_open);
++    s.str_get(set_open).str_get(map_open);
+     s.local_get(SET).typed_select(string_ref());
+     s.local_get(SIZE).f64_convert_i32_u().call(number_to_string);
+     s.call(concat);
+-    s.global_get(paren).call(concat);
++    s.str_get(paren).call(concat);
+     s.local_get(M).call(ref_open);
+-    s.global_get(close);
++    s.str_get(close);
+     s.i32_const(0).i32_const(0).call(layout);
+     s.end();
+     f
+@@ -1007,7 +1008,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             .ref_cast_non_null(crate::wrapper::wrapper())
+             .struct_get(runtime::T_WRAPPER, crate::wrapper::F_PRIM)
+             .local_set(W_PRIM);
+-        s.global_get(lbracket);
++        s.str_get(lbracket);
+         s.local_get(O).call(tag).ref_cast_non_null(string()).local_tee(Q_TAG);
+         s.ref_cast_non_null(string()).call(concat).local_set(W_BASE);
+         s.local_get(O).call(ctor_name).local_set(NAME);
+@@ -1035,7 +1036,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         s.local_get(NAME).ref_is_null();
+         s.if_(BlockType::Empty);
+         s.local_get(W_BASE).ref_as_non_null();
+-        s.global_get(null_p).call(concat).local_set(W_BASE);
++        s.str_get(null_p).call(concat).local_set(W_BASE);
+         s.else_();
+         s.local_get(NAME)
+             .ref_as_non_null()
+@@ -1045,20 +1046,20 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             .i32_eqz();
+         s.if_(BlockType::Empty);
+         s.local_get(W_BASE).ref_as_non_null();
+-        s.global_get(open_p).call(concat);
++        s.str_get(open_p).call(concat);
+         s.local_get(NAME).ref_as_non_null().call(concat);
+-        s.global_get(rparen).call(concat).local_set(W_BASE);
++        s.str_get(rparen).call(concat).local_set(W_BASE);
+         s.end();
+         s.end();
+         s.local_get(W_BASE).ref_as_non_null();
+-        s.global_get(colon).call(concat);
++        s.str_get(colon).call(concat);
+         s.local_get(W_PRIM)
+             .local_get(DEPTH)
+             .local_get(INDENT)
+             .i32_const(1)
+             .call(format)
+             .call(concat);
+-        s.global_get(rbracket).call(concat).local_set(W_BASE);
++        s.str_get(rbracket).call(concat).local_set(W_BASE);
+         runtime::is_string(&mut s, W_PRIM);
+         s.local_set(W_SKIP);
+         // Other keys: the enumerable ones past a string's indices, and symbols.
+@@ -1076,7 +1077,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         s.end();
+         s.local_get(W_BASE)
+             .ref_as_non_null()
+-            .global_get(space)
++            .str_get(space)
+             .call(concat)
+             .local_set(PREFIX);
+         s.end();
+@@ -1100,7 +1101,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         s.end();
+         s.local_get(W_BASE)
+             .ref_as_non_null()
+-            .global_get(space)
++            .str_get(space)
+             .call(concat)
+             .local_set(PREFIX);
+         s.end();
+@@ -1126,9 +1127,9 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             .i32_const(object::CLASS_REGEXP)
+             .i32_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(slash);
++        s.str_get(slash);
+         elem(&mut s, 0);
+-        s.call(concat).global_get(slash).call(concat);
++        s.call(concat).str_get(slash).call(concat);
+         elem(&mut s, 1);
+         s.call(concat).local_set(W_BASE);
+         s.local_get(O).call(own_keys).array_len();
+@@ -1138,7 +1139,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         s.end();
+         s.local_get(W_BASE)
+             .ref_as_non_null()
+-            .global_get(space)
++            .str_get(space)
+             .call(concat)
+             .local_set(PREFIX);
+         s.end();
+@@ -1149,7 +1150,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         .ref_test_non_null(crate::generator::generator());
+     s.i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(generator_prefix).local_set(PREFIX);
++    s.str_get(generator_prefix).local_set(PREFIX);
+     s.end();
+     if cx.names("$asyncgen") {
+         // An async generator object (T20): `Object [AsyncGenerator] `.
+@@ -1161,7 +1162,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             .i32_const(object::CLASS_ASYNC_GEN)
+             .i32_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(prefix).local_set(PREFIX);
++        s.str_get(prefix).local_set(PREFIX);
+         s.end();
+     }
+     // An array iterator (T25): `Object [Array Iterator] ` (only if the code can make one).
+@@ -1182,7 +1183,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             .i32_eqz()
+             .i32_and();
+         s.if_(BlockType::Empty);
+-        s.global_get(array_iterator_prefix).local_set(PREFIX);
++        s.str_get(array_iterator_prefix).local_set(PREFIX);
+         s.end();
+     }
+     // An `arguments` object (T25): `[Arguments] `.
+@@ -1195,7 +1196,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         .i32_eq();
+     s.i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(arguments_prefix).local_set(PREFIX);
++    s.str_get(arguments_prefix).local_set(PREFIX);
+     s.end();
+     if cx.names("$module") {
+         // A module namespace (T41): `[Module: null prototype] `; empty, node prints `{  }`.
+@@ -1209,9 +1210,9 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         s.local_get(O).call(own_keys).array_len().i32_eqz();
+         s.if_(BlockType::Empty);
+-        s.global_get(empty).return_();
++        s.str_get(empty).return_();
+         s.end();
+-        s.global_get(prefix).local_set(PREFIX);
++        s.str_get(prefix).local_set(PREFIX);
+         s.end();
+     }
+     // `Math`/`JSON` (T25): node's `Symbol.toStringTag` form.
+@@ -1234,7 +1235,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             .i32_eq();
+         s.i32_and();
+         s.if_(BlockType::Empty);
+-        s.global_get(prefix).local_set(PREFIX);
++        s.str_get(prefix).local_set(PREFIX);
+         s.end();
+     }
+     // The prefix: `Name ` from the constructor on the chain; none for `Object`; for no constructor,
+@@ -1260,20 +1261,20 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             s.br(0).end().end();
+             s.local_get(PLAIN).i32_eqz();
+             s.if_(BlockType::Empty);
+-            s.global_get(null_proto).local_set(PREFIX);
++            s.str_get(null_proto).local_set(PREFIX);
+             s.end();
+         }
+         s.else_();
+         {
+             s.local_get(NAME)
+                 .ref_as_non_null()
+-                .global_get(object_)
++                .str_get(object_)
+                 .call(str_eq)
+                 .i32_eqz();
+             s.if_(BlockType::Empty);
+             s.local_get(NAME)
+                 .ref_as_non_null()
+-                .global_get(space)
++                .str_get(space)
+                 .call(concat)
+                 .local_set(PREFIX);
+             s.end();
+@@ -1345,19 +1346,19 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+                 // (No constructor: after `[Object: null prototype] `.)
+                 s.local_get(PREFIX).ref_is_null();
+                 s.if_(BlockType::Result(string_ref()));
+-                s.global_get(object_).global_get(space).call(concat);
++                s.str_get(object_).str_get(space).call(concat);
+                 s.else_();
+                 s.local_get(PREFIX).ref_as_non_null();
+                 s.end();
+                 s.else_();
+                 s.local_get(NAME)
+                     .ref_as_non_null()
+-                    .global_get(space)
++                    .str_get(space)
+                     .call(concat);
+                 s.end();
+-                s.global_get(lb).call(concat);
++                s.str_get(lb).call(concat);
+                 s.local_get(Q_TAG).ref_cast_non_null(string()).call(concat);
+-                s.global_get(rb).call(concat);
++                s.str_get(rb).call(concat);
+                 s.local_set(PREFIX);
+                 s.end();
+             }
+@@ -1385,20 +1386,20 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+     {
+         s.local_get(PREFIX).ref_is_null();
+         s.if_(BlockType::Empty);
+-        s.global_get(deep).return_();
++        s.str_get(deep).return_();
+         s.end();
+-        s.local_get(PREFIX).global_get(null_proto).ref_eq();
++        s.local_get(PREFIX).str_get(null_proto).ref_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(deep_null).return_();
++        s.str_get(deep_null).return_();
+         s.end();
+         // (A function's own properties aren't shown that deep: `format` stops first.)
+         s.local_get(NAME).ref_is_null();
+         s.if_(BlockType::Empty);
+-        s.global_get(deep).return_();
++        s.str_get(deep).return_();
+         s.end();
+-        s.global_get(lbracket);
++        s.str_get(lbracket);
+         s.local_get(NAME).ref_as_non_null().call(concat);
+-        s.global_get(rbracket).call(concat).return_();
++        s.str_get(rbracket).call(concat).return_();
+     }
+     s.end();
+     s.local_get(O);
+@@ -1417,7 +1418,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+             .local_tee(Q_STATE);
+         s.i32_const(promise::PENDING).i32_eq();
+         s.if_(BlockType::Result(string_ref()));
+-        s.global_get(pending);
++        s.str_get(pending);
+         s.else_();
+         s.local_get(O)
+             .ref_cast_non_null(promise::promise())
+@@ -1427,7 +1428,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         s.i32_const(1).call(format).local_set(NAME);
+         s.local_get(Q_STATE).i32_const(promise::REJECTED).i32_eq();
+         s.if_(BlockType::Result(string_ref()));
+-        s.global_get(rejected)
++        s.str_get(rejected)
+             .local_get(NAME)
+             .ref_as_non_null()
+             .call(concat);
+@@ -1455,15 +1456,15 @@ fn format_object(cx: &mut dyn Cx) -> Function {
+         .local_get(INDENT);
+     s.local_get(PREFIX).ref_is_null();
+     s.if_(BlockType::Result(string_ref()));
+-    s.global_get(open);
++    s.str_get(open);
+     s.else_();
+     s.local_get(PREFIX)
+         .ref_as_non_null()
+-        .global_get(open)
++        .str_get(open)
+         .call(concat);
+     s.end();
+     s.local_get(O).call(ref_open);
+-    s.global_get(close);
++    s.str_get(close);
+     s.i32_const(0).i32_const(0).call(layout);
+     s.end();
+     let _ = lbracket;
+@@ -1856,13 +1857,13 @@ fn layout(cx: &mut dyn Cx) -> Function {
+         s.local_get(TOTAL).i32_const(BREAK_LENGTH).i32_le_s();
+         s.local_get(NL).i32_eqz().i32_and();
+         s.if_(BlockType::Empty);
+-        s.local_get(OPEN).global_get(space).call(concat);
++        s.local_get(OPEN).str_get(space).call(concat);
+         s.local_get(E)
+             .local_get(N)
+-            .global_get(comma_space)
++            .str_get(comma_space)
+             .call(join);
+         s.call(concat);
+-        s.global_get(space).call(concat);
++        s.str_get(space).call(concat);
+         s.local_get(CLOSE).call(concat).return_();
+         s.end();
+         s.local_get(E).local_set(G);
+@@ -1871,22 +1872,22 @@ fn layout(cx: &mut dyn Cx) -> Function {
+     s.local_get(G).ref_as_non_null().array_len().local_set(N);
+     s.end();
+     // One entry (or group line) per line.
+-    s.global_get(newline);
++    s.str_get(newline);
+     s.local_get(INDENT).call(spaces).call(concat).local_set(IND);
+     s.local_get(OPEN);
+     s.local_get(IND)
+         .ref_as_non_null()
+-        .global_get(space)
++        .str_get(space)
+         .call(concat)
+-        .global_get(space)
++        .str_get(space)
+         .call(concat);
+     s.call(concat);
+     s.local_get(G).ref_as_non_null().local_get(N);
+-    s.global_get(comma);
++    s.str_get(comma);
+     s.local_get(IND).ref_as_non_null().call(concat);
+-    s.global_get(space)
++    s.str_get(space)
+         .call(concat)
+-        .global_get(space)
++        .str_get(space)
+         .call(concat);
+     s.call(join);
+     s.call(concat);
+@@ -2049,7 +2050,7 @@ fn group(cx: &mut dyn Cx) -> Function {
+     s.local_get(N);
+     s.local_get(LINE).local_get(N).i32_lt_u();
+     s.select().local_set(LINE);
+-    s.global_get(empty).local_set(STR);
++    s.str_get(empty).local_set(STR);
+     s.local_get(I).local_set(J);
+     s.block(BlockType::Empty).loop_(BlockType::Empty);
+     s.local_get(J)
+@@ -2063,7 +2064,7 @@ fn group(cx: &mut dyn Cx) -> Function {
+         .local_get(J)
+         .array_get(T_KEYS)
+         .ref_as_non_null();
+-    s.global_get(comma_space).call(concat);
++    s.str_get(comma_space).call(concat);
+     s.local_get(WIDTHS)
+         .local_get(J)
+         .local_get(I)
+@@ -2220,8 +2221,8 @@ fn join(cx: &mut dyn Cx) -> Function {
+     f
+ }
+ 
+-/// The globals of `[Getter]`, `[Setter]` and `[Getter/Setter]`.
+-fn accessor_labels(cx: &mut dyn Cx) -> [u32; 3] {
++/// The constants `[Getter]`, `[Setter]` and `[Getter/Setter]`.
++fn accessor_labels(cx: &mut dyn Cx) -> [runtime::Str; 3] {
+     [
+         cx.str("[Getter]"),
+         cx.str("[Setter]"),
+@@ -2230,7 +2231,7 @@ fn accessor_labels(cx: &mut dyn Cx) -> [u32; 3] {
+ }
+ 
+ /// Push how node shows the accessor in local `r` (a `$accessor`).
+-fn accessor_label(s: &mut InstructionSink, [getter, setter, both]: [u32; 3], r: u32) {
++fn accessor_label(s: &mut InstructionSink, [getter, setter, both]: [runtime::Str; 3], r: u32) {
+     let get = |s: &mut InstructionSink, field: u32| {
+         s.local_get(r)
+             .ref_cast_non_null(props::accessor())
+@@ -2238,11 +2239,11 @@ fn accessor_label(s: &mut InstructionSink, [getter, setter, both]: [u32; 3], r:
+             .global_get(runtime::G_UNDEFINED)
+             .ref_eq();
+     };
+-    s.global_get(getter).global_get(setter);
++    s.str_get(getter).str_get(setter);
+     get(s, 0);
+     s.i32_eqz();
+     s.typed_select(string_ref());
+-    s.global_get(both);
++    s.str_get(both);
+     get(s, 0);
+     get(s, 1);
+     s.i32_or();
+@@ -2342,7 +2343,7 @@ fn format_props(cx: &mut dyn Cx) -> Function {
+     s.i32_and().br_if(0);
+     s.local_get(OUT).ref_as_non_null().local_get(M);
+     s.local_get(K).ref_as_non_null().call(key);
+-    s.global_get(colon).call(concat);
++    s.str_get(colon).call(concat);
+     value(&mut s);
+     s.call(concat);
+     s.array_set(T_KEYS);
+@@ -2362,7 +2363,7 @@ fn format_props(cx: &mut dyn Cx) -> Function {
+     s.local_get(OUT).ref_as_non_null().local_get(M);
+     s.local_get(K).ref_as_non_null();
+     s.i32_const(0).i32_const(0).i32_const(0).call(format);
+-    s.global_get(colon).call(concat);
++    s.str_get(colon).call(concat);
+     value(&mut s);
+     s.call(concat);
+     s.array_set(T_KEYS);
+@@ -2457,14 +2458,14 @@ fn format_checked(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         push(&mut s, G_INSPECT_CIRC, G_INSPECT_CIRC_N, V, TMP);
+         s.end();
+-        s.global_get(circ_open);
++        s.str_get(circ_open);
+         s.local_get(K)
+             .i32_const(1)
+             .i32_add()
+             .f64_convert_i32_u()
+             .call(number_to_string)
+             .call(concat);
+-        s.global_get(circ_close).call(concat).return_();
++        s.str_get(circ_close).call(concat).return_();
+     }
+     s.end();
+     s.local_get(K).i32_const(1).i32_add().local_set(K);
+@@ -2538,14 +2539,14 @@ fn ref_open(cx: &mut dyn Cx) -> Function {
+         .local_get(O)
+         .ref_eq();
+     s.if_(BlockType::Empty);
+-    s.global_get(ref_open);
++    s.str_get(ref_open);
+     s.local_get(K)
+         .i32_const(1)
+         .i32_add()
+         .f64_convert_i32_u()
+         .call(number_to_string)
+         .call(concat);
+-    s.global_get(ref_close).call(concat);
++    s.str_get(ref_close).call(concat);
+     s.local_get(OPEN).call(concat).return_();
+     s.end();
+     s.local_get(K).i32_const(1).i32_add().local_set(K);
+@@ -2645,7 +2646,7 @@ fn format_map_iter(cx: &mut dyn Cx) -> Function {
+         s.array_set(T_KEYS);
+         s.local_get(PAIR).ref_as_non_null().i32_const(2);
+         s.local_get(INDENT).i32_const(2).i32_add();
+-        s.global_get(open).global_get(close);
++        s.str_get(open).str_get(close);
+         s.i32_const(1).i32_const(0).call(layout);
+     }
+     s.else_();
+@@ -2662,14 +2663,14 @@ fn format_map_iter(cx: &mut dyn Cx) -> Function {
+     s.local_get(TOTAL).local_get(N).i32_gt_u();
+     s.if_(BlockType::Empty);
+     s.local_get(OUT).ref_as_non_null().local_get(N);
+-    s.global_get(more);
++    s.str_get(more);
+     s.local_get(TOTAL)
+         .local_get(N)
+         .i32_sub()
+         .f64_convert_i32_u()
+         .call(number_to_string)
+         .call(concat);
+-    s.global_get(more_item).global_get(more_items);
++    s.str_get(more_item).str_get(more_items);
+     s.local_get(TOTAL)
+         .local_get(N)
+         .i32_sub()
+@@ -2683,14 +2684,14 @@ fn format_map_iter(cx: &mut dyn Cx) -> Function {
+     // `[Map Iterator] {`, `[Map Entries] {`, `[Set Iterator] {`, `[Set Entries] {`.
+     let head = |s: &mut InstructionSink| {
+         // (`select` picks its first operand when the condition holds: the set's head first.)
+-        s.global_get(heads[3]).global_get(heads[2]);
++        s.str_get(heads[3]).str_get(heads[2]);
+         s.local_get(MODE)
+             .i32_const(3)
+             .i32_rem_u()
+             .i32_const(2)
+             .i32_eq();
+         s.typed_select(string_ref());
+-        s.global_get(heads[1]).global_get(heads[0]);
++        s.str_get(heads[1]).str_get(heads[0]);
+         s.local_get(MODE)
+             .i32_const(3)
+             .i32_rem_u()
+@@ -2704,14 +2705,14 @@ fn format_map_iter(cx: &mut dyn Cx) -> Function {
+     s.local_get(N).i32_eqz();
+     s.if_(BlockType::Empty);
+     head(&mut s);
+-    s.global_get(empty_close).call(concat).return_();
++    s.str_get(empty_close).call(concat).return_();
+     s.end();
+     s.local_get(OUT)
+         .ref_as_non_null()
+         .local_get(N)
+         .local_get(INDENT);
+     head(&mut s);
+-    s.global_get(brace);
++    s.str_get(brace);
+     s.i32_const(0).i32_const(0).call(layout);
+     s.end();
+     f
+diff --git a/crates/backend/src/iter.rs b/crates/backend/src/iter.rs
+index a63127f..0fa86de 100644
+--- a/crates/backend/src/iter.rs
++++ b/crates/backend/src/iter.rs
+@@ -13,6 +13,7 @@
+ //! Arrays and strings don't look at `Symbol.iterator` (a replaced `Array.prototype[Symbol.iterator]`
+ //! isn't seen).
+ 
++use crate::runtime::StrGet;
+ use crate::runtime::JsTest;
+ use js2wasi3_ir::ErrorKind;
+ use wasm_encoder::{BlockType, Catch, Function, InstructionSink, ValType};
+@@ -162,7 +163,7 @@ impl Helper {
+                 record(&mut s, 0, 1);
+                 record(&mut s, 0, 0);
+                 empty_args(&mut s);
+-                s.global_get(what).call(call_value);
++                s.str_get(what).call(call_value);
+                 s.end();
+                 f
+             }
+@@ -176,9 +177,9 @@ impl Helper {
+                 s.test_object(0)
+                     .i32_eqz();
+                 s.if_(BlockType::Empty);
+-                s.global_get(result);
++                s.str_get(result);
+                 s.local_get(0).call(inspect).call(concat);
+-                s.global_get(not_obj).call(concat).call(throw);
++                s.str_get(not_obj).call(concat).call(throw);
+                 s.end();
+                 s.local_get(0);
+                 s.end();
+@@ -197,7 +198,7 @@ impl Helper {
+                 s.i32_const(0).return_();
+                 s.end();
+                 it(&mut s, 0);
+-                s.struct_get(T_ITER, F_OBJ).global_get(ret).call(get);
++                s.struct_get(T_ITER, F_OBJ).str_get(ret).call(get);
+                 s.call(is_nullish).i32_eqz();
+                 s.end();
+                 f
+@@ -269,19 +270,19 @@ fn async_open(cx: &mut dyn Cx) -> Function {
+     s.local_get(M).ref_test_non_null(func::function()).i32_eqz();
+     s.if_(BlockType::Empty);
+     s.local_get(M).call(typeof_string);
+-    s.global_get(space).call(concat);
++    s.str_get(space).call(concat);
+     s.local_get(M).call(describe).call(concat);
+-    s.global_get(not_fn).call(concat).call(throw);
++    s.str_get(not_fn).call(concat).call(throw);
+     s.end();
+     s.local_get(M).local_get(V);
+     empty_args(&mut s);
+-    s.global_get(what).call(call_value).local_tee(IT);
++    s.str_get(what).call(call_value).local_tee(IT);
+     s.ref_test_non_null(runtime::object()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(not_obj).call(throw);
++    s.str_get(not_obj).call(throw);
+     s.end();
+     s.local_get(IT);
+-    s.local_get(IT).global_get(next).call(get);
++    s.local_get(IT).str_get(next).call(get);
+     s.array_new_fixed(T_VALS, 2);
+     s.end();
+     f
+@@ -302,7 +303,7 @@ fn async_return(cx: &mut dyn Cx) -> Function {
+     s.block(BlockType::Result(jsval()));
+     s.try_table(BlockType::Empty, [Catch::One { tag: TAG, label: 0 }]);
+     record(&mut s, ST, 0);
+-    s.global_get(ret).call(get).local_tee(M);
++    s.str_get(ret).call(get).local_tee(M);
+     s.call(is_nullish);
+     s.if_(BlockType::Empty);
+     null_eq(&mut s);
+@@ -311,7 +312,7 @@ fn async_return(cx: &mut dyn Cx) -> Function {
+     s.local_get(M);
+     record(&mut s, ST, 0);
+     empty_args(&mut s);
+-    s.global_get(ret).call(call_value).return_();
++    s.str_get(ret).call(call_value).return_();
+     s.end();
+     s.unreachable();
+     s.end();
+@@ -405,13 +406,13 @@ fn open(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.local_get(M).local_get(V);
+     empty_args(&mut s);
+-    s.global_get(method).call(call_value).local_tee(IT);
++    s.str_get(method).call(call_value).local_tee(IT);
+     s.ref_test_non_null(runtime::object()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(not_obj).call(throw);
++    s.str_get(not_obj).call(throw);
+     s.end();
+     s.i32_const(PROTOCOL).local_get(IT);
+-    s.local_get(IT).global_get(next).call(get);
++    s.local_get(IT).str_get(next).call(get);
+     s.i32_const(0);
+     null_eq(&mut s);
+     s.struct_new(T_ITER);
+@@ -517,13 +518,13 @@ fn step(cx: &mut dyn Cx) -> Function {
+             it(&mut s, IT);
+             s.struct_get(T_ITER, F_OBJ).call(oob);
+             s.if_(BlockType::Empty);
+-            s.global_get(msg).call(throw);
++            s.str_get(msg).call(throw);
+             s.end();
+             s.end();
+         }
+         s.local_get(I).f64_convert_i32_u();
+         it(&mut s, IT);
+-        s.struct_get(T_ITER, F_OBJ).global_get(length).call(get);
++        s.struct_get(T_ITER, F_OBJ).str_get(length).call(get);
+         s.call(to_number).f64_ge();
+         s.if_(BlockType::Empty);
+         finish(&mut s);
+@@ -635,22 +636,22 @@ fn step(cx: &mut dyn Cx) -> Function {
+     it(&mut s, IT);
+     s.struct_get(T_ITER, F_OBJ);
+     empty_args(&mut s);
+-    s.global_get(next).call(call_value).local_tee(R);
++    s.str_get(next).call(call_value).local_tee(R);
+     s.ref_test_non_null(runtime::object()).i32_eqz();
+     s.if_(BlockType::Empty);
+     it(&mut s, IT);
+     s.i32_const(DONE).struct_set(T_ITER, F_KIND);
+-    s.global_get(result);
++    s.str_get(result);
+     s.local_get(R).call(inspect).call(concat);
+-    s.global_get(not_obj).call(concat);
++    s.str_get(not_obj).call(concat);
+     s.call(throw);
+     s.end();
+-    s.local_get(R).global_get(done).call(get).call(to_boolean);
++    s.local_get(R).str_get(done).call(get).call(to_boolean);
+     s.if_(BlockType::Empty);
+     finish(&mut s);
+     s.end();
+     it(&mut s, IT);
+-    s.local_get(R).global_get(value).call(get);
++    s.local_get(R).str_get(value).call(get);
+     set_value(&mut s);
+     s.i32_const(1);
+     s.end();
+@@ -688,7 +689,7 @@ fn close(cx: &mut dyn Cx) -> Function {
+     {
+         it(&mut s, IT);
+         s.struct_get(T_ITER, F_OBJ)
+-            .global_get(ret)
++            .str_get(ret)
+             .call(get)
+             .local_tee(M);
+         s.call(is_nullish);
+@@ -699,15 +700,15 @@ fn close(cx: &mut dyn Cx) -> Function {
+         it(&mut s, IT);
+         s.struct_get(T_ITER, F_OBJ);
+         empty_args(&mut s);
+-        s.global_get(ret).call(call_value).local_set(R);
++        s.str_get(ret).call(call_value).local_set(R);
+         s.local_get(THROWING).i32_eqz();
+         s.test_object(R)
+             .i32_eqz();
+         s.i32_and();
+         s.if_(BlockType::Empty);
+-        s.global_get(result);
++        s.str_get(result);
+         s.local_get(R).call(inspect).call(concat);
+-        s.global_get(not_obj).call(concat);
++        s.str_get(not_obj).call(concat);
+         s.call(throw);
+         s.end();
+     }
+@@ -791,7 +792,7 @@ fn proto_values(cx: &mut dyn Cx, kind: i32, typed: bool) -> Function {
+     runtime::is_string(&mut s, THIS);
+     s.i32_or().i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(msg).call(throw);
++    s.str_get(msg).call(throw);
+     s.end();
+     if typed {
+         // T47: ValidateTypedArray.
+@@ -809,11 +810,11 @@ fn proto_values(cx: &mut dyn Cx, kind: i32, typed: bool) -> Function {
+         ));
+         s.local_get(THIS).ref_test_non_null(crate::typed::typed()).i32_eqz();
+         s.if_(BlockType::Empty);
+-        s.global_get(this_typed).call(throw);
++        s.str_get(this_typed).call(throw);
+         s.end();
+         s.local_get(THIS).call(oob);
+         s.if_(BlockType::Empty);
+-        s.global_get(msg).call(throw);
++        s.str_get(msg).call(throw);
+         s.end();
+     }
+     s.i32_const(object::CLASS_PLAIN)
+@@ -875,11 +876,11 @@ fn next(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.local_get(ST).ref_test_non_null(iter()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(msg).call(throw);
++    s.str_get(msg).call(throw);
+     s.end();
+     s.local_get(ST).call(step).local_set(MORE);
+     s.call(new_object).local_set(R);
+-    s.local_get(R).global_get(value);
++    s.local_get(R).str_get(value);
+     s.local_get(MORE);
+     s.if_(BlockType::Result(jsval()));
+     it(&mut s, ST);
+@@ -888,7 +889,7 @@ fn next(cx: &mut dyn Cx) -> Function {
+     s.global_get(G_UNDEFINED);
+     s.end();
+     s.call(define);
+-    s.local_get(R).global_get(done);
++    s.local_get(R).str_get(done);
+     s.local_get(MORE);
+     s.if_(BlockType::Result(jsval()));
+     s.global_get(runtime::G_FALSE);
+diff --git a/crates/backend/src/lib.rs b/crates/backend/src/lib.rs
+index 65f969a..f136a90 100644
+--- a/crates/backend/src/lib.rs
++++ b/crates/backend/src/lib.rs
+@@ -58,6 +58,7 @@ mod typed;
+ mod wit;
+ mod wrapper;
+ 
++use crate::runtime::StrGet;
+ use std::collections::HashMap;
+ 
+ use anyhow::{Context, bail};
+@@ -255,6 +256,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
+         helpers: Vec::new(),
+         strings: Vec::new(),
+         string_ids: HashMap::new(),
++        str_count: 0,
+         tables: false,
+         shared,
+         declared: Vec::new(),
+@@ -411,6 +413,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
+             module.suppressed,
+             module.stacks,
+             module.big_typed,
++            e.str_count,
+         );
+     }
+     if abi {
+@@ -494,12 +497,10 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
+     if !e.strings.is_empty() {
+         runtime::const_placeholders(&mut globals, module.bigint);
+     }
++    // T100: strings live in `G_STRS`; BigInt constants keep a global each.
+     for c in &e.strings {
+-        match c {
+-            ConstGlobal::Str(_) => {
+-                runtime::string_global(&mut globals, e.const_base() - 1 - module.bigint as u32)
+-            }
+-            ConstGlobal::BigInt(_) => bigint::const_global(&mut globals, e.const_base() - 1),
++        if let ConstGlobal::BigInt(_) = c {
++            bigint::const_global(&mut globals, e.const_base() - 1);
+         }
+     }
+ 
+@@ -968,8 +969,12 @@ struct Emitter<'m> {
+     helpers: Vec<Helper>,
+     /// Interned string constants, emitted as globals after the user globals.
+     /// String constants, and BigInt constants (T40): globals after the module's.
++    /// The constants in order of first use (T57), and each one's index: a string's in `G_STRS` (T100), a
++    /// BigInt's among the BigInt constants (its global is `const_base() + index`).
+     strings: Vec<ConstGlobal>,
+     string_ids: HashMap<ConstGlobal, u32>,
++    /// How many of `strings` are strings (T100).
++    str_count: u32,
+     /// The number → string tables (data segment 0) are needed.
+     tables: bool,
+     /// The code of each shared closure: its object is global `shared_base + k`.
+@@ -990,8 +995,8 @@ impl runtime::Cx for Emitter<'_> {
+         self.helper_index(Helper::Js(h))
+     }
+ 
+-    fn string(&mut self, units: &[u16]) -> u32 {
+-        self.const_global(ConstGlobal::Str(units.to_vec()))
++    fn string(&mut self, units: &[u16]) -> runtime::Str {
++        runtime::Str(self.const_index(ConstGlobal::Str(units.to_vec())))
+     }
+ 
+     fn tables_data(&mut self) -> u32 {
+@@ -1347,7 +1352,11 @@ impl Emitter<'_> {
+                     .array_new_default(runtime::T_BYTES)
+                     .drop();
+             }
+-            for (k, c) in chunk.iter().enumerate() {
++            for c in chunk {
++                let k = self.string_ids[c];
++                if let ConstGlobal::Str(_) = c {
++                    s.global_get(runtime::G_STRS).i32_const(k as i32);
++                }
+                 s.i32_const(bytes.len() as i32);
+                 let (maker, len) = match c {
+                     ConstGlobal::Str(units) => {
+@@ -1359,9 +1368,11 @@ impl Emitter<'_> {
+                         (first + 1, words.len())
+                     }
+                 };
+-                s.i32_const(len as i32)
+-                    .call(maker)
+-                    .global_set(base + (j * CONST_CHUNK + k) as u32);
++                s.i32_const(len as i32).call(maker);
++                match c {
++                    ConstGlobal::Str(_) => s.array_set(runtime::T_STRS),
++                    ConstGlobal::BigInt(_) => s.global_set(base + k),
++                };
+             }
+             if j + 1 == chunks && chunks > 1 {
+                 for i in 0..chunks as u32 - 1 {
+@@ -1376,16 +1387,26 @@ impl Emitter<'_> {
+         (bytes, names)
+     }
+ 
+-    /// The global index of a constant (interned).
+-    fn const_global(&mut self, c: ConstGlobal) -> u32 {
+-        let base = self.const_base();
++    /// A constant's index (interned): a string's in `G_STRS`, a BigInt's among the BigInt constants.
++    fn const_index(&mut self, c: ConstGlobal) -> u32 {
+         if let Some(k) = self.string_ids.get(&c) {
+-            return base + k;
++            return *k;
+         }
+-        let k = self.strings.len() as u32;
++        let k = match c {
++            ConstGlobal::Str(_) => {
++                self.str_count += 1;
++                self.str_count - 1
++            }
++            ConstGlobal::BigInt(_) => (self.strings.len() as u32) - self.str_count,
++        };
+         self.strings.push(c.clone());
+         self.string_ids.insert(c, k);
+-        base + k
++        k
++    }
++
++    /// The global of a BigInt constant (interned).
++    fn const_global(&mut self, c: ConstGlobal) -> u32 {
++        self.const_base() + self.const_index(c)
+     }
+ 
+     fn type_id(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
+@@ -1404,7 +1425,7 @@ impl Emitter<'_> {
+         let c = match c {
+             EqOperand::Oddball(g) => runtime::EqConst::Oddball(g),
+             EqOperand::Str(units) => runtime::EqConst::Str {
+-                global: runtime::Cx::string(self, units),
++                c: runtime::Cx::string(self, units),
+                 len: units.len() as u32,
+             },
+             EqOperand::Num(v) => runtime::EqConst::Num(v),
+@@ -1818,7 +1839,7 @@ impl Emitter<'_> {
+             }
+             Expr::Str(units) => {
+                 let g = runtime::Cx::string(self, units);
+-                s.global_get(g);
++                s.str_get(g);
+             }
+             Expr::Intrinsic { op, args } => {
+                 use runtime::Helper as H;
+@@ -1859,7 +1880,7 @@ impl Emitter<'_> {
+                     // T74: a constant key: no ToPropertyKey, no element paths, the hash from the build.
+                     self.expr(s, frames, obj)?;
+                     let g = runtime::Cx::string(self, units);
+-                    s.global_get(g);
++                    s.str_get(g);
+                     s.i32_const(object::key_hash(units));
+                     s.i32_const(self.ic_sites as i32);
+                     self.ic_sites += 1;
+@@ -1881,7 +1902,7 @@ impl Emitter<'_> {
+                     // T74: an object literal's constant key.
+                     self.expr(s, frames, obj)?;
+                     let g = runtime::Cx::string(self, units);
+-                    s.global_get(g);
++                    s.str_get(g);
+                     self.expr(s, frames, value)?;
+                     s.i32_const(object::key_hash(units));
+                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::DefineNamed))));
+@@ -1894,7 +1915,7 @@ impl Emitter<'_> {
+                     // T74: `o.k = v` with a constant key, as `GetNamed`.
+                     self.expr(s, frames, obj)?;
+                     let g = runtime::Cx::string(self, units);
+-                    s.global_get(g);
++                    s.str_get(g);
+                     self.expr(s, frames, value)?;
+                     s.i32_const(object::key_hash(units));
+                     s.i32_const(self.set_sites as i32);
+@@ -2407,12 +2428,12 @@ impl Emitter<'_> {
+                     s.array_new_fixed(runtime::T_VALS, c.env.len() as u32);
+                 }
+                 let name = runtime::Cx::str(self, &c.name);
+-                s.global_get(name);
++                s.str_get(name);
+                 s.i32_const(c.length as i32).i32_const(flags);
+                 s.call(self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::New))));
+                 if let Some(src) = &c.source {
+                     let src = runtime::Cx::str(self, src);
+-                    s.global_get(src);
++                    s.str_get(src);
+                     s.call(
+                         self.helper_index(Helper::Js(runtime::Helper::Func(
+                             func::Helper::SetSource,
+@@ -2454,7 +2475,7 @@ impl Emitter<'_> {
+                 }
+                 s.array_new_fixed(runtime::T_VALS, args.len() as u32);
+                 let what = runtime::Cx::str(self, what);
+-                s.global_get(what);
++                s.str_get(what);
+                 s.call(
+                     self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::CallValue))),
+                 );
+@@ -2478,7 +2499,7 @@ impl Emitter<'_> {
+                     None => func::Helper::ConstructSame,
+                 };
+                 let what = runtime::Cx::str(self, what);
+-                s.global_get(what);
++                s.str_get(what);
+                 s.call(self.helper_index(Helper::Js(runtime::Helper::Func(h))));
+             }
+         }
+diff --git a/crates/backend/src/numstr.rs b/crates/backend/src/numstr.rs
+index ac41dff..2ad4492 100644
+--- a/crates/backend/src/numstr.rs
++++ b/crates/backend/src/numstr.rs
+@@ -10,6 +10,7 @@
+ //! Verified against node on 30k random doubles plus edge cases (the Rust tests and
+ //! `tests/fixtures/numstr.js`).
+ 
++use crate::runtime::StrGet;
+ use std::sync::OnceLock;
+ 
+ use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, RefType, ValType};
+@@ -730,8 +731,8 @@ fn number_to_string(cx: &mut dyn Cx) -> Function {
+     });
+     let mut f = Function::new([(1, ValType::I64), (7, ValType::I32), (2, sref)]);
+     let mut s = f.instructions();
+-    let ret_global = |s: &mut InstructionSink, g: u32| {
+-        s.global_get(g).return_();
++    let ret_global = |s: &mut InstructionSink, g: runtime::Str| {
++        s.str_get(g).return_();
+     };
+     // NaN, ±0, ±∞
+     s.local_get(X).local_get(X).f64_ne();
+diff --git a/crates/backend/src/object.rs b/crates/backend/src/object.rs
+index 0eb6436..1259aa1 100644
+--- a/crates/backend/src/object.rs
++++ b/crates/backend/src/object.rs
+@@ -25,6 +25,7 @@
+ //! ToPrimitive uses the built-in `valueOf`/`toString` (`Error.prototype.toString`, or
+ //! `[object Object]` / `[object Error]`); a replaced one traps (calling values: T14).
+ 
++use crate::runtime::{KeyConst, StrGet};
+ use crate::runtime::JsTest;
+ use js2wasi3_ir::{Builtin, ErrorKind};
+ use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
+@@ -735,7 +736,7 @@ impl Helper {
+                 s.if_(BlockType::Empty);
+                 s.i32_const(1).return_();
+                 s.end();
+-                s.local_get(V).ref_cast_non_null(object()).global_get(key);
++                s.local_get(V).ref_cast_non_null(object()).str_get(key);
+                 s.call(holder).local_tee(HD).ref_is_null();
+                 s.if_(BlockType::Empty);
+                 s.i32_const(1).return_();
+@@ -783,7 +784,7 @@ impl Helper {
+                 s.end();
+                 s.local_get(0).call(is_nullish);
+                 s.if_(BlockType::Empty);
+-                s.global_get(msg).call(throw);
++                s.str_get(msg).call(throw);
+                 s.end();
+                 s.i32_const(0)
+                     .array_new_default(T_VALS)
+@@ -1393,7 +1394,7 @@ fn get_length(cx: &mut dyn Cx) -> Function {
+             .struct_get(T_OBJECT, F_KEYS)
+             .local_get(E)
+             .array_get(T_KEYS)
+-            .global_get(length)
++            .str_get(length)
+             .ref_eq()
+             .i32_eqz()
+             .br_if(0);
+@@ -1415,7 +1416,7 @@ fn get_length(cx: &mut dyn Cx) -> Function {
+         s.return_();
+         s.end();
+     }
+-    s.local_get(V).global_get(length).call(get);
++    s.local_get(V).str_get(length).call(get);
+     s.end();
+     s.end();
+     s.end();
+@@ -2009,7 +2010,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+     let parent = parent(b).map(|p| h(cx, Helper::Proto(p)));
+     let g = runtime::proto_global(b);
+     // (%MapIteratorPrototype% and %SetIteratorPrototype% have no `constructor`, T25.)
+-    let mut props: Vec<(u32, Option<u32>)> =
++    let mut props: Vec<(runtime::Str, Option<runtime::Str>)> =
+         if matches!(b, Builtin::MapIterator | Builtin::SetIterator) {
+             vec![]
+         } else {
+@@ -2200,17 +2201,17 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+     };
+     // (keys, name, code, length, getter): one function object defined under each key.
+     // (keys, name, code, length, getter, `New` flags)
+-    let mut real: Vec<(Vec<u32>, u32, u32, i32, bool, i32)> = real
++    let mut real: Vec<(Vec<KeyConst>, runtime::Str, u32, i32, bool, i32)> = real
+         .into_iter()
+         .map(|(h, key, name, len)| {
+             let code = cx.helper(h);
+             cx.declare_func(code);
+-            let mut keys = vec![key.map_or(runtime::G_SYM_ITERATOR, |k| cx.str(k))];
++            let mut keys = vec![key.map_or(KeyConst::Global(runtime::G_SYM_ITERATOR), |k| cx.str(k).into())];
+             let typed_values = runtime::Helper::Iter(crate::iter::Helper::TypedProto(
+                 crate::iter::ARRAY_LIKE,
+             ));
+             if (h == values && matches!(b, Builtin::Array | Builtin::TypedArray)) || h == typed_values {
+-                keys.push(runtime::G_SYM_ITERATOR);
++                keys.push(KeyConst::Global(runtime::G_SYM_ITERATOR));
+             }
+             let flags = if h == values { func::NEW_VALUES } else { 0 };
+             (keys, cx.str(name), code, len, false, flags)
+@@ -2220,7 +2221,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+     // `Set.prototype[Symbol.iterator]` and `keys` are `values`; `size` is a getter. T27: a key
+     // `$name` is the well-known symbol `Symbol.name` (`$$RegExp_prototype_$match`).
+     // (symbol, name, code, length, attributes, getter)
+-    let mut sym_methods: Vec<(u32, u32, u32, i32, i32, bool)> = Vec::new();
++    let mut sym_methods: Vec<(u32, runtime::Str, u32, i32, i32, bool)> = Vec::new();
+     for (key, code, len) in cx.builtin_methods(b) {
+         cx.declare_func(code);
+         if let Some(k) = key
+@@ -2251,12 +2252,13 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+         } else {
+             key.clone()
+         });
+-        let mut keys = vec![cx.str(&key)];
++        let mut keys: Vec<KeyConst> = vec![cx.str(&key).into()];
++        let sym_iterator = KeyConst::Global(runtime::G_SYM_ITERATOR);
+         match (b, key.as_str()) {
+-            (Builtin::Map, "entries") => keys.push(runtime::G_SYM_ITERATOR),
+-            (Builtin::Set, "values") => keys.extend([cx.str("keys"), runtime::G_SYM_ITERATOR]),
++            (Builtin::Map, "entries") => keys.push(sym_iterator),
++            (Builtin::Set, "values") => keys.extend([cx.str("keys").into(), sym_iterator]),
+             // Annex B (T26): the same function.
+-            (Builtin::Date, "toUTCString") => keys.push(cx.str("toGMTString")),
++            (Builtin::Date, "toUTCString") => keys.push(cx.str("toGMTString").into()),
+             _ => {}
+         }
+         real.push((keys, name, code, len as i32, getter, 0));
+@@ -2311,7 +2313,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+     }
+     s.local_tee(O).global_set(g);
+     for (key, value) in props {
+-        s.local_get(O).ref_as_non_null().global_get(key);
++        s.local_get(O).ref_as_non_null().str_get(key);
+         // T87: `String.prototype` is a String object of length 0.
+         if Some(key) == string_length {
+             s.i32_const(0).ref_i31();
+@@ -2319,13 +2321,13 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+             continue;
+         }
+         match value {
+-            Some(v) => s.global_get(v),
++            Some(v) => s.str_get(v),
+             None => s.global_get(G_BUILTIN),
+         };
+         s.i32_const(HIDDEN).call(define);
+     }
+     if let Some(length) = length {
+-        s.local_get(O).ref_as_non_null().global_get(length);
++        s.local_get(O).ref_as_non_null().str_get(length);
+         s.i32_const(0).ref_i31();
+         s.i32_const(HIDDEN).call(define);
+     }
+@@ -2336,7 +2338,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+         s.i32_const(cx.code_slot(code));
+         s.i32_const(-1);
+         s.ref_null(func::vals());
+-        s.global_get(name)
++        s.str_get(name)
+             .i32_const(len)
+             .i32_const(0)
+             .call(new_function);
+@@ -2350,7 +2352,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+         s.i32_const(cx.code_slot(code));
+         s.i32_const(-1);
+         s.ref_null(func::vals());
+-        s.global_get(name)
++        s.str_get(name)
+             .i32_const(len)
+             .i32_const(flags)
+             .call(new_function)
+@@ -2363,7 +2365,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+         for key in keys {
+             s.local_get(O)
+                 .ref_as_non_null()
+-                .global_get(key)
++                .key_get(key)
+                 .local_get(M);
+             if let Some(define_accessor) = define_accessor.filter(|_| getter) {
+                 s.i32_const(0).i32_const(HIDDEN).call(define_accessor);
+@@ -2410,7 +2412,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+         s.i32_const(cx.code_slot(code));
+         s.i32_const(-1);
+         s.ref_null(func::vals());
+-        s.global_get(name)
++        s.str_get(name)
+             .i32_const(0)
+             .i32_const(0)
+             .call(new_function);
+@@ -2430,7 +2432,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
+         s.i32_const(cx.code_slot(code));
+         s.i32_const(-1);
+         s.ref_null(func::vals());
+-        s.global_get(name)
++        s.str_get(name)
+             .i32_const(0)
+             .i32_const(0)
+             .call(new_function);
+@@ -2574,7 +2576,7 @@ fn string_has(cx: &mut dyn Cx, s: &mut InstructionSink, st: u32, k: u32) {
+     let length = cx.str("length");
+     s.local_get(k)
+         .ref_as_non_null()
+-        .global_get(length)
++        .str_get(length)
+         .call(str_eq);
+     s.local_get(k).ref_as_non_null().call(index);
+     s.local_get(st)
+@@ -2755,7 +2757,7 @@ fn get(cx: &mut dyn Cx) -> Function {
+     {
+         s.local_get(K)
+             .ref_as_non_null()
+-            .global_get(length)
++            .str_get(length)
+             .call(str_eq);
+         s.if_(BlockType::Empty);
+         s.local_get(V)
+@@ -2924,12 +2926,12 @@ fn set(cx: &mut dyn Cx) -> Function {
+     // Concatenate the string globals / pushes in `parts`, then throw.
+     s.local_get(V).call(is_nullish);
+     s.if_(BlockType::Empty);
+-    s.global_get(set_of);
++    s.str_get(set_of);
+     s.local_get(V).call(to_string).call(concat);
+-    s.global_get(setting).call(concat);
++    s.str_get(setting).call(concat);
+     key_text(cx, &mut s, KEY, to_key);
+     s.call(concat);
+-    s.global_get(close).call(concat);
++    s.str_get(close).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(KEY).call(to_key).local_set(K);
+@@ -2943,7 +2945,7 @@ fn set(cx: &mut dyn Cx) -> Function {
+     {
+         // `o.__proto__ = p` runs Object.prototype's `__proto__` setter.
+         k(&mut s);
+-        s.global_get(proto_key).call(str_eq);
++        s.str_get(proto_key).call(str_eq);
+         s.if_(BlockType::Empty);
+         s.local_get(O).ref_as_non_null();
+         k(&mut s);
+@@ -2961,23 +2963,23 @@ fn set(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     string_has(cx, &mut s, V, K);
+     s.if_(BlockType::Empty);
+-    s.global_get(read_only);
++    s.str_get(read_only);
+     k(&mut s);
+     s.call(concat);
+-    s.global_get(of_string).call(concat);
++    s.str_get(of_string).call(concat);
+     s.local_get(V).ref_cast_non_null(string()).call(concat);
+-    s.global_get(quote).call(concat);
++    s.str_get(quote).call(concat);
+     s.call(throw);
+     s.end();
+     s.end();
+-    s.global_get(create);
++    s.str_get(create);
+     k(&mut s);
+     s.call(concat);
+-    s.global_get(on).call(concat);
++    s.str_get(on).call(concat);
+     s.local_get(V).call(typeof_string).call(concat);
+-    s.global_get(space_quote).call(concat);
++    s.str_get(space_quote).call(concat);
+     s.local_get(V).call(to_string).call(concat);
+-    s.global_get(quote).call(concat);
++    s.str_get(quote).call(concat);
+     s.call(throw);
+     s.end();
+     f
+@@ -3010,7 +3012,7 @@ fn delete(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(V).call(is_nullish);
+     s.if_(BlockType::Empty);
+-    s.global_get(convert).call(throw);
++    s.str_get(convert).call(throw);
+     s.end();
+     s.local_get(KEY).call(to_key).local_set(K);
+     // An array: `length` can't be deleted; an element becomes a hole.
+@@ -3018,12 +3020,12 @@ fn delete(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     s.local_get(K)
+         .ref_as_non_null()
+-        .global_get(length)
++        .str_get(length)
+         .call(str_eq);
+     s.if_(BlockType::Empty);
+-    s.global_get(cannot);
++    s.str_get(cannot);
+     s.local_get(K).ref_as_non_null().call(concat);
+-    s.global_get(of_array).call(concat);
++    s.str_get(of_array).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(V)
+@@ -3040,9 +3042,9 @@ fn delete(cx: &mut dyn Cx) -> Function {
+     s.local_get(E).call(elem_attrs);
+     s.i32_const(FIXED).i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(cannot);
++    s.str_get(cannot);
+     s.local_get(K).ref_as_non_null().call(concat);
+-    s.global_get(of_array).call(concat);
++    s.str_get(of_array).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(V)
+@@ -3070,9 +3072,9 @@ fn delete(cx: &mut dyn Cx) -> Function {
+         .i32_const(FIXED)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(cannot);
++    s.str_get(cannot);
+     s.local_get(K).ref_as_non_null().call(concat);
+-    s.global_get(of_obj).call(concat);
++    s.str_get(of_obj).call(concat);
+     as_obj(&mut s, V);
+     s.call(desc).call(concat);
+     s.call(throw);
+@@ -3086,9 +3088,9 @@ fn delete(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     string_has(cx, &mut s, V, K);
+     s.if_(BlockType::Empty);
+-    s.global_get(cannot);
++    s.str_get(cannot);
+     s.local_get(K).ref_as_non_null().call(concat);
+-    s.global_get(of).call(concat);
++    s.str_get(of).call(concat);
+     s.call(throw);
+     s.end();
+     s.end();
+@@ -3171,9 +3173,9 @@ fn has(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.test_object(V).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(search);
++    s.str_get(search);
+     s.local_get(KEY).call(to_key).call(concat);
+-    s.global_get(in_).call(concat);
++    s.str_get(in_).call(concat);
+     s.local_get(V).call(to_string).call(concat);
+     s.call(throw);
+     s.end();
+@@ -3197,7 +3199,7 @@ fn has_own(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(V).call(is_nullish);
+     s.if_(BlockType::Empty);
+-    s.global_get(convert).call(throw);
++    s.str_get(convert).call(throw);
+     s.end();
+     s.local_get(KEY).call(to_key).local_set(K);
+     s.test_object(V);
+@@ -3534,7 +3536,7 @@ fn own_keys(cx: &mut dyn Cx, all: bool) -> Function {
+     s.array_copy(T_KEYS, T_KEYS);
+     if let Some(length) = length {
+         s.local_get(ALL).ref_as_non_null().local_get(ELEMS).array_len();
+-        s.global_get(length).array_set(T_KEYS);
++        s.str_get(length).array_set(T_KEYS);
+     }
+     s.local_get(ALL)
+         .ref_as_non_null()
+@@ -3697,7 +3699,7 @@ fn create(cx: &mut dyn Cx) -> Function {
+         .call(alloc)
+         .return_();
+     s.end();
+-    s.global_get(msg);
++    s.str_get(msg);
+     s.local_get(P).call(to_string).call(concat);
+     s.call(throw);
+     s.unreachable();
+@@ -3716,7 +3718,7 @@ fn regexp_new(cx: &mut dyn Cx) -> Function {
+     let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+     let mut s = f.instructions();
+     s.i32_const(CLASS_REGEXP).call(proto).call(alloc).local_tee(O).ref_as_non_null();
+-    s.global_get(last_index).i32_const(0).ref_i31();
++    s.str_get(last_index).i32_const(0).ref_i31();
+     s.i32_const(HIDDEN | FIXED).call(define);
+     s.local_get(O).ref_as_non_null().global_get(runtime::G_SYM_STATE);
+     s.local_get(DATA);
+@@ -3754,7 +3756,7 @@ fn typed_length_snapshot(cx: &mut dyn Cx) -> Function {
+     let mut f = Function::new([(1, ValType::I32), (1, jsval()), (1, rt(true, T_VALS))]);
+     let mut s = f.instructions();
+     s.local_get(O)
+-        .global_get(length)
++        .str_get(length)
+         .i32_const(key_hash(&units))
+         .call(find)
+         .local_tee(E);
+@@ -3810,7 +3812,7 @@ fn typed_length_fill(cx: &mut dyn Cx) -> Function {
+         .br_if(1);
+     s.local_get(O)
+         .ref_as_non_null()
+-        .global_get(length)
++        .str_get(length)
+         .i32_const(key_hash(&units))
+         .call(find)
+         .i32_const(0)
+@@ -3855,7 +3857,7 @@ fn regexp_snapshot(cx: &mut dyn Cx) -> Function {
+         let units: Vec<u16> = key.encode_utf16().collect();
+         let g = cx.str(key);
+         s.local_get(O)
+-            .global_get(g)
++            .str_get(g)
+             .i32_const(key_hash(&units))
+             .call(find);
+         s.local_tee(E).i32_const(0).i32_lt_s();
+@@ -3939,7 +3941,7 @@ fn regexp_plain(cx: &mut dyn Cx) -> Function {
+         .struct_get(T_OBJECT, F_KEYS)
+         .i32_const(0)
+         .array_get(T_KEYS);
+-    s.global_get(last_index).ref_eq();
++    s.str_get(last_index).ref_eq();
+     fail_unless(&mut s);
+     s.local_get(O)
+         .struct_get(T_OBJECT, F_ATTRS)
+@@ -3975,7 +3977,7 @@ fn regexp_plain(cx: &mut dyn Cx) -> Function {
+             .struct_get(T_OBJECT, F_KEYS)
+             .local_get(E)
+             .array_get(T_KEYS);
+-        s.global_get(g).ref_eq();
++        s.str_get(g).ref_eq();
+         fail_unless(&mut s);
+         s.local_get(P)
+             .struct_get(T_OBJECT, F_ATTRS)
+@@ -4113,7 +4115,7 @@ fn get_prototype_of(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(V).call(is_nullish);
+     s.if_(BlockType::Empty);
+-    s.global_get(convert).call(throw);
++    s.str_get(convert).call(throw);
+     s.end();
+     runtime::object_then(&mut s, V, |s| {
+         s.struct_get(T_OBJECT, F_PROTO).local_tee(P).ref_is_null();
+@@ -4194,11 +4196,11 @@ fn error_stack(cx: &mut dyn Cx) -> Function {
+     const S: u32 = 1;
+     let mut f = Function::new([(1, jsval())]);
+     let mut s = f.instructions();
+-    s.local_get(R).call(to_string).global_get(frame).call(concat).local_set(S);
++    s.local_get(R).call(to_string).str_get(frame).call(concat).local_set(S);
+     s.test_object(R);
+     s.if_(BlockType::Empty);
+     as_obj(&mut s, R);
+-    s.global_get(stack).local_get(S).i32_const(HIDDEN).call(define);
++    s.str_get(stack).local_get(S).i32_const(HIDDEN).call(define);
+     s.end();
+     s.local_get(S);
+     s.end();
+@@ -4228,7 +4230,7 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
+         .call(proto)
+         .call(alloc)
+         .local_set(o);
+-    s.local_get(o).ref_as_non_null().global_get(stack);
++    s.local_get(o).ref_as_non_null().str_get(stack);
+     if cx.names("stack") {
+         // Made on its first read (T63): an accessor slot whose getter and setter are the
+         // built-in sentinel, which `property_value`, the setters and `getOwnPropertyDescriptor`
+@@ -4243,14 +4245,14 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
+     }
+     s.local_get(m).global_get(G_UNDEFINED).ref_eq().i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.local_get(o).ref_as_non_null().global_get(message);
++    s.local_get(o).ref_as_non_null().str_get(message);
+     s.local_get(m).call(to_string);
+     s.i32_const(HIDDEN).call(define);
+     s.end();
+     if suppressed {
+         for (i, key) in [(0, "error"), (1, "suppressed")] {
+             let key = cx.str(key);
+-            s.local_get(o).ref_as_non_null().global_get(key);
++            s.local_get(o).ref_as_non_null().str_get(key);
+             s.local_get(i).i32_const(HIDDEN).call(define);
+         }
+         s.local_get(o).ref_as_non_null();
+@@ -4260,10 +4262,10 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
+     s.test_object(opt);
+     s.if_(BlockType::Empty);
+     as_obj(&mut s, opt);
+-    s.global_get(cause).call(lookup).ref_is_null().i32_eqz();
++    s.str_get(cause).call(lookup).ref_is_null().i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.local_get(o).ref_as_non_null().global_get(cause);
+-    s.local_get(opt).global_get(cause).call(get);
++    s.local_get(o).ref_as_non_null().str_get(cause);
++    s.local_get(opt).str_get(cause).call(get);
+     s.i32_const(HIDDEN).call(define);
+     s.end();
+     s.end();
+@@ -4287,7 +4289,7 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
+             .struct_get(runtime::T_ITER, crate::iter::F_VALUE);
+         s.call(push);
+         s.br(0).end().end();
+-        s.local_get(o).ref_as_non_null().global_get(errors);
++        s.local_get(o).ref_as_non_null().str_get(errors);
+         s.local_get(list).i32_const(HIDDEN).call(define);
+     }
+     s.local_get(o).ref_as_non_null();
+@@ -4365,25 +4367,25 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+             s.local_get(T).ref_test_non_null(func::function()).i32_eqz();
+             s.if_(BlockType::Empty);
+             s.local_get(T).call(typeof_string);
+-            s.global_get(space).call(concat);
++            s.str_get(space).call(concat);
+             s.local_get(T).call(to_string).call(concat);
+-            s.global_get(not_fn).call(concat).call(throw);
++            s.str_get(not_fn).call(concat).call(throw);
+             s.end();
+             s.local_get(T).local_get(O);
+             // (`select` picks its first operand when the condition holds.)
+-            s.global_get(hints[2]);
+-            s.global_get(hints[1]);
+-            s.global_get(hints[0]);
++            s.str_get(hints[2]);
++            s.str_get(hints[1]);
++            s.str_get(hints[0]);
+             s.local_get(HINT).i32_const(1).i32_eq();
+             s.typed_select(string_ref());
+             s.local_get(HINT).i32_const(2).i32_eq();
+             s.typed_select(string_ref());
+             s.array_new_fixed(T_VALS, 1);
+-            s.global_get(to_primitive_key(cx));
++            s.str_get(to_primitive_key(cx));
+             s.call(call_value).local_tee(R);
+             s.ref_test_non_null(object());
+             s.if_(BlockType::Empty);
+-            s.global_get(no_prim).call(throw);
++            s.str_get(no_prim).call(throw);
+             s.end();
+             s.local_get(R).return_();
+         }
+@@ -4418,7 +4420,7 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+     // Two rounds: I = 0, 1. The key of round I: toString when (I == 0) == (hint == string).
+     s.block(BlockType::Empty).loop_(BlockType::Empty);
+     s.local_get(I).i32_const(2).i32_ge_u().br_if(1);
+-    s.global_get(to_string_key).global_get(value_of);
++    s.str_get(to_string_key).str_get(value_of);
+     s.local_get(I).i32_eqz();
+     s.local_get(HINT).i32_const(2).i32_eq();
+     s.i32_eq();
+@@ -4460,7 +4462,7 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+             s.if_(BlockType::Empty);
+             s.local_get(T);
+             s.local_get(T).call(to_string);
+-            s.local_get(KEY).global_get(value_of).ref_eq();
++            s.local_get(KEY).str_get(value_of).ref_eq();
+             s.typed_select(jsval()).return_();
+             s.end();
+         }
+@@ -4471,10 +4473,10 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Empty);
+         s.local_get(T);
+         s.local_get(T).call(to_string);
+-        s.local_get(KEY).global_get(value_of).ref_eq();
++        s.local_get(KEY).str_get(value_of).ref_eq();
+         s.typed_select(jsval()).return_();
+         s.end();
+-        s.local_get(KEY).global_get(value_of).ref_eq();
++        s.local_get(KEY).str_get(value_of).ref_eq();
+         s.if_(BlockType::Empty);
+         // Object.prototype.valueOf returns the object: try the other method.
+         s.local_get(HD).call(obj_proto).ref_eq().br_if(2);
+@@ -4488,9 +4490,9 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+             s.local_get(O).call(builtin_tag).local_tee(T);
+             runtime::is_string(&mut s, T);
+             s.if_(BlockType::Empty);
+-            s.global_get(object_open);
++            s.str_get(object_open);
+             s.local_get(T).ref_cast_non_null(string()).call(concat);
+-            s.global_get(close_bracket).call(concat).return_();
++            s.str_get(close_bracket).call(concat).return_();
+             s.end();
+         }
+         // T30: a wrapper's class.
+@@ -4500,19 +4502,19 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+             let wrapper_tag = rh(cx, runtime::Helper::Wrap(wrapper::Helper::Tag));
+             let concat = rh(cx, runtime::Helper::Concat);
+             let (open, close) = (cx.str("[object "), cx.str("]"));
+-            s.global_get(open);
++            s.str_get(open);
+             s.local_get(O).call(wrapper_tag).ref_cast_non_null(string());
+             s.call(concat);
+-            s.global_get(close).call(concat).return_();
++            s.str_get(close).call(concat).return_();
+         }
+         s.end();
+         s.local_get(O).ref_test_non_null(func::function());
+         s.if_(BlockType::Empty);
+-        s.global_get(tags[3]).return_();
++        s.str_get(tags[3]).return_();
+         s.end();
+         s.local_get(O).ref_test_non_null(array::array());
+         s.if_(BlockType::Empty);
+-        s.global_get(tags[2]).return_();
++        s.str_get(tags[2]).return_();
+         s.end();
+         s.local_get(O)
+             .struct_get(T_OBJECT, F_CLASS)
+@@ -4521,9 +4523,9 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+             .i32_const(CLASS_ERROR)
+             .i32_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(tags[1]).return_();
++        s.str_get(tags[1]).return_();
+         s.end();
+-        s.global_get(tags[0]).return_();
++        s.str_get(tags[0]).return_();
+         s.end();
+         s.call(user);
+     }
+@@ -4542,7 +4544,7 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.end();
+     s.br(0).end().end();
+-    s.global_get(no_prim).call(throw);
++    s.str_get(no_prim).call(throw);
+     s.unreachable();
+     s.end();
+     f
+@@ -4566,13 +4568,13 @@ fn error_to_string(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.test_object(THIS).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(not_obj).call(throw);
++    s.str_get(not_obj).call(throw);
+     s.end();
+     for (key, local, default) in [(name, N, error), (message, M, empty)] {
+-        s.local_get(THIS).global_get(key).call(get).local_tee(T);
++        s.local_get(THIS).str_get(key).call(get).local_tee(T);
+         s.global_get(G_UNDEFINED).ref_eq();
+         s.if_(BlockType::Result(string_ref()));
+-        s.global_get(default);
++        s.str_get(default);
+         s.else_();
+         s.local_get(T).call(to_string);
+         s.end();
+@@ -4588,7 +4590,7 @@ fn error_to_string(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.local_get(N)
+         .ref_as_non_null()
+-        .global_get(colon)
++        .str_get(colon)
+         .call(concat);
+     s.local_get(M).ref_as_non_null().call(concat);
+     s.end();
+@@ -4697,7 +4699,7 @@ fn check_destructure(cx: &mut dyn Cx) -> Function {
+     for (g, text) in [(G_UNDEFINED, undefined), (G_NULL, null)] {
+         s.local_get(0).global_get(g).ref_eq();
+         s.if_(BlockType::Empty);
+-        s.local_get(1).global_get(text).call(concat).call(throw);
++        s.local_get(1).str_get(text).call(concat).call(throw);
+         s.end();
+     }
+     s.end();
+@@ -4729,7 +4731,7 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
+     let mut s = f.instructions();
+     s.local_get(V).call(is_nullish);
+     s.if_(BlockType::Empty);
+-    s.global_get(convert).call(throw);
++    s.str_get(convert).call(throw);
+     s.end();
+     s.test_object(V);
+     s.if_(BlockType::Result(rt(false, T_KEYS)));
+@@ -4769,7 +4771,7 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
+     if let Some(length) = length {
+         s.test_string(V);
+         s.if_(BlockType::Empty);
+-        s.local_get(OUT).local_get(N).global_get(length).array_set(T_VALS);
++        s.local_get(OUT).local_get(N).str_get(length).array_set(T_VALS);
+         s.local_get(N).i32_const(1).i32_add().local_set(N);
+         s.end();
+     }
+@@ -4843,7 +4845,7 @@ fn make_arguments(cx: &mut dyn Cx) -> Function {
+     s.i32_const(0).call(define);
+     s.local_get(I).i32_const(1).i32_add().local_set(I);
+     s.br(0).end().end();
+-    s.local_get(O).ref_as_non_null().global_get(length);
++    s.local_get(O).ref_as_non_null().str_get(length);
+     s.local_get(N).ref_i31();
+     s.i32_const(HIDDEN).call(define);
+     s.local_get(O)
+@@ -4917,7 +4919,7 @@ fn own_symbols(cx: &mut dyn Cx) -> Function {
+ }
+ 
+ /// The callee text of a `Symbol.toPrimitive` call in errors (T25).
+-fn to_primitive_key(cx: &mut dyn Cx) -> u32 {
++fn to_primitive_key(cx: &mut dyn Cx) -> runtime::Str {
+     cx.str("[Symbol.toPrimitive]")
+ }
+ 
+@@ -4971,7 +4973,7 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
+     let tag = |cx: &mut dyn Cx, s: &mut InstructionSink, name: &str| {
+         let g = cx.str(name);
+         s.if_(BlockType::Empty);
+-        s.global_get(g).return_();
++        s.str_get(g).return_();
+         s.end();
+     };
+     let class = |s: &mut InstructionSink, c: i32| {
+@@ -5004,7 +5006,7 @@ fn builtin_tag(cx: &mut dyn Cx) -> Function {
+         {
+             let (m, st) = (cx.str("Map Iterator"), cx.str("Set Iterator"));
+             // Modes 3–5 are a Set's (T53: were swapped).
+-            s.global_get(st).global_get(m);
++            s.str_get(st).str_get(m);
+             s.local_get(O)
+                 .ref_cast_non_null(mapset::mapiter())
+                 .struct_get(runtime::T_MAPITER, mapset::I_MODE)
+@@ -5087,6 +5089,6 @@ pub fn define_tag(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, tag: &str) {
+     let tag = cx.str(tag);
+     s.local_get(o).ref_cast_non_null(object());
+     s.call(sym).ref_cast_non_null(string());
+-    s.global_get(tag);
++    s.str_get(tag);
+     s.i32_const(HIDDEN | READONLY).call(define);
+ }
+diff --git a/crates/backend/src/promise.rs b/crates/backend/src/promise.rs
+index 6b48678..34321b9 100644
+--- a/crates/backend/src/promise.rs
++++ b/crates/backend/src/promise.rs
+@@ -23,6 +23,7 @@
+ //! Not modelled: subclassing through species (`then` and the statics always make `%Promise%`
+ //! promises), `Symbol.toStringTag`, `Promise.any` (AggregateError).
+ 
++use crate::runtime::StrGet;
+ use crate::runtime::JsTest;
+ use js2wasi3_ir::{Builtin, ErrorKind};
+ use wasm_encoder::{BlockType, Catch, Function, HeapType, InstructionSink, ValType};
+@@ -282,7 +283,7 @@ impl Helper {
+                 let msg = cx.str("Promise constructor cannot be invoked without 'new'");
+                 let mut f = Function::new([]);
+                 let mut s = f.instructions();
+-                s.global_get(msg).call(throw).unreachable();
++                s.str_get(msg).call(throw).unreachable();
+                 s.end();
+                 f
+             }
+@@ -300,7 +301,7 @@ impl Helper {
+                 let key = cx.str("then");
+                 let mut f = Function::new([]);
+                 let mut s = f.instructions();
+-                s.local_get(THIS).global_get(key);
++                s.local_get(THIS).str_get(key);
+                 s.global_get(G_UNDEFINED);
+                 arg(cx, &mut s, 0);
+                 s.array_new_fixed(T_VALS, 2);
+@@ -391,14 +392,14 @@ impl Helper {
+                     |s| {
+                         s.local_get(THEN).local_get(T);
+                         s.local_get(RES).local_get(REJ).array_new_fixed(T_VALS, 2);
+-                        s.global_get(empty).call(call_value).drop();
++                        s.str_get(empty).call(call_value).drop();
+                     },
+                     |s| {
+                         let e = RES;
+                         s.local_set(e);
+                         s.local_get(REJ).global_get(G_UNDEFINED);
+                         s.local_get(e).array_new_fixed(T_VALS, 1);
+-                        s.global_get(empty).call(call_value).drop();
++                        s.str_get(empty).call(call_value).drop();
+                     },
+                 );
+                 s.end();
+@@ -494,16 +495,16 @@ impl Helper {
+                 s.local_get(V).call(typeof_string);
+                 s.test_object(V);
+                 s.if_(BlockType::Result(string_ref()));
+-                s.global_get(tail);
++                s.str_get(tail);
+                 s.else_();
+-                s.global_get(space);
++                s.str_get(space);
+                 s.local_get(V).call(describe).call(concat);
+-                s.global_get(tail).call(concat);
++                s.str_get(tail).call(concat);
+                 s.end();
+                 s.call(concat);
+                 s.return_();
+                 s.end();
+-                s.global_get(tail).call(concat);
++                s.str_get(tail).call(concat);
+                 s.end();
+                 f
+             }
+@@ -546,7 +547,7 @@ pub(crate) fn native(
+     new: u32,
+     code: u32,
+     env: Option<u32>,
+-    name: u32,
++    name: runtime::Str,
+     len: i32,
+ ) {
+     s.i32_const(cx.code_slot(code));
+@@ -555,15 +556,15 @@ pub(crate) fn native(
+         Some(e) => s.local_get(e),
+         None => s.ref_null(vals()),
+     };
+-    s.global_get(name).i32_const(len).i32_const(0).call(new);
++    s.str_get(name).i32_const(len).i32_const(0).call(new);
+ }
+ 
+ /// Throw TypeError `msg` unless `this` is an object.
+-fn check_object(s: &mut InstructionSink, msg: u32, throw: u32) {
++fn check_object(s: &mut InstructionSink, msg: runtime::Str, throw: u32) {
+     s.test_object(THIS)
+         .i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(msg).call(throw);
++    s.str_get(msg).call(throw);
+     s.end();
+ }
+ 
+@@ -620,7 +621,7 @@ fn ctor(cx: &mut dyn Cx) -> Function {
+     ]
+     .into_iter()
+     .filter(|(_, name, _)| cx.names(name));
+-    let statics: Vec<(u32, u32, i32)> = [
++    let statics: Vec<(u32, runtime::Str, i32)> = [
+         (Helper::Combine(Combinator::All), "all", 1),
+         (Helper::Combine(Combinator::AllSettled), "allSettled", 1),
+         (Helper::Combine(Combinator::Race), "race", 1),
+@@ -636,7 +637,7 @@ fn ctor(cx: &mut dyn Cx) -> Function {
+         (code, cx.str(name), len)
+     })
+     .collect();
+-    let statics: Vec<(u32, u32, i32)> = if prelude.is_empty() {
++    let statics: Vec<(u32, runtime::Str, i32)> = if prelude.is_empty() {
+         statics
+     } else {
+         const ORDER: [&str; 8] =
+@@ -667,20 +668,20 @@ fn ctor(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.i32_const(cx.code_slot(call)).i32_const(cx.code_slot(construct));
+     s.ref_null(vals());
+-    s.global_get(name).i32_const(1).i32_const(0);
++    s.str_get(name).i32_const(1).i32_const(0);
+     s.call(new).local_tee(F);
+     s.ref_cast_non_null(runtime::object())
+         .global_set(G_PROMISE_CTOR);
+     s.call(proto).local_set(P);
+     s.local_get(F).ref_cast_non_null(runtime::object());
+-    s.global_get(prototype).local_get(P);
++    s.str_get(prototype).local_get(P);
+     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
+         .call(define);
+-    s.local_get(P).ref_as_non_null().global_get(constructor);
++    s.local_get(P).ref_as_non_null().str_get(constructor);
+     s.local_get(F).i32_const(object::HIDDEN).call(define);
+     for (code, name, len) in statics {
+         s.local_get(F).ref_cast_non_null(runtime::object());
+-        s.global_get(name);
++        s.str_get(name);
+         native(cx, &mut s, new, code, None, name, len);
+         s.i32_const(object::HIDDEN).call(define);
+     }
+@@ -698,7 +699,7 @@ fn proto_from_new_target(cx: &mut dyn Cx, s: &mut InstructionSink, p: u32, tmp:
+     s.local_get(NT).local_get(SELF).ref_eq().i32_eqz();
+     s.if_(BlockType::Empty);
+     s.local_get(NT)
+-        .global_get(prototype)
++        .str_get(prototype)
+         .call(get)
+         .local_tee(tmp);
+     s.ref_test_non_null(runtime::object());
+@@ -731,9 +732,9 @@ fn ctor_construct(cx: &mut dyn Cx) -> Function {
+     arg(cx, &mut s, 0);
+     s.local_tee(EX).ref_test_non_null(function()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(resolver);
++    s.str_get(resolver);
+     s.local_get(EX).call(describe).call(concat);
+-    s.global_get(not_fn).call(concat);
++    s.str_get(not_fn).call(concat);
+     s.call(throw);
+     s.end();
+     s.call(new).local_set(P);
+@@ -745,13 +746,13 @@ fn ctor_construct(cx: &mut dyn Cx) -> Function {
+         |s| {
+             s.local_get(EX).global_get(G_UNDEFINED);
+             s.local_get(RES).local_get(REJ).array_new_fixed(T_VALS, 2);
+-            s.global_get(empty).call(call_value).drop();
++            s.str_get(empty).call(call_value).drop();
+         },
+         |s| {
+             s.local_set(EX);
+             s.local_get(REJ).global_get(G_UNDEFINED);
+             s.local_get(EX).array_new_fixed(T_VALS, 1);
+-            s.global_get(empty).call(call_value).drop();
++            s.str_get(empty).call(call_value).drop();
+         },
+     );
+     s.local_get(P);
+@@ -825,7 +826,7 @@ fn resolve(cx: &mut dyn Cx) -> Function {
+     s.local_get(X).local_get(P).ref_eq();
+     s.if_(BlockType::Empty);
+     s.local_get(P);
+-    s.global_get(cycle).global_get(G_UNDEFINED).call(new_error);
++    s.str_get(cycle).global_get(G_UNDEFINED).call(new_error);
+     s.call(reject).return_();
+     s.end();
+     s.test_object(X)
+@@ -836,7 +837,7 @@ fn resolve(cx: &mut dyn Cx) -> Function {
+     try_catch(
+         &mut s,
+         |s| {
+-            s.local_get(X).global_get(then).call(get).local_set(THEN);
++            s.local_get(X).str_get(then).call(get).local_set(THEN);
+         },
+         |s| {
+             s.local_set(THEN);
+@@ -1046,7 +1047,7 @@ fn then(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(THIS).ref_test_non_null(promise()).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(msg);
++    s.str_get(msg);
+     s.local_get(THIS).call(describe).call(concat);
+     s.call(throw);
+     s.end();
+@@ -1090,7 +1091,7 @@ fn finally(cx: &mut dyn Cx) -> Function {
+     native(cx, &mut s, new, catch_finally, Some(ENV), empty, 1);
+     s.local_set(CF);
+     s.end();
+-    s.local_get(THIS).global_get(then);
++    s.local_get(THIS).str_get(then);
+     s.local_get(TF).local_get(CF).array_new_fixed(T_VALS, 2);
+     s.call(invoke);
+     s.end();
+@@ -1113,11 +1114,11 @@ fn finally_fn(cx: &mut dyn Cx, catch: bool) -> Function {
+     s.i32_const(0).array_get(T_VALS);
+     s.global_get(G_UNDEFINED);
+     s.i32_const(0).array_new_default(T_VALS);
+-    s.global_get(empty).call(call_value);
++    s.str_get(empty).call(call_value);
+     s.call(resolve).local_set(P);
+     arg(cx, &mut s, 0);
+     s.array_new_fixed(T_VALS, 1).local_set(ENV);
+-    s.local_get(P).global_get(then);
++    s.local_get(P).str_get(then);
+     native(cx, &mut s, new, thunk, Some(ENV), empty, 0);
+     s.array_new_fixed(T_VALS, 1);
+     s.call(invoke);
+@@ -1137,7 +1138,7 @@ fn promise_resolve(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(X).ref_test_non_null(promise());
+     s.if_(BlockType::Empty);
+-    s.local_get(X).global_get(constructor).call(get);
++    s.local_get(X).str_get(constructor).call(get);
+     s.call(ctor).ref_eq();
+     s.if_(BlockType::Empty);
+     s.local_get(X).return_();
+@@ -1233,7 +1234,7 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
+                         .ref_cast_non_null(iter::iter())
+                         .struct_get(runtime::T_ITER, iter::F_VALUE);
+                     s.call(resolve).local_set(NP);
+-                    s.local_get(NP).global_get(then);
++                    s.local_get(NP).str_get(then);
+                     match element {
+                         Some(code) => {
+                             // values.push(undefined); remaining++
+@@ -1296,7 +1297,7 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
+                         .i32_const(0)
+                         .array_get(T_VALS);
+                     s.array_new_fixed(T_VALS, 1);
+-                    s.global_get(empty).call(call_value).drop();
++                    s.str_get(empty).call(call_value).drop();
+                 }
+                 s.end();
+             }
+@@ -1305,7 +1306,7 @@ fn combine(cx: &mut dyn Cx, c: Combinator) -> Function {
+             s.local_set(E);
+             s.local_get(REJ).global_get(G_UNDEFINED);
+             s.local_get(E).array_new_fixed(T_VALS, 1);
+-            s.global_get(empty).call(call_value).drop();
++            s.str_get(empty).call(call_value).drop();
+         },
+     );
+     s.local_get(D);
+@@ -1350,10 +1351,10 @@ fn element(cx: &mut dyn Cx, e: Element) -> Function {
+     if let Some((what, key)) = settled {
+         s.call(new_object).local_set(O);
+         s.local_get(O)
+-            .global_get(status)
+-            .global_get(what)
++            .str_get(status)
++            .str_get(what)
+             .call(define);
+-        s.local_get(O).global_get(key).local_get(X).call(define);
++        s.local_get(O).str_get(key).local_get(X).call(define);
+         s.local_get(O).local_set(X);
+     }
+     s.local_get(STATE)
+@@ -1390,7 +1391,7 @@ fn element(cx: &mut dyn Cx, e: Element) -> Function {
+             .i32_const(0)
+             .array_get(T_VALS);
+         s.array_new_fixed(T_VALS, 1);
+-        s.global_get(empty).call(call_value).drop();
++        s.str_get(empty).call(call_value).drop();
+     }
+     s.end();
+     s.global_get(G_UNDEFINED);
+@@ -1417,14 +1418,14 @@ fn any_reject(cx: &mut dyn Cx) -> Function {
+     let mut f = Function::new([(1, jsval())]);
+     let mut s = f.instructions();
+     s.local_get(STATE).i32_const(0).array_get(T_VALS);
+-    s.global_get(msg).global_get(G_UNDEFINED);
++    s.str_get(msg).global_get(G_UNDEFINED);
+     s.call(new_error).local_tee(E);
+-    s.ref_cast_non_null(runtime::object()).global_get(stack);
+-    s.global_get(header).i32_const(object::HIDDEN).call(define);
++    s.ref_cast_non_null(runtime::object()).str_get(stack);
++    s.str_get(header).i32_const(object::HIDDEN).call(define);
+     s.local_get(STATE).i32_const(3).array_get(T_VALS);
+     s.global_get(G_UNDEFINED);
+     s.local_get(E).array_new_fixed(T_VALS, 1);
+-    s.global_get(empty).call(call_value).drop();
++    s.str_get(empty).call(call_value).drop();
+     s.end();
+     f
+ }
+@@ -1446,7 +1447,7 @@ fn with_resolvers(cx: &mut dyn Cx) -> Function {
+     s.call(resolvers).local_set(REJ).local_set(RES);
+     s.call(new_object).local_set(O);
+     for (key, v) in keys.into_iter().zip([P, RES, REJ]) {
+-        s.local_get(O).global_get(key).local_get(v).call(define);
++        s.local_get(O).str_get(key).local_get(v).call(define);
+     }
+     s.local_get(O);
+     s.end();
+@@ -1568,7 +1569,7 @@ fn drain(cx: &mut dyn Cx) -> Function {
+     s.else_();
+     s.local_get(A).global_get(G_UNDEFINED);
+     s.i32_const(0).array_new_default(T_VALS);
+-    s.global_get(empty).call(call_value).drop();
++    s.str_get(empty).call(call_value).drop();
+     s.end();
+     s.end();
+     s.br(0);
+@@ -1633,7 +1634,7 @@ fn reaction_job(cx: &mut dyn Cx) -> Function {
+         |s| {
+             s.local_get(H).global_get(G_UNDEFINED);
+             s.local_get(ARG).array_new_fixed(T_VALS, 1);
+-            s.global_get(empty).call(call_value).local_set(V);
++            s.str_get(empty).call(call_value).local_set(V);
+         },
+         |s| {
+             s.local_set(V);
+@@ -1678,7 +1679,7 @@ fn check_callback(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     {
+         // node's ERR_INVALID_ARG_TYPE text.
+-        s.global_get(msg);
++        s.str_get(msg);
+         s.local_get(CB).call(is_nullish);
+         s.if_(BlockType::Result(string_ref()));
+         s.local_get(CB).call(to_string);
+@@ -1699,32 +1700,32 @@ fn check_callback(cx: &mut dyn Cx) -> Function {
+         s.if_(BlockType::Result(string_ref()));
+         s.local_get(CB).call(inspect);
+         s.else_();
+-        s.global_get(instance);
+-        s.global_get(array_name).global_get(object_name);
++        s.str_get(instance);
++        s.str_get(array_name).str_get(object_name);
+         s.local_get(CB).ref_test_non_null(array::array());
+         s.typed_select(string_ref());
+         s.call(concat);
+         s.end();
+         s.else_();
+-        s.global_get(instance)
++        s.str_get(instance)
+             .local_get(N)
+             .ref_as_non_null()
+             .call(concat);
+         s.end();
+         s.else_();
+-        s.global_get(type_);
++        s.str_get(type_);
+         s.local_get(CB).call(typeof_string).call(concat);
+-        s.global_get(open).call(concat);
++        s.str_get(open).call(concat);
+         runtime::is_string(&mut s, CB);
+         s.if_(BlockType::Result(string_ref()));
+-        s.global_get(quote);
++        s.str_get(quote);
+         s.local_get(CB).call(to_string).call(concat);
+-        s.global_get(quote).call(concat);
++        s.str_get(quote).call(concat);
+         s.else_();
+         s.local_get(CB).call(inspect);
+         s.end();
+         s.call(concat);
+-        s.global_get(close).call(concat);
++        s.str_get(close).call(concat);
+         s.end();
+         s.end();
+         s.call(concat).call(throw);
+@@ -1758,14 +1759,14 @@ fn throw_arg_type(cx: &mut dyn Cx) -> Function {
+         .global_get(G_UNDEFINED)
+         .call(new_error)
+         .local_set(E);
+-    s.global_get(code).array_new_fixed(T_VALS, 1).local_set(ENV);
++    s.str_get(code).array_new_fixed(T_VALS, 1).local_set(ENV);
+     s.local_get(E).ref_cast_non_null(runtime::object());
+-    s.global_get(to_string_key);
++    s.str_get(to_string_key);
+     native(cx, &mut s, new, to_string, Some(ENV), to_string_key, 0);
+     s.i32_const(object::HIDDEN).call(define);
+     s.local_get(E)
+-        .global_get(code_key)
+-        .global_get(code)
++        .str_get(code_key)
++        .str_get(code)
+         .call(define_prop);
+     s.local_get(E).throw(TAG);
+     s.end();
+@@ -1786,16 +1787,16 @@ fn code_to_string(cx: &mut dyn Cx) -> Function {
+     );
+     let mut f = Function::new([]);
+     let mut s = f.instructions();
+-    s.local_get(THIS).global_get(name).call(get).call(to_string);
+-    s.global_get(open).call(concat);
++    s.local_get(THIS).str_get(name).call(get).call(to_string);
++    s.str_get(open).call(concat);
+     env(&mut s);
+     s.i32_const(0)
+         .array_get(T_VALS)
+         .ref_cast_non_null(runtime::string());
+     s.call(concat);
+-    s.global_get(close).call(concat);
++    s.str_get(close).call(concat);
+     s.local_get(THIS)
+-        .global_get(message)
++        .str_get(message)
+         .call(get)
+         .call(to_string);
+     s.call(concat);
+@@ -1856,9 +1857,9 @@ fn unhandled_text(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Result(string_ref()));
+     s.local_get(V).call(describe_error);
+     s.else_();
+-    s.global_get(head);
++    s.str_get(head);
+     s.local_get(V).call(describe).call(concat);
+-    s.global_get(tail).call(concat);
++    s.str_get(tail).call(concat);
+     s.end();
+     s.end();
+     f
+diff --git a/crates/backend/src/props.rs b/crates/backend/src/props.rs
+index ace1557..d8dfad1 100644
+--- a/crates/backend/src/props.rs
++++ b/crates/backend/src/props.rs
+@@ -16,6 +16,7 @@
+ //! Arrays: attributes of indices and `length` other than the defaults (or those of a sealed /
+ //! frozen array) aren't representable: `defineProperty` traps on them.
+ 
++use crate::runtime::StrGet;
+ use crate::runtime::JsTest;
+ use js2wasi3_ir::{ErrorKind, PrivateKind};
+ use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
+@@ -252,7 +253,7 @@ fn value(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.local_get(G).local_get(RCV);
+     s.i32_const(0).array_new_default(T_VALS);
+-    s.global_get(getter);
++    s.str_get(getter);
+     s.call(call_value).return_();
+     s.end();
+     s.local_get(RAW).global_get(G_BUILTIN).ref_eq();
+@@ -283,11 +284,11 @@ fn throw_read_only(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, k: u32) {
+         cx.str("' of object '"),
+         cx.str("'"),
+     );
+-    s.global_get(a);
++    s.str_get(a);
+     s.local_get(k).call(concat);
+-    s.global_get(b).call(concat);
++    s.str_get(b).call(concat);
+     s.local_get(o).call(desc).call(concat);
+-    s.global_get(c).call(concat);
++    s.str_get(c).call(concat);
+     s.call(throw);
+ }
+ 
+@@ -339,11 +340,11 @@ fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u3
+         .global_get(G_UNDEFINED)
+         .ref_eq();
+     s.if_(BlockType::Empty);
+-    s.global_get(a);
++    s.str_get(a);
+     s.local_get(k).call(concat);
+-    s.global_get(b).call(concat);
++    s.str_get(b).call(concat);
+     s.local_get(o).call(desc).call(concat);
+-    s.global_get(c).call(concat);
++    s.str_get(c).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(acc)
+@@ -351,7 +352,7 @@ fn call_setter(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k: u3
+         .struct_get(T_ACCESSOR, 1);
+     s.local_get(o);
+     s.local_get(v).array_new_fixed(T_VALS, 1);
+-    s.global_get(setter);
++    s.str_get(setter);
+     s.call(call_value).drop();
+ }
+ 
+@@ -496,9 +497,9 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
+         .i32_const(NO_EXTEND)
+         .i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(add);
++    s.str_get(add);
+     s.local_get(K).call(concat);
+-    s.global_get(not_ext).call(concat);
++    s.str_get(not_ext).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(O).local_get(K).local_get(V).i32_const(0);
+@@ -529,7 +530,7 @@ fn ctor_name(cx: &mut dyn Cx) -> Function {
+     s.local_get(O).ref_is_null().br_if(1);
+     s.local_get(O)
+         .ref_as_non_null()
+-        .global_get(constructor)
++        .str_get(constructor)
+         .call(find)
+         .local_tee(E);
+     s.i32_const(0).i32_ge_s();
+@@ -544,7 +545,7 @@ fn ctor_name(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     s.local_get(C)
+         .ref_cast_non_null(object())
+-        .global_get(name)
++        .str_get(name)
+         .call(own)
+         .local_set(N);
+     runtime::is_string(&mut s, N);
+@@ -554,7 +555,7 @@ fn ctor_name(cx: &mut dyn Cx) -> Function {
+     // node: only if the object is an instance of it (`C.prototype` on its chain).
+     s.local_get(C)
+         .ref_cast_non_null(object())
+-        .global_get(prototype)
++        .str_get(prototype)
+         .call(own)
+         .local_set(PP);
+     s.local_get(START).local_set(Q);
+@@ -598,7 +599,7 @@ fn desc(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(O).ref_test_non_null(array::array());
+     s.if_(BlockType::Empty);
+-    s.global_get(array).return_();
++    s.str_get(array).return_();
+     s.end();
+     // T30: a wrapper is `[object String]` etc.
+     s.local_get(O).ref_test_non_null(crate::wrapper::wrapper());
+@@ -606,10 +607,10 @@ fn desc(cx: &mut dyn Cx) -> Function {
+     {
+         let tag = cx.helper(runtime::Helper::Wrap(crate::wrapper::Helper::Tag));
+         let (a, b) = (cx.str("[object "), cx.str("]"));
+-        s.global_get(a);
++        s.str_get(a);
+         s.local_get(O).call(tag).ref_cast_non_null(runtime::string());
+         s.call(concat);
+-        s.global_get(b).call(concat).return_();
++        s.str_get(b).call(concat).return_();
+     }
+     s.end();
+     if cx.names("$module") {
+@@ -618,7 +619,7 @@ fn desc(cx: &mut dyn Cx) -> Function {
+         s.local_get(O);
+         is_class(&mut s, object::CLASS_MODULE);
+         s.if_(BlockType::Empty);
+-        s.global_get(module).return_();
++        s.str_get(module).return_();
+         s.end();
+     }
+     if cx.names("$date") {
+@@ -631,7 +632,7 @@ fn desc(cx: &mut dyn Cx) -> Function {
+             .i32_const(object::CLASS_DATE)
+             .i32_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(date).return_();
++        s.str_get(date).return_();
+         s.end();
+     }
+     if cx.names("$regexp") {
+@@ -644,19 +645,19 @@ fn desc(cx: &mut dyn Cx) -> Function {
+             .i32_const(object::CLASS_REGEXP)
+             .i32_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(regexp).return_();
++        s.str_get(regexp).return_();
+         s.end();
+     }
+-    s.global_get(open);
++    s.str_get(open);
+     s.local_get(O).call(ctor_name).local_tee(N);
+     s.ref_is_null();
+     s.if_(BlockType::Result(string_ref()));
+-    s.global_get(object_);
++    s.str_get(object_);
+     s.else_();
+     s.local_get(N).ref_as_non_null();
+     s.end();
+     s.call(concat);
+-    s.global_get(close).call(concat);
++    s.str_get(close).call(concat);
+     s.end();
+     f
+ }
+@@ -842,20 +843,20 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+         (2, ValType::F64),
+     ]);
+     let mut s = f.instructions();
+-    let fail = |s: &mut InstructionSink, msg: u32| {
+-        s.global_get(msg);
++    let fail = |s: &mut InstructionSink, msg: runtime::Str| {
++        s.str_get(msg);
+         s.local_get(K).ref_as_non_null().call(concat);
+         s.call(throw);
+     };
+     s.test_object(OV).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(non_object).call(throw);
++    s.str_get(non_object).call(throw);
+     s.end();
+     s.local_get(OV).ref_cast_non_null(object()).local_set(O);
+     s.local_get(KEY).call(to_key).local_set(K);
+     s.test_object(D).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(not_desc);
++    s.str_get(not_desc);
+     s.local_get(D).call(to_string).call(concat);
+     s.call(throw);
+     s.end();
+@@ -868,13 +869,13 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+         let bit = 1 << i;
+         s.local_get(D)
+             .ref_cast_non_null(object())
+-            .global_get(*key)
++            .str_get(*key)
+             .call(lookup)
+             .ref_is_null()
+             .i32_eqz();
+         s.if_(BlockType::Empty);
+         s.local_get(HAS).i32_const(bit).i32_or().local_set(HAS);
+-        s.local_get(D).global_get(*key).call(get).local_set(T);
++        s.local_get(D).str_get(*key).call(get).local_set(T);
+         match bit {
+             D_VALUE => {
+                 s.local_get(T).local_set(VAL);
+@@ -884,7 +885,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+                 s.local_get(T).global_get(G_UNDEFINED).ref_eq().i32_eqz();
+                 s.i32_and();
+                 s.if_(BlockType::Empty);
+-                s.global_get(if bit == D_GET { getter_fn } else { setter_fn });
++                s.str_get(if bit == D_GET { getter_fn } else { setter_fn });
+                 s.local_get(T).call(to_string).call(concat);
+                 s.call(throw);
+                 s.end();
+@@ -911,7 +912,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+         .i32_ne();
+     s.i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(both);
++    s.str_get(both);
+     s.local_get(D)
+         .ref_cast_non_null(object())
+         .call(desc)
+@@ -1119,7 +1120,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+         // the spec does); it is never configurable, enumerable or an accessor.
+         s.local_get(K)
+             .ref_as_non_null()
+-            .global_get(length)
++            .str_get(length)
+             .call(str_eq);
+         s.if_(BlockType::Empty);
+         {
+@@ -1130,7 +1131,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+             s.local_get(NL).call(to_int32).f64_convert_i32_u();
+             s.local_get(NL2).f64_ne();
+             s.if_(BlockType::Empty);
+-            s.global_get(invalid_length).call(range_error);
++            s.str_get(invalid_length).call(range_error);
+             s.end();
+             s.end();
+             s.local_get(HAS).i32_const(D_GET | D_SET).i32_and();
+@@ -1223,9 +1224,9 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+                 s.i32_and();
+                 s.i32_or();
+                 s.if_(BlockType::Empty);
+-                s.global_get(define_prop);
++                s.str_get(define_prop);
+                 s.local_get(K).ref_as_non_null().call(concat);
+-                s.global_get(not_ext).call(concat);
++                s.str_get(not_ext).call(concat);
+                 s.call(throw);
+                 s.end();
+                 arr(&mut s);
+@@ -1260,9 +1261,9 @@ fn define_property(cx: &mut dyn Cx) -> Function {
+             .i32_const(NO_EXTEND)
+             .i32_and();
+         s.if_(BlockType::Empty);
+-        s.global_get(define_prop);
++        s.str_get(define_prop);
+         s.local_get(K).ref_as_non_null().call(concat);
+-        s.global_get(not_ext).call(concat);
++        s.str_get(not_ext).call(concat);
+         s.call(throw);
+         s.end();
+         s.local_get(O)
+@@ -1333,14 +1334,14 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
+         s.global_get(G_FALSE);
+         s.end();
+     };
+-    let field = |s: &mut InstructionSink, key: u32, value: &dyn Fn(&mut InstructionSink)| {
+-        s.local_get(R).ref_cast_non_null(object()).global_get(key);
++    let field = |s: &mut InstructionSink, key: runtime::Str, value: &dyn Fn(&mut InstructionSink)| {
++        s.local_get(R).ref_cast_non_null(object()).str_get(key);
+         value(s);
+         s.i32_const(0).call(define);
+     };
+     s.local_get(V).call(is_nullish);
+     s.if_(BlockType::Empty);
+-    s.global_get(convert).call(throw);
++    s.str_get(convert).call(throw);
+     s.end();
+     s.test_object(V).i32_eqz();
+     s.if_(BlockType::Empty);
+@@ -1364,7 +1365,7 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     s.local_get(K)
+         .ref_as_non_null()
+-        .global_get(length)
++        .str_get(length)
+         .call(str_eq);
+     s.if_(BlockType::Result(ValType::I32));
+     s.i32_const(HIDDEN | FIXED | READONLY).i32_const(HIDDEN | FIXED);
+@@ -1436,7 +1437,7 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
+             .struct_get(T_ACCESSOR, 0);
+         s.local_get(O);
+         s.i32_const(0).array_new_default(T_VALS);
+-        s.global_get(getter);
++        s.str_get(getter);
+         s.call(call_value).local_set(X);
+         s.local_get(A)
+             .i32_const(!(ACCESSOR | READONLY) & 0xff)
+@@ -1719,9 +1720,9 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
+         .local_tee(g);
+     s.global_get(G_UNDEFINED).ref_eq();
+     s.if_(BlockType::Empty);
+-    s.global_get(quote);
++    s.str_get(quote);
+     s.local_get(SYM).ref_cast_non_null(string()).call(concat);
+-    s.global_get(without).call(concat);
++    s.str_get(without).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(g).local_get(O);
+@@ -1730,7 +1731,7 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
+     } else {
+         s.i32_const(0).array_new_default(T_VALS);
+     }
+-    s.global_get(what).call(call_value);
++    s.str_get(what).call(call_value);
+     if write {
+         s.drop();
+     }
+@@ -1744,9 +1745,9 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
+             .i32_const(READONLY)
+             .i32_and();
+         s.if_(BlockType::Empty);
+-        s.global_get(method);
++        s.str_get(method);
+         s.local_get(SYM).ref_cast_non_null(string()).call(concat);
+-        s.global_get(not_writable).call(concat);
++        s.str_get(not_writable).call(concat);
+         s.call(throw);
+         s.end();
+         as_obj(&mut s, O);
+@@ -1778,9 +1779,9 @@ fn private_has(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.test_object(O).i32_eqz();
+     s.if_(BlockType::Empty);
+-    s.global_get(search);
++    s.str_get(search);
+     s.local_get(SYM).ref_cast_non_null(string()).call(concat);
+-    s.global_get(in_).call(concat);
++    s.str_get(in_).call(concat);
+     s.local_get(O).call(to_string).call(concat);
+     s.call(throw);
+     s.end();
+@@ -1857,9 +1858,9 @@ fn super_set(cx: &mut dyn Cx) -> Function {
+     s.local_get(KEY).call(to_key).local_set(K);
+     s.local_get(P).ref_is_null();
+     s.if_(BlockType::Empty);
+-    s.global_get(set_null);
++    s.str_get(set_null);
+     s.local_get(K).ref_as_non_null().call(concat);
+-    s.global_get(close).call(concat).call(throw);
++    s.str_get(close).call(concat).call(throw);
+     s.end();
+     s.local_get(THIS).ref_cast_non_null(object()).local_set(O);
+     s.block(BlockType::Empty).loop_(BlockType::Empty);
+@@ -1940,11 +1941,11 @@ fn call_setter_on(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k:
+         .global_get(G_UNDEFINED)
+         .ref_eq();
+     s.if_(BlockType::Empty);
+-    s.global_get(a);
++    s.str_get(a);
+     s.local_get(k).ref_as_non_null().call(concat);
+-    s.global_get(b).call(concat);
++    s.str_get(b).call(concat);
+     s.local_get(o).ref_as_non_null().call(desc).call(concat);
+-    s.global_get(c).call(concat);
++    s.str_get(c).call(concat);
+     s.call(throw);
+     s.end();
+     s.local_get(acc)
+@@ -1952,7 +1953,7 @@ fn call_setter_on(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k:
+         .struct_get(T_ACCESSOR, 1);
+     s.local_get(o);
+     s.local_get(v).array_new_fixed(T_VALS, 1);
+-    s.global_get(setter);
++    s.str_get(setter);
+     s.call(call_value).drop();
+ }
+ 
+@@ -1966,10 +1967,10 @@ fn throw_read_only_nullable(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, k:
+         cx.str("' of object '"),
+         cx.str("'"),
+     );
+-    s.global_get(a);
++    s.str_get(a);
+     s.local_get(k).ref_as_non_null().call(concat);
+-    s.global_get(b).call(concat);
++    s.str_get(b).call(concat);
+     s.local_get(o).ref_as_non_null().call(desc).call(concat);
+-    s.global_get(c).call(concat);
++    s.str_get(c).call(concat);
+     s.call(throw);
+ }
+diff --git a/crates/backend/src/runtime.rs b/crates/backend/src/runtime.rs
+index f07f03b..819ffc0 100644
+--- a/crates/backend/src/runtime.rs
++++ b/crates/backend/src/runtime.rs
+@@ -102,11 +102,13 @@ pub const T_WRAPPER: u32 = 27;
+ /// string being appended to (`str_buf_append`): its first `len` units of `buf` (room to grow), and
+ /// that string once made (`str_buf_get`; null after an append). Only ever in a variable's local.
+ pub const T_STRBUF: u32 = 28;
++/// `$strs`: a final `(array (mut (ref $string)))` (T100): the module's string constants ([`G_STRS`]).
++pub const T_STRS: u32 = 29;
+ /// `$bigint`: a final `(array (mut i32))`, sign then magnitude limbs (T40, see [`crate::bigint`]).
+ /// Only in a module that can make a BigInt ([`Cx::bigint`]): the last type of the group then.
+-pub const T_BIGINT: u32 = 29;
++pub const T_BIGINT: u32 = 30;
+ /// Number of runtime types before the function types (one more with `$bigint`).
+-pub const TYPES: u32 = 29;
++pub const TYPES: u32 = 30;
+ 
+ /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
+ pub const TAG: u32 = 0;
+@@ -212,8 +214,13 @@ pub const G_HASH_VAL: u32 = G_HASH_KEY + 1;
+ /// `object::Helper::TypedLengthSnapshot`), then two cached prototypes with the `G_EPOCH` at which their chain to
+ /// `%TypedArray%.prototype` had no other `length` (`[2]`, `[3]` and `[4]`, `[5]`; `object::Helper::TypedLengthFill`).
+ pub const G_TLEN: u32 = G_HASH_VAL + 1;
++/// `(ref $strs)` (T100, F322): the module's string constants, one GC root instead of a global each
++/// (wasmtime walks every GC-ref global on each collection: 60,000 constant globals made a GC-heavy loop
++/// 2.2× slower). Made at instantiation holding empty strings, filled by the start function
++/// (`consts$init<k>`); a use is [`str_get`].
++pub const G_STRS: u32 = G_TLEN + 1;
+ /// Number of runtime globals before the user globals, without the BigInt ones.
+-pub const GLOBALS: u32 = G_TLEN + 1;
++pub const GLOBALS: u32 = G_STRS + 1;
+ /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
+ /// only in a module that can make a BigInt ([`Cx::bigint`]).
+ pub const G_BIGINT_PROTO: u32 = GLOBALS;
+@@ -287,8 +294,8 @@ const I31_END: i32 = 1 << 30;
+ pub trait Cx {
+     /// Function index of a helper (emitted on demand).
+     fn helper(&mut self, h: Helper) -> u32;
+-    /// Global index of an interned string constant.
+-    fn string(&mut self, units: &[u16]) -> u32;
++    /// An interned string constant (T100: its index in [`G_STRS`], pushed with [`StrGet::str_get`]).
++    fn string(&mut self, units: &[u16]) -> Str;
+     /// Index of the passive data segment with the number → string tables.
+     fn tables_data(&mut self) -> u32;
+     /// Global index of the ABI bump pointer (only in modules with string exports).
+@@ -441,7 +448,7 @@ pub trait Cx {
+     fn js_rem(&mut self) -> u32;
+     fn js_pow(&mut self) -> u32;
+ 
+-    fn str(&mut self, s: &str) -> u32 {
++    fn str(&mut self, s: &str) -> Str {
+         let units: Vec<u16> = s.encode_utf16().collect();
+         self.string(&units)
+     }
+@@ -491,6 +498,45 @@ pub fn is_string(s: &mut InstructionSink, v: u32) {
+ /// call into the runtime, even when the answer is no. These first test the abstract `array` /
+ /// `struct` kinds (in the object header, inline) and exact `final` types, so the concrete test runs
+ /// only where it's cheap or rare. The results are those of the plain `ref.test`.
++/// A string constant (T100): its index in [`G_STRS`].
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub struct Str(pub u32);
++
++/// A constant property key (T100): a string constant, or a global holding a symbol
++/// (`G_SYM_ITERATOR`).
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum KeyConst {
++    Str(Str),
++    Global(u32),
++}
++
++impl From<Str> for KeyConst {
++    fn from(c: Str) -> Self {
++        KeyConst::Str(c)
++    }
++}
++
++/// Pushing a string constant (T100).
++pub trait StrGet {
++    /// Push constant `c`, a `(ref $string)`: `global.get G_STRS; i32.const i; array.get $strs`.
++    fn str_get(&mut self, c: Str) -> &mut Self;
++    /// Push key `k`, a `(ref $string)`.
++    fn key_get(&mut self, k: KeyConst) -> &mut Self;
++}
++
++impl StrGet for InstructionSink<'_> {
++    fn str_get(&mut self, c: Str) -> &mut Self {
++        self.global_get(G_STRS).i32_const(c.0 as i32).array_get(T_STRS)
++    }
++
++    fn key_get(&mut self, k: KeyConst) -> &mut Self {
++        match k {
++            KeyConst::Str(c) => self.str_get(c),
++            KeyConst::Global(g) => self.global_get(g),
++        }
++    }
++}
++
+ pub trait JsTest {
+     /// Push "local `v` is a `$string`" (a string or a symbol).
+     fn test_string(&mut self, v: u32) -> &mut Self;
+@@ -868,6 +914,11 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
+                 field(StorageType::Val(rt(true, T_STRING)), true),
+             ]),
+         })),
++        // $strs (T100).
++        sub(CompositeInnerType::Array(ArrayType(field(
++            StorageType::Val(rt(false, T_STRING)),
++            true,
++        )))),
+     ];
+     if bigint {
+         group.push(sub(CompositeInnerType::Array(ArrayType(field(
+@@ -886,6 +937,7 @@ pub fn globals(
+     suppressed: bool,
+     stacks: bool,
+     big_typed: bool,
++    strings: u32,
+ ) {
+     for kind in [K_UNDEFINED, K_NULL, K_FALSE, K_TRUE] {
+         globals.global(
+@@ -1113,6 +1165,22 @@ pub fn globals(
+         },
+         &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
+     );
++    // T100: the string constants, `strings` empty strings until the start function fills them.
++    globals.global(
++        GlobalType {
++            val_type: rt(false, T_STRS),
++            mutable: false,
++            shared: false,
++        },
++        &ConstExpr::extended([
++            Instruction::ArrayNewFixed {
++                array_type_index: T_STRING,
++                array_size: 0,
++            },
++            Instruction::I32Const(strings as i32),
++            Instruction::ArrayNew(T_STRS),
++        ]),
++    );
+     for _ in 0..extra {
+         globals.global(
+             GlobalType {
+@@ -1162,19 +1230,6 @@ pub fn const_placeholders(globals: &mut GlobalSection, bigint: bool) {
+     }
+ }
+ 
+-/// A string constant's global (T57): `(global (mut (ref $string)) (global.get placeholder))`,
+-/// set by the start function.
+-pub fn string_global(globals: &mut GlobalSection, placeholder: u32) {
+-    globals.global(
+-        GlobalType {
+-            val_type: string_ref(),
+-            mutable: true,
+-            shared: false,
+-        },
+-        &ConstExpr::global_get(placeholder),
+-    );
+-}
+-
+ /// A constant `f64` as a JS value, in a constant expression.
+ pub fn const_number(v: f64) -> ConstExpr {
+     match small_int(v) {
+@@ -1521,13 +1576,13 @@ fn to_number(cx: &mut dyn Cx) -> Function {
+     s.else_();
+     s.local_get(V).ref_test_non_null(symbol());
+     s.if_(BlockType::Empty);
+-    s.global_get(no_num).call(throw);
++    s.str_get(no_num).call(throw);
+     s.end();
+     if cx.bigint() {
+         let no_big = cx.str("Cannot convert a BigInt value to a number");
+         bigint::is_bigint(&mut s, V);
+         s.if_(BlockType::Empty);
+-        s.global_get(no_big).call(throw);
++        s.str_get(no_big).call(throw);
+         s.end();
+     }
+     // ToNumber of a string: the prelude's StringToNumber (T21). It's linked when the IR converts a
+@@ -1791,8 +1846,8 @@ pub fn typeof_is(s: &mut InstructionSink, t: u32, tag: TypeofTag, bigint: bool)
+ pub enum EqConst {
+     /// An oddball (`undefined`, `null`, `true`, `false`) in this global: equal only to itself.
+     Oddball(u32),
+-    /// A string constant in global `global`, `len` code units long.
+-    Str { global: u32, len: u32 },
++    /// String constant `c`, `len` code units long.
++    Str { c: Str, len: u32 },
+     /// A number.
+     Num(f64),
+ }
+@@ -1804,9 +1859,9 @@ pub fn strict_eq_const(s: &mut InstructionSink, t: u32, c: EqConst, str_eq: u32)
+         EqConst::Oddball(g) => {
+             s.global_get(g).ref_eq();
+         }
+-        EqConst::Str { global, len } => {
++        EqConst::Str { c, len } => {
+             // Identity (the same constant), else a string of the same length and units.
+-            s.local_tee(t).global_get(global).ref_eq();
++            s.local_tee(t).str_get(c).ref_eq();
+             s.if_(BlockType::Result(ValType::I32));
+             s.i32_const(1);
+             s.else_();
+@@ -1819,7 +1874,7 @@ pub fn strict_eq_const(s: &mut InstructionSink, t: u32, c: EqConst, str_eq: u32)
+                 .i32_eq();
+             s.if_(BlockType::Result(ValType::I32));
+             s.local_get(t).ref_cast_non_null(string());
+-            s.global_get(global).call(str_eq);
++            s.str_get(c).call(str_eq);
+             s.else_();
+             s.i32_const(0);
+             s.end();
+@@ -1989,7 +2044,7 @@ fn typeof_(cx: &mut dyn Cx) -> Function {
+ /// `$typeof_string(v) -> (ref $string)`: JS `typeof` as a value.
+ fn typeof_string(cx: &mut dyn Cx) -> Function {
+     let typeof_ = cx.helper(Helper::Typeof);
+-    let names: Vec<u32> = TypeofTag::ALL.iter().map(|t| cx.str(t.as_str())).collect();
++    let names: Vec<Str> = TypeofTag::ALL.iter().map(|t| cx.str(t.as_str())).collect();
+     const V: u32 = 0;
+     const C: u32 = 1;
+     let mut f = Function::new([(1, ValType::I32)]);
+@@ -2000,10 +2055,10 @@ fn typeof_string(cx: &mut dyn Cx) -> Function {
+     for (i, g) in rest.iter().enumerate() {
+         s.local_get(C).i32_const(i as i32).i32_eq();
+         s.if_(BlockType::Result(string_ref()));
+-        s.global_get(*g);
++        s.str_get(*g);
+         s.else_();
+     }
+-    s.global_get(*last);
++    s.str_get(*last);
+     for _ in rest {
+         s.end();
+     }
+@@ -2112,7 +2167,7 @@ fn to_string(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(V).ref_test_non_null(symbol());
+     s.if_(BlockType::Empty);
+-    s.global_get(no_str).call(throw);
++    s.str_get(no_str).call(throw);
+     s.end();
+     s.test_string(V);
+     s.if_(BlockType::Empty);
+@@ -2142,10 +2197,10 @@ fn to_string(cx: &mut dyn Cx) -> Function {
+     for (k, g) in names[..3].iter().enumerate() {
+         s.local_get(K).i32_const(k as i32).i32_eq();
+         s.if_(BlockType::Empty);
+-        s.global_get(*g).return_();
++        s.str_get(*g).return_();
+         s.end();
+     }
+-    s.global_get(names[3]);
++    s.str_get(names[3]);
+     s.end();
+     f
+ }
+@@ -3022,11 +3077,11 @@ fn throw_read(cx: &mut dyn Cx) -> Function {
+     const PROP: u32 = 1;
+     let mut f = Function::new([]);
+     let mut s = f.instructions();
+-    s.global_get(parts[0]);
++    s.str_get(parts[0]);
+     s.local_get(V).call(to_string).call(concat);
+-    s.global_get(parts[1]).call(concat);
++    s.str_get(parts[1]).call(concat);
+     s.local_get(PROP).call(concat);
+-    s.global_get(parts[2]).call(concat);
++    s.str_get(parts[2]).call(concat);
+     s.call(throw);
+     s.end();
+     f
+@@ -3095,7 +3150,7 @@ fn describe(cx: &mut dyn Cx) -> Function {
+         let own_get = cx.helper(Helper::Obj(object::Helper::OwnGet));
+         let stack = cx.str("stack");
+         s.local_get(V).ref_cast_non_null(object());
+-        s.global_get(stack).call(own_get).local_set(T);
++        s.str_get(stack).call(own_get).local_set(T);
+         object::frameless_stack(cx, &mut s, V, T);
+         s.if_(BlockType::Empty);
+         s.local_get(V).call(inspect).return_();
+@@ -3104,10 +3159,10 @@ fn describe(cx: &mut dyn Cx) -> Function {
+     s.local_get(V).call(to_string).local_set(H);
+     // node's `improveStack`: an error whose constructor isn't named like it shows both,
+     // `Ctor [name]: message` (or `Ctor: message` when the constructor's name contains it).
+-    s.local_get(V).global_get(name_key).call(get).local_tee(T);
++    s.local_get(V).str_get(name_key).call(get).local_tee(T);
+     s.call(is_nullish);
+     s.if_(BlockType::Result(string_ref()));
+-    s.global_get(error);
++    s.str_get(error);
+     s.else_();
+     s.local_get(T).call(to_string);
+     s.end();
+@@ -3125,7 +3180,7 @@ fn describe(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     s.local_get(H).ref_as_non_null().return_();
+     s.end();
+-    s.local_get(N).ref_as_non_null().global_get(error);
++    s.local_get(N).ref_as_non_null().str_get(error);
+     s.local_get(LEN).i32_const(5).i32_sub();
+     s.call(str_at);
+     s.local_get(H)
+@@ -3193,10 +3248,10 @@ fn describe(cx: &mut dyn Cx) -> Function {
+     s.br(0).end().end();
+     s.local_get(C)
+         .ref_as_non_null()
+-        .global_get(open)
++        .str_get(open)
+         .call(concat);
+     s.local_get(N).ref_as_non_null().call(concat);
+-    s.global_get(close).call(concat);
++    s.str_get(close).call(concat);
+     s.local_get(H).ref_as_non_null().local_get(LEN).call(slice);
+     s.call(concat);
+     s.end();
+diff --git a/crates/backend/src/timers.rs b/crates/backend/src/timers.rs
+index 1405a54..ad2c211 100644
+--- a/crates/backend/src/timers.rs
++++ b/crates/backend/src/timers.rs
+@@ -23,6 +23,7 @@
+ //! the microtasks, until both are empty ([`Helper::RunTicks`]); after the main code of an ES module
+ //! the microtasks come first (of a CommonJS entry, the ticks: T60).
+ 
++use crate::runtime::StrGet;
+ use js2wasi3_ir::{
+     Builtin, TIMER_CLEAR_IMMEDIATE, TIMER_CLEAR_INTERVAL, TIMER_CLEAR_TIMEOUT, TIMER_NAMES,
+     TIMER_NEXT_TICK, TIMER_SET_IMMEDIATE, TIMER_SET_INTERVAL,
+@@ -636,7 +637,7 @@ fn run_callback(cx: &mut dyn Cx, s: &mut InstructionSink, t: u32, r: u32) {
+     get(s, t, F_CALLBACK);
+     s.local_get(t);
+     get(s, t, F_ARGS);
+-    s.global_get(empty);
++    s.str_get(empty);
+     s.call(call_value).drop();
+     s.call(after);
+     s.call(unhandled).local_tee(r).ref_is_null().i32_eqz();
+@@ -784,7 +785,7 @@ fn run_ticks(cx: &mut dyn Cx) -> Function {
+             s.global_get(G_TICKS).ref_as_non_null();
+             s.local_get(I).i32_const(1).i32_add().array_get(T_VALS);
+             s.ref_cast_non_null(func::vals());
+-            s.global_get(empty);
++            s.str_get(empty);
+             s.local_get(I).i32_const(2).i32_add().local_set(I);
+             s.call(call_value).drop();
+             s.br(0);
+diff --git a/crates/backend/src/typed.rs b/crates/backend/src/typed.rs
+index a3abdc6..8c4a906 100644
+--- a/crates/backend/src/typed.rs
++++ b/crates/backend/src/typed.rs
+@@ -18,6 +18,7 @@
+ //!   0 when out of bounds, (byte length − offset) / size when tracking. Other modules keep the
+ //!   fixed layout and read the `length` field.
+ 
++use crate::runtime::StrGet;
+ use js2wasi3_ir::{Builtin, TYPED_NAMES, TypedOp};
+ use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
+ 
+@@ -151,16 +152,16 @@ impl Helper {
+             Helper::Len => current_length(),
+             Helper::Name => {
+                 let kinds = cx.typed_kinds() as usize;
+-                let names: Vec<u32> = TYPED_NAMES[..kinds].iter().map(|n| cx.str(n)).collect();
++                let names: Vec<runtime::Str> = TYPED_NAMES[..kinds].iter().map(|n| cx.str(n)).collect();
+                 let mut f = Function::new([]);
+                 let mut s = f.instructions();
+                 for (k, g) in names.iter().enumerate() {
+                     s.local_get(0).i32_const(k as i32).i32_eq();
+                     s.if_(BlockType::Empty);
+-                    s.global_get(*g).return_();
++                    s.str_get(*g).return_();
+                     s.end();
+                 }
+-                s.global_get(names[0]);
++                s.str_get(names[0]);
+                 s.end();
+                 f
+             }
+@@ -1188,12 +1189,12 @@ fn format(cx: &mut dyn Cx) -> Function {
+     s.local_get(LEN).i32_const(0).i32_ne();
+     s.i32_and();
+     s.if_(BlockType::Empty);
+-    s.global_get(lbracket);
++    s.str_get(lbracket);
+     s.local_get(T)
+         .struct_get(T_TYPED, F_KIND)
+         .call(name)
+         .call(concat);
+-    s.global_get(rbracket).call(concat).return_();
++    s.str_get(rbracket).call(concat).return_();
+     s.end();
+     s.local_get(LEN)
+         .i32_const(100)
+@@ -1223,14 +1224,14 @@ fn format(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     {
+         s.local_get(OUT).ref_as_non_null().local_get(N);
+-        s.global_get(more);
++        s.str_get(more);
+         s.local_get(LEN)
+             .local_get(N)
+             .i32_sub()
+             .f64_convert_i32_u()
+             .call(number_to_string);
+         s.call(concat);
+-        s.global_get(more_items).global_get(more_item);
++        s.str_get(more_items).str_get(more_item);
+         s.local_get(LEN)
+             .local_get(N)
+             .i32_sub()
+@@ -1247,13 +1248,13 @@ fn format(cx: &mut dyn Cx) -> Function {
+         .local_get(N)
+         .local_get(INDENT);
+     s.local_get(T).struct_get(T_TYPED, F_KIND).call(name);
+-    s.global_get(lparen).call(concat);
++    s.str_get(lparen).call(concat);
+     s.local_get(LEN)
+         .f64_convert_i32_u()
+         .call(number_to_string)
+         .call(concat);
+-    s.global_get(rparen).call(concat);
+-    s.global_get(rbracket);
++    s.str_get(rparen).call(concat);
++    s.str_get(rbracket);
+     s.i32_const(1).i32_const(1).call(layout);
+     s.end();
+     f
+@@ -1291,14 +1292,14 @@ fn format_buffer(cx: &mut dyn Cx) -> Function {
+     let mut s = f.instructions();
+     s.local_get(DEPTH).i32_const(2).i32_gt_s();
+     s.if_(BlockType::Empty);
+-    s.global_get(deep).return_();
++    s.str_get(deep).return_();
+     s.end();
+     if cx.rab() {
+         // T47.
+         let detached = cx.str("ArrayBuffer { (detached), [byteLength]: 0 }");
+         s.local_get(B).struct_get(T_BUFFER, F_DETACHED);
+         s.if_(BlockType::Empty);
+-        s.global_get(detached).return_();
++        s.str_get(detached).return_();
+         s.end();
+     }
+     s.local_get(B)
+@@ -1364,7 +1365,7 @@ fn format_buffer(cx: &mut dyn Cx) -> Function {
+         s.br(0);
+     }
+     s.end().end();
+-    s.global_get(contents);
++    s.str_get(contents);
+     s.local_get(HEX)
+         .ref_as_non_null()
+         .call(concat)
+@@ -1373,14 +1374,14 @@ fn format_buffer(cx: &mut dyn Cx) -> Function {
+     s.if_(BlockType::Empty);
+     {
+         s.local_get(HEX).ref_as_non_null();
+-        s.global_get(more).call(concat);
++        s.str_get(more).call(concat);
+         s.local_get(LEN)
+             .local_get(N)
+             .i32_sub()
+             .f64_convert_i32_u()
+             .call(number_to_string);
+         s.call(concat);
+-        s.global_get(more_bytes).global_get(more_byte);
++        s.str_get(more_bytes).str_get(more_byte);
+         s.local_get(LEN)
+             .local_get(N)
+             .i32_sub()
+@@ -1391,15 +1392,15 @@ fn format_buffer(cx: &mut dyn Cx) -> Function {
+     }
+     s.end();
+     s.local_get(HEX).ref_as_non_null();
+-    s.global_get(gt).call(concat);
+-    s.global_get(byte_length);
++    s.str_get(gt).call(concat);
++    s.str_get(byte_length);
+     s.local_get(LEN)
+         .f64_convert_i32_u()
+         .call(number_to_string)
+         .call(concat);
+     s.array_new_fixed(T_KEYS, 2);
+     s.i32_const(2).local_get(INDENT);
+-    s.global_get(open).global_get(close);
++    s.str_get(open).str_get(close);
+     s.i32_const(0).i32_const(0).call(layout);
+     s.end();
+     f
+diff --git a/crates/backend/src/wit.rs b/crates/backend/src/wit.rs
+index 516d3dc..04ab0b1 100644
+--- a/crates/backend/src/wit.rs
++++ b/crates/backend/src/wit.rs
+@@ -15,6 +15,7 @@
+ //! into a buffer first. A JS value that doesn't fit the type traps (an `enum` string that isn't
+ //! a case, a `result` object whose `tag` is neither `ok` nor `err`).
+ 
++use crate::runtime::StrGet;
+ use js2wasi3_ir::{AbiType, TYPED_SIZES, TypedOp, WitType};
+ use wasm_encoder::{BlockType, InstructionSink, MemArg, ValType};
+ 
+@@ -347,7 +348,7 @@ pub fn lift_flat(
+             for (key, t) in fs {
+                 let n = flatten(t).len();
+                 let k = cx.str(key);
+-                s.local_get(o).global_get(k);
++                s.local_get(o).str_get(k);
+                 lift_flat(cx, g, s, t, &slots[i..i + n]);
+                 s.call(define);
+                 i += n;
+@@ -361,7 +362,7 @@ pub fn lift_flat(
+             s.call(new).local_set(o);
+             for (k, key) in fs.iter().enumerate() {
+                 let key = cx.str(key);
+-                s.local_get(o).global_get(key);
++                s.local_get(o).str_get(key);
+                 get(s, 0);
+                 s.i32_const(1 << k).i32_and();
+                 s.if_(BlockType::Result(runtime::jsval()));
+@@ -374,13 +375,13 @@ pub fn lift_flat(
+             s.local_get(o);
+         }
+         WitType::Enum(cs) => {
+-            let names: Vec<u32> = cs.iter().map(|c| cx.str(c)).collect();
++            let names: Vec<runtime::Str> = cs.iter().map(|c| cx.str(c)).collect();
+             // A chain of `if`s on the case index; out of range traps.
+             for (k, name) in names.iter().enumerate() {
+                 get(s, 0);
+                 s.i32_const(k as i32).i32_eq();
+                 s.if_(BlockType::Result(runtime::jsval()));
+-                s.global_get(*name);
++                s.str_get(*name);
+                 s.else_();
+             }
+             s.unreachable();
+@@ -494,17 +495,17 @@ fn lift_cases(
+         s.local_get(slots[0].0).i32_const(k as i32).i32_eq();
+         s.if_(BlockType::Empty);
+         let name = cx.str(name);
+-        s.local_get(o).global_get(tag).global_get(name).call(define);
++        s.local_get(o).str_get(tag).str_get(name).call(define);
+         match t {
+             Some(t) => {
+                 let n = flatten(t).len();
+-                s.local_get(o).global_get(val);
++                s.local_get(o).str_get(val);
+                 lift_flat(cx, g, s, t, &slots[1..1 + n]);
+                 s.call(define);
+             }
+             None if always_val => {
+                 s.local_get(o)
+-                    .global_get(val)
++                    .str_get(val)
+                     .global_get(G_UNDEFINED)
+                     .call(define);
+             }
+@@ -652,7 +653,7 @@ pub fn lower_mem(
+             for ((key, t), o) in fs.iter().zip(offs) {
+                 let x = g.local(runtime::jsval());
+                 let k = cx.str(key);
+-                s.local_get(v).global_get(k).call(get).local_set(x);
++                s.local_get(v).str_get(k).call(get).local_set(x);
+                 lower_mem(cx, g, s, t, x, addr, off + o);
+             }
+         }
+@@ -665,7 +666,7 @@ pub fn lower_mem(
+             s.i32_const(0);
+             for (k, key) in fs.iter().enumerate() {
+                 let key = cx.str(key);
+-                s.local_get(v).global_get(key).call(get).call(b);
++                s.local_get(v).str_get(key).call(get).call(b);
+                 s.i32_const(k as i32).i32_shl().i32_or();
+             }
+             store_disc(s, size_align(t).0, off);
+@@ -676,7 +677,7 @@ pub fn lower_mem(
+             s.block(BlockType::Empty);
+             for (k, c) in cs.iter().enumerate() {
+                 let c = cx.str(c);
+-                s.local_get(v).global_get(c).call(eq);
++                s.local_get(v).str_get(c).call(eq);
+                 s.if_(BlockType::Empty);
+                 s.local_get(addr).i32_const(k as i32);
+                 store_disc(s, size, off);
+@@ -773,7 +774,7 @@ pub fn lower_mem(
+             let to_number = rh(cx, runtime::Helper::ToNumber);
+             let length = cx.str("length");
+             let (x, ea) = (g.local(runtime::jsval()), g.local(ValType::I32));
+-            s.local_get(v).global_get(length).call(get).call(to_number);
++            s.local_get(v).str_get(length).call(get).call(to_number);
+             s.i32_trunc_sat_f64_u().local_set(len);
+             alloc(s, &|s| {
+                 s.local_get(len).i32_const(size as i32).i32_mul();
+@@ -814,11 +815,11 @@ fn lower_cases(
+     let (payload, _) = variant_layout(cases.len(), &ts);
+     let size = disc_size(cases.len());
+     let (tg, x) = (g.local(runtime::jsval()), g.local(runtime::jsval()));
+-    s.local_get(v).global_get(tag).call(get).local_set(tg);
+-    s.local_get(v).global_get(val).call(get).local_set(x);
++    s.local_get(v).str_get(tag).call(get).local_set(tg);
++    s.local_get(v).str_get(val).call(get).local_set(x);
+     for (k, (name, t)) in cases.iter().enumerate() {
+         let name = cx.str(name);
+-        s.local_get(tg).global_get(name).call(eq);
++        s.local_get(tg).str_get(name).call(eq);
+         s.if_(BlockType::Empty);
+         s.local_get(addr).i32_const(k as i32);
+         store_disc(s, size, off);
+diff --git a/crates/backend/src/wrapper.rs b/crates/backend/src/wrapper.rs
+index 5f50916..b0c45d3 100644
+--- a/crates/backend/src/wrapper.rs
++++ b/crates/backend/src/wrapper.rs
+@@ -8,6 +8,7 @@
+ //! (enumerable, read-only, non-configurable) and `length` (hidden too), so keys, `for-in`,
+ //! `hasOwnProperty` and failed writes need nothing new.
+ 
++use crate::runtime::StrGet;
+ use crate::runtime::JsTest;
+ use js2wasi3_ir::{Builtin, ErrorKind};
+ use wasm_encoder::{BlockType, Function, HeapType, ValType};
+@@ -92,7 +93,7 @@ impl Helper {
+                         s.if_(BlockType::Empty);
+                         match kind {
+                             0 => {
+-                                s.global_get(empty);
++                                s.str_get(empty);
+                             }
+                             1 => {
+                                 s.i32_const(0).ref_i31();
+@@ -165,7 +166,7 @@ fn new(cx: &mut dyn Cx) -> Function {
+         s.i32_const(READONLY | FIXED).call(define);
+         s.local_get(I).i32_const(1).i32_add().local_set(I);
+         s.br(0).end().end();
+-        s.local_get(O).ref_as_non_null().global_get(length);
++        s.local_get(O).ref_as_non_null().str_get(length);
+         s.local_get(N).ref_i31();
+         s.i32_const(HIDDEN | READONLY | FIXED).call(define);
+     }
+@@ -197,7 +198,7 @@ fn to_object(cx: &mut dyn Cx) -> Function {
+     s.end();
+     s.local_get(V).call(is_nullish);
+     s.if_(BlockType::Empty);
+-    s.global_get(msg).call(throw);
++    s.str_get(msg).call(throw);
+     s.end();
+     let wrap = |s: &mut wasm_encoder::InstructionSink, proto: u32| {
+         s.if_(BlockType::Empty);
+@@ -250,7 +251,7 @@ fn construct(cx: &mut dyn Cx, b: Builtin) -> Function {
+             .array_get(T_VALS)
+             .ref_test_non_null(symbol());
+         s.if_(BlockType::Empty);
+-        s.global_get(msg).call(throw);
++        s.str_get(msg).call(throw);
+         s.end();
+         s.end();
+     }
+@@ -263,7 +264,7 @@ fn construct(cx: &mut dyn Cx, b: Builtin) -> Function {
+     s.if_(BlockType::Result(rt(true, T_OBJECT)));
+     s.call(proto);
+     s.else_();
+-    s.local_get(NT).global_get(prototype).call(get).local_tee(P);
++    s.local_get(NT).str_get(prototype).call(get).local_tee(P);
+     s.ref_test_non_null(object_ty());
+     s.if_(BlockType::Result(rt(true, T_OBJECT)));
+     s.local_get(P).ref_cast_non_null(object_ty());
+@@ -297,10 +298,10 @@ fn tag(cx: &mut dyn Cx) -> Function {
+         .ref_cast_non_null(wrapper())
+         .struct_get(T_WRAPPER, F_PRIM)
+         .local_set(P);
+-    s.global_get(names[0]);
+-    s.global_get(names[1]);
+-    s.global_get(names[2]);
+-    s.global_get(names[3]);
++    s.str_get(names[0]);
++    s.str_get(names[1]);
++    s.str_get(names[2]);
++    s.str_get(names[3]);
+     s.local_get(P).call(is_number);
+     s.typed_select(jsval());
+     s.test_string(P);
+@@ -309,7 +310,7 @@ fn tag(cx: &mut dyn Cx) -> Function {
+     s.typed_select(jsval());
+     if cx.bigint() {
+         let name = cx.str("BigInt");
+-        s.global_get(name);
++        s.str_get(name);
+         crate::bigint::is_bigint(&mut s, P);
+         s.i32_eqz().typed_select(jsval());
+     }
