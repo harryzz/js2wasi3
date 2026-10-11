@@ -3803,8 +3803,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     continue;
                 }
             };
-            // T103: a `var` written before every read needs no `undefined` (it can stay `f64`).
-            if decl.init.is_none() && is_var && plain && self.an.definite.contains(&sym) {
+            // T103: a `var` written before every read needs no `undefined` (it can stay `f64`);
+            // T106: a `let` too.
+            if decl.init.is_none() && plain && self.an.definite.contains(&sym) {
                 continue;
             }
             if decl.init.is_some() && is_var {

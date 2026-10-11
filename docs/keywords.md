@@ -66,7 +66,7 @@ What's most needed, in order: the rest of the built-in library (`Intl` beyond `D
 | `instanceof` | ✅ | Classes, functions, native errors, built-ins, `Symbol.hasInstance` (T25). |
 | `int` | ➖ | Removed in ES5. |
 | `interface` | ➖ | Reserved in strict mode; a syntax error in node too. |
-| `let` | ✅ | Block scope, a fresh binding per loop iteration, TDZ (also across `switch` cases). |
+| `let` | ✅ | Block scope, a fresh binding per loop iteration, TDZ (also across `switch` cases). T106: `let x;` written before every read is a number local. |
 | `long` | ➖ | Removed in ES5. |
 | `native` | ➖ | Removed in ES5. |
 | `new` | ✅ | Functions, classes, native errors, `Promise`; `new.target` in class constructors and ordinary functions and their arrows (T38; `undefined` when called, in methods and in static blocks). |

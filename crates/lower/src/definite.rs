@@ -1,7 +1,8 @@
 //! Definite assignment of `var`s (T103, F389): the uncaptured function-local `var`s whose every read
 //! comes after a write on every path. For those, `var x;` needn't store `undefined`, so the type
 //! inference (see the crate doc) can keep them `f64`. The others may be read before any write, so they
-//! start as `undefined` even when every declaration has an initializer (T104, F276).
+//! start as `undefined` even when every declaration has an initializer (T104, F276). T106: uncaptured `let`s
+//! too (`let x;` sets `x` to `undefined` again each time it runs, so it unassigns it).
 //!
 //! One forward pass per function over its statements with the set of variables assigned so far
 //! (`None`: unreachable, after `return`/`break`/`continue`/`throw`). Only plain `x = e` and
@@ -19,7 +20,7 @@ use oxc_ast::AstKind;
 use oxc_ast::ast::*;
 use oxc_semantic::{Scoping, Semantic};
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::symbol::SymbolId;
+use oxc_syntax::symbol::{SymbolFlags, SymbolId};
 
 use crate::closures::Analysis;
 
@@ -35,7 +36,9 @@ pub fn analyze(semantic: &Semantic, an: &Analysis) -> (HashSet<SymbolId>, HashSe
     let mut reads = Vec::new();
     for sym in scoping.symbol_ids() {
         if scoping.symbol_scope_id(sym) == root
-            || !scoping.symbol_flags(sym).is_function_scoped_declaration()
+            || !(scoping.symbol_flags(sym).is_function_scoped_declaration()
+                || scoping.symbol_flags(sym).contains(SymbolFlags::BlockScopedVariable)
+                    && !scoping.symbol_flags(sym).is_const_variable())
             || an.captured.contains(&sym)
             || !is_decl(scoping.symbol_declaration(sym))
             || scoping
@@ -264,7 +267,14 @@ impl Walk<'_> {
                         set.insert(sym);
                     }
                 }
-                (BindingPattern::BindingIdentifier(_), None) => {}
+                (BindingPattern::BindingIdentifier(b), None) => {
+                    // `let x;` is `x = undefined`; `var x;` changes nothing.
+                    if v.kind != VariableDeclarationKind::Var
+                        && let (Some(set), Some(sym)) = (&mut d, b.symbol_id.get())
+                    {
+                        set.remove(&sym);
+                    }
+                }
                 _ => self.opaque(decl.span, &d),
             }
         }

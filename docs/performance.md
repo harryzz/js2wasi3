@@ -116,8 +116,10 @@ node:
   - mandelbrot (77%): `var Zr, Zi, Cr, Ci, Tr, Ti` are declared without a value, so their type includes `undefined`
     and they stay `jsval`, although every read follows a write (F389; **fixed by T103**, 2026-10-10: 3,955 → 254 ms on
     a-03, node ~180 ms);
+  - spectralnorm, fannkuchredux, fasta: `let i, j` without a value made the loop counters (and spectralnorm's
+    `eval_A` parameters) `jsval` (**fixed by T106**, 2026-10-11: spectralnorm −32%, fannkuchredux −8%, fasta −5%);
   - nbody, navier-stokes, spectralnorm, crypto: the numbers live in object properties and arrays, which hold `jsval`s
-    (F323).
+    (F323, F391).
 - **GC** (wasmtime's `CopyingHeap::forward`/`scan_field`/`collect`): leads splay (78%), binarytrees (57%),
   earley-boyer (31%). T98's 16 MiB reserve is in these numbers; F347 has the heap-size trade-off.
 - **regex** (`$$reRun`, `re_alts_find`): a VM in the prelude; 81% of octane-regexp, 84% of regexredux (F336).
