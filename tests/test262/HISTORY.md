@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-11: T105 write-site entry guess (full run)
+
+- Compiler (`main` at 7ac9812 + T105, uncommitted at the run): `set_named` tries the entry its site last wrote
+  (`G_IC`) before `find_own_named`. Runner: unchanged.
+- Full run on `a-03` (`~/t262-t105.log`, 1,273 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-11: T104 `var` read before its initializer (full run)
 
 - Compiler (`main` at cb00fa4 + T104, uncommitted at the run): an uncaptured function-local `var` that a read can

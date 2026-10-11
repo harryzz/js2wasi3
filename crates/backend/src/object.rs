@@ -332,8 +332,9 @@ pub enum Helper {
     /// `(o, k, v, attrs, hash)`: a new own property `k` known to be absent, neither an array index nor
     /// `length`, with its hash (T74).
     AppendNamed,
-    /// `(v, k: (ref $string), value, hash: i32, site: i32)`: `v.k = value` for a constant key that is
-    /// neither an array index, `length` nor `__proto__` (T74): an own writable data property directly;
+    /// `(v, k: (ref $string), value, hash: i32, site: i32, ic: i32)`: `v.k = value` for a constant key that
+    /// is neither an array index, `length` nor `__proto__` (T74): an own writable data property directly
+    /// (T105: first the entry `G_IC[ic]` remembers, as [`Helper::GetNamed`]);
     /// T90: a new property directly when the receiver is extensible and its prototype is the one the
     /// site remembers at the current `G_EPOCH` (no `k` on that chain: no setter, nothing read-only);
     /// other objects through `ordinary_set_named` (which remembers), others [`Helper::Set`].
@@ -596,7 +597,7 @@ impl Helper {
             Helper::Define => (vec![o, s, v, I32], vec![]),
             Helper::AppendNamed => (vec![o, s, v, I32, I32], vec![]),
             Helper::DefineNamed => (vec![v, s, v, I32], vec![]),
-            Helper::SetNamed => (vec![v, s, v, I32, I32], vec![]),
+            Helper::SetNamed => (vec![v, s, v, I32, I32, I32], vec![]),
             Helper::Remove => (vec![o, s], vec![]),
             Helper::Grow => (vec![o], vec![]),
             Helper::Reindex => (vec![o, I32], vec![]),
@@ -939,24 +940,28 @@ fn define_named(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `set_named(v, k, value, hash, site)`: `v.k = value` (see [`Helper::SetNamed`]).
+/// `set_named(v, k, value, hash, site, ic)`: `v.k = value` (see [`Helper::SetNamed`]).
 fn set_named(cx: &mut dyn Cx) -> Function {
     let ordinary = rh(cx, runtime::Helper::Prop(props::Helper::SetNamed));
     let set = h(cx, Helper::Set);
     let find = h(cx, Helper::FindOwnNamed);
     let append = h(cx, Helper::AppendNamed);
+    let store = h(cx, Helper::IcStore);
     const V: u32 = 0;
     const K: u32 = 1;
     const X: u32 = 2;
     const H: u32 = 3;
     const SITE: u32 = 4;
-    const O: u32 = 5;
-    const E: u32 = 6;
-    const IC: u32 = 7;
+    const ICS: u32 = 5;
+    const O: u32 = 6;
+    const E: u32 = 7;
+    const IC: u32 = 8;
+    const G: u32 = 9;
     let mut f = Function::new([
         (1, rt(true, T_OBJECT)),
         (1, ValType::I32),
         (1, rt(true, T_VALS)),
+        (1, rt(true, T_I32S)),
     ]);
     let mut s = f.instructions();
     // Not an object: the generic `set` (T93: one test-and-cast chain, as in `get_named`).
@@ -965,6 +970,34 @@ fn set_named(cx: &mut dyn Cx) -> Function {
         s.return_();
     });
     s.local_set(O);
+    // T105: the entry this site remembers, when it's still `k` and a writable data property.
+    s.block(BlockType::Empty);
+    s.global_get(runtime::G_IC).local_tee(G).ref_is_null().br_if(0);
+    s.local_get(ICS).local_get(G).array_len().i32_ge_u().br_if(0);
+    s.local_get(G).local_get(ICS).array_get(T_I32S).local_tee(E);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).i32_ge_u().br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(E)
+        .array_get(T_KEYS)
+        .local_get(K)
+        .ref_eq()
+        .i32_eqz()
+        .br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(E)
+        .array_get_u(T_BYTES)
+        .i32_const(ACCESSOR | READONLY | WATCHED)
+        .i32_and()
+        .br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(E)
+        .local_get(X)
+        .array_set(T_VALS);
+    s.return_();
+    s.end();
     s.local_get(O).ref_as_non_null().local_get(K).local_get(H).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
@@ -978,6 +1011,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
             .i32_and()
             .i32_eqz();
         s.if_(BlockType::Empty);
+        s.local_get(ICS).local_get(E).call(store);
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
             .local_get(E)

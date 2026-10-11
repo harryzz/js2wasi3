@@ -106,7 +106,8 @@ node:
   1.9%, `set` 1.7%). Objects are dictionaries with a per-site entry-index guess (T74). Most of the cost is the
   *hit* path in `get_named` itself: load the site's guess, compare the key, check for an accessor. The ~5% of full
   hash lookups (`find_own_named`) come from:
-  - writes to existing properties: `set_named` has no guess and always hashes (15% of nbody, 11% of richards; F372);
+  - writes to existing properties: `set_named` has no guess and always hashes (15% of nbody, 11% of richards; F372;
+    **fixed by T105**, 2026-10-11: nbody −14.2%, richards −10.6% on a-03);
   - prototype hits (methods): the guess caches own properties only (F321, F359; T99's prototype cache didn't pay);
   - sites that see more than one layout.
 - **Numbers** (`box_number` 9.1%, `to_number` 7.0%). A number outside the i31 range or not an integer is a `$number`
@@ -141,7 +142,8 @@ reason.
 
 ## Next steps, by expected gain per effort
 
-1. A write guess in `set_named` like `get_named`'s (F372): up to 15% of nbody, 11% of richards.
+1. ~~A write guess in `set_named` like `get_named`'s (F372): up to 15% of nbody, 11% of richards.~~ Done (T105:
+   nbody −14.2%, richards −10.6%).
 2. ~~`var x;` with every read after a write stays `f64` (F389): mandelbrot's 77%.~~ Done (T103: mandelbrot 15.6×
    faster, the other 17 benchmarks unchanged).
 3. Regex literals compiled to Wasm ahead of time (F336): octane-regexp, regexredux.

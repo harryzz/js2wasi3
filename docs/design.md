@@ -158,6 +158,8 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   writable data property is written in place. `G_SET_IC` starts at 16 entries: wasmtime's copying collector
   copies every live array on each collection, and a 1,024-entry ref array made the GC-bound default-heap runs
   ~2× slower (T90 progress log).)
+  (T105: a constant-key write also has a read-style site in `G_IC`: the entry it last wrote is tried first (still `k`,
+  no `ACCESSOR | READONLY | WATCHED` bit) before `find_own_named`; nbody −14%, richards −11%.)
   (T92: **object tests without `is_subtype`**. `$object` isn't final, so wasmtime compiles `ref.test`/`ref.cast
   (ref $object)` inline only for an exact `$object` and calls its `is_subtype` runtime function for every other
   object (a `Map`, array, function…). `runtime::object_or` tests and casts in one chain: abstract `struct`,

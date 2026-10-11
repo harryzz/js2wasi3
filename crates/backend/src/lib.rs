@@ -1899,6 +1899,9 @@ impl Emitter<'_> {
                     s.i32_const(object::key_hash(units));
                     s.i32_const(self.set_sites as i32);
                     self.set_sites += 1;
+                    // T105: and a read-style site for its entry guess.
+                    s.i32_const(self.ic_sites as i32);
+                    self.ic_sites += 1;
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
                     return Ok(false);
                 }
