@@ -1175,6 +1175,9 @@ pub enum Intrinsic {
     /// `(x: f64) -> bool` (T107): `x` has the bits [`Intrinsic::ElemNum`] returns for "not an element in
     /// number mode" (no JS number has them).
     F64IsHole,
+    /// `(v: jsval) -> f64` (T108): `v`'s value if it's a number (an i31 or a `$number`), else the bits of
+    /// [`Intrinsic::F64IsHole`]. Never runs JS code.
+    NumOrHole,
     /// 32 random bits from the host (`wasi:random/insecure`, commands only) (`i32`).
     RandomSeed,
     /// Call [`Module::imports`]`[i]` (T20 slice 5) with the arguments in an array (`jsval`):
@@ -1510,6 +1513,7 @@ impl Intrinsic {
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
             Intrinsic::ElemNum => (&[JsVal, JsVal], Some(F64)),
             Intrinsic::F64IsHole => (&[F64], Some(Bool)),
+            Intrinsic::NumOrHole => (&[JsVal], Some(F64)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
             Intrinsic::DateNow => (&[], Some(F64)),
             Intrinsic::Environment(_) => (&[], Some(JsVal)),
@@ -1728,6 +1732,7 @@ impl Intrinsic {
             Intrinsic::F64FromWords => "f64_from_words",
             Intrinsic::ElemNum => "elem_num",
             Intrinsic::F64IsHole => "f64_is_hole",
+            Intrinsic::NumOrHole => "num_or_hole",
             Intrinsic::RandomSeed => "random_seed",
             Intrinsic::DateNow => "date_now",
             Intrinsic::Environment(_) => "environment",

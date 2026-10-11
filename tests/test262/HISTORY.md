@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-11: T108 element reads in `+` unboxed (full run)
+
+- Compiler (`main` at 4a5ae25 + T108, uncommitted at the run): a `+` with element reads under a numeric consumer
+  reads them unboxed (`Lowerer::num_sum`, `NumOrHole`). Runner: unchanged.
+- Full run on `a-03` (`~/t262-t108.log`, 1,282 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-11: T107 number arrays (seven full runs)
 
 - Compiler (`main` at 5a7e032 + T107, uncommitted at the runs): arrays holding only numbers keep them unboxed

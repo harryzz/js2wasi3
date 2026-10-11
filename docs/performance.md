@@ -120,7 +120,8 @@ node:
     `eval_A` parameters) `jsval` (**fixed by T106**, 2026-10-11: spectralnorm −32%, fannkuchredux −8%, fasta −5%);
   - nbody, navier-stokes, spectralnorm, crypto: the numbers live in object properties and arrays, which hold `jsval`s
     (F323, F391). Arrays: **T107** (2026-10-11) keeps number arrays unboxed: spectralnorm −49%, navier-stokes −19%,
-    fannkuchredux −9%, crypto −7%, fasta −5% (a-03); object properties still box (F323).
+    fannkuchredux −9%, crypto −7%, fasta −5% (a-03); **T108** (2026-10-11) reads elements unboxed in a `+` under a
+    numeric consumer: navier-stokes another −47% (2,859 → 1,513 ms); object properties still box (F323).
 - **GC** (wasmtime's `CopyingHeap::forward`/`scan_field`/`collect`): leads splay (78%), binarytrees (57%),
   earley-boyer (31%). T98's 16 MiB reserve is in these numbers; F347 has the heap-size trade-off.
 - **regex** (`$$reRun`, `re_alts_find`): a VM in the prelude; 81% of octane-regexp, 84% of regexredux (F336).

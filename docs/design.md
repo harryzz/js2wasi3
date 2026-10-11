@@ -67,6 +67,11 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   overwrite fast path first), `get_num`/`set_num` (the backend's `+o[k]` / `o[k] = <f64>` peepholes), the statement
   `o[k] += <number>` (`ElemNum`), push/pop, iteration. A generic read of a non-integer element boxes it (a new
   `$number`). See `crates/backend/src/array.rs`.)
+  (T108: a `+` with an element read among its operands, under a numeric consumer (an operand of `-`/`*`/`/`/`%`/`**`
+  or a relational operator), is lowered by `Lowerer::num_sum`: each operand in source order to an `f64` (an element
+  by `ElemNum`, else `get` + `NumOrHole`; another value by `NumOrHole`, which gives HOLE's bits for a non-number),
+  each `+` an `f64.add` when both operands are numbers, else `js_add` at that same point (so conversions keep JS's
+  order) and ToNumber at the end. A lone element read stays `get_num`'s. navier-stokes −47%.)
   (T102: **watchpoints**, JSC's idea: the built-in entries a fast path relies on carry a watch bit in their attribute
   byte (`object::WATCH_ITER`: `Array.prototype[Symbol.iterator]` and `%ArrayIteratorPrototype%.next`;
   `WATCH_STRITER`: `String.prototype[Symbol.iterator]`; `WATCH_REGEXP`: the `RegExp.prototype` keys `regexp_plain`

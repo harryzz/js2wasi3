@@ -19,8 +19,8 @@ T101 (the Node.js compatibility page, `scripts/compat.mjs`, https://harryzz.gith
 `node scripts/compat.mjs` after tasks that add node APIs. T102 (watchpoint flags, F390: iteration sees a replaced
 `next`, `regexp_plain` one bit) is done. T103 (`var x;` written before every read stays `f64`, F389: mandelbrot 15.6× faster) is done. T104 (F276: a `var` read before its initializer is `undefined`) is done. T105 (F372: a per-site entry guess for
 `set_named`: nbody −14%, richards −11%) is done. T106 (`let x;` stays `f64`: spectralnorm −32%) is done. T107 (F391: number arrays
-unboxed: spectralnorm −49%, navier-stokes −19%) is done. Next task: T108 (F401, element reads in `+`/comparisons
-without a box; `tasks/T108-elem-reads-unboxed.md`, not started: measure first).
+unboxed: spectralnorm −49%, navier-stokes −19%) is done. T108 (F401: element reads in a `+`
+under a numeric consumer unboxed: navier-stokes −47%) is done. Next task: not chosen (candidates F403, F404, F400).
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.

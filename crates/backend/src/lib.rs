@@ -2106,6 +2106,27 @@ impl Emitter<'_> {
                         s.i64_reinterpret_f64().i64_const(array::HOLE).i64_eq();
                         return Ok(true);
                     }
+                    Intrinsic::NumOrHole => {
+                        let v = self.scratch_js;
+                        s.local_tee(v).ref_test_non_null(wasm_encoder::HeapType::I31);
+                        s.if_(BlockType::Result(ValType::F64));
+                        s.local_get(v)
+                            .ref_cast_non_null(wasm_encoder::HeapType::I31)
+                            .i31_get_s()
+                            .f64_convert_i32_s();
+                        s.else_();
+                        s.local_get(v)
+                            .ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER));
+                        s.if_(BlockType::Result(ValType::F64));
+                        s.local_get(v)
+                            .ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER))
+                            .struct_get(runtime::T_NUMBER, 0);
+                        s.else_();
+                        s.i64_const(array::HOLE).f64_reinterpret_i64();
+                        s.end();
+                        s.end();
+                        return Ok(true);
+                    }
                     Intrinsic::F64Hi => {
                         s.i64_reinterpret_f64()
                             .i64_const(32)
@@ -2236,6 +2257,7 @@ impl Emitter<'_> {
                     | Intrinsic::F64Lo
                     | Intrinsic::F64FromWords
                     | Intrinsic::F64IsHole
+                    | Intrinsic::NumOrHole
                     | Intrinsic::RandomSeed
                     | Intrinsic::DateNow
                     | Intrinsic::MonotonicNow

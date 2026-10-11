@@ -4822,7 +4822,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if may_be_bigint {
             return Ok(Val::js(numeric(op, l, r), Kind::Any));
         }
-        let e = Expr::binary(op, Type::F64, self.num(l, span)?, self.num(r, span)?);
+        let l = self.num_sum(cx, l);
+        let e = Expr::binary(op, Type::F64, l, self.num_sum(cx, r));
         let ty = if op.is_comparison() {
             Type::Bool
         } else {
@@ -7141,6 +7142,145 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         Ok(())
     }
 
+    /// T108: ToNumber of `v` where `v` is a `+` (a `js_add` tree) with a computed element read among its
+    /// operands (`x0[c] + a * (lastX + x[++c] + x[++l])` under `*`): the operands are taken as unboxed
+    /// numbers where they are (an element: `ElemNum`, else `get`; anything else: `NumOrHole`), in source
+    /// order, and each `+` whose operands are both numbers is an `f64` add; else that `+` is `js_add` as
+    /// before (at the same point, so the order of conversions is JS's). Anything else: [`number_of`].
+    fn num_sum(&mut self, cx: &mut FnCx, v: Val) -> Expr {
+        fn has_elem(e: &Expr) -> bool {
+            match e {
+                Expr::Intrinsic {
+                    op: Intrinsic::JsAdd,
+                    args,
+                } => args.iter().any(has_elem),
+                Expr::Intrinsic {
+                    op: Intrinsic::GetProp,
+                    args,
+                } => !matches!(args[1], Expr::Str(_)),
+                _ => false,
+            }
+        }
+        // A lone element read is `get_num`'s (the backend's `jsval->f64(get(…))` peephole).
+        let sum = matches!(
+            v.e,
+            Expr::Intrinsic {
+                op: Intrinsic::JsAdd,
+                ..
+            }
+        );
+        if v.ty != Type::JsVal || v.kind == Kind::Str || !sum || !has_elem(&v.e) {
+            return number_of(v);
+        }
+        let mut body = vec![];
+        let x = self.sum_operand(cx, v.e, &mut body);
+        let value = match x.v {
+            Some(jv) => Expr::Cond {
+                cond: Box::new(f64_is_hole(x.t)),
+                then: Box::new(Expr::convert(Type::JsVal, Type::F64, Expr::Local(jv))),
+                els: Box::new(Expr::Local(x.t)),
+                ty: Type::F64,
+            },
+            None => Expr::Local(x.t),
+        };
+        Expr::Seq {
+            body,
+            value: Box::new(value),
+        }
+    }
+
+    /// One operand of [`Self::num_sum`], evaluated into `out`.
+    fn sum_operand(&mut self, cx: &mut FnCx, e: Expr, out: &mut Vec<Stmt>) -> SumOperand {
+        let t = cx.func.add_local("num", Type::F64);
+        match e {
+            Expr::Intrinsic {
+                op: Intrinsic::JsAdd,
+                mut args,
+            } => {
+                let b = args.pop().expect("two operands");
+                let a = args.pop().expect("two operands");
+                let a = self.sum_operand(cx, a, out);
+                let b = self.sum_operand(cx, b, out);
+                let sum = Expr::binary(
+                    BinOp::Add,
+                    Type::F64,
+                    Expr::Local(a.t),
+                    Expr::Local(b.t),
+                );
+                let holes: Vec<Expr> = [&a, &b]
+                    .iter()
+                    .filter(|x| x.v.is_some())
+                    .map(|x| f64_is_hole(x.t))
+                    .collect();
+                let Some(cond) = holes.into_iter().reduce(|p, q| Expr::Cond {
+                    cond: Box::new(p),
+                    then: Box::new(Expr::bool(true)),
+                    els: Box::new(q),
+                    ty: Type::Bool,
+                }) else {
+                    out.push(Stmt::Set(t, sum));
+                    return SumOperand { t, v: None };
+                };
+                let v = cx.func.add_local("sum", Type::JsVal);
+                out.push(Stmt::If {
+                    cond,
+                    then: vec![
+                        Stmt::Set(
+                            v,
+                            Expr::intrinsic(Intrinsic::JsAdd, vec![a.jsval(), b.jsval()]),
+                        ),
+                        Stmt::Set(t, Expr::intrinsic(Intrinsic::NumOrHole, vec![Expr::Local(v)])),
+                    ],
+                    els: vec![Stmt::Set(t, sum)],
+                });
+                SumOperand { t, v: Some(v) }
+            }
+            Expr::Intrinsic {
+                op: Intrinsic::GetProp,
+                mut args,
+            } if !matches!(args[1], Expr::Str(_)) => {
+                let k = args.pop().expect("two operands");
+                let o = args.pop().expect("two operands");
+                let to = cx.func.add_local("obj", Type::JsVal);
+                let tk = cx.func.add_local("key", Type::JsVal);
+                let v = cx.func.add_local("elem", Type::JsVal);
+                out.push(Stmt::Set(to, o));
+                out.push(Stmt::Set(tk, k));
+                // `ElemNum` runs no JS code: after "not one", `get` is the one observable read.
+                out.push(Stmt::Set(
+                    t,
+                    Expr::intrinsic(Intrinsic::ElemNum, vec![Expr::Local(to), Expr::Local(tk)]),
+                ));
+                out.push(Stmt::If {
+                    cond: f64_is_hole(t),
+                    then: vec![
+                        Stmt::Set(
+                            v,
+                            Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(to), Expr::Local(tk)]),
+                        ),
+                        Stmt::Set(t, Expr::intrinsic(Intrinsic::NumOrHole, vec![Expr::Local(v)])),
+                    ],
+                    els: vec![],
+                });
+                SumOperand { t, v: Some(v) }
+            }
+            Expr::Convert {
+                from: Type::F64,
+                to: Type::JsVal,
+                arg,
+            } => {
+                out.push(Stmt::Set(t, *arg));
+                SumOperand { t, v: None }
+            }
+            e => {
+                let v = cx.func.add_local("operand", Type::JsVal);
+                out.push(Stmt::Set(v, e));
+                out.push(Stmt::Set(t, Expr::intrinsic(Intrinsic::NumOrHole, vec![Expr::Local(v)])));
+                SumOperand { t, v: Some(v) }
+            }
+        }
+    }
+
     /// `o.k++` / `--o[k]`: the old or new value, as a number.
     fn member_update(&mut self, cx: &mut FnCx, u: &'a UpdateExpression<'a>) -> R<Val> {
         let m = u
@@ -8200,6 +8340,33 @@ fn js_length(params: &FormalParameters) -> u32 {
         .iter()
         .position(|p| p.initializer.is_some())
         .unwrap_or(params.items.len()) as u32
+}
+
+/// An operand of [`Lowerer::num_sum`]: its number in `t`, or (`v`: it may not be one) `t` has the hole's
+/// bits and the value is in `v`.
+struct SumOperand {
+    t: LocalId,
+    v: Option<LocalId>,
+}
+
+impl SumOperand {
+    /// The operand as a JS value (a number is boxed: only on the generic path).
+    fn jsval(&self) -> Expr {
+        let boxed = Expr::convert(Type::F64, Type::JsVal, Expr::Local(self.t));
+        match self.v {
+            None => boxed,
+            Some(v) => Expr::Cond {
+                cond: Box::new(f64_is_hole(self.t)),
+                then: Box::new(Expr::Local(v)),
+                els: Box::new(boxed),
+                ty: Type::JsVal,
+            },
+        }
+    }
+}
+
+fn f64_is_hole(t: LocalId) -> Expr {
+    Expr::intrinsic(Intrinsic::F64IsHole, vec![Expr::Local(t)])
 }
 
 /// JS ToNumber.

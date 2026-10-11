@@ -1,6 +1,6 @@
 # T108: element reads in `+` and comparisons without a box (F401)
 
-Status: todo | Depends on: T107 | Local
+Status: done | Depends on: T107 | Local
 
 ## Goal
 T107 keeps arrays of numbers unboxed (`nums`, number mode). A read used as a number is already unboxed
@@ -37,22 +37,36 @@ single observable read, as `Lowerer::elem_add_stmt` does). Order of evaluation m
 - `crates/ir/src/lib.rs`: `Intrinsic::ElemNum`, `F64IsHole`.
 
 ## Plan
-- [ ] Measure first (a-03, ask): perf of navier-stokes, splay, crypto, nbody with T107: how much is `box_number` /
+- [x] Measure first (a-03, ask): perf of navier-stokes, splay, crypto, nbody with T107: how much is `box_number` /
   allocation from generic element reads now; IR of the hot loops (`js2wasi3 ir`) to list the exact shapes. If
   < ~3% anywhere, record that in F401 and stop.
-- [ ] Comparisons first (smallest, no result-type question): `o[k] <op> x` / `x <op> o[k]` / both, for
+- [x] (dropped after measuring: ≤ 1.1% anywhere, F402) Comparisons first (smallest, no result-type question): `o[k] <op> x` / `x <op> o[k]` / both, for
   `< <= > >=` (and `=== !==` if they show up).
-- [ ] `+` under a numeric consumer (the navier-stokes chain).
-- [ ] Fixture `tests/fixtures/arrays/elem-reads.js`: order of evaluation (a right operand that changes the array,
+- [x] `+` under a numeric consumer (the navier-stokes chain).
+- [x] Fixture `tests/fixtures/arrays/elem-reads.js`: order of evaluation (a right operand that changes the array,
   getters on elements counted, `valueOf` on an object element, string elements, holes behind a prototype element,
   `NaN`/`-0`, typed arrays, plain objects with numeric keys) = node.
-- [ ] `scripts/diff.sh` on the touched dirs; test262 (full run on a-03, ask); a-03 benchmarks (ask): nothing
+- [x] `scripts/diff.sh` on the touched dirs; test262 (full run on a-03, ask); a-03 benchmarks (ask): nothing
   slower beyond noise (F399: ±5% layout effects; compare hot IR when a program without element reads moves).
 
 ## Acceptance
 - Every fixture = node; test262 0 regressions; navier-stokes / splay faster; nothing slower beyond noise.
 
 ## Notes / Result
+- Measured first (a-03 perf of the T107 builds): navier-stokes ~79% in generic element reads + `js_add`
+  (`get` 25%, `box_number` 24%, `to_number` 20%, `js_add` 10%); comparisons ≤ 1.1% anywhere (dropped, F402);
+  crypto's and nbody's boxing isn't from element reads (F404; object properties, F323); splay is GC.
+- Changed: `Intrinsic::NumOrHole` (`crates/ir`, inline in `crates/backend/src/lib.rs`: an i31's / `$number`'s
+  value, else HOLE's bits); `Lowerer::num_sum` + `sum_operand` (`crates/lower/src/lib.rs`) replace `number_of` for
+  the operands of `-`/`*`/`/`/`%`/`**`/relational operators when the operand is a `js_add` tree with a computed
+  element read: operands in source order into `f64` locals, `f64.add` when both are numbers, else `js_add` at that
+  point and ToNumber at the end. A lone element read is left to `get_num`.
+- Results (a-03, T107 vs T108, median of 5): **navier-stokes 2,859 → 1,513 ms (−47.1%)**, crypto +0.2%; the other
+  16 benchmarks' `.wasm` are byte-identical (±1.9%, noise). All outputs same. Full test262: no changes (28,105).
+  `scripts/diff.sh tests/fixtures/arrays`: 8/8.
+- Unsupported / left: comparisons (F402); a `jsval` local holding the sum (`lastX`: one box per iteration, F403);
+  a `+` whose value isn't consumed as a number (`o.p = x[i] + y[i]`, `f(x[i] + 1)`) is unchanged.
+- Next smallest step: F403 (`lastX` as `f64`) for navier-stokes' last box per iteration.
 
 ## Progress
 - 2026-10-11: task created as the handoff after T107 (user: "write handoff for F401 for new session"). Not
@@ -60,3 +74,41 @@ single observable read, as `Lowerer::elem_add_stmt` does). Order of evaluation m
   `~/js2wasi3-t106` and `~/js2wasi3-t107` compilers and the bench script `~/t107-bench.sh` (copy and rename for
   T108: head = T107, new = T108; `~/t107-all.sh` chains benchmarks and test262; run detached with
   `setsid nohup bash -l …`, a non-login shell lacks `wasmtime`).
+- 2026-10-11: started. Local IR of navier-stokes `lin_solve` (`js2wasi3 ir`): the inner loop is
+  `lastX = f64->jsval(... f64.mul(jsval->f64($js_add($get(x0, k), f64->jsval(f64.mul(a, jsval->f64($js_add($js_add($js_add(lastX, $get(x, ..)), $get(x, ..)), $get(x, ..))))))), invC) ...)`:
+  4 boxing `$get`s, 4 `$js_add`s, two `jsval->f64` after `$js_add`, and `lastX` is a `jsval` local (its first
+  write is a `$get`), so `f64->jsval` of the stored value boxes once more per iteration. Every `+` here is under a
+  numeric consumer (`f64.mul`). Next: perf on a-03 (asked).
+- 2026-10-11: measured on a-03 (user OK): `~/t108-prof.sh`, perf of the T107 builds in `~/t107-bench`, profiles in
+  `~/t108-prof`. Self time: **navier-stokes** `get` 25.2%, `box_number` 24.3% (20.1% from `lin_solve`, 1.9%
+  `project`, 1.5% `advect`), `to_number` 19.7%, `js_add` 9.7%, `set_num` 5.8%, `get_num` 3.2%, `js_less` 1.1%:
+  ~79% is the generic element read + `+` path. **crypto** `box_number` 21.9% (18.6% from `am3`), but not from
+  element reads: `am3`'s elements are i31; the boxes are `f64->jsval` of the `jsval` locals/params `l`, `c`, `n`,
+  `i`, `j` (`l = $js_add($js_add(f64->jsval(..), $get(w_array, j)), c)`): a local-type question, not F401.
+  **nbody** `box_number` 15.6%, all from `advance`'s object properties (`bodies[i].vx`), not arrays: out of scope.
+  **splay** GC-bound (copying collector ~72%), `js_less` 0.7%, `box_number` 0.2%: nothing for T108.
+  Decision: comparisons are < 3% everywhere (max 1.1%), so they're dropped from this task (follow-up). The `+` chain under a numeric
+  consumer is the whole task (navier-stokes).
+- 2026-10-11: implemented. IR: `Intrinsic::NumOrHole` (`jsval -> f64`: an i31's or `$number`'s value, else
+  HOLE's bits; inline in the backend, no call). Lowering: `Lowerer::num_sum` replaces `number_of` for the operands
+  of arithmetic/relational operators (`binary`, the `f64` path): a `js_add` tree with a computed element read
+  (`GetProp` with a non-string key) becomes a `seq` that evaluates each operand in source order into an `f64` local
+  (element: `ElemNum`, on HOLE `get` + `NumOrHole`; `f64->jsval(e)`: `e`; anything else: `NumOrHole`) and each `+`
+  as `f64.add` when both are numbers, else `js_add` of the operands (boxed only there) at that same point. HOLE is a
+  signalling NaN, so no `f64.add` result has its bits. `lin_solve`'s inner loop now has no `js_add`/`get` on the
+  fast path (`lastX` stays a `jsval` local: one box per iteration left).
+  Fixture `tests/fixtures/arrays/elem-reads.js` (number mode, i31 arrays, strings, holes behind a prototype
+  element, NaN/-0/Infinity, getters, valueOf order, a right operand that changes the array, a chain whose first
+  `+` converts before the next operand, typed arrays, plain objects, strings, null receiver, comparisons):
+  `scripts/diff.sh tests/fixtures/arrays` 8/8 pass; navier-stokes `wasm-tools validate` ok; local
+  `scripts/bench.sh -r 3 octane-navier-stokes`: SAME output, 2.33 s (node 0.21). Next: a-03 benchmarks + test262 (ask).
+- 2026-10-11: a-03 run started (user OK): tree rsynced, `~/js2wasi3-t108` built; `~/t108-all.sh` = `~/t108-bench.sh` (T107 vs T108, 18 benchmarks, 5 interleaved rounds → `~/t108-bench.log`) then full test262 `--update` → `~/t262-t108.log` (rsync `tests/test262/baseline.json` back after).
+- 2026-10-11: first a-03 run showed mandelbrot +3.5%, spectralnorm +2.1%: `num_sum` also took a lone element read
+  (`a[i] * m`), which replaced T107's `get_num` peephole. Fixed: only a `js_add` tree is rewritten (now only
+  crypto (2 sites) and navier-stokes (8) of the 18 benchmarks change). Run stopped, `scripts/diff.sh
+  tests/fixtures/arrays` 8/8 again, rsynced, rebuilt, `~/t108-all.sh` restarted.
+- 2026-10-11: a-03 benchmarks (`~/t108-bench.log`, T107 vs T108, median of 5 interleaved, ms): **navier-stokes
+  2,859 → 1,513 (−47.1%)**, crypto 5,317 → 5,325 (+0.2%); only these two `.wasm` differ from T107 (the other 16
+  are byte-identical: mandelbrot +1.2%, spectralnorm +1.8%, regexredux +1.9%, revcomp +1.2% are noise; the rest
+  −0.7…+0.9%). All outputs same. Full test262 running.
+- 2026-10-11: full test262 on a-03 (`~/t262-t108.log`, 1,282 s): no changes since the baseline (28,105 pass). Docs updated (design.md, performance.md, HISTORY.md, tasks/README.md: F401 ticked, F402–F404 added). Done.
