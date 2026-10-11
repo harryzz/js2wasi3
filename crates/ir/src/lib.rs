@@ -1168,6 +1168,13 @@ pub enum Intrinsic {
     F64Lo,
     /// The `f64` with these high and low 32 bits.
     F64FromWords,
+    /// `(o, k: jsval) -> f64` (T107): element `k` of an array in number mode, unboxed; for anything else
+    /// (another value, a hole, a generic array) the NaN with the hole's bits ([`Intrinsic::F64IsHole`]).
+    /// Never runs JS code.
+    ElemNum,
+    /// `(x: f64) -> bool` (T107): `x` has the bits [`Intrinsic::ElemNum`] returns for "not an element in
+    /// number mode" (no JS number has them).
+    F64IsHole,
     /// 32 random bits from the host (`wasi:random/insecure`, commands only) (`i32`).
     RandomSeed,
     /// Call [`Module::imports`]`[i]` (T20 slice 5) with the arguments in an array (`jsval`):
@@ -1501,6 +1508,8 @@ impl Intrinsic {
             Intrinsic::DelegateStep => (&[JsVal, I32, JsVal], Some(JsVal)),
             Intrinsic::F64Hi | Intrinsic::F64Lo => (&[F64], Some(I32)),
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
+            Intrinsic::ElemNum => (&[JsVal, JsVal], Some(F64)),
+            Intrinsic::F64IsHole => (&[F64], Some(Bool)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
             Intrinsic::DateNow => (&[], Some(F64)),
             Intrinsic::Environment(_) => (&[], Some(JsVal)),
@@ -1717,6 +1726,8 @@ impl Intrinsic {
             Intrinsic::F64Hi => "f64_hi",
             Intrinsic::F64Lo => "f64_lo",
             Intrinsic::F64FromWords => "f64_from_words",
+            Intrinsic::ElemNum => "elem_num",
+            Intrinsic::F64IsHole => "f64_is_hole",
             Intrinsic::RandomSeed => "random_seed",
             Intrinsic::DateNow => "date_now",
             Intrinsic::Environment(_) => "environment",

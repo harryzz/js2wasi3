@@ -4006,6 +4006,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.push(Stmt::Expr(v.e));
                 Ok(())
             }
+            Expression::AssignmentExpression(a)
+                if a.operator == AssignmentOperator::Addition
+                    && matches!(&a.left, AssignmentTarget::ComputedMemberExpression(m)
+                        if !matches!(m.object, Expression::Super(_))) =>
+            {
+                self.elem_add_stmt(cx, a, out)
+            }
             Expression::AssignmentExpression(a) if a.left.as_member_expression().is_some() => {
                 let v = self.member_assign(cx, a)?;
                 out.push(Stmt::Expr(v.e));
@@ -7015,6 +7022,20 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             )
         });
         let value = self.combine(cx, a.operator, old, rhs, a.span)?;
+        // T107: a number stays an `f64` (the store boxes it, unless the backend stores it unboxed).
+        if value.ty == Type::F64 {
+            let tf = cx.func.add_local("value", Type::F64);
+            body.push(Stmt::Expr(member_set(
+                &private,
+                Expr::Local(to),
+                key_of,
+                jsval_of(Val::num(Expr::Tee(tf, Box::new(value.e)))),
+            )));
+            return Ok(Val::num(Expr::Seq {
+                body,
+                value: Box::new(Expr::Local(tf)),
+            }));
+        }
         let kind = match value.kind {
             Kind::Str | Kind::Bool => value.kind,
             _ => Kind::Any,
@@ -7032,6 +7053,92 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             },
             kind,
         ))
+    }
+
+    /// T107: the statement `o[k] += x`. With a number `x`: the element is read first, unboxed from an array
+    /// in number mode (`ElemNum`; anything else: `get`), then `x`, then the sum is stored (`set(o, k,
+    /// f64->jsval(…))`, which the backend stores unboxed); else as [`Self::member_assign`].
+    fn elem_add_stmt(
+        &mut self,
+        cx: &mut FnCx,
+        a: &'a AssignmentExpression<'a>,
+        out: &mut Vec<Stmt>,
+    ) -> R<()> {
+        let m = a
+            .left
+            .as_member_expression()
+            .expect("checked by the caller");
+        let (obj, key, private) = self.member_ref(cx, m)?;
+        let to = cx.func.add_local("obj", Type::JsVal);
+        let mut body = vec![Stmt::Set(to, obj)];
+        let key_of = self.key_temp(cx, key, &mut body);
+        let rhs = self.expr(cx, &a.right)?;
+        if rhs.ty != Type::F64 || !matches!(private, Member::Plain) {
+            let old = Val::js(
+                member_get(&private, Expr::Local(to), key_of.clone()),
+                Kind::Any,
+            );
+            let value = self.combine(cx, a.operator, Some(old), rhs, a.span)?;
+            body.push(Stmt::Expr(member_set(
+                &private,
+                Expr::Local(to),
+                key_of,
+                jsval_of(value),
+            )));
+            out.extend(body);
+            return Ok(());
+        }
+        let tf = cx.func.add_local("old", Type::F64);
+        let old = cx.func.add_local("old", Type::JsVal);
+        let r = cx.func.add_local("rhs", Type::F64);
+        let hole = || {
+            Expr::intrinsic(Intrinsic::F64IsHole, vec![Expr::Local(tf)])
+        };
+        body.push(Stmt::Set(
+            tf,
+            Expr::intrinsic(Intrinsic::ElemNum, vec![Expr::Local(to), key_of.clone()]),
+        ));
+        body.push(Stmt::If {
+            cond: hole(),
+            then: vec![Stmt::Set(
+                old,
+                Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(to), key_of.clone()]),
+            )],
+            els: vec![],
+        });
+        body.push(Stmt::Set(r, rhs.e));
+        body.push(Stmt::If {
+            cond: hole(),
+            then: vec![Stmt::Expr(Expr::intrinsic(
+                Intrinsic::SetProp,
+                vec![
+                    Expr::Local(to),
+                    key_of.clone(),
+                    Expr::intrinsic(
+                        Intrinsic::JsAdd,
+                        vec![
+                            Expr::Local(old),
+                            jsval_of(Val::num(Expr::Local(r))),
+                        ],
+                    ),
+                ],
+            ))],
+            els: vec![Stmt::Expr(Expr::intrinsic(
+                Intrinsic::SetProp,
+                vec![
+                    Expr::Local(to),
+                    key_of,
+                    jsval_of(Val::num(Expr::Binary {
+                        op: BinOp::Add,
+                        ty: Type::F64,
+                        lhs: Box::new(Expr::Local(tf)),
+                        rhs: Box::new(Expr::Local(r)),
+                    })),
+                ],
+            ))],
+        });
+        out.extend(body);
+        Ok(())
     }
 
     /// `o.k++` / `--o[k]`: the old or new value, as a number.

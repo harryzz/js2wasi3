@@ -771,6 +771,7 @@ const D_GET: i32 = 16;
 const D_SET: i32 = 32;
 
 fn define_property(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let to_key = oh(cx, object::Helper::ToKey);
     let find = oh(cx, object::Helper::FindOwn);
     let lookup = oh(cx, object::Helper::Lookup);
@@ -942,7 +943,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     let slots = |s: &mut InstructionSink, elem: bool| {
         if elem {
             arr(s);
-            s.struct_get(T_ARRAY, array::F_ELEMS);
+            s.call(elems_h);
         } else {
             s.local_get(O).ref_as_non_null().struct_get(T_OBJECT, F_VALS);
         }

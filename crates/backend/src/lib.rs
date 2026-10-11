@@ -1732,6 +1732,20 @@ impl Emitter<'_> {
                 };
             }
             Expr::Convert {
+                from: Type::JsVal,
+                to: Type::F64,
+                arg,
+            } if matches!(&**arg, Expr::Intrinsic { op: Intrinsic::GetProp, args } if !matches!(args[1], Expr::Str(_))) =>
+            {
+                // T107: `+o[k]` (an element read as a number): unboxed from an array in number mode.
+                let Expr::Intrinsic { args, .. } = &**arg else {
+                    unreachable!()
+                };
+                self.expr(s, frames, &args[0])?;
+                self.expr(s, frames, &args[1])?;
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::GetNum))));
+            }
+            Expr::Convert {
                 from: Type::F64,
                 to: Type::JsVal,
                 arg,
@@ -1905,6 +1919,27 @@ impl Emitter<'_> {
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
                     return Ok(false);
                 }
+                if let (
+                    Intrinsic::SetProp,
+                    [
+                        obj,
+                        key,
+                        Expr::Convert {
+                            from: Type::F64,
+                            to: Type::JsVal,
+                            arg: x,
+                        },
+                    ],
+                ) = (op, args.as_slice())
+                    && !matches!(key, Expr::Str(_))
+                {
+                    // T107: `o[k] = x` with a number: unboxed into an array in number mode.
+                    self.expr(s, frames, obj)?;
+                    self.expr(s, frames, key)?;
+                    self.expr(s, frames, x)?;
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNum))));
+                    return Ok(false);
+                }
                 if let Intrinsic::F64FromWords = op {
                     // (hi << 32) | (lo as u32)
                     self.expr(s, frames, &args[0])?;
@@ -2067,6 +2102,10 @@ impl Emitter<'_> {
                         s.ref_is_null();
                         return Ok(true);
                     }
+                    Intrinsic::F64IsHole => {
+                        s.i64_reinterpret_f64().i64_const(array::HOLE).i64_eq();
+                        return Ok(true);
+                    }
                     Intrinsic::F64Hi => {
                         s.i64_reinterpret_f64()
                             .i64_const(32)
@@ -2173,6 +2212,7 @@ impl Emitter<'_> {
                     Intrinsic::StrBufAppend => H::StrBufAppend,
                     Intrinsic::StrBufLen => H::StrBufLen,
                     Intrinsic::ReAltsFind => H::ReAltsFind,
+                    Intrinsic::ElemNum => H::Obj(object::Helper::ElemNum),
                     Intrinsic::JsonQuoteInto => H::JsonQuoteInto,
                     Intrinsic::JsonScan => H::JsonScan,
                     Intrinsic::StringLength
@@ -2195,6 +2235,7 @@ impl Emitter<'_> {
                     | Intrinsic::F64Hi
                     | Intrinsic::F64Lo
                     | Intrinsic::F64FromWords
+                    | Intrinsic::F64IsHole
                     | Intrinsic::RandomSeed
                     | Intrinsic::DateNow
                     | Intrinsic::MonotonicNow
@@ -2442,7 +2483,24 @@ impl Emitter<'_> {
                 }
                 s.array_new_fixed(runtime::T_VALS, elems.len() as u32);
                 s.i32_const(elems.len() as i32);
-                s.call(self.helper_index(Helper::Js(runtime::Helper::Arr(array::Helper::New))));
+                // T107: the number-mode state from the elements' IR where it's known.
+                let i31_const = |x: &Expr| match x {
+                    Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => {
+                        matches!(**arg, Expr::Const(Const::F64(v)) if runtime::small_int(v).is_some())
+                    }
+                    _ => false,
+                };
+                let number = |x: &Expr| {
+                    matches!(x, Expr::Convert { from: Type::F64, to: Type::JsVal, .. })
+                };
+                let h = if elems.iter().all(|x| x.as_ref().is_some_and(i31_const)) {
+                    array::Helper::NewHinted
+                } else if elems.iter().all(|x| x.as_ref().is_some_and(number)) {
+                    array::Helper::New
+                } else {
+                    array::Helper::NewGeneric
+                };
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Arr(h))));
             }
             Expr::CallRef {
                 callee,

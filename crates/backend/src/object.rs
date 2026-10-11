@@ -327,6 +327,12 @@ pub enum Helper {
     MarkChain,
     /// `(v: jsval) -> jsval`: `v.length` (T74): an array's or a string's directly, else [`Helper::Get`].
     GetLength,
+    /// `(v, k: jsval) -> f64` (T107): `ToNumber(v[k])`; an element of an array in number mode without a box.
+    GetNum,
+    /// `(v, k: jsval, x: f64)` (T107): `v[k] = x`; into an array in number mode without a box.
+    SetNum,
+    /// `(v, k: jsval) -> f64` (T107): see `Intrinsic::ElemNum`.
+    ElemNum,
     /// `(o, k, v: jsval, attrs: i32)`: set an own property (attributes only for a new one).
     Define,
     /// `(o, k, v, attrs, hash)`: a new own property `k` known to be absent, neither an array index nor
@@ -476,6 +482,9 @@ impl Helper {
             Helper::SetIcStore => "set_ic_store",
             Helper::MarkChain => "mark_chain",
             Helper::GetLength => "get_length",
+            Helper::GetNum => "get_num",
+            Helper::SetNum => "set_num",
+            Helper::ElemNum => "elem_num",
             Helper::Define => "define",
             Helper::AppendNamed => "append_named",
             Helper::DefineNamed => "define_named",
@@ -594,6 +603,9 @@ impl Helper {
             Helper::SetIcStore => (vec![I32, rt(true, T_OBJECT), I32], vec![]),
             Helper::MarkChain => (vec![rt(true, T_OBJECT)], vec![]),
             Helper::GetLength => (vec![v], vec![v]),
+            Helper::GetNum => (vec![v, v], vec![ValType::F64]),
+            Helper::SetNum => (vec![v, v, ValType::F64], vec![]),
+            Helper::ElemNum => (vec![v, v], vec![ValType::F64]),
             Helper::Define => (vec![o, s, v, I32], vec![]),
             Helper::AppendNamed => (vec![o, s, v, I32, I32], vec![]),
             Helper::DefineNamed => (vec![v, s, v, I32], vec![]),
@@ -660,6 +672,9 @@ impl Helper {
             Helper::SetIcStore => set_ic_store(),
             Helper::MarkChain => mark_chain(),
             Helper::GetLength => get_length(cx),
+            Helper::GetNum => get_num(cx),
+            Helper::SetNum => set_num(cx),
+            Helper::ElemNum => elem_num(),
             Helper::OwnGet => own_get(cx),
             Helper::Lookup => lookup(cx, false),
             Helper::Holder => lookup(cx, true),
@@ -798,7 +813,7 @@ impl Helper {
             }
             Helper::GetOwnSymbols => {
                 let own = h(cx, Helper::OwnSymbols);
-                let new_array = rh(cx, runtime::Helper::Arr(array::Helper::New));
+                let new_array = rh(cx, runtime::Helper::Arr(array::Helper::NewGeneric));
                 let is_nullish = rh(cx, runtime::Helper::IsNullish);
                 let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
                 let msg = cx.str("Cannot convert undefined or null to object");
@@ -1346,6 +1361,196 @@ fn get_named(cx: &mut dyn Cx) -> Function {
         s.local_get(V);
         s.call(value);
     }
+    s.end();
+    f
+}
+
+/// `get_num(v, k)` (see [`Helper::GetNum`]): an i31 index below the length of an array in number mode, not
+/// a hole, is read as is; everything else is `ToNumber(get(v, k))`.
+fn get_num(cx: &mut dyn Cx) -> Function {
+    let get = h(cx, Helper::Get);
+    let to_number = rh(cx, runtime::Helper::ToNumber);
+    const V: u32 = 0;
+    const K: u32 = 1;
+    const A: u32 = 2;
+    const N: u32 = 3;
+    const J: u32 = 4;
+    const X: u32 = 5;
+    const R: u32 = 6;
+    const EL: u32 = 7;
+    let mut f = Function::new([
+        (1, rt(true, T_ARRAY)),
+        (1, rt(true, runtime::T_NUMS)),
+        (1, ValType::I32),
+        (1, ValType::F64),
+        (1, jsval()),
+        (1, rt(true, T_VALS)),
+    ]);
+    let mut s = f.instructions();
+    let to_f64 = |s: &mut InstructionSink| {
+        // `ToNumber(R)`, an i31 or a `$number` inline.
+        s.local_get(R).ref_test_non_null(wasm_encoder::HeapType::I31);
+        s.if_(BlockType::Result(ValType::F64));
+        s.local_get(R).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s().f64_convert_i32_s();
+        s.else_();
+        s.local_get(R).ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER));
+        s.if_(BlockType::Result(ValType::F64));
+        s.local_get(R)
+            .ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER))
+            .struct_get(runtime::T_NUMBER, 0);
+        s.else_();
+        s.local_get(R).call(to_number);
+        s.end();
+        s.end();
+    };
+    s.block(BlockType::Empty);
+    s.local_get(V).ref_test_non_null(array::array()).i32_eqz().br_if(0);
+    s.local_get(K).ref_test_non_null(wasm_encoder::HeapType::I31).i32_eqz().br_if(0);
+    s.local_get(V).ref_cast_non_null(array::array()).local_set(A);
+    s.local_get(K).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s().local_set(J);
+    // Generic (the store's size first, as `get`): a number element inline; an accessor: the general path.
+    s.local_get(J).local_get(A).struct_get(T_ARRAY, array::F_ELEMS).local_tee(EL).array_len().i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(EL).local_get(J).array_get(T_VALS).local_tee(R);
+    s.ref_is_null().br_if(1);
+    s.local_get(R).ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR)).br_if(1);
+    to_f64(&mut s);
+    s.return_();
+    s.end();
+    // Number mode: as is (a hole: the general path).
+    s.local_get(J).local_get(A).struct_get(T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
+    s.local_get(A).struct_get(T_ARRAY, array::F_NUMS).local_set(N);
+    array::is_num_mode(&mut s, N);
+    s.i32_eqz().br_if(0);
+    s.local_get(N).local_get(J).array_get(runtime::T_NUMS).local_tee(X);
+    s.i64_reinterpret_f64().i64_const(array::HOLE).i64_eq().br_if(0);
+    s.local_get(X).return_();
+    s.end();
+    s.local_get(V).local_get(K).call(get).local_set(R);
+    to_f64(&mut s);
+    s.end();
+    f
+}
+
+/// `set_num(v, k, x)` (see [`Helper::SetNum`]): an i31 index into an array in number mode goes to its
+/// number-mode store ([`array::Helper::SetIndex`], which keeps it unboxed); everything else is `set(v, k, x)`.
+fn set_num(cx: &mut dyn Cx) -> Function {
+    let set = h(cx, Helper::Set);
+    let nums_resize = cx.helper(runtime::Helper::Arr(array::Helper::NumsResize));
+    const V: u32 = 0;
+    const K: u32 = 1;
+    const X: u32 = 2;
+    const A: u32 = 3;
+    const N: u32 = 4;
+    const J: u32 = 5;
+    const T: u32 = 6;
+    const B: u32 = 7;
+    const E: u32 = 8;
+    let mut f = Function::new([
+        (1, rt(true, T_ARRAY)),
+        (1, rt(true, runtime::T_NUMS)),
+        (1, ValType::I32),
+        (1, ValType::I32),
+        (1, jsval()),
+        (1, rt(true, T_VALS)),
+    ]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty);
+    s.local_get(V).ref_test_non_null(array::array()).i32_eqz().br_if(0);
+    s.local_get(K).ref_test_non_null(wasm_encoder::HeapType::I31).i32_eqz().br_if(0);
+    s.local_get(V).ref_cast_non_null(array::array()).local_set(A);
+    s.local_get(K).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s().local_tee(J);
+    s.i32_const(0).i32_lt_s().br_if(0);
+    s.local_get(A).struct_get(T_ARRAY, array::F_NUMS).local_set(N);
+    array::is_num_mode(&mut s, N);
+    s.if_(BlockType::Empty);
+    {
+        // Number mode, no `preventExtensions`/`seal`/`freeze`/read-only `length`.
+        s.local_get(A)
+            .struct_get(T_ARRAY, F_CLASS)
+            .i32_const(NO_EXTEND | SEALED | FROZEN | LENGTH_READONLY)
+            .i32_and()
+            .br_if(1);
+        // A NaN canonicalized: no value has HOLE's bits.
+        s.local_get(X).local_get(X).f64_ne();
+        s.if_(BlockType::Empty);
+        s.f64_const(f64::NAN.into()).local_set(X);
+        s.end();
+        s.local_get(J).local_get(A).struct_get(T_ARRAY, array::F_LENGTH).i32_lt_u();
+        s.if_(BlockType::Empty);
+        // A hole while the prototype chain may have index keys: the general path (T34).
+        s.local_get(N)
+            .local_get(J)
+            .array_get(runtime::T_NUMS)
+            .i64_reinterpret_f64()
+            .i64_const(array::HOLE)
+            .i64_eq()
+            .global_get(runtime::G_INDEX_PROTO)
+            .i32_eqz()
+            .i32_eqz()
+            .i32_and()
+            .br_if(2);
+        s.local_get(N).local_get(J).local_get(X).array_set(runtime::T_NUMS);
+        s.return_();
+        s.end();
+        s.global_get(runtime::G_INDEX_PROTO).br_if(1);
+        s.local_get(J).i32_const(array::MAX_DENSE).i32_ge_u().br_if(1);
+        s.local_get(A).ref_as_non_null().local_get(J).i32_const(1).i32_add().call(nums_resize);
+        s.local_get(A)
+            .struct_get(T_ARRAY, array::F_NUMS)
+            .local_get(J)
+            .local_get(X)
+            .array_set(runtime::T_NUMS);
+        s.return_();
+    }
+    s.end();
+    // Generic (or hinted, for an i31): overwriting an element that's there, no attributes, no `seal`/`freeze`.
+    s.local_get(J).local_get(A).struct_get(T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
+    s.local_get(A).struct_get(T_ARRAY, array::F_EATTRS).ref_is_null().i32_eqz().br_if(0);
+    s.local_get(A)
+        .struct_get(T_ARRAY, F_CLASS)
+        .i32_const(SEALED | FROZEN)
+        .i32_and()
+        .br_if(0);
+    s.local_get(A).struct_get(T_ARRAY, array::F_ELEMS).local_tee(E);
+    s.local_get(J).array_get(T_VALS).ref_is_null().br_if(0);
+    runtime::box_inline(&mut s, X, T);
+    s.local_tee(B);
+    s.ref_test_non_null(wasm_encoder::HeapType::I31).i32_eqz();
+    s.local_get(A).struct_get(T_ARRAY, array::F_HINT);
+    s.i32_and().br_if(0);
+    s.local_get(E).local_get(J).local_get(B).array_set(T_VALS);
+    s.return_();
+    s.end();
+    s.local_get(V).local_get(K);
+    runtime::box_inline(&mut s, X, J);
+    s.call(set);
+    s.end();
+    f
+}
+
+/// `elem_num(v, k)` (see [`Helper::ElemNum`]).
+fn elem_num() -> Function {
+    const V: u32 = 0;
+    const K: u32 = 1;
+    const A: u32 = 2;
+    const N: u32 = 3;
+    const J: u32 = 4;
+    let mut f = Function::new([(1, rt(true, T_ARRAY)), (1, rt(true, runtime::T_NUMS)), (1, ValType::I32)]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty);
+    s.local_get(V).ref_test_non_null(array::array()).i32_eqz().br_if(0);
+    s.local_get(K).ref_test_non_null(wasm_encoder::HeapType::I31).i32_eqz().br_if(0);
+    s.local_get(V).ref_cast_non_null(array::array()).local_tee(A);
+    s.struct_get(T_ARRAY, array::F_NUMS).local_set(N);
+    array::is_num_mode(&mut s, N);
+    s.i32_eqz().br_if(0);
+    s.local_get(K).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s().local_tee(J);
+    s.local_get(A).struct_get(T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
+    // A hole has HOLE's bits already.
+    s.local_get(N).local_get(J).array_get(runtime::T_NUMS).return_();
+    s.end();
+    s.i64_const(array::HOLE).f64_reinterpret_i64();
     s.end();
     f
 }
@@ -2727,15 +2932,22 @@ fn get(cx: &mut dyn Cx) -> Function {
     const K: u32 = 2;
     const R: u32 = 3;
     const I: u32 = 4;
+    const NUMS: u32 = 6;
+    const XF: u32 = 7;
     let mut f = Function::new([
         (1, rt(true, T_STRING)),
         (1, jsval()),
         (1, ValType::I64),
         (1, ValType::I32),
+        (1, rt(true, runtime::T_NUMS)),
+        (1, ValType::F64),
+        (1, rt(true, T_VALS)),
     ]);
     let mut s = f.instructions();
     const J: u32 = 5;
-    // Fast path: an array element at a small integer index.
+    const EL: u32 = 8;
+    // Fast path: an array element at a small integer index. Below the store's size first: a generic
+    // array's elements (null past `length`); an array in number mode has an empty store (T107).
     s.local_get(V).ref_test_non_null(array::array());
     s.local_get(KEY)
         .ref_test_non_null(wasm_encoder::HeapType::I31);
@@ -2747,15 +2959,12 @@ fn get(cx: &mut dyn Cx) -> Function {
         .local_tee(J);
     s.local_get(V)
         .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_LENGTH);
+        .struct_get(T_ARRAY, array::F_ELEMS)
+        .local_tee(EL)
+        .array_len();
     s.i32_lt_u();
     s.if_(BlockType::Empty);
-    s.local_get(V)
-        .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_ELEMS)
-        .local_get(J)
-        .array_get(T_VALS)
-        .local_tee(R);
+    s.local_get(EL).local_get(J).array_get(T_VALS).local_tee(R);
     s.ref_is_null().i32_eqz();
     s.if_(BlockType::Empty);
     // An accessor element (T32): its getter.
@@ -2765,6 +2974,27 @@ fn get(cx: &mut dyn Cx) -> Function {
     s.local_get(R).local_get(V).call(value).return_();
     s.end();
     s.local_get(R).return_();
+    s.end();
+    s.end();
+    // T107: number mode: the element boxed (a hole: the general path below).
+    s.local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_NUMS)
+        .local_set(NUMS);
+    array::is_num_mode(&mut s, NUMS);
+    s.if_(BlockType::Empty);
+    s.local_get(J)
+        .local_get(V)
+        .ref_cast_non_null(array::array())
+        .struct_get(T_ARRAY, array::F_LENGTH)
+        .i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(NUMS).local_get(J).array_get(runtime::T_NUMS).local_tee(XF);
+    s.i64_reinterpret_f64().i64_const(array::HOLE).i64_ne();
+    s.if_(BlockType::Empty);
+    runtime::box_inline(&mut s, XF, J);
+    s.return_();
+    s.end();
     s.end();
     s.end();
     s.end();
@@ -3072,6 +3302,7 @@ fn set(cx: &mut dyn Cx) -> Function {
 }
 
 fn delete(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let to_key = h(cx, Helper::ToKey);
     let remove = h(cx, Helper::Remove);
     let find = h(cx, Helper::FindOwn);
@@ -3135,7 +3366,7 @@ fn delete(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(V)
         .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_ELEMS);
+        .call(elems_h);
     s.local_get(E);
     s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
     s.array_set(T_VALS);
@@ -3186,6 +3417,7 @@ fn delete(cx: &mut dyn Cx) -> Function {
 }
 
 fn has(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let to_key = h(cx, Helper::ToKey);
     let lookup = h(cx, Helper::Lookup);
     let to_string = rh(cx, runtime::Helper::ToString);
@@ -3247,7 +3479,7 @@ fn has(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(V)
         .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_ELEMS)
+        .call(elems_h)
         .local_get(J)
         .array_get(T_VALS)
         .ref_is_null()
@@ -3350,6 +3582,7 @@ fn set_proto() -> Function {
 }
 
 fn copy_props(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let own_keys = h(cx, Helper::OwnKeys);
     let own = h(cx, Helper::OwnGet);
     let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
@@ -3398,7 +3631,7 @@ fn copy_props(cx: &mut dyn Cx) -> Function {
             as_obj(s, T);
             s.local_get(SYMS)
                 .ref_cast_non_null(array::array())
-                .struct_get(T_ARRAY, array::F_ELEMS)
+                .call(elems_h)
                 .local_get(I)
                 .array_get(T_VALS)
                 .ref_cast_non_null(string())
@@ -4284,7 +4517,7 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
         let not_iterable = cx.helper(runtime::Helper::Prom(crate::promise::Helper::NotIterable));
         let open = rh(cx, runtime::Helper::Iter(crate::iter::Helper::Open));
         let step = rh(cx, runtime::Helper::Iter(crate::iter::Helper::Step));
-        let new_array = rh(cx, runtime::Helper::Arr(crate::array::Helper::New));
+        let new_array = rh(cx, runtime::Helper::Arr(crate::array::Helper::NewGeneric));
         let push = rh(cx, runtime::Helper::Arr(crate::array::Helper::Push));
         let errors = cx.str("errors");
         let (it, list) = (o + 1, o + 2);
@@ -4668,6 +4901,7 @@ fn throw(cx: &mut dyn Cx, k: ErrorKind) -> Function {
 
 /// `{...rest}`: copy the own enumerable properties, then delete the excluded keys.
 fn object_rest(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let new_object = h(cx, Helper::NewObject);
     let copy = h(cx, Helper::CopyProps);
     let remove = h(cx, Helper::Remove);
@@ -4689,7 +4923,7 @@ fn object_rest(cx: &mut dyn Cx) -> Function {
     as_obj(&mut s, O);
     s.local_get(EX)
         .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_ELEMS)
+        .call(elems_h)
         .local_get(I)
         .array_get(T_VALS)
         .call(to_key)
@@ -4725,7 +4959,7 @@ fn keys(cx: &mut dyn Cx, which: u8) -> Function {
     let own_keys = h(cx, if which == 3 { Helper::OwnNames } else { Helper::OwnKeys });
     let for_in_keys = h(cx, Helper::ForInKeys);
     let get = h(cx, Helper::Get);
-    let new = cx.helper(runtime::Helper::Arr(array::Helper::New));
+    let new = cx.helper(runtime::Helper::Arr(array::Helper::NewGeneric));
     let convert = cx.str("Cannot convert undefined or null to object");
     const V: u32 = 0;
     const KS: u32 = 1;
@@ -4822,6 +5056,7 @@ fn symbol_keys() -> Function {
 
 /// `$make_arguments(args)` (T25).
 fn make_arguments(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let alloc = h(cx, Helper::Alloc);
     let proto = h(cx, Helper::Proto(Builtin::Object));
     let array_proto = h(cx, Helper::Proto(Builtin::Array));
@@ -4850,7 +5085,7 @@ fn make_arguments(cx: &mut dyn Cx) -> Function {
     s.ref_cast_non_null(string());
     s.local_get(A)
         .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_ELEMS)
+        .call(elems_h)
         .local_get(I)
         .array_get(T_VALS);
     s.i32_const(0).call(define);
@@ -4873,7 +5108,7 @@ fn make_arguments(cx: &mut dyn Cx) -> Function {
 
 /// `$own_symbols(o, all)` (T25): the own symbol keys in insertion order, as an array.
 fn own_symbols(cx: &mut dyn Cx) -> Function {
-    let new_array = rh(cx, runtime::Helper::Arr(array::Helper::New));
+    let new_array = rh(cx, runtime::Helper::Arr(array::Helper::NewGeneric));
     const O: u32 = 0;
     const ALL: u32 = 1;
     const E: u32 = 2;

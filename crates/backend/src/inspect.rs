@@ -17,7 +17,7 @@
 use crate::runtime::JsTest;
 use wasm_encoder::{BlockType, Function, InstructionSink, ValType};
 
-use crate::array::{self, F_ELEMS, F_LENGTH};
+use crate::array::{self, F_LENGTH};
 use crate::runtime::{
     self, Cx, T_ARRAY, T_KEYS, T_NUMBER, T_STRING, T_VALS, jsval, rt, string, string_ref,
 };
@@ -568,6 +568,7 @@ fn format(cx: &mut dyn Cx) -> Function {
 }
 
 fn format_array(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let ref_open = ih(cx, Helper::RefOpen);
     let props = ih(cx, Helper::Props);
     let (more, more_item, more_items) =
@@ -629,7 +630,7 @@ fn format_array(cx: &mut dyn Cx) -> Function {
     s.i32_const(1).local_set(NUMBERS);
     let elem = |s: &mut InstructionSink, idx: u32| {
         s.local_get(A)
-            .struct_get(T_ARRAY, F_ELEMS)
+            .call(elems_h)
             .local_get(idx)
             .array_get(T_VALS);
     };
@@ -940,6 +941,7 @@ fn format_mapset(cx: &mut dyn Cx) -> Function {
 }
 
 fn format_object(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let ref_open = ih(cx, Helper::RefOpen);
     let props = ih(cx, Helper::Props);
     let format = ih(cx, Helper::Format);
@@ -1114,7 +1116,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
                 .global_get(runtime::G_SYM_STATE)
                 .call(own)
                 .ref_cast_non_null(crate::array::array())
-                .struct_get(runtime::T_ARRAY, crate::array::F_ELEMS)
+                .call(elems_h)
                 .i32_const(i)
                 .array_get(T_VALS)
                 .ref_cast_non_null(string());
@@ -1300,7 +1302,7 @@ fn format_object(cx: &mut dyn Cx) -> Function {
                     .i32_eqz();
                 s.local_get(O).i32_const(0).call(own_symbols);
                 s.ref_cast_non_null(array::array())
-                    .struct_get(T_ARRAY, F_ELEMS)
+                    .call(elems_h)
                     .local_set(Q_SYMS);
                 s.i32_const(0).local_set(Q_STATE);
                 s.block(BlockType::Empty).loop_(BlockType::Empty);
@@ -2251,6 +2253,7 @@ fn accessor_label(s: &mut InstructionSink, [getter, setter, both]: [u32; 3], r: 
 
 /// `$inspect_props(o, depth, indent, skip_indices)` (T25), see [`Helper::Props`].
 fn format_props(cx: &mut dyn Cx) -> Function {
+    let elems_h = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
     let format = ih(cx, Helper::Format);
     let key = ih(cx, Helper::Key);
     let concat = cx.helper(runtime::Helper::Concat);
@@ -2318,7 +2321,7 @@ fn format_props(cx: &mut dyn Cx) -> Function {
     s.local_get(O).call(own_keys).local_set(KS);
     s.local_get(O).i32_const(0).call(own_symbols);
     s.ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, F_ELEMS)
+        .call(elems_h)
         .local_set(SYMS);
     s.local_get(KS).ref_as_non_null().array_len();
     s.local_get(SYMS).ref_as_non_null().array_len();

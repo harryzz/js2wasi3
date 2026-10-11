@@ -1,0 +1,57 @@
+// T107: arrays holding only numbers keep them unboxed; any other use must behave as before.
+const show = (label, v) => console.log(label, v);
+const a = []; for (let i = 0; i < 6; i++) a.push(i / 4);
+show('push', a);
+a[8] = 2 ** 40; show('gap', a); show('in', [3 in a, 7 in a, a.length]);
+a[1] = NaN; a[2] = -0; a[3] = Infinity; show('special', a);
+show('is -0', Object.is(a[2], -0)); show('isNaN', Number.isNaN(a[1]));
+const holeRead = []; holeRead.length = 3; holeRead[1] = 5;
+Array.prototype[0] = 'from proto'; show('proto behind hole', [holeRead[0], holeRead[1], holeRead[2]]);
+delete Array.prototype[0];
+const s = [1, 2, 3]; s.push(4.5); s[1] = 'two'; show('string in', s); s[0] = 7; show('after', s);
+const o = []; o.push(1.5); o.push({ k: 1 }); show('object in', o);
+const d = [1.5, 2.5, 3.5]; delete d[1]; show('delete', d, d.length);
+const g = []; g.push(1); Object.defineProperty(g, 0, { get() { return 'getter'; } }); show('getter', g[0]);
+const ro = []; ro.push(1, 2); Object.defineProperty(ro, 1, { writable: false });
+try { ro[1] = 9; } catch (e) { show('ro', e.constructor.name); } show('ro after', ro);
+const fz = []; fz.push(1.25); Object.freeze(fz);
+try { fz[0] = 2; } catch (e) { show('frozen', e.constructor.name); }
+try { fz.push(3); } catch (e) { show('frozen push', e.constructor.name); } show('frozen after', fz);
+const sl = []; sl.push(0.5); Object.seal(sl); sl[0] = 1.5; try { sl[1] = 2; } catch (e) { show('sealed', e.constructor.name); } show('sealed after', sl);
+const ne = []; ne.push(0.5); Object.preventExtensions(ne); ne[0] = 9.5; try { ne[1] = 1; } catch (e) { show('ne', e.constructor.name); } show('ne after', ne);
+const srt = []; for (const x of [3.5, 1.25, 2]) srt.push(x); srt.sort((x, y) => x - y); show('sort', srt);
+const sp = [1.5, 2.5, 3.5, 4.5]; show('splice', sp.splice(1, 2, 9.5), sp);
+show('slice/concat', [1.5, 2.5].slice(1), [0.5].concat([1.5], 2.5));
+show('spread', [...[1.5, 2.5]], Math.max(...[1.5, 9.25, 3]));
+const len = []; len.push(1.5, 2.5, 3.5); len.length = 1; len.length = 3; len[4] = 4.5; show('length', len);
+show('map/filter/reduce', [1.5, 2.5].map(x => x * 2), [1, 2, 3].filter(x => x > 1), [0.5, 0.25].reduce((x, y) => x + y));
+show('join/indexOf/includes', [1.5, 2].join('-'), [1.5, NaN].indexOf(NaN), [1.5, NaN].includes(NaN));
+const big = []; for (let i = 0; i < 1000; i++) big[i] = i * 0.001; let sum = 0; for (let i = 0; i < big.length; i++) sum += big[i];
+show('big', sum.toFixed(6), big.length);
+const keys = []; keys.push(1.5); keys.push(2.5); show('keys', Object.keys(keys), JSON.stringify(keys), String(keys));
+const mixed = []; mixed[0] = 1; mixed[1] = undefined; show('undefined in', mixed, 1 in mixed);
+const n = new Array(3); n[0] = 1.5; show('new Array(n)', n);
+const pop = []; pop.push(1.5, 2.5); show('pop/shift', pop.pop(), pop.shift(), pop, pop.length);
+const fe = []; fe.push(0.5, 1.5); fe.forEach((v, i) => console.log('forEach', i, v));
+const [x0, , x2 = 'dflt'] = [0.5, 1.5]; show('destructure', x0, x2);
+// The hint (integers so far): a double converts, an object drops it, a non-aware operation drops it.
+const h1 = []; for (let i = 0; i < 4; i++) h1.push(i); h1[1] = 0.5; h1.push(7); show('ints then double', h1);
+const h2 = [1, 2, 3]; h2[3] = 2.25; h2[5] = 1; show('literal ints then double', h2, 4 in h2);
+const h3 = [1, 2]; h3.push('s'); h3.push(1.5); show('ints then string', h3);
+const h4 = [3, 1, 2]; h4.sort(); h4.push(0.5); show('sorted then double', h4);
+const h5 = new Array(4); h5[0] = 0; h5[2] = 1.5; show('holes then double', h5, 1 in h5);
+const h6 = [1, 2]; Object.defineProperty(h6, 0, { enumerable: false }); h6[1] = 2.5; show('attrs then double', h6, Object.keys(h6));
+const h7 = []; h7[2] = 1.5; Array.prototype[0] = 'proto0'; show('hole reads proto', h7[0], h7[1]); delete Array.prototype[0];
+// `o[k] += x` (T107): the element is read before x; strings, getters, holes and other keys as before.
+const p1 = [0.5, 1.5]; for (let i = 0; i < 2; i++) p1[i] += i * 0.25; show('+= num', p1);
+const p2 = ['a', 'b']; p2[0] += 1.5; show('+= on string', p2);
+const p3 = [1.5, 2.5]; const bump = () => { p3[0] = 100; return 0.5; }; p3[0] += bump(); show('+= old before rhs', p3);
+const p4 = [1.5]; const conv = () => { p4.push('x'); return 1; }; p4[0] += conv(); show('+= rhs converts', p4);
+const p5 = []; p5.length = 2; p5[0] += 1; show('+= on hole', p5);
+const p6 = { k: 1.5 }; const key = 'k'; p6[key] += 2; show('+= object', p6);
+const p7 = [1.5, 2]; let reads = 0; Object.defineProperty(p7, 1, { get() { reads++; return 2; }, set(v) { show('set', v); } }); p7[1] += 0.5; show('+= getter', reads);
+const p8 = [0.5]; const ko = { toString() { show('key toString'); return '0'; } }; p8[ko] += 1; show('+= key object', p8);
+const p9 = new Float64Array(2); p9[1] += 2.5; show('+= typed', p9);
+const ps = [1.5, 2.5]; Object.seal(ps); try { ps.pop(); } catch (e) { show('sealed pop', e.constructor.name); } show('sealed after', ps);
+const pn = [0.5, 1.5, 2.5]; show('pop number', pn.pop(), pn.pop(), pn, pn.length); pn.push(9.25); show('push after pop', pn);
+const ph = []; ph.length = 2; ph[0] = 0.5; Array.prototype[1] = 'p1'; show('pop hole', ph.pop(), ph); delete Array.prototype[1];

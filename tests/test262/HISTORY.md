@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-11: T107 number arrays (seven full runs)
+
+- Compiler (`main` at 5a7e032 + T107, uncommitted at the runs): arrays holding only numbers keep them unboxed
+  (`$nums`), with the hint, the conversions and the number-aware fast paths. Runner: unchanged.
+- Seven full runs on `a-03` (`~/t262-t107.log`, `-t107b` … `-t107g`, one per build while the speed was tuned,
+  ~1,280–1,300 s each, -j 36): every one **no changes since the baseline**: 28,105 of 28,984 run pass (97.0%), 0
+  regressions; `baseline.json` unchanged.
+
 ## 2026-10-11: T106 `let x;` definite assignment (full run)
 
 - Compiler (`main` at 8635dd3 + T106, uncommitted at the run): T103's definite assignment covers uncaptured `let`s

@@ -17,7 +17,7 @@ use crate::runtime::JsTest;
 use js2wasi3_ir::ErrorKind;
 use wasm_encoder::{BlockType, Catch, Function, InstructionSink, ValType};
 
-use crate::array::{self, F_ELEMS, F_LENGTH};
+use crate::array::{self, F_LENGTH};
 use crate::runtime::{
     self, Cx, G_SYM_ITERATOR, G_UNDEFINED, T_ARRAY, T_ITER, T_STRING, T_VALS, TAG, jsval, rt,
     string,
@@ -421,6 +421,7 @@ fn open(cx: &mut dyn Cx) -> Function {
 }
 
 fn step(cx: &mut dyn Cx) -> Function {
+    let elem_at = cx.helper(runtime::Helper::Arr(crate::array::Helper::ElemAt));
     let get = oh(cx, object::Helper::Get);
     let prop_value = cx.helper(runtime::Helper::Prop(crate::props::Helper::Value));
     let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
@@ -437,7 +438,14 @@ fn step(cx: &mut dyn Cx) -> Function {
     const N: u32 = 2;
     const C: u32 = 3;
     const R: u32 = 4;
-    let mut f = Function::new([(3, ValType::I32), (1, jsval())]);
+    const AR: u32 = 5;
+    const NM: u32 = 6;
+    let mut f = Function::new([
+        (3, ValType::I32),
+        (1, jsval()),
+        (1, rt(true, T_ARRAY)),
+        (1, rt(true, runtime::T_NUMS)),
+    ]);
     let mut s = f.instructions();
     let finish = |s: &mut InstructionSink| {
         it(s, IT);
@@ -466,12 +474,17 @@ fn step(cx: &mut dyn Cx) -> Function {
         s.end();
         it(&mut s, IT);
         it(&mut s, IT);
-        s.struct_get(T_ITER, F_OBJ)
-            .ref_cast_non_null(array::array())
-            .struct_get(T_ARRAY, F_ELEMS)
-            .local_get(I)
-            .array_get(T_VALS)
-            .local_tee(R);
+        s.struct_get(T_ITER, F_OBJ).ref_cast_non_null(array::array()).local_tee(AR);
+        // T107: generic arrays read `elems` directly; number mode boxes (`elem_at`).
+        s.struct_get(T_ARRAY, array::F_NUMS).local_set(NM);
+        array::is_num_mode(&mut s, NM);
+        s.i32_eqz();
+        s.if_(BlockType::Result(jsval()));
+        s.local_get(AR).struct_get(T_ARRAY, array::F_ELEMS).local_get(I).array_get(T_VALS);
+        s.else_();
+        s.local_get(AR).ref_as_non_null().local_get(I).call(elem_at);
+        s.end();
+        s.local_tee(R);
         // A hole reads through the prototype chain (T33); an accessor element (T32) calls its
         // getter.
         s.ref_is_null();
@@ -532,7 +545,7 @@ fn step(cx: &mut dyn Cx) -> Function {
         it(&mut s, IT);
         if keys_entries {
             // keys: the index; values: obj[i]; entries: [i, obj[i]].
-            let new_array = cx.helper(runtime::Helper::Arr(array::Helper::New));
+            let new_array = cx.helper(runtime::Helper::Arr(array::Helper::NewGeneric));
             s.local_get(N).i32_const(ARRAY_KEYS).i32_eq();
             s.if_(BlockType::Result(jsval()));
             s.local_get(I).ref_i31();
@@ -728,7 +741,7 @@ fn close(cx: &mut dyn Cx) -> Function {
 
 fn rest(cx: &mut dyn Cx) -> Function {
     let step = ih(cx, Helper::Step);
-    let new = array::ah(cx, array::Helper::New);
+    let new = array::ah(cx, array::Helper::NewGeneric);
     let push = array::ah(cx, array::Helper::Push);
     const IT: u32 = 0;
     const A: u32 = 1;

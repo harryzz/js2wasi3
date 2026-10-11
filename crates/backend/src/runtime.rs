@@ -102,11 +102,13 @@ pub const T_WRAPPER: u32 = 27;
 /// string being appended to (`str_buf_append`): its first `len` units of `buf` (room to grow), and
 /// that string once made (`str_buf_get`; null after an append). Only ever in a variable's local.
 pub const T_STRBUF: u32 = 28;
+/// `$nums`: `(array (mut f64))`, the elements of an array in number mode (T107, see [`crate::array`]).
+pub const T_NUMS: u32 = 29;
 /// `$bigint`: a final `(array (mut i32))`, sign then magnitude limbs (T40, see [`crate::bigint`]).
 /// Only in a module that can make a BigInt ([`Cx::bigint`]): the last type of the group then.
-pub const T_BIGINT: u32 = 29;
+pub const T_BIGINT: u32 = 30;
 /// Number of runtime types before the function types (one more with `$bigint`).
-pub const TYPES: u32 = 29;
+pub const TYPES: u32 = 30;
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -645,6 +647,10 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
     array_fields.push(field(StorageType::Val(ValType::I32), true));
     // Element attributes (T32): null while every element has the default ones.
     array_fields.push(field(StorageType::Val(rt(true, T_BYTES)), true));
+    // T107: `nums`, the elements in number mode (null: generic, `elems` holds them).
+    array_fields.push(field(StorageType::Val(rt(true, T_NUMS)), true));
+    // T107: `hint` (1: generic, but only numbers so far; an i32, so the collector never traces it).
+    array_fields.push(field(StorageType::Val(ValType::I32), true));
     let mut function_fields = object_fields.clone();
     // `code` and `construct` (T89): slots in the code table (-1: none), not funcrefs.
     function_fields.push(field(StorageType::Val(ValType::I32), false));
@@ -868,6 +874,11 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
                 field(StorageType::Val(rt(true, T_STRING)), true),
             ]),
         })),
+        // $nums (T107).
+        sub(CompositeInnerType::Array(ArrayType(field(
+            StorageType::Val(ValType::F64),
+            true,
+        )))),
     ];
     if bigint {
         group.push(sub(CompositeInnerType::Array(ArrayType(field(
@@ -1461,27 +1472,33 @@ fn box_number() -> Function {
     const I: u32 = 1;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
+    box_inline(&mut s, X, I);
+    s.end();
+    f
+}
+
+/// [`Helper::Box`] inline (T107: hot element reads): the `f64` in local `x` as a `jsval`, local `i` (an i32)
+/// as scratch.
+pub fn box_inline(s: &mut InstructionSink, x: u32, i: u32) {
     // i = trunc_sat(x); keep as i31 if f64(i) == x, i in range and x is not -0.
-    s.local_get(X)
+    s.local_get(x)
         .i32_trunc_sat_f64_s()
-        .local_tee(I)
+        .local_tee(i)
         .f64_convert_i32_s()
-        .local_get(X)
+        .local_get(x)
         .f64_eq();
-    s.local_get(I).i32_const(I31_MIN).i32_ge_s().i32_and();
-    s.local_get(I).i32_const(I31_END).i32_lt_s().i32_and();
-    s.local_get(X)
+    s.local_get(i).i32_const(I31_MIN).i32_ge_s().i32_and();
+    s.local_get(i).i32_const(I31_END).i32_lt_s().i32_and();
+    s.local_get(x)
         .i64_reinterpret_f64()
         .i64_const(i64::MIN)
         .i64_ne()
         .i32_and();
     s.if_(BlockType::Result(jsval()));
-    s.local_get(I).ref_i31();
+    s.local_get(i).ref_i31();
     s.else_();
-    s.local_get(X).struct_new(T_NUMBER);
+    s.local_get(x).struct_new(T_NUMBER);
     s.end();
-    s.end();
-    f
 }
 
 /// Push the `$oddball` kind of local `v` (which must be an oddball).

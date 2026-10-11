@@ -59,6 +59,14 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   symbols are `$symbol`, a subtype of `$string` compared by identity, so property keys stay string arrays.
   Iteration uses an internal `$iter` state with fast paths for arrays and strings and the protocol otherwise.
   See `crates/backend/src/{array,iter,inspect}.rs` and `crates/lower/src/patterns.rs`.)
+  (T107: **number arrays**, JSC's Double indexing type: an array whose elements are all numbers and that got a
+  non-i31 one keeps them unboxed in `nums: (ref null $nums)` (an `(array (mut f64))`, holes a reserved NaN), its
+  `elems` empty; empty arrays and all-i31 literals are generic with an `i32` `hint` and switch on their first
+  non-i31 number (after checking every element); anything else, or any path that doesn't know number mode
+  (`array::Helper::Elems`), makes the array generic for good. Hot paths know the states: `get`/`set_index` (an
+  overwrite fast path first), `get_num`/`set_num` (the backend's `+o[k]` / `o[k] = <f64>` peepholes), the statement
+  `o[k] += <number>` (`ElemNum`), push/pop, iteration. A generic read of a non-integer element boxes it (a new
+  `$number`). See `crates/backend/src/array.rs`.)
   (T102: **watchpoints**, JSC's idea: the built-in entries a fast path relies on carry a watch bit in their attribute
   byte (`object::WATCH_ITER`: `Array.prototype[Symbol.iterator]` and `%ArrayIteratorPrototype%.next`;
   `WATCH_STRITER`: `String.prototype[Symbol.iterator]`; `WATCH_REGEXP`: the `RegExp.prototype` keys `regexp_plain`
