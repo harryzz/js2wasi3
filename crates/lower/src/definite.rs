@@ -1,12 +1,14 @@
-//! Definite assignment of `var`s (T103, F389): the uncaptured function-local `var`s declared
-//! without a value whose every read comes after a write on every path. For those, `var x;` needn't
-//! store `undefined`, so the type inference (see the crate doc) can keep them `f64`.
+//! Definite assignment of `var`s (T103, F389): the uncaptured function-local `var`s whose every read
+//! comes after a write on every path. For those, `var x;` needn't store `undefined`, so the type
+//! inference (see the crate doc) can keep them `f64`. The others may be read before any write, so they
+//! start as `undefined` even when every declaration has an initializer (T104, F276).
 //!
 //! One forward pass per function over its statements with the set of variables assigned so far
 //! (`None`: unreachable, after `return`/`break`/`continue`/`throw`). Only plain `x = e` and
 //! `var x = e` count as writes; a read counts as safe when the set has its variable. Branches meet
 //! by intersection; a loop, a `switch`, a non-loop label and a `try` give what held before their
-//! bodies (plus their test or discriminant), since a jump can leave them from any point. A
+//! bodies (plus their test or discriminant), since a jump can leave them from any point; a `do`-`while`
+//! without `break`/`continue` in its body tests from the body's end. A
 //! construct the pass doesn't model checks every read in it against the set at its start and adds
 //! nothing. A read the pass never reached (code it doesn't walk) isn't safe, so missing a case
 //! only loses precision.
@@ -23,8 +25,8 @@ use crate::closures::Analysis;
 
 type Set = Option<HashSet<SymbolId>>;
 
-/// The `var`s of [`Analysis::definite`].
-pub fn analyze(semantic: &Semantic, an: &Analysis) -> HashSet<SymbolId> {
+/// The `var`s of [`Analysis::definite`] and of [`Analysis::maybe_undefined`].
+pub fn analyze(semantic: &Semantic, an: &Analysis) -> (HashSet<SymbolId>, HashSet<SymbolId>) {
     let scoping = semantic.scoping();
     let nodes = semantic.nodes();
     let root = scoping.root_scope_id();
@@ -51,9 +53,16 @@ pub fn analyze(semantic: &Semantic, an: &Analysis) -> HashSet<SymbolId> {
         }
     }
     reads.sort_unstable();
+    let mut jumps: Vec<u32> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind(), AstKind::BreakStatement(_) | AstKind::ContinueStatement(_)))
+        .map(|n| n.span().start)
+        .collect();
+    jumps.sort_unstable();
     let mut w = Walk {
         scoping,
         reads: &reads,
+        jumps: &jumps,
         safe: HashSet::new(),
     };
     for node in nodes.iter() {
@@ -71,14 +80,16 @@ pub fn analyze(semantic: &Semantic, an: &Analysis) -> HashSet<SymbolId> {
         .filter(|(at, _)| !w.safe.contains(at))
         .map(|(_, s)| *s)
         .collect();
-    candidates.retain(|s| !unsafe_syms.contains(s));
-    candidates
+    let (maybe, definite) = candidates.into_iter().partition(|s| unsafe_syms.contains(s));
+    (definite, maybe)
 }
 
 struct Walk<'s> {
     scoping: &'s Scoping,
     /// The candidates' reads (start, variable), sorted.
     reads: &'s [(u32, SymbolId)],
+    /// Starts of every `break` and `continue`, sorted.
+    jumps: &'s [u32],
     /// Starts of the reads seen with their variable assigned.
     safe: HashSet<u32>,
 }
@@ -138,8 +149,15 @@ impl Walk<'_> {
                 d
             }
             Statement::DoWhileStatement(w) => {
-                self.stmt(&w.body, d.clone());
-                self.expr(&w.test, d)
+                let end = self.stmt(&w.body, d.clone());
+                let span = w.body.span();
+                let i = self.jumps.partition_point(|at| *at < span.start);
+                if self.jumps.get(i).is_none_or(|at| *at >= span.end) {
+                    // Only the body's end reaches the test.
+                    self.expr(&w.test, end)
+                } else {
+                    self.expr(&w.test, d)
+                }
             }
             Statement::ForStatement(f) => {
                 let d = match &f.init {

@@ -68,6 +68,9 @@ pub struct Analysis {
     /// Uncaptured function-local `var`s written before every read (T103, `definite.rs`): `var x;`
     /// doesn't store `undefined` into them. Filled after this analysis.
     pub definite: HashSet<SymbolId>,
+    /// The other uncaptured function-local `var`s: a read can come before any write, so they start
+    /// as `undefined` (T104, F276).
+    pub maybe_undefined: HashSet<SymbolId>,
     /// Captured `let`/`const` that a closure made before the declaration ends can read: their cell is
     /// created uninitialized at the start of their block and closures check it.
     pub tdz: HashSet<SymbolId>,

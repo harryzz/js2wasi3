@@ -31,7 +31,8 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   with a kind field. Variables, params and results are `f64` unless a non-number is ever stored in them:
   see `crates/lower`, "Type inference", and `crates/backend/src/runtime.rs`.
   T103: a function-local `var x;` that every read follows a write of (definite assignment, `crates/lower/src/definite.rs`)
-  stores no `undefined`, so it can be `f64` too.)
+  stores no `undefined`, so it can be `f64` too. T104: the other `var`s (a read can come first) start as `undefined`
+  even with an initializer.)
   (T13: objects are `$object` dictionaries: entries in insertion order in GC arrays, a hash index past 8 entries, a
   prototype. Built-in prototypes are created lazily; their methods are sentinels that trap when read until functions
   exist (T14/T21). Errors are objects of class `error`. See `crates/backend/src/object.rs`.

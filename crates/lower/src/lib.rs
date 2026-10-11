@@ -197,7 +197,7 @@ pub fn lower_with(
 ) -> Result<ir::Module, Diagnostics> {
     let mut facts = Facts::default();
     let mut an = closures::analyze(&program.semantic);
-    an.definite = definite::analyze(&program.semantic, &an);
+    (an.definite, an.maybe_undefined) = definite::analyze(&program.semantic, &an);
     loop {
         let mut extra = Vec::new();
         if facts.string_to_number {
@@ -3770,6 +3770,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if let Err(e) = r {
                     result = Err(e);
                 }
+                if d.kind == VariableDeclarationKind::Var {
+                    for b in decl.id.get_binding_identifiers() {
+                        if let Some(sym) = b.symbol_id.get() {
+                            self.var_maybe_undefined(cx, sym);
+                        }
+                    }
+                }
                 continue;
             };
             let sym = b
@@ -3800,6 +3807,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             if decl.init.is_none() && is_var && plain && self.an.definite.contains(&sym) {
                 continue;
             }
+            if decl.init.is_some() && is_var {
+                self.var_maybe_undefined(cx, sym);
+            }
             let v = self.store(slot, ty, v);
             if decl.init.is_none() && is_var {
                 // `var x;` doesn't reset `x`: it's `undefined` from function entry on (a captured
@@ -3816,6 +3826,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             out.extend(self.declare_store(cx, sym, ty, v, !is_var));
         }
         result
+    }
+
+    /// T104 (F276): a `var` with an initializer that a read can reach first is `undefined` from
+    /// function entry on, like `var x;`.
+    fn var_maybe_undefined(&mut self, cx: &mut FnCx, sym: SymbolId) {
+        if !self.an.maybe_undefined.contains(&sym) {
+            return;
+        }
+        let Some(&local) = cx.locals.get(&sym) else { return };
+        self.observe(Slot::Var(sym), Kind::Any);
+        if local.0 >= cx.func.params && !cx.var_undefined.contains(&local) {
+            cx.var_undefined.push(local);
+        }
     }
 
     fn while_loop(

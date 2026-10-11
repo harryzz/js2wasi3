@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-11: T104 `var` read before its initializer (full run)
+
+- Compiler (`main` at cb00fa4 + T104, uncommitted at the run): an uncaptured function-local `var` that a read can
+  reach before any write starts as `undefined`, initializer or not (F276). Runner: unchanged.
+- Full run on `a-03` (`~/t262-t104.log`, 1,297 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-11: T103 `var x;` definite assignment (full run)
 
 - Compiler (`main` at 2c08c25 + T103, uncommitted at the run): an uncaptured function-local `var` declared without a

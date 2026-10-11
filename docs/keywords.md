@@ -89,7 +89,7 @@ What's most needed, in order: the rest of the built-in library (`Intl` beyond `D
 | `try` | ✅ | |
 | `typeof` | 🟡 | All value kinds; an undeclared name gives `"undefined"` (T28/T42). T63: a node global js2wasi3 lacks (`navigator`, `URL`, …) also gives `"undefined"` (node: `"object"`/`"function"`, F277), so feature tests take their fallback. |
 | `using` | 🟡 | T45: `using` and `await using` in blocks, functions, static blocks, `switch` blocks, `for`/`for-of` heads and the module's top level (disposal in reverse order at scope exit, `SuppressedError` chains, the spec's awaits), `Symbol.dispose`/`asyncDispose`, `DisposableStack`, `AsyncDisposableStack`, `SuppressedError`. Missing: top-level `using` in a module with imports/exports (rejected); `DisposableStack.prototype[Symbol.dispose]` is a separate function from `dispose` (node: the same). |
-| `var` | 🟡 | Hoisting, function scope, nested top-level blocks (F28); T63: read before its declaration (`for (; !o; ) { var o = … }`) is `undefined`. T103: `var x;` written before every read is a number local (no `undefined` stored). Bug: assigned only in a branch that didn't run, it reads `0` or traps (F276). |
+| `var` | 🟡 | Hoisting, function scope, nested top-level blocks (F28); T63: read before its declaration (`for (; !o; ) { var o = … }`) is `undefined`. T103: `var x;` written before every read is a number local (no `undefined` stored). T104: assigned only in a branch that didn't run, it reads `undefined` (F276 fixed). |
 | `void` | ✅ | |
 | `volatile` | ➖ | Removed in ES5. |
 | `while` | ✅ | |
