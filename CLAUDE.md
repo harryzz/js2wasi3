@@ -20,7 +20,8 @@ T101 (the Node.js compatibility page, `scripts/compat.mjs`, https://harryzz.gith
 `next`, `regexp_plain` one bit) is done. T103 (`var x;` written before every read stays `f64`, F389: mandelbrot 15.6× faster) is done. T104 (F276: a `var` read before its initializer is `undefined`) is done. T105 (F372: a per-site entry guess for
 `set_named`: nbody −14%, richards −11%) is done. T106 (`let x;` stays `f64`: spectralnorm −32%) is done. T107 (F391: number arrays
 unboxed: spectralnorm −49%, navier-stokes −19%) is done. T108 (F401: element reads in a `+`
-under a numeric consumer unboxed: navier-stokes −47%) is done. Next task: not chosen (candidates F403, F404, F400).
+under a numeric consumer unboxed: navier-stokes −47%) is done. Next task: T109 (F392, object layouts per
+allocation site; `tasks/T109-site-layouts.md`, not started; zigbee2mqtt replay on a-03 is the acceptance check).
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.
