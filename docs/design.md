@@ -173,6 +173,19 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   ~2× slower (T90 progress log).)
   (T105: a constant-key write also has a read-style site in `G_IC`: the entry it last wrote is tried first (still `k`,
   no `ACCESSOR | READONLY | WATCHED` bit) before `find_own_named`; nbody −14%, richards −11%.)
+  (T109: **layouts per allocation site**, decided at build time. A constructor's `this.k = …` keys in
+  first-appearance order (a class's constructor, or a `function` some `new X(…)` names; `closures::Analysis::
+  this_props`) and an object literal's plain named keys are a layout (1–8 keys, not `length`/`__proto__`/digits;
+  `ir::Module::layouts`, one per distinct key list). The marker is `F_INDEX` holding the layout's **shared,
+  pre-built hash index** (an immutable global `(ref $i32s)`, < 64 slots; own indexes are ≥ 64), so no new field and
+  no `$object` subtype (F376's `is_subtype`). Invariant: index == L's ⇒ `keys[0..count]` = L's first keys.
+  `new` allocates `n` slots with L's index (`CreateThisLayout`); `this.k = v` in the constructor is `layout_set`
+  (add at `slot == count` after `NO_EXTEND` and T90's per-site prototype check, overwrite at `slot` when
+  `keys[slot] == k` and the attributes allow it, else `set_named`); a literal's defines are `layout_define`.
+  `define` keeps a shared index only when it maps the new key to the new entry, else drops it (null, or `reindex`
+  past `SMALL`); every generic path works unchanged. Objects with no layout are still pre-sized by the static count
+  (JSC's `StaticPropertyAnalyzer`). Reads are unchanged (T74/T105 guesses). splay −27%, binarytrees −26%,
+  earley-boyer −24%, richards −3%; zigbee2mqtt replay −1.2%.)
   (T92: **object tests without `is_subtype`**. `$object` isn't final, so wasmtime compiles `ref.test`/`ref.cast
   (ref $object)` inline only for an exact `$object` and calls its `is_subtype` runtime function for every other
   object (a `Map`, array, function…). `runtime::object_or` tests and casts in one chain: abstract `struct`,

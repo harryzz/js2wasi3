@@ -41,7 +41,7 @@ pub const F_KEYS: u32 = 2;
 pub const F_VALS: u32 = 3;
 pub const F_ATTRS: u32 = 4;
 pub const F_COUNT: u32 = 5;
-const F_INDEX: u32 = 6;
+pub const F_INDEX: u32 = 6;
 
 pub const CLASS_PLAIN: i32 = 0;
 pub const CLASS_ERROR: i32 = 1;
@@ -356,6 +356,9 @@ pub enum Helper {
     Reindex,
     /// `(class: i32, proto: (ref null $object)) -> (ref $object)`: a new empty object.
     Alloc,
+    /// `(class: i32, proto: (ref null $object), n: i32) -> (ref $object)` (T109): [`Helper::Alloc`] with room
+    /// for `n` properties (JSC's static property count), so the first `n` adds don't grow.
+    AllocSized,
     /// `() -> (ref $object)`: a built-in prototype.
     Proto(Builtin),
     /// `(s: (ref $string)) -> i64`: the array index `s` denotes (canonical, < 2^32 - 1), or -1.
@@ -376,6 +379,17 @@ pub enum Helper {
     HasOwn,
     /// `() -> jsval`: `{}`.
     NewObject,
+    /// `(n: i32) -> jsval` (T109): `{}` with room for `n` properties.
+    NewObjectSized,
+    /// `(v, k: (ref $string), x, hash, site, ics, index: (ref $i32s), slot: i32)` (T109): `v.k = x` where `k` is
+    /// key `slot` of the layout whose shared index is `index` (see [`layout_index`]); else [`Helper::SetNamed`].
+    LayoutSet,
+    /// `(n: i32, index: (ref $i32s)) -> jsval` (T109): [`Helper::NewObjectSized`] with a layout's shared index.
+    NewObjectLayout,
+    /// `(o, k: (ref $string), x, hash, index: (ref $i32s), slot: i32)` (T109): an object literal's `k: x`, key
+    /// `slot` of the layout: stored at that entry while `o` has the layout and `slot` entries, else
+    /// [`Helper::DefineNamed`].
+    LayoutDefine,
     /// `(o, p: jsval)`: `__proto__: p` in a literal.
     SetProto,
     /// `(target, src: jsval)`: `...src` in a literal.
@@ -493,6 +507,7 @@ impl Helper {
             Helper::Grow => "grow",
             Helper::Reindex => "reindex",
             Helper::Alloc => "alloc_object",
+            Helper::AllocSized => "alloc_object_sized",
             Helper::Proto(b) => match b {
                 Builtin::Object => "Object.prototype",
                 Builtin::String => "String.prototype",
@@ -538,6 +553,10 @@ impl Helper {
             Helper::Has => "has",
             Helper::HasOwn => "has_own",
             Helper::NewObject => "new_object",
+            Helper::NewObjectSized => "new_object_sized",
+            Helper::LayoutSet => "layout_set",
+            Helper::NewObjectLayout => "new_object_layout",
+            Helper::LayoutDefine => "layout_define",
             Helper::SetProto => "set_proto",
             Helper::CopyProps => "copy_props",
             Helper::OwnKeys => "own_keys",
@@ -614,6 +633,7 @@ impl Helper {
             Helper::Grow => (vec![o], vec![]),
             Helper::Reindex => (vec![o, I32], vec![]),
             Helper::Alloc => (vec![I32, on], vec![o]),
+            Helper::AllocSized => (vec![I32, on, I32], vec![o]),
             Helper::Proto(_) => (vec![], vec![o]),
             Helper::ArrayIndex => (vec![s], vec![I64]),
             Helper::ToKey => (vec![v], vec![s]),
@@ -621,6 +641,10 @@ impl Helper {
             Helper::Set | Helper::DefineProp => (vec![v, v, v], vec![]),
             Helper::Delete | Helper::Has | Helper::HasOwn => (vec![v, v], vec![I32]),
             Helper::NewObject => (vec![], vec![v]),
+            Helper::NewObjectSized => (vec![I32], vec![v]),
+            Helper::LayoutSet => (vec![v, s, v, I32, I32, I32, rt(false, T_I32S), I32], vec![]),
+            Helper::NewObjectLayout => (vec![I32, rt(false, T_I32S)], vec![v]),
+            Helper::LayoutDefine => (vec![v, s, v, I32, rt(false, T_I32S), I32], vec![]),
             Helper::SetProto | Helper::CopyProps => (vec![v, v], vec![]),
             Helper::OwnKeys | Helper::OwnNames => (vec![o], vec![rt(false, T_KEYS)]),
             Helper::ForInKeys | Helper::Create | Helper::GetPrototypeOf => (vec![v], vec![v]),
@@ -686,6 +710,7 @@ impl Helper {
             Helper::Grow => grow(cx),
             Helper::Reindex => reindex(cx),
             Helper::Alloc => alloc(),
+            Helper::AllocSized => alloc_sized(),
             Helper::Proto(b) => proto(cx, b),
             Helper::ArrayIndex => array_index(),
             Helper::ToKey => to_key(cx),
@@ -728,6 +753,10 @@ impl Helper {
             Helper::Has => has(cx),
             Helper::HasOwn => has_own(cx),
             Helper::NewObject => new_object(cx),
+            Helper::NewObjectSized => new_object_sized(cx),
+            Helper::LayoutSet => layout_set(cx),
+            Helper::NewObjectLayout => new_object_layout(cx),
+            Helper::LayoutDefine => layout_define(cx),
             Helper::SetProto => set_proto(),
             Helper::CopyProps => copy_props(cx),
             Helper::OwnKeys => own_keys(cx, false),
@@ -1090,6 +1119,212 @@ fn set_named(cx: &mut dyn Cx) -> Function {
         .local_get(H)
         .local_get(SITE)
         .call(ordinary);
+    s.end();
+    f
+}
+
+/// T109: a layout's shared hash index, made at build time: entry `e + 1` for key `e` at the slot `find`'s
+/// probe (`hash & mask`, then the next ones) reaches. Its length (< 64, a power of 2 with free slots) tells it
+/// from an object's own index (`reindex` makes ≥ 64). An object holding it as `index` has the layout: its
+/// entries `0..count` are the layout's first keys (or deleted).
+pub fn layout_index(keys: &[Vec<u16>]) -> Vec<i32> {
+    let cap = (2 * keys.len()).next_power_of_two().max(2);
+    assert!(cap < 64, "layouts have at most 8 keys");
+    let mask = cap as u32 - 1;
+    let mut idx = vec![0; cap];
+    for (e, k) in keys.iter().enumerate() {
+        let mut i = key_hash(k) as u32 & mask;
+        while idx[i as usize] != 0 {
+            i = (i + 1) & mask;
+        }
+        idx[i as usize] = e as i32 + 1;
+    }
+    idx
+}
+
+/// Indexes shorter than this are layouts' shared ones (T109).
+const SHARED_INDEX: i32 = 64;
+
+/// `layout_set(v, k, x, hash, site, ics, index, slot)` (see [`Helper::LayoutSet`]).
+fn layout_set(cx: &mut dyn Cx) -> Function {
+    let set_named = h(cx, Helper::SetNamed);
+    const V: u32 = 0;
+    const K: u32 = 1;
+    const X: u32 = 2;
+    const H: u32 = 3;
+    const SITE: u32 = 4;
+    const ICS: u32 = 5;
+    const IDX: u32 = 6;
+    const SLOT: u32 = 7;
+    const O: u32 = 8;
+    const N: u32 = 9;
+    const IC: u32 = 10;
+    const E: u32 = 11;
+    let mut f = Function::new([
+        (1, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, rt(true, T_VALS)),
+        (1, ValType::I32),
+    ]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty);
+    runtime::object_or(&mut s, V, |s| {
+        s.br(1);
+    });
+    s.local_tee(O);
+    s.struct_get(T_OBJECT, F_INDEX).local_get(IDX).ref_eq().i32_eqz().br_if(0);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_tee(N);
+    s.local_get(SLOT).i32_eq();
+    s.if_(BlockType::Empty);
+    {
+        // The next key of the layout: absent (the layout's keys differ). Extensible, and the site's
+        // prototype still without `k` on its chain (T90, as `set_named`).
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_CLASS)
+            .i32_const(NO_EXTEND)
+            .i32_and()
+            .br_if(1);
+        s.global_get(runtime::G_SET_IC).local_tee(IC).ref_is_null().br_if(1);
+        s.local_get(SITE)
+            .i32_const(1)
+            .i32_shl()
+            .local_tee(E)
+            .local_get(IC)
+            .array_len()
+            .i32_ge_u()
+            .br_if(1);
+        s.local_get(IC)
+            .local_get(E)
+            .i32_const(1)
+            .i32_add()
+            .array_get(T_VALS)
+            .global_get(runtime::G_EPOCH)
+            .ref_i31()
+            .ref_eq()
+            .i32_eqz()
+            .br_if(1);
+        s.local_get(IC)
+            .local_get(E)
+            .array_get(T_VALS)
+            .local_get(O)
+            .struct_get(T_OBJECT, F_PROTO)
+            .ref_eq()
+            .i32_eqz()
+            .br_if(1);
+        layout_changed(&mut s, O);
+        // The arrays have the layout's size (a `grow` drops the shared index); attributes are 0.
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_KEYS)
+            .local_get(SLOT)
+            .local_get(K)
+            .array_set(T_KEYS);
+        s.local_get(O)
+            .struct_get(T_OBJECT, F_VALS)
+            .local_get(SLOT)
+            .local_get(X)
+            .array_set(T_VALS);
+        s.local_get(O)
+            .local_get(SLOT)
+            .i32_const(1)
+            .i32_add()
+            .struct_set(T_OBJECT, F_COUNT);
+        s.return_();
+    }
+    s.end();
+    // An entry before `count`: still `k` (not deleted, not re-added under another string), a writable data
+    // property.
+    s.local_get(SLOT).local_get(N).i32_ge_u().br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(SLOT)
+        .array_get(T_KEYS)
+        .local_get(K)
+        .ref_eq()
+        .i32_eqz()
+        .br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(SLOT)
+        .array_get_u(T_BYTES)
+        .i32_const(ACCESSOR | READONLY | WATCHED)
+        .i32_and()
+        .br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(SLOT)
+        .local_get(X)
+        .array_set(T_VALS);
+    s.return_();
+    s.end();
+    s.local_get(V)
+        .local_get(K)
+        .local_get(X)
+        .local_get(H)
+        .local_get(SITE)
+        .local_get(ICS)
+        .call(set_named);
+    s.end();
+    f
+}
+
+fn new_object_layout(cx: &mut dyn Cx) -> Function {
+    let alloc = h(cx, Helper::AllocSized);
+    let proto = h(cx, Helper::Proto(Builtin::Object));
+    const O: u32 = 2;
+    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let mut s = f.instructions();
+    s.i32_const(CLASS_PLAIN)
+        .call(proto)
+        .local_get(0)
+        .call(alloc)
+        .local_tee(O)
+        .local_get(1)
+        .struct_set(T_OBJECT, F_INDEX);
+    s.local_get(O).ref_as_non_null();
+    s.end();
+    f
+}
+
+/// `layout_define(o, k, x, hash, index, slot)` (see [`Helper::LayoutDefine`]).
+fn layout_define(cx: &mut dyn Cx) -> Function {
+    let define_named = h(cx, Helper::DefineNamed);
+    const V: u32 = 0;
+    const K: u32 = 1;
+    const X: u32 = 2;
+    const H: u32 = 3;
+    const IDX: u32 = 4;
+    const SLOT: u32 = 5;
+    const O: u32 = 6;
+    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let mut s = f.instructions();
+    s.block(BlockType::Empty);
+    // The literal's object (made by `new_object_layout`, an exact `$object`), its next layout key.
+    s.local_get(V).ref_test_non_null(runtime::object()).i32_eqz().br_if(0);
+    s.local_get(V).ref_cast_non_null(runtime::object()).local_tee(O);
+    s.struct_get(T_OBJECT, F_INDEX).local_get(IDX).ref_eq().i32_eqz().br_if(0);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_get(SLOT).i32_ne().br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(SLOT)
+        .local_get(K)
+        .array_set(T_KEYS);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(SLOT)
+        .local_get(X)
+        .array_set(T_VALS);
+    s.local_get(O)
+        .local_get(SLOT)
+        .i32_const(1)
+        .i32_add()
+        .struct_set(T_OBJECT, F_COUNT);
+    s.return_();
+    s.end();
+    s.local_get(V)
+        .local_get(K)
+        .local_get(X)
+        .local_get(H)
+        .call(define_named);
     s.end();
     f
 }
@@ -2011,6 +2246,54 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     s.end();
     s.return_();
     s.end();
+    // T109: a layout's shared index (never written): kept if it already has `k` at entry `e` (the
+    // layout's next key), else the object gets its own (none below SMALL entries).
+    s.local_get(idx).array_len().i32_const(SHARED_INDEX).i32_lt_u();
+    s.if_(BlockType::Empty);
+    {
+        s.local_get(idx)
+            .array_len()
+            .i32_const(1)
+            .i32_sub()
+            .local_set(mask);
+        if named {
+            s.local_get(HV);
+        } else {
+            s.local_get(K).call(hash);
+        }
+        s.local_get(mask).i32_and().local_set(i);
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(idx)
+            .local_get(i)
+            .array_get(T_I32S)
+            .local_get(e)
+            .i32_const(1)
+            .i32_add()
+            .i32_eq();
+        s.if_(BlockType::Empty);
+        s.return_();
+        s.end();
+        s.local_get(idx).local_get(i).array_get(T_I32S).i32_eqz().br_if(1);
+        s.local_get(i)
+            .i32_const(1)
+            .i32_add()
+            .local_get(idx)
+            .array_len()
+            .i32_const(1)
+            .i32_sub()
+            .i32_and()
+            .local_set(i);
+        s.br(0).end().end();
+        s.local_get(O)
+            .ref_null(wasm_encoder::HeapType::Concrete(T_I32S))
+            .struct_set(T_OBJECT, F_INDEX);
+        s.local_get(e).i32_const(SMALL).i32_ge_s();
+        s.if_(BlockType::Empty);
+        s.local_get(O).i32_const(64).call(reindex);
+        s.end();
+        s.return_();
+    }
+    s.end();
     s.local_get(e)
         .i32_const(1)
         .i32_add()
@@ -2277,6 +2560,20 @@ fn alloc() -> Function {
     s.i32_const(0).array_new_default(T_KEYS);
     s.i32_const(0).array_new_default(T_VALS);
     s.i32_const(0).array_new_default(T_BYTES);
+    s.i32_const(0);
+    s.ref_null(wasm_encoder::HeapType::Concrete(T_I32S));
+    s.struct_new(T_OBJECT);
+    s.end();
+    f
+}
+
+fn alloc_sized() -> Function {
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(0).local_get(1);
+    s.local_get(2).array_new_default(T_KEYS);
+    s.local_get(2).array_new_default(T_VALS);
+    s.local_get(2).array_new_default(T_BYTES);
     s.i32_const(0);
     s.ref_null(wasm_encoder::HeapType::Concrete(T_I32S));
     s.struct_new(T_OBJECT);
@@ -3542,6 +3839,16 @@ fn new_object(cx: &mut dyn Cx) -> Function {
     let mut f = Function::new([]);
     let mut s = f.instructions();
     s.i32_const(CLASS_PLAIN).call(proto).call(alloc);
+    s.end();
+    f
+}
+
+fn new_object_sized(cx: &mut dyn Cx) -> Function {
+    let alloc = h(cx, Helper::AllocSized);
+    let proto = h(cx, Helper::Proto(Builtin::Object));
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.i32_const(CLASS_PLAIN).call(proto).local_get(0).call(alloc);
     s.end();
     f
 }

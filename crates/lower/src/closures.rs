@@ -104,6 +104,10 @@ pub struct Analysis {
     pub privates: Vec<PrivateName>,
     /// Each `#x` reference (by its start): the private name it denotes.
     pub private_refs: HashMap<u32, u32>,
+    /// T109: per function scope (a class's scope for its constructor), the distinct keys stored by
+    /// `this.k = …` in it or its arrow functions, in source order (JSC's `StaticPropertyAnalyzer` counts
+    /// them to size the allocation; js2wasi3 also makes them a layout).
+    pub this_props: HashMap<ScopeId, Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -593,7 +597,87 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
             an.appended.insert(sym);
         }
     }
+    an.this_props = this_props(semantic, &an);
     an
+}
+
+/// [`Analysis::this_props`].
+fn this_props(semantic: &Semantic, an: &Analysis) -> HashMap<ScopeId, Vec<String>> {
+    let scoping = semantic.scoping();
+    let nodes = semantic.nodes();
+    // Only what `new` can make an object for: a class's constructor, or a `function` that isn't a
+    // method, accessor, generator or async.
+    // A `function` counts only if some `new X(…)` names it (lossy, like JSC's analysis): by its own name or
+    // the variable, property or key it's assigned to. Prototype.js-style `initialize` methods (called through
+    // `apply` on another constructor's `this`) would otherwise get stores that never hit.
+    let new_names: HashSet<&str> = nodes
+        .iter()
+        .filter_map(|n| match n.kind() {
+            AstKind::NewExpression(ne) => match ne.callee.without_parentheses() {
+                Expression::Identifier(id) => Some(id.name.as_str()),
+                Expression::StaticMemberExpression(m) => Some(m.property.name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let mut constructors: HashSet<ScopeId> = an.ctor_class.values().copied().collect();
+    for node in nodes.iter() {
+        let AstKind::Function(f) = node.kind() else {
+            continue;
+        };
+        if f.r#async || f.generator {
+            continue;
+        }
+        let assigned = match nodes.parent_kind(node.id()) {
+            AstKind::VariableDeclarator(d) => d.id.get_identifier_name().map(|n| n.as_str()),
+            AstKind::AssignmentExpression(a) => match &a.left {
+                AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
+                AssignmentTarget::StaticMemberExpression(m) => Some(m.property.name.as_str()),
+                _ => None,
+            },
+            AstKind::ObjectProperty(p) if !p.method && p.kind == PropertyKind::Init => match &p.key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+                PropertyKey::StringLiteral(sl) => Some(sl.value.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let named = f.id.as_ref().map(|id| id.name.as_str());
+        if [named, assigned].into_iter().flatten().any(|n| new_names.contains(n))
+            && let Some(s) = f.scope_id.get()
+        {
+            constructors.insert(s);
+        }
+    }
+    let mut keys: HashMap<ScopeId, Vec<String>> = HashMap::new();
+    for node in nodes.iter() {
+        let AstKind::AssignmentExpression(a) = node.kind() else {
+            continue;
+        };
+        let Some(SimpleAssignmentTarget::StaticMemberExpression(m)) = a.left.as_simple_assignment_target()
+        else {
+            continue;
+        };
+        if !matches!(m.object, Expression::ThisExpression(_)) {
+            continue;
+        }
+        let owner = scoping.scope_ancestors(node.scope_id()).find(|s| {
+            let f = scoping.scope_flags(*s);
+            f.is_function() && !f.is_arrow()
+        });
+        if let Some(s) = owner {
+            let s = an.ctor_class.get(&s).copied().unwrap_or(s);
+            if !constructors.contains(&s) {
+                continue;
+            }
+            let k = keys.entry(s).or_default();
+            if !k.iter().any(|x| x == m.property.name.as_str()) {
+                k.push(m.property.name.to_string());
+            }
+        }
+    }
+    keys
 }
 
 /// The class whose static field initializer contains `pos` in `scope`, if no function boundary

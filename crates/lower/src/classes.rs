@@ -910,10 +910,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         construct.pos = f.pos;
         let mut args = vec![Expr::Local(LocalId(0))];
         if hidden.this {
-            args.push(Expr::intrinsic(
-                Intrinsic::CreateThis,
-                vec![Expr::Local(LocalId(1))],
-            ));
+            // T109: sized for the constructor's `this.k = …` properties, with their layout.
+            args.push(self.create_this_for(Some(scope), Expr::Local(LocalId(1))));
         }
         if hidden.new_target {
             args.push(Expr::Local(LocalId(1)));

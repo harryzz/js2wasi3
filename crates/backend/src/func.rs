@@ -98,6 +98,11 @@ pub enum Helper {
     /// `(new_target) -> jsval`: a new object whose prototype is `new_target.prototype` (or
     /// `Object.prototype` if that isn't an object).
     CreateThis,
+    /// `(new_target, n: i32) -> jsval` (T109): [`Helper::CreateThis`] with room for `n` properties.
+    CreateThisSized,
+    /// `(new_target, n: i32, index: (ref $i32s)) -> jsval` (T109): [`Helper::CreateThisSized`] with a
+    /// layout's shared index (`object::layout_index`).
+    CreateThisLayout,
     /// `(f: jsval) -> jsval`: `f.prototype`, directly for an ordinary function's own (entry 2), else
     /// `object::Helper::Get` (T89).
     FnPrototype,
@@ -180,6 +185,8 @@ impl Helper {
             Helper::ConstructList => "construct_list",
             Helper::ConstructOrdinary => "construct_ordinary",
             Helper::CreateThis => "create_this",
+            Helper::CreateThisSized => "create_this_sized",
+            Helper::CreateThisLayout => "create_this_layout",
             Helper::FnPrototype => "fn_prototype",
             Helper::ClassHeritage => "class_heritage",
             Helper::ClassSetup => "class_setup",
@@ -232,6 +239,8 @@ impl Helper {
             Helper::ConstructList => (vec![v, v, v, s], vec![v]),
             Helper::ConstructOrdinary => (vec![v, v, v], vec![v]),
             Helper::CreateThis | Helper::ClassHeritage | Helper::FnPrototype => (vec![v], vec![v]),
+            Helper::CreateThisSized => (vec![v, ValType::I32], vec![v]),
+            Helper::CreateThisLayout => (vec![v, ValType::I32, rt(false, runtime::T_I32S)], vec![v]),
             Helper::ClassSetup => (vec![v, v, v], vec![v]),
             Helper::InstanceOfValue => (vec![v, v], vec![ValType::I32]),
             Helper::CtorReturn { .. } => (vec![v, v], vec![v]),
@@ -274,7 +283,9 @@ impl Helper {
             }
             Helper::ConstructList => construct_list(cx),
             Helper::ConstructOrdinary => construct_ordinary(cx),
-            Helper::CreateThis => create_this(cx),
+            Helper::CreateThis => create_this(cx, false),
+            Helper::CreateThisSized => create_this(cx, true),
+            Helper::CreateThisLayout => create_this_layout(cx),
             Helper::FnPrototype => fn_prototype(cx),
             Helper::ClassHeritage => class_heritage(cx),
             Helper::ClassSetup => class_setup(cx),
@@ -553,24 +564,52 @@ fn construct_list(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn create_this(cx: &mut dyn Cx) -> Function {
+fn create_this(cx: &mut dyn Cx, sized: bool) -> Function {
     let fn_prototype = fh(cx, Helper::FnPrototype);
-    let alloc = oh(cx, object::Helper::Alloc);
+    let alloc = oh(
+        cx,
+        if sized {
+            object::Helper::AllocSized
+        } else {
+            object::Helper::Alloc
+        },
+    );
     let obj_proto = oh(cx, object::Helper::Proto(Builtin::Object));
     const NT: u32 = 0;
-    const P: u32 = 1;
+    let p: u32 = if sized { 2 } else { 1 };
     let mut f = Function::new([(1, jsval())]);
     let mut s = f.instructions();
     s.i32_const(object::CLASS_PLAIN);
-    s.local_get(NT).call(fn_prototype).local_set(P);
+    s.local_get(NT).call(fn_prototype).local_set(p);
     // (`test_object`: no `is_subtype` libcall for the non-final `$object`, F350.)
-    s.test_object(P);
+    s.test_object(p);
     s.if_(BlockType::Result(rt(true, T_OBJECT)));
-    s.local_get(P).ref_cast_non_null(runtime::object());
+    s.local_get(p).ref_cast_non_null(runtime::object());
     s.else_();
     s.call(obj_proto);
     s.end();
+    if sized {
+        s.local_get(1);
+    }
     s.call(alloc);
+    s.end();
+    f
+}
+
+fn create_this_layout(cx: &mut dyn Cx) -> Function {
+    let sized = fh(cx, Helper::CreateThisSized);
+    const O: u32 = 3;
+    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let mut s = f.instructions();
+    // `alloc` made an exact `$object`.
+    s.local_get(0)
+        .local_get(1)
+        .call(sized)
+        .ref_cast_non_null(runtime::object())
+        .local_tee(O)
+        .local_get(2)
+        .struct_set(T_OBJECT, object::F_INDEX);
+    s.local_get(O).ref_as_non_null();
     s.end();
     f
 }

@@ -278,6 +278,7 @@ pub fn lower_with(
             lowered: HashSet::new(),
             hidden: HashMap::new(),
             fn_scope: HashMap::new(),
+            layouts: HashMap::new(),
             fn_source: HashMap::new(),
             rest_param: HashSet::new(),
             fn_length: HashMap::new(),
@@ -444,6 +445,8 @@ struct Lowerer<'p, 'a> {
     /// Hidden leading params of each JS function.
     hidden: HashMap<FuncId, Hidden>,
     fn_scope: HashMap<FuncId, ScopeId>,
+    /// T109: constructors' layouts by scope (`None`: none), see [`Self::layout`].
+    layouts: HashMap<ScopeId, Option<u32>>,
     /// The source span of each function (T25: `Function.prototype.toString`).
     fn_source: HashMap<FuncId, Span>,
     /// Functions with a rest parameter (their last IR parameter, an array).
@@ -2982,7 +2985,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ir::FnKind::Generator
             } else if self.module.function(id).flags.is_async {
                 ir::FnKind::Async
-            } else if constructor && self.hidden[&id].new_target {
+            } else if constructor && (self.hidden[&id].new_target || self.this_count(id) > 0) {
                 ir::FnKind::OrdinaryWith {
                     construct: self.ctor_adapter(id),
                 }
@@ -3097,7 +3100,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ir::FnKind::Generator
             } else if f.flags.is_async {
                 ir::FnKind::Async
-            } else if self.hidden.get(&func).is_some_and(|h| h.new_target) {
+            } else if self.hidden.get(&func).is_some_and(|h| h.new_target) || self.this_count(func) > 0 {
                 ir::FnKind::OrdinaryWith {
                     construct: self.ctor_adapter(func),
                 }
@@ -3110,9 +3113,75 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }))
     }
 
-    /// What `new` runs for a function that uses `new.target` (T38): `f$construct(self, new_target,
-    /// args) -> jsval` makes `this` from `new_target.prototype`, calls the typed function `func` with
-    /// both, and gives its result if that is an object, else `this`.
+    /// What `new` runs for a function that uses `new.target` (T38) or stores `this` properties (T109):
+    /// `f$construct(self, new_target, args) -> jsval` makes `this` from `new_target.prototype` (with room for
+    /// [`Self::this_count`] properties), calls the typed function `func` with it (and `new_target` if it takes
+    /// it), and gives its result if that is an object, else `this`.
+    /// T109: how many properties `func`'s `this.k = …` stores give `this` (JSC's static property count,
+    /// at most the size where objects get a hash index).
+    fn this_count(&self, func: FuncId) -> u32 {
+        self.fn_scope
+            .get(&func)
+            .and_then(|s| self.an.this_props.get(s))
+            .map_or(0, |k| (k.len() as u32).min(SMALL_OBJECT))
+    }
+
+    /// T109: the layout of a constructor's scope (its `this.k = …` keys, when 1 to 8 and all plain
+    /// named keys), registered in the module on first use.
+    fn layout(&mut self, scope: ScopeId) -> Option<u32> {
+        if let Some(l) = self.layouts.get(&scope) {
+            return *l;
+        }
+        let keys = self.an.this_props.get(&scope)?;
+        let l = (1..=SMALL_OBJECT as usize).contains(&keys.len())
+            && keys.iter().all(|k| k != "length" && k != "__proto__");
+        let l = l.then(|| self.layout_for(keys.clone()));
+        self.layouts.insert(scope, l);
+        l
+    }
+
+    /// T109: the layout with these keys (one per distinct key list).
+    fn layout_for(&mut self, keys: Vec<String>) -> u32 {
+        if let Some(l) = self.module.layouts.iter().position(|k| *k == keys) {
+            return l as u32;
+        }
+        self.module.layouts.push(keys);
+        self.module.layouts.len() as u32 - 1
+    }
+
+    /// T109: the layout and its keys if the function `cx` lowers is a constructor with one (a base class's
+    /// constructor or a `function`; not an arrow function).
+    fn this_layout(&mut self, cx: &FnCx) -> Option<(u32, Vec<String>)> {
+        let scope = cx.scope?;
+        // A class's constructor is lowered with the class's scope (`lower_class`).
+        let owner = if cx.class == Some(scope) {
+            if cx.ctor == Some(true) {
+                return None;
+            }
+            scope
+        } else {
+            let flags = self.scoping.scope_flags(scope);
+            if !flags.is_function() || flags.is_arrow() {
+                return None;
+            }
+            scope
+        };
+        let l = self.layout(owner)?;
+        Some((l, self.module.layouts[l as usize].clone()))
+    }
+
+    /// `this` for `new` of the function or class with scope `scope`: sized for its `this.k = …` keys, with
+    /// their layout when it has one (T109).
+    fn create_this_for(&mut self, scope: Option<ScopeId>, new_target: Expr) -> Expr {
+        if let Some(l) = scope.and_then(|s| self.layout(s)) {
+            return Expr::intrinsic(Intrinsic::CreateThisLayout(l), vec![new_target]);
+        }
+        let n = scope
+            .and_then(|s| self.an.this_props.get(&s))
+            .map_or(0, |k| (k.len() as u32).min(SMALL_OBJECT));
+        create_this(new_target, n)
+    }
+
     fn ctor_adapter(&mut self, func: FuncId) -> FuncId {
         if let Some(a) = self.ctor_adapters.get(&func) {
             return *a;
@@ -3137,7 +3206,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if hidden.this {
             args.push(Expr::Local(this));
         }
-        args.push(Expr::Local(LocalId(1)));
+        if hidden.new_target {
+            args.push(Expr::Local(LocalId(1)));
+        }
         let rest = self.rest_param.contains(&func);
         for i in hidden.count()..f.params {
             let op = if rest && i == f.params - 1 {
@@ -3163,7 +3234,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         a.body = vec![
             Stmt::Set(
                 this,
-                Expr::intrinsic(Intrinsic::CreateThis, vec![Expr::Local(LocalId(1))]),
+                self.create_this_for(self.fn_scope.get(&func).copied(), Expr::Local(LocalId(1))),
             ),
             Stmt::Return(Some(Expr::intrinsic(
                 Intrinsic::CtorReturn { derived: false },
@@ -6874,7 +6945,46 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     fn object_literal(&mut self, cx: &mut FnCx, o: &'a ObjectExpression<'a>) -> R<Val> {
         let t = cx.func.add_local("obj", Type::JsVal);
-        let mut body = vec![Stmt::Set(t, Expr::intrinsic(Intrinsic::NewObject, vec![]))];
+        // T109: room for the literal's properties (`__proto__: v` sets the prototype; a spread adds an
+        // unknown number).
+        let n = o
+            .properties
+            .iter()
+            .filter(|p| match p {
+                ObjectPropertyKind::ObjectProperty(op) => !matches!(&op.key,
+                    PropertyKey::StaticIdentifier(id) if id.name == "__proto__" && !op.shorthand),
+                ObjectPropertyKind::SpreadProperty(_) => false,
+            })
+            .count()
+            .min(SMALL_OBJECT as usize);
+        // T109: a layout when every property is a plain `key: value` with a distinct named key.
+        let mut keys: Vec<String> = Vec::new();
+        let plain = o.properties.iter().all(|p| match p {
+            ObjectPropertyKind::ObjectProperty(op) if op.kind == PropertyKind::Init && !op.computed => {
+                let k = match &op.key {
+                    PropertyKey::StaticIdentifier(id) => id.name.as_str(),
+                    PropertyKey::StringLiteral(sl) => sl.value.as_str(),
+                    _ => return false,
+                };
+                let named = k != "length"
+                    && k != "__proto__"
+                    && !(!k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()))
+                    && !keys.iter().any(|x| x == k);
+                keys.push(k.to_string());
+                named
+            }
+            _ => false,
+        });
+        let layout = (plain && (1..=SMALL_OBJECT as usize).contains(&keys.len()))
+            .then(|| self.layout_for(keys.clone()));
+        let new = if let Some(l) = layout {
+            Expr::intrinsic(Intrinsic::NewObjectLayout(l), vec![])
+        } else if n == 0 {
+            Expr::intrinsic(Intrinsic::NewObject, vec![])
+        } else {
+            Expr::intrinsic(Intrinsic::NewObjectSized, vec![Expr::i32(n as i32)])
+        };
+        let mut body = vec![Stmt::Set(t, new)];
         let mut result = Ok(());
         for p in &o.properties {
             let r = match p {
@@ -6893,6 +7003,21 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
         }
         result?;
+        if let Some(l) = layout {
+            for st in &mut body {
+                if let Stmt::Expr(Expr::Intrinsic { op, args }) = st
+                    && *op == Intrinsic::DefineProp
+                    && let [Expr::Local(o), Expr::Str(k), _] = args.as_slice()
+                    && *o == t
+                    && let Some(slot) = keys.iter().position(|x| x.encode_utf16().eq(k.iter().copied()))
+                {
+                    *op = Intrinsic::LayoutDefine {
+                        layout: l,
+                        slot: slot as u32,
+                    };
+                }
+            }
+        }
         Ok(Val::js(
             Expr::Seq {
                 body,
@@ -7009,6 +7134,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .left
             .as_member_expression()
             .expect("checked by the caller");
+        // T109: `this.k = v` in a constructor with a layout: `LayoutSet`.
+        let layout = match m {
+            MemberExpression::StaticMemberExpression(sm)
+                if a.operator == AssignmentOperator::Assign
+                    && matches!(sm.object, Expression::ThisExpression(_)) =>
+            {
+                self.this_layout(cx).and_then(|(l, keys)| {
+                    let slot = keys.iter().position(|k| k == sm.property.name.as_str())?;
+                    Some(Intrinsic::LayoutSet {
+                        layout: l,
+                        slot: slot as u32,
+                    })
+                })
+            }
+            _ => None,
+        };
         let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
         let tv = cx.func.add_local("value", Type::JsVal);
@@ -7016,6 +7157,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         // T74: a constant key stays in place (no side effects), so the backend sees it.
         let key_of = self.key_temp(cx, key, &mut body);
         let rhs = self.expr(cx, &a.right)?;
+        let member_set = |private: &Member, o: Expr, k: Expr, v: Expr| match layout {
+            Some(op) => Expr::intrinsic(op, vec![o, k, v]),
+            None => member_set(private, o, k, v),
+        };
         let old = (a.operator != AssignmentOperator::Assign).then(|| {
             Val::js(
                 member_get(&private, Expr::Local(to), key_of.clone()),
@@ -8367,6 +8512,19 @@ impl SumOperand {
 
 fn f64_is_hole(t: LocalId) -> Expr {
     Expr::intrinsic(Intrinsic::F64IsHole, vec![Expr::Local(t)])
+}
+
+/// T109: objects get a hash index past this many properties (`object::SMALL` in the backend); a static
+/// size guess stops there.
+const SMALL_OBJECT: u32 = 8;
+
+/// `this` for `new` (`new_target.prototype`), with room for `n` properties.
+fn create_this(new_target: Expr, n: u32) -> Expr {
+    if n == 0 {
+        Expr::intrinsic(Intrinsic::CreateThis, vec![new_target])
+    } else {
+        Expr::intrinsic(Intrinsic::CreateThisSized, vec![new_target, Expr::i32(n as i32)])
+    }
 }
 
 /// JS ToNumber.

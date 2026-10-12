@@ -102,6 +102,9 @@ pub struct Module {
     pub functions: Vec<Function>,
     pub globals: Vec<Global>,
     pub exports: Vec<Export>,
+    /// T109: object layouts, each a constructor's `this.k = …` keys in order (1 to 8 keys): see
+    /// [`Intrinsic::CreateThisLayout`] and [`Intrinsic::LayoutSet`].
+    pub layouts: Vec<Vec<String>>,
     /// The command entry point (a `wasi:cli/run` command runs it), for a module without exports.
     /// Takes no params and has no result.
     pub main: Option<FuncId>,
@@ -864,6 +867,9 @@ pub enum Intrinsic {
     NewError(ErrorKind),
     /// `{}`: a new plain object (prototype `Object.prototype`).
     NewObject,
+    /// `(n: i32) -> jsval` (T109): [`Intrinsic::NewObject`] with room for `n` properties (an object literal's
+    /// static property count, as JSC's `StaticPropertyAnalyzer`).
+    NewObjectSized,
     /// `v[key]`: property get (a TypeError on `undefined` / `null`).
     GetProp,
     /// `v[key] = value` (no result; TypeErrors as in strict mode).
@@ -1049,6 +1055,22 @@ pub enum Intrinsic {
     /// A new object whose prototype is `new_target.prototype` (`Object.prototype` if that isn't an
     /// object): a base class constructor's `this`.
     CreateThis,
+    /// `(new_target, n: i32) -> jsval` (T109): [`Intrinsic::CreateThis`] with room for `n` properties (the
+    /// constructor's `this.k = …` count).
+    CreateThisSized,
+    /// `(new_target) -> jsval` (T109): [`Intrinsic::CreateThis`] with room for the keys of
+    /// [`Module::layouts`]`[l]`, marked as having that layout (its shared hash index).
+    CreateThisLayout(u32),
+    /// `(o, key: string constant, value)` (T109): `o.key = value` in the constructor of layout `layout`,
+    /// where `key` is the layout's key `slot`: a store at that entry when `o` still has the layout,
+    /// else `SetProp`.
+    LayoutSet { layout: u32, slot: u32 },
+    /// `() -> jsval` (T109): `{}` with room for the keys of [`Module::layouts`]`[l]` and that layout (an object
+    /// literal's keys).
+    NewObjectLayout(u32),
+    /// `(o, key: string constant, value)` (T109): an object literal's `key: value` (`DefineProp`), `key` the
+    /// layout's key `slot`.
+    LayoutDefine { layout: u32, slot: u32 },
     /// Check a class heritage value (node's TypeErrors): the class prototype's parent.
     ClassHeritage,
     /// args: class, heritage (`undefined`: none), prototype parent (from `ClassHeritage`, or
@@ -1421,6 +1443,11 @@ impl Intrinsic {
             }
             Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
+            Intrinsic::NewObjectSized => (&[I32], Some(JsVal)),
+            Intrinsic::CreateThisSized => (&[JsVal, I32], Some(JsVal)),
+            Intrinsic::CreateThisLayout(_) => (&[JsVal], Some(JsVal)),
+            Intrinsic::LayoutSet { .. } | Intrinsic::LayoutDefine { .. } => (&[JsVal, JsVal, JsVal], None),
+            Intrinsic::NewObjectLayout(_) => (&[], Some(JsVal)),
             Intrinsic::SetProp | Intrinsic::DefineProp => (&[JsVal, JsVal, JsVal], None),
             Intrinsic::DeleteProp | Intrinsic::HasProp | Intrinsic::HasOwn => {
                 (&[JsVal, JsVal], Some(Bool))
@@ -1602,6 +1629,7 @@ impl Intrinsic {
             Intrinsic::ConsoleWrite { stderr: true } => "write_stderr",
             Intrinsic::NewError(_) => "new_error",
             Intrinsic::NewObject => "new_object",
+            Intrinsic::NewObjectSized => "new_object_sized",
             Intrinsic::GetProp => "get",
             Intrinsic::SetProp => "set",
             Intrinsic::DefineProp => "define",
@@ -1678,6 +1706,11 @@ impl Intrinsic {
             Intrinsic::GetOwnPropertyNames => "get_own_property_names",
             Intrinsic::ConstructList => "construct_list",
             Intrinsic::CreateThis => "create_this",
+            Intrinsic::CreateThisSized => "create_this_sized",
+            Intrinsic::CreateThisLayout(_) => "create_this_layout",
+            Intrinsic::LayoutSet { .. } => "layout_set",
+            Intrinsic::NewObjectLayout(_) => "new_object_layout",
+            Intrinsic::LayoutDefine { .. } => "layout_define",
             Intrinsic::ClassHeritage => "class_heritage",
             Intrinsic::ClassSetup => "class_setup",
             Intrinsic::InstanceOfValue => "instanceof_value",
@@ -1838,6 +1871,9 @@ impl Intrinsic {
                 | Intrinsic::GetOwnPropertyNames
                 | Intrinsic::ConstructList
                 | Intrinsic::CreateThis
+                | Intrinsic::CreateThisSized
+                | Intrinsic::CreateThisLayout(_)
+                | Intrinsic::LayoutSet { .. }
                 | Intrinsic::ClassHeritage
                 | Intrinsic::InstanceOfValue
                 | Intrinsic::SuperGet
@@ -2176,8 +2212,9 @@ pub enum FnKind {
     Plain,
     /// A `function`: an own `prototype` object, `new` makes an object and calls the code.
     Ordinary,
-    /// A `function` that uses `new.target` (T38): like [`FnKind::Ordinary`], but `new` runs
-    /// `construct` (the `$code` shape `(self, new_target, args) -> jsval`), which passes it.
+    /// A `function` that uses `new.target` (T38) or stores `this` properties (T109: `this` made with room
+    /// for them): like [`FnKind::Ordinary`], but `new` runs `construct` (the `$code` shape
+    /// `(self, new_target, args) -> jsval`), which passes it.
     OrdinaryWith { construct: FuncId },
     /// A class: calling it throws (its code does), `new` runs `construct`, a function
     /// `(self, new_target, args) -> jsval` (the `$code` shape). Its `prototype` comes from

@@ -489,6 +489,25 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             }),
         );
     }
+    // T109: each layout's shared hash index (`object::layout_index`), immutable.
+    for keys in &module.layouts {
+        let units: Vec<Vec<u16>> = keys.iter().map(|k| k.encode_utf16().collect()).collect();
+        let idx = object::layout_index(&units);
+        let mut init: Vec<wasm_encoder::Instruction> =
+            idx.iter().map(|&e| wasm_encoder::Instruction::I32Const(e)).collect();
+        init.push(wasm_encoder::Instruction::ArrayNewFixed {
+            array_type_index: runtime::T_I32S,
+            array_size: idx.len() as u32,
+        });
+        globals.global(
+            GlobalType {
+                val_type: runtime::rt(false, runtime::T_I32S),
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::extended(init),
+        );
+    }
     // String and BigInt constants (T57): mutable globals holding a placeholder (the first one or
     // two globals here), filled by the start function (see `const_inits`).
     if !e.strings.is_empty() {
@@ -1283,9 +1302,14 @@ impl runtime::Cx for Emitter<'_> {
 
 impl Emitter<'_> {
     /// The global index of the first constant, after the placeholders.
+    /// T109: the global holding layout `l`'s shared index.
+    fn layout_global(&self, l: u32) -> u32 {
+        self.global_base + (self.m.globals.len() + self.shared.len()) as u32 + l
+    }
+
     fn const_base(&self) -> u32 {
         self.global_base
-            + (self.m.globals.len() + self.shared.len()) as u32
+            + (self.m.globals.len() + self.shared.len() + self.m.layouts.len()) as u32
             + 1
             + self.m.bigint as u32
     }
@@ -1888,6 +1912,26 @@ impl Emitter<'_> {
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::GetLength))));
                     return Ok(true);
                 }
+                if let (Intrinsic::LayoutDefine { layout, slot }, [obj, Expr::Str(units), value]) =
+                    (op, args.as_slice())
+                {
+                    // T109: as `DefineNamed` below, with the layout's index and the key's entry.
+                    self.expr(s, frames, obj)?;
+                    let g = runtime::Cx::string(self, units);
+                    s.global_get(g);
+                    self.expr(s, frames, value)?;
+                    s.i32_const(object::key_hash(units));
+                    s.global_get(self.layout_global(*layout));
+                    s.i32_const(*slot as i32);
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::LayoutDefine))));
+                    return Ok(false);
+                }
+                if let Intrinsic::NewObjectLayout(l) = op {
+                    s.i32_const(self.m.layouts[*l as usize].len() as i32);
+                    s.global_get(self.layout_global(*l));
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::NewObjectLayout))));
+                    return Ok(true);
+                }
                 if let (Intrinsic::DefineProp, [obj, Expr::Str(units), value]) =
                     (op, args.as_slice())
                     && object::named_key(units)
@@ -1900,6 +1944,31 @@ impl Emitter<'_> {
                     s.i32_const(object::key_hash(units));
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::DefineNamed))));
                     return Ok(false);
+                }
+                if let (Intrinsic::LayoutSet { layout, slot }, [obj, Expr::Str(units), value]) =
+                    (op, args.as_slice())
+                {
+                    // T109: as `SetNamed` below, with the layout's index and the key's entry.
+                    self.expr(s, frames, obj)?;
+                    let g = runtime::Cx::string(self, units);
+                    s.global_get(g);
+                    self.expr(s, frames, value)?;
+                    s.i32_const(object::key_hash(units));
+                    s.i32_const(self.set_sites as i32);
+                    self.set_sites += 1;
+                    s.i32_const(self.ic_sites as i32);
+                    self.ic_sites += 1;
+                    s.global_get(self.layout_global(*layout));
+                    s.i32_const(*slot as i32);
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::LayoutSet))));
+                    return Ok(false);
+                }
+                if let Intrinsic::CreateThisLayout(l) = op {
+                    self.expr(s, frames, &args[0])?;
+                    s.i32_const(self.m.layouts[*l as usize].len() as i32);
+                    s.global_get(self.layout_global(*l));
+                    s.call(self.helper_index(Helper::Js(H::Func(func::Helper::CreateThisLayout))));
+                    return Ok(true);
                 }
                 if let (Intrinsic::SetProp, [obj, Expr::Str(units), value]) = (op, args.as_slice())
                     && object::named_key(units)
@@ -2306,6 +2375,7 @@ impl Emitter<'_> {
                     Intrinsic::ProcessExit => H::Host(host::Helper::Exit),
                     Intrinsic::NewError(k) => H::Obj(object::Helper::NewError(*k)),
                     Intrinsic::NewObject => H::Obj(object::Helper::NewObject),
+                    Intrinsic::NewObjectSized => H::Obj(object::Helper::NewObjectSized),
                     Intrinsic::GetProp => H::Obj(object::Helper::Get),
                     Intrinsic::SetProp => H::Obj(object::Helper::Set),
                     Intrinsic::DefineProp => H::Obj(object::Helper::DefineProp),
@@ -2338,6 +2408,13 @@ impl Emitter<'_> {
                     Intrinsic::InstanceOf(b) => H::Obj(object::Helper::InstanceOf(*b)),
                     Intrinsic::ConstructList => H::Func(func::Helper::ConstructList),
                     Intrinsic::CreateThis => H::Func(func::Helper::CreateThis),
+                    Intrinsic::CreateThisSized => H::Func(func::Helper::CreateThisSized),
+                    Intrinsic::CreateThisLayout(_)
+                    | Intrinsic::LayoutSet { .. }
+                    | Intrinsic::NewObjectLayout(_)
+                    | Intrinsic::LayoutDefine { .. } => {
+                        unreachable!("emitted above")
+                    }
                     Intrinsic::ClassHeritage => H::Func(func::Helper::ClassHeritage),
                     Intrinsic::ClassSetup => H::Func(func::Helper::ClassSetup),
                     Intrinsic::InstanceOfValue => H::Func(func::Helper::InstanceOfValue),
