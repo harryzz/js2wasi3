@@ -229,9 +229,22 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     } else {
         0
     };
+    // T110: each key's distinct slots in the layouts that have it, in first-appearance order.
+    let mut layout_slots: HashMap<Vec<u16>, Vec<u32>> = HashMap::new();
+    for keys in &module.layouts {
+        for (i, k) in keys.iter().enumerate() {
+            let v = layout_slots.entry(k.encode_utf16().collect()).or_default();
+            if !v.contains(&(i as u32)) {
+                v.push(i as u32);
+            }
+        }
+    }
     let mut e = Emitter {
         scratch_f64: 0,
         scratch_js: 0,
+        scratch_obj: 0,
+        scratch_val: 0,
+        layout_slots,
         m: module,
         exits,
         imports: host::Imports {
@@ -948,6 +961,9 @@ enum Frame {
     Anon,
 }
 
+/// T110: the most slots a constant-key read tries inline (a key at more distinct slots calls `get_named`).
+const LAYOUT_GUESSES: usize = 3;
+
 struct Emitter<'m> {
     m: &'m ir::Module,
     /// The command uses `process.exit` or `process`'s at-exit hook (T55).
@@ -956,6 +972,11 @@ struct Emitter<'m> {
     scratch_f64: u32,
     /// A `jsval` local for inline sequences (T75).
     scratch_js: u32,
+    /// T110: a `(ref null $object)` and a second `jsval` local for the inline layout reads.
+    scratch_obj: u32,
+    scratch_val: u32,
+    /// T110: a key's distinct slots in the module's layouts.
+    layout_slots: HashMap<Vec<u16>, Vec<u32>>,
     imports: host::Imports,
     types: TypeSection,
     /// Runtime globals that come before the module's own (see `global_base`).
@@ -1455,8 +1476,12 @@ impl Emitter<'_> {
             .collect();
         locals.push((1, ValType::F64));
         locals.push((1, runtime::jsval()));
+        locals.push((1, runtime::rt(true, runtime::T_OBJECT)));
+        locals.push((1, runtime::jsval()));
         self.scratch_f64 = f.locals.len() as u32;
         self.scratch_js = self.scratch_f64 + 1;
+        self.scratch_obj = self.scratch_f64 + 2;
+        self.scratch_val = self.scratch_f64 + 3;
         let mut func = Function::new(locals);
         let mut frames = Vec::new();
         {
@@ -1897,6 +1922,53 @@ impl Emitter<'_> {
                     // T74: a constant key: no ToPropertyKey, no element paths, the hash from the build.
                     self.expr(s, frames, obj)?;
                     let g = runtime::Cx::string(self, units);
+                    // T110: a key some layout has: try its slots inline (an `$object` whose entry at a slot is
+                    // `k` holds its own `k` there; keys are unique), a data value as is; else the call.
+                    let slots = self.layout_slots.get(units).cloned().unwrap_or_default();
+                    if !slots.is_empty() && slots.len() <= LAYOUT_GUESSES {
+                        let (v, o, r) = (self.scratch_js, self.scratch_obj, self.scratch_val);
+                        s.local_set(v);
+                        s.block(BlockType::Result(runtime::jsval()));
+                        s.block(BlockType::Result(runtime::jsval()));
+                        s.local_get(v);
+                        s.br_on_cast_fail(
+                            0,
+                            wasm_encoder::RefType::EQREF,
+                            wasm_encoder::RefType {
+                                nullable: false,
+                                heap_type: runtime::object(),
+                            },
+                        );
+                        s.local_set(o);
+                        for &slot in &slots {
+                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_COUNT);
+                            s.i32_const(slot as i32).i32_gt_u();
+                            s.if_(BlockType::Empty);
+                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_KEYS);
+                            s.i32_const(slot as i32).array_get(runtime::T_KEYS);
+                            s.global_get(g).ref_eq();
+                            s.if_(BlockType::Empty);
+                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+                            s.i32_const(slot as i32).array_get(runtime::T_VALS).local_tee(r);
+                            s.ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
+                            s.local_get(r).global_get(runtime::G_BUILTIN).ref_eq();
+                            s.i32_or().i32_eqz();
+                            s.if_(BlockType::Empty);
+                            s.local_get(r).br(4);
+                            s.end();
+                            s.end();
+                            s.end();
+                        }
+                        s.local_get(v);
+                        s.end();
+                        s.global_get(g);
+                        s.i32_const(object::key_hash(units));
+                        s.i32_const(self.ic_sites as i32);
+                        self.ic_sites += 1;
+                        s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::GetNamed))));
+                        s.end();
+                        return Ok(true);
+                    }
                     s.global_get(g);
                     s.i32_const(object::key_hash(units));
                     s.i32_const(self.ic_sites as i32);
@@ -1977,8 +2049,54 @@ impl Emitter<'_> {
                     // T74: `o.k = v` with a constant key, as `GetNamed`.
                     self.expr(s, frames, obj)?;
                     let g = runtime::Cx::string(self, units);
-                    s.global_get(g);
-                    self.expr(s, frames, value)?;
+                    // T110: a key some layout has: write in place at one of its slots when the entry there is
+                    // `k` and a writable data property (T105's test, at a constant slot); else the call.
+                    let slots = self.layout_slots.get(units).cloned().unwrap_or_default();
+                    let inline = !slots.is_empty() && slots.len() <= LAYOUT_GUESSES;
+                    if inline {
+                        self.expr(s, frames, value)?;
+                        let (v, o, x) = (self.scratch_js, self.scratch_obj, self.scratch_val);
+                        s.local_set(x).local_set(v);
+                        s.block(BlockType::Empty);
+                        s.block(BlockType::Result(runtime::jsval()));
+                        s.local_get(v);
+                        s.br_on_cast_fail(
+                            0,
+                            wasm_encoder::RefType::EQREF,
+                            wasm_encoder::RefType {
+                                nullable: false,
+                                heap_type: runtime::object(),
+                            },
+                        );
+                        s.local_set(o);
+                        for &slot in &slots {
+                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_COUNT);
+                            s.i32_const(slot as i32).i32_gt_u();
+                            s.if_(BlockType::Empty);
+                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_KEYS);
+                            s.i32_const(slot as i32).array_get(runtime::T_KEYS);
+                            s.global_get(g).ref_eq();
+                            s.if_(BlockType::Empty);
+                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_ATTRS);
+                            s.i32_const(slot as i32).array_get_u(runtime::T_BYTES);
+                            s.i32_const(object::ACCESSOR | object::READONLY | object::WATCHED);
+                            s.i32_and().i32_eqz();
+                            s.if_(BlockType::Empty);
+                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+                            s.i32_const(slot as i32).local_get(x).array_set(runtime::T_VALS);
+                            s.br(4);
+                            s.end();
+                            s.end();
+                            s.end();
+                        }
+                        s.local_get(v);
+                        s.end();
+                        s.global_get(g);
+                        s.local_get(x);
+                    } else {
+                        s.global_get(g);
+                        self.expr(s, frames, value)?;
+                    }
                     s.i32_const(object::key_hash(units));
                     s.i32_const(self.set_sites as i32);
                     self.set_sites += 1;
@@ -1986,6 +2104,9 @@ impl Emitter<'_> {
                     s.i32_const(self.ic_sites as i32);
                     self.ic_sites += 1;
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
+                    if inline {
+                        s.end();
+                    }
                     return Ok(false);
                 }
                 if let (
