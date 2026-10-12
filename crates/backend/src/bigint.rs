@@ -1884,7 +1884,7 @@ fn to_numeric(cx: &mut dyn Cx) -> Function {
     s.test_object(V);
     s.if_(BlockType::Empty);
     s.local_get(V)
-        .ref_cast_non_null(runtime::object())
+        .cast_object()
         .i32_const(1)
         .call(to_primitive)
         .local_tee(V);

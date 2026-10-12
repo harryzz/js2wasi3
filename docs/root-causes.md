@@ -34,7 +34,10 @@ T110 with 3 exact tests before its inline cast lost half its gain (laptop: nbody
 - Costs now: knucleotide +7.2% under T110 (F409). Blocks: T110's inline sites (F405/F409), any inline object path
   (F359 inline caches), T111's cell test is safe (a final type).
 - Follow-ups: F409, F350, F360, F359 (part).
-- Root fix to find (T112 step 6): an object-kind test that never calls `is_subtype` and costs one compare on the
+- **Fixed by T113 (2026-10-12):** plain objects are a final `$plain`; every object test is a chain of exact compares
+  (`$plain` first), so no object test calls `is_subtype` (a-03: deltablue −8.6%, richards −8.1%, knucleotide −5.2%;
+  F409 closed). Left: F410–F413 (the chain's order and costs per kind).
+- Root fix (T112 step 6, done in T113): an object-kind test that never calls `is_subtype` and costs one compare on the
   plain-object path (e.g. a final type for plain objects with every generic site going through `object_or`, or a
   kind byte reachable without a cast); measured on hit and miss before use.
 

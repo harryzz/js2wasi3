@@ -911,6 +911,15 @@ The rules after T106–T110, where each speed fix made another program slower (`
   the build without the fast path.
 - **One gate before a speed commit**: `scripts/gate.sh <base-ref>`: the 18 programs (identical `.wasm` = no
   change; `slower`/`faster` when the minimum times differ by more than 2%) and the micro-benchmarks (more than
-  1 ns and 3%). Nothing slower, on the laptop first and on a-03 (ask) before the commit.
+  1 ns and 3%). Nothing slower, on the laptop first and on a-03 (ask) before the commit. Object tests (T113):
+  plain objects are the final `$plain`; `cast_object`/`is_object`/`object_or` classify by exact compares over
+  `OBJECT_KINDS`, never a cast to the non-final `$object`.
+- **A shared test changed for every value kind needs a micro case for every kind** (T113): the object test runs
+  in `==`, `+`, `typeof`, property access and BigInt code, so `tests/bench/micro/primitives.js` and
+  `object-kinds.js` cover null, undefined, booleans, numbers, strings, symbols, BigInts and each object kind. Two
+  forms of one test (`is_object`, `object_or`) must give every kind the same exits.
+- **Equal instructions = placement** (T113): the gate's `instr` column (`perf stat -e instructions:u`) tells a
+  slowdown from added work from one from code moving in memory (pidigits +5.3% at +0.01% instructions: its loops
+  left the uop cache). Placement isn't fixed by changing the test that moved it.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

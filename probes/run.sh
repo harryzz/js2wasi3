@@ -26,3 +26,8 @@ echo "10) T89 (F350): 50M calls through a funcref in a GC struct (call_ref) vs a
 wasm-tools parse funcref.wat -o out/funcref.wasm
 time wasmtime run --invoke run_struct out/funcref.wasm 2>/dev/null
 time wasmtime run --invoke run_table out/funcref.wasm 2>/dev/null
+echo "11) T113 (R1): 50M ref.test against a final vs a non-final struct type, hit and miss (the non-final misses call is_subtype)"
+wasm-tools parse casts.wat -o out/casts.wasm
+for c in final_hit final_miss_subtype final_miss_other final_miss_i31 nonfinal_exact nonfinal_subtype nonfinal_other nonfinal_i31; do
+  /usr/bin/time -f "   $c %es" wasmtime run --invoke $c out/casts.wasm >/dev/null
+done

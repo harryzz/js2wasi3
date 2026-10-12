@@ -314,7 +314,7 @@ fn format(cx: &mut dyn Cx) -> Function {
             s.call(concat);
             // Derived: ` extends Parent`.
             s.local_get(V)
-                .ref_cast_non_null(runtime::object())
+                .cast_object()
                 .struct_get(runtime::T_OBJECT, object::F_PROTO)
                 .local_tee(P);
             s.ref_test_non_null(func::function());
@@ -409,7 +409,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         // A function whose prototype is `Object.prototype` (`Function.prototype` itself, F47): node
         // names its constructor, `Object`.
         s.local_get(V)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .struct_get(runtime::T_OBJECT, object::F_PROTO)
             .global_get(runtime::G_PROTOS + js2wasi3_ir::Builtin::Object.index())
             .ref_eq();
@@ -418,7 +418,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         s.global_get(object_suffix).call(concat).local_set(B);
         s.end();
         s.local_get(V)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .call(own_keys)
             .array_len()
             .i32_const(0)
@@ -426,7 +426,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         s.local_get(DEPTH).i32_const(2).i32_le_s();
         s.i32_and();
         s.if_(BlockType::Result(string_ref()));
-        s.local_get(V).ref_cast_non_null(runtime::object());
+        s.local_get(V).cast_object();
         s.local_get(DEPTH).local_get(INDENT);
         s.local_get(B)
             .ref_as_non_null()
@@ -491,7 +491,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         let format = ih(cx, Helper::Format);
         let (stack, errors) = (cx.str("stack"), cx.str("errors"));
         let (errors_key, brace, rbrace) = (cx.str("[errors]: "), cx.str(" {"), cx.str("}"));
-        s.local_get(V).ref_cast_non_null(runtime::object());
+        s.local_get(V).cast_object();
         s.global_get(stack).call(own_get).local_set(STK);
         if cx.names("stack") {
             // T63: only a `stack` without frames counts (every error's can be a string then).
@@ -514,7 +514,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         s.local_get(V).call(to_string);
         s.end();
         s.call(concat).global_get(close).call(concat).local_set(B);
-        s.local_get(V).ref_cast_non_null(runtime::object());
+        s.local_get(V).cast_object();
         s.global_get(errors).call(own_get).local_tee(ERRS);
         s.ref_test_non_null(array::array());
         s.if_(BlockType::Empty);
@@ -543,7 +543,7 @@ fn format(cx: &mut dyn Cx) -> Function {
         s.global_get(close).call(concat).return_();
     }
     s.end();
-    s.local_get(V).ref_cast_non_null(runtime::object());
+    s.local_get(V).cast_object();
     s.local_get(DEPTH).local_get(INDENT);
     s.ref_null(string());
     s.call(f_object).return_();

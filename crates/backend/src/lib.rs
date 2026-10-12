@@ -64,6 +64,7 @@ use anyhow::{Context, bail};
 use js2wasi3_ir::{
     self as ir, AbiType, BinOp, Const, Expr, Intrinsic, LabelId, Stmt, Type, UnOp, visit_exprs,
 };
+use runtime::JsTest as _;
 use wasm_encoder::{
     BlockType, Catch, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
     Elements, ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType,
@@ -1963,7 +1964,7 @@ impl Emitter<'_> {
                             wasm_encoder::RefType::EQREF,
                             wasm_encoder::RefType {
                                 nullable: false,
-                                heap_type: runtime::object(),
+                                heap_type: wasm_encoder::HeapType::Concrete(runtime::T_PLAIN),
                             },
                         );
                         s.local_set(o);
@@ -2098,7 +2099,7 @@ impl Emitter<'_> {
                             wasm_encoder::RefType::EQREF,
                             wasm_encoder::RefType {
                                 nullable: false,
-                                heap_type: runtime::object(),
+                                heap_type: wasm_encoder::HeapType::Concrete(runtime::T_PLAIN),
                             },
                         );
                         s.local_set(o);
@@ -2225,7 +2226,7 @@ impl Emitter<'_> {
                                 s.ref_cast_non_null(func::function());
                             }
                             Intrinsic::ObjectDesc => {
-                                s.ref_cast_non_null(runtime::object());
+                                s.cast_object();
                             }
                             Intrinsic::ArrayPush => {
                                 s.ref_cast_non_null(array::array());

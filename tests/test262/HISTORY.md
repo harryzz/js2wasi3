@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-12: T113 a final type for plain objects (full run)
+
+- Compiler (`main` at db256bc + T113, uncommitted at the run): plain objects are a final `$plain`; every object
+  test and cast is a chain of exact compares (`cast_object`, `is_object`, `object_or`). Runner: unchanged.
+- Full run on `a-03` (`~/t262-t113.log`, 1,424 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-11: T109 layouts per allocation site (full run)
 
 - Compiler (`main` at 5e26a12 + T109, uncommitted at the run; the first T109 build, which gave layouts to every

@@ -104,11 +104,26 @@ pub const T_WRAPPER: u32 = 27;
 pub const T_STRBUF: u32 = 28;
 /// `$nums`: `(array (mut f64))`, the elements of an array in number mode (T107, see [`crate::array`]).
 pub const T_NUMS: u32 = 29;
+/// `$plain` (T113): a final subtype of `$object` with its fields, the type of every plain object (made by
+/// `object::alloc`). Every object is then one of the final types in [`OBJECT_KINDS`], so a test or cast can tell
+/// them apart with inline type compares only: wasmtime calls its `is_subtype` for a `ref.test`/`ref.cast` to a
+/// non-final type whenever the value isn't exactly that type (`probes/casts.wat`).
+pub const T_PLAIN: u32 = 30;
+/// T113: the block types of [`JsTest::cast_object`] and [`JsTest::is_object`]: `(eqref) -> (ref $object)`,
+/// `(eqref) -> i32` and `(eqref) -> eqref` (their chains take the value as a block parameter).
+pub const T_CAST_OBJECT: u32 = 31;
+pub const T_IS_OBJECT: u32 = 32;
+pub const T_NOT_OBJECT: u32 = 33;
 /// `$bigint`: a final `(array (mut i32))`, sign then magnitude limbs (T40, see [`crate::bigint`]).
 /// Only in a module that can make a BigInt ([`Cx::bigint`]): the last type of the group then.
-pub const T_BIGINT: u32 = 30;
+pub const T_BIGINT: u32 = 34;
 /// Number of runtime types before the function types (one more with `$bigint`).
-pub const TYPES: u32 = 30;
+pub const TYPES: u32 = 34;
+
+/// T113: the final object types, commonest first: every object is exactly one of them.
+pub const OBJECT_KINDS: [u32; 11] = [
+    T_PLAIN, T_ARRAY, T_FUNCTION, T_MAP, T_PROMISE, T_GENERATOR, T_TIMER, T_MAPITER, T_BUFFER, T_TYPED, T_WRAPPER,
+];
 
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
@@ -504,6 +519,11 @@ pub trait JsTest {
     fn test_string(&mut self, v: u32) -> &mut Self;
     /// Push "local `v` is an `$object`" (any object, including arrays and functions).
     fn test_object(&mut self, v: u32) -> &mut Self;
+    /// T113: the value on the stack (an `eqref`) as a `(ref $object)`: a `br_on_cast` to each of
+    /// [`OBJECT_KINDS`] (inline compares, `$plain` first); anything else is cast to `$object` and traps.
+    fn cast_object(&mut self) -> &mut Self;
+    /// T113: 1 if the value on the stack (an `eqref`) is an object, else 0: the [`OBJECT_KINDS`] chain.
+    fn is_object(&mut self) -> &mut Self;
 }
 
 impl JsTest for InstructionSink<'_> {
@@ -520,41 +540,63 @@ impl JsTest for InstructionSink<'_> {
     }
 
     fn test_object(&mut self, v: u32) -> &mut Self {
-        self.local_get(v).ref_test_non_null(HeapType::Abstract {
-            shared: false,
-            ty: wasm_encoder::AbstractHeapType::Struct,
-        });
-        self.if_(BlockType::Result(ValType::I32));
-        // The non-object structs a value can be, then the commonest objects, all exact final types.
-        self.local_get(v).ref_test_non_null(number());
-        self.local_get(v).ref_test_non_null(oddball());
-        self.i32_or();
-        self.if_(BlockType::Result(ValType::I32));
-        self.i32_const(0);
-        self.else_();
-        self.local_get(v).ref_test_non_null(HeapType::Concrete(T_FUNCTION));
-        self.local_get(v).ref_test_non_null(HeapType::Concrete(T_ARRAY));
-        self.i32_or();
-        self.if_(BlockType::Result(ValType::I32));
-        self.i32_const(1);
-        self.else_();
-        self.local_get(v).ref_test_non_null(object());
+        self.local_get(v).is_object()
+    }
+
+    fn cast_object(&mut self) -> &mut Self {
+        self.block(BlockType::FunctionType(T_CAST_OBJECT));
+        for t in OBJECT_KINDS {
+            self.br_on_cast(
+                0,
+                RefType::EQREF,
+                RefType {
+                    nullable: false,
+                    heap_type: HeapType::Concrete(t),
+                },
+            );
+        }
+        self.ref_cast_non_null(object());
+        self.end()
+    }
+
+    fn is_object(&mut self) -> &mut Self {
+        // `$plain` first (one compare for the commonest object, the same for any value), then a primitive leaves
+        // early as in `object_or` (not a struct: a small integer, string, symbol or BigInt; then a number box or
+        // an oddball), and only a struct that may be another object takes the rest of the chain.
+        let any_struct = RefType {
+            nullable: false,
+            heap_type: HeapType::Abstract {
+                shared: false,
+                ty: wasm_encoder::AbstractHeapType::Struct,
+            },
+        };
+        let to = |t: HeapType| RefType {
+            nullable: false,
+            heap_type: t,
+        };
+        self.block(BlockType::FunctionType(T_IS_OBJECT));
+        self.block(BlockType::FunctionType(T_CAST_OBJECT));
+        self.block(BlockType::FunctionType(T_NOT_OBJECT));
+        self.br_on_cast(1, RefType::EQREF, to(HeapType::Concrete(T_PLAIN)));
+        self.br_on_cast_fail(0, RefType::EQREF, any_struct);
+        self.br_on_cast(0, any_struct, to(number()));
+        self.br_on_cast(0, any_struct, to(oddball()));
+        for t in &OBJECT_KINDS[1..] {
+            self.br_on_cast(1, any_struct, to(HeapType::Concrete(*t)));
+        }
         self.end();
+        self.drop().i32_const(0).br(1);
         self.end();
-        self.else_();
-        self.i32_const(0);
+        self.drop().i32_const(1);
         self.end()
     }
 }
 
 /// Push local `v` as a `(ref $object)`, or run `not_object` (which must not fall through: it returns
 /// or branches out) when `v` isn't an object (T92). One chain does the test and the cast: the abstract
-/// `struct` test, the two non-object structs a value commonly is, then `br_on_cast` to the final
-/// `$function`, `$array` and `$map` and last to `$object`, which is inline for a plain object. A
-/// separate `ref.test`/`ref.cast (ref $object)` calls wasmtime's `is_subtype` for every object that
-/// isn't exactly `$object` (`$object` isn't final): twice per method call on a `Map`, an array or a
-/// function. The other final subtypes (promise, typed array, …) still take that call, in the last
-/// `br_on_cast`.
+/// `struct` test, the two non-object structs a value commonly is, then a `br_on_cast` to each of the
+/// final [`OBJECT_KINDS`] (T113), all inline compares. A `ref.test`/`ref.cast (ref $object)` would call
+/// wasmtime's `is_subtype` for every value that isn't exactly `$object` (`$object` isn't final).
 /// T112: the fast-path events a `build --count` module counts, in `G_COUNTS` order; printed at exit as
 /// `count <name> <n>`.
 pub const COUNTS: &[&str] = &[
@@ -631,7 +673,7 @@ pub fn object_or(s: &mut InstructionSink, v: u32, not_object: impl FnOnce(&mut I
     s.local_get(v).ref_test_non_null(oddball());
     s.i32_or().br_if(0);
     s.local_get(v);
-    for t in [T_FUNCTION, T_ARRAY, T_MAP, T_OBJECT] {
+    for t in OBJECT_KINDS {
         s.br_on_cast(
             1,
             RefType::EQREF,
@@ -947,6 +989,18 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
             StorageType::Val(ValType::F64),
             true,
         )))),
+        // $plain (T113): a plain object, final.
+        sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: object_fields.clone().into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ),
+        // The block types of `cast_object` and `is_object` (T113).
+        sub(CompositeInnerType::Func(wasm_encoder::FuncType::new([jsval()], [rt(false, T_OBJECT)]))),
+        sub(CompositeInnerType::Func(wasm_encoder::FuncType::new([jsval()], [ValType::I32]))),
+        sub(CompositeInnerType::Func(wasm_encoder::FuncType::new([jsval()], [jsval()]))),
     ];
     if bigint {
         group.push(sub(CompositeInnerType::Array(ArrayType(field(
@@ -3188,7 +3242,7 @@ fn describe(cx: &mut dyn Cx) -> Function {
         // An error whose `stack` has no frames (`Promise.any`'s, T25): node inspects it.
         let own_get = cx.helper(Helper::Obj(object::Helper::OwnGet));
         let stack = cx.str("stack");
-        s.local_get(V).ref_cast_non_null(object());
+        s.local_get(V).cast_object();
         s.global_get(stack).call(own_get).local_set(T);
         object::frameless_stack(cx, &mut s, V, T);
         s.if_(BlockType::Empty);
@@ -3207,7 +3261,7 @@ fn describe(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_tee(N).ref_as_non_null().array_len().local_set(LEN);
     s.local_get(V)
-        .ref_cast_non_null(object())
+        .cast_object()
         .call(ctor_name)
         .local_tee(C);
     s.ref_is_null();
@@ -3407,7 +3461,7 @@ fn js_less(cx: &mut dyn Cx, swap: bool, or_equal: bool) -> Function {
         s.test_object(v);
         s.if_(BlockType::Empty);
         s.local_get(v)
-            .ref_cast_non_null(object())
+            .cast_object()
             .i32_const(1)
             .call(to_primitive)
             .local_set(v);

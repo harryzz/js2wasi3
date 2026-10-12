@@ -28,7 +28,7 @@ use crate::object::{
 };
 use crate::runtime::{
     self, Cx, G_BUILTIN, G_FALSE, G_TRUE, G_UNDEFINED, T_ACCESSOR, T_ARRAY, T_BYTES, T_KEYS,
-    T_OBJECT, T_STRING, T_VALS, jsval, object, rt, string, string_ref,
+    T_OBJECT, T_STRING, T_VALS, jsval, rt, string, string_ref,
 };
 
 pub fn accessor() -> HeapType {
@@ -305,7 +305,7 @@ fn lazy_stack_set(cx: &mut dyn Cx, s: &mut InstructionSink, acc: u32, o: u32, k:
         .global_get(G_BUILTIN)
         .ref_eq();
     s.if_(BlockType::Empty);
-    s.local_get(o).ref_cast_non_null(runtime::object());
+    s.local_get(o).cast_object();
     s.local_get(k).ref_as_non_null();
     s.local_get(v).i32_const(object::HIDDEN).call(define);
     s.return_();
@@ -547,7 +547,7 @@ fn ctor_name(cx: &mut dyn Cx) -> Function {
     s.ref_test_non_null(func::function());
     s.if_(BlockType::Empty);
     s.local_get(C)
-        .ref_cast_non_null(object())
+        .cast_object()
         .global_get(name)
         .call(own)
         .local_set(N);
@@ -557,7 +557,7 @@ fn ctor_name(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     // node: only if the object is an instance of it (`C.prototype` on its chain).
     s.local_get(C)
-        .ref_cast_non_null(object())
+        .cast_object()
         .global_get(prototype)
         .call(own)
         .local_set(PP);
@@ -711,7 +711,7 @@ fn define_accessor(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_ACCESSOR)),
     ]);
     let mut s = f.instructions();
-    s.local_get(V).ref_cast_non_null(object()).local_set(O);
+    s.local_get(V).cast_object().local_set(O);
     s.local_get(KEY).call(to_key).local_set(K);
     s.local_get(O)
         .ref_as_non_null()
@@ -856,7 +856,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(non_object).call(throw);
     s.end();
-    s.local_get(OV).ref_cast_non_null(object()).local_set(O);
+    s.local_get(OV).cast_object().local_set(O);
     s.local_get(KEY).call(to_key).local_set(K);
     s.test_object(D).i32_eqz();
     s.if_(BlockType::Empty);
@@ -872,7 +872,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     for (i, key) in keys.iter().enumerate() {
         let bit = 1 << i;
         s.local_get(D)
-            .ref_cast_non_null(object())
+            .cast_object()
             .global_get(*key)
             .call(lookup)
             .ref_is_null()
@@ -918,7 +918,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(both);
     s.local_get(D)
-        .ref_cast_non_null(object())
+        .cast_object()
         .call(desc)
         .call(concat);
     s.call(throw);
@@ -1345,7 +1345,7 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
         s.end();
     };
     let field = |s: &mut InstructionSink, key: u32, value: &dyn Fn(&mut InstructionSink)| {
-        s.local_get(R).ref_cast_non_null(object()).global_get(key);
+        s.local_get(R).cast_object().global_get(key);
         value(s);
         s.i32_const(0).call(define);
     };
@@ -1357,7 +1357,7 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(G_UNDEFINED).return_();
     s.end();
-    s.local_get(V).ref_cast_non_null(object()).local_set(O);
+    s.local_get(V).cast_object().local_set(O);
     s.local_get(KEY).call(to_key).local_set(K);
     s.call(new_object).local_set(R);
     // The property's attributes (`A`) and slot (`X`): an array's index or `length` (T32), or an
@@ -1498,7 +1498,7 @@ fn integrity(op: u8) -> Function {
     s.if_(BlockType::Empty);
     s.local_get(V).return_();
     s.end();
-    s.local_get(V).ref_cast_non_null(object()).local_set(O);
+    s.local_get(V).cast_object().local_set(O);
     let mut flags = NO_EXTEND;
     if op >= 1 {
         flags |= SEALED;
@@ -1561,7 +1561,7 @@ fn test_integrity(op: u8, module: bool) -> Function {
     s.if_(BlockType::Empty);
     s.i32_const((op != 0) as i32).return_();
     s.end();
-    s.local_get(V).ref_cast_non_null(object()).local_set(O);
+    s.local_get(V).cast_object().local_set(O);
     s.local_get(O)
         .ref_as_non_null()
         .struct_get(T_OBJECT, F_CLASS)
@@ -1872,7 +1872,7 @@ fn super_set(cx: &mut dyn Cx) -> Function {
     s.local_get(K).ref_as_non_null().call(concat);
     s.global_get(close).call(concat).call(throw);
     s.end();
-    s.local_get(THIS).ref_cast_non_null(object()).local_set(O);
+    s.local_get(THIS).cast_object().local_set(O);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(P).ref_is_null().br_if(1);
     s.local_get(P)

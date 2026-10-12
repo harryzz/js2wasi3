@@ -357,7 +357,7 @@ fn hash(cx: &mut dyn Cx) -> Function {
     s.end();
     s.test_object(V);
     s.if_(BlockType::Empty);
-    s.local_get(V).ref_cast_non_null(runtime::object()).call(id);
+    s.local_get(V).cast_object().call(id);
     s.return_();
     s.end();
     if cx.bigint() {

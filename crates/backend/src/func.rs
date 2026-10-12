@@ -313,10 +313,10 @@ impl Helper {
                     s.local_get(NT).local_get(SELF).ref_eq().i32_eqz();
                     s.if_(BlockType::Empty);
                     s.local_get(NT).global_get(prototype).call(get).local_tee(P);
-                    s.ref_test_non_null(runtime::object());
+                    s.is_object();
                     s.if_(BlockType::Empty);
-                    s.local_get(E).ref_cast_non_null(runtime::object());
-                    s.local_get(P).ref_cast_non_null(runtime::object());
+                    s.local_get(E).cast_object();
+                    s.local_get(P).cast_object();
                     s.struct_set(T_OBJECT, object::F_PROTO);
                     s.end();
                     s.end();
@@ -584,7 +584,7 @@ fn create_this(cx: &mut dyn Cx, sized: bool) -> Function {
     // (`test_object`: no `is_subtype` libcall for the non-final `$object`, F350.)
     s.test_object(p);
     s.if_(BlockType::Result(rt(true, T_OBJECT)));
-    s.local_get(p).ref_cast_non_null(runtime::object());
+    s.local_get(p).cast_object();
     s.else_();
     s.call(obj_proto);
     s.end();
@@ -605,7 +605,7 @@ fn create_this_layout(cx: &mut dyn Cx) -> Function {
     s.local_get(0)
         .local_get(1)
         .call(sized)
-        .ref_cast_non_null(runtime::object())
+        .cast_object()
         .local_tee(O)
         .local_get(2)
         .struct_set(T_OBJECT, object::F_INDEX);
@@ -708,7 +708,7 @@ fn class_heritage(cx: &mut dyn Cx) -> Function {
         s.test_object(v);
         s.if_(BlockType::Result(runtime::string_ref()));
         s.local_get(v)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .call(desc);
         s.else_();
         s.local_get(v).call(to_string);
@@ -736,7 +736,7 @@ fn class_heritage(cx: &mut dyn Cx) -> Function {
     s.call(throw);
     s.end();
     s.local_get(V).global_get(prototype).call(get).local_tee(P);
-    s.ref_test_non_null(runtime::object());
+    s.is_object();
     s.local_get(P).global_get(G_NULL).ref_eq();
     s.i32_or().i32_eqz();
     s.if_(BlockType::Empty);
@@ -762,21 +762,21 @@ fn class_setup(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     s.local_get(PARENT).ref_test_non_null(function());
     s.if_(BlockType::Empty);
-    s.local_get(C).ref_cast_non_null(runtime::object());
-    s.local_get(PARENT).ref_cast_non_null(runtime::object());
+    s.local_get(C).cast_object();
+    s.local_get(PARENT).cast_object();
     s.struct_set(T_OBJECT, object::F_PROTO);
     s.end();
     s.i32_const(object::CLASS_PLAIN);
     s.test_object(PP);
     s.if_(BlockType::Result(rt(true, T_OBJECT)));
-    s.local_get(PP).ref_cast_non_null(runtime::object());
+    s.local_get(PP).cast_object();
     s.else_();
     s.ref_null(HeapType::Concrete(T_OBJECT));
     s.end();
     s.call(alloc).local_set(P);
     s.local_get(P).ref_as_non_null().global_get(constructor);
     s.local_get(C).i32_const(object::HIDDEN).call(define);
-    s.local_get(C).ref_cast_non_null(runtime::object());
+    s.local_get(C).cast_object();
     s.global_get(prototype).local_get(P);
     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
         .call(define);
@@ -941,9 +941,9 @@ fn error_ctor(cx: &mut dyn Cx, k: ErrorKind) -> Function {
     };
     s.global_get(name).i32_const(length).i32_const(0);
     s.call(new).local_tee(F);
-    s.ref_cast_non_null(runtime::object()).global_set(g);
+    s.cast_object().global_set(g);
     s.call(proto).local_set(P);
-    s.local_get(F).ref_cast_non_null(runtime::object());
+    s.local_get(F).cast_object();
     s.global_get(prototype).local_get(P);
     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
         .call(define);
@@ -1374,7 +1374,7 @@ fn set_name(cx: &mut dyn Cx) -> Function {
     const PREFIX: u32 = 2;
     let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.local_get(F).ref_cast_non_null(runtime::object());
+    s.local_get(F).cast_object();
     s.global_get(name);
     s.local_get(PREFIX).ref_cast_non_null(runtime::string());
     s.local_get(KEY).ref_test_non_null(runtime::symbol());
@@ -1475,9 +1475,9 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     s.ref_null(HeapType::Concrete(T_VALS));
     s.global_get(name).i32_const(length as i32).i32_const(0);
     s.call(new).local_tee(F);
-    s.ref_cast_non_null(runtime::object()).global_set(g);
+    s.cast_object().global_set(g);
     s.call(proto).local_set(P);
-    s.local_get(F).ref_cast_non_null(runtime::object());
+    s.local_get(F).cast_object();
     s.global_get(prototype).local_get(P);
     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
         .call(define);
@@ -1500,7 +1500,7 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
                 None => None,
             };
             s.local_get(F)
-                .ref_cast_non_null(runtime::object())
+                .cast_object()
                 .global_get(key);
             match value {
                 Some(h) => s.call(h),
@@ -1512,7 +1512,7 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     }
     for (key, code, len) in statics {
         s.local_get(F)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .global_get(key);
         s.i32_const(cx.code_slot(code));
         s.i32_const(-1);
@@ -1538,7 +1538,7 @@ pub(crate) fn define_constants(
     for (key, v) in constants {
         let key = cx.str(key);
         s.local_get(o)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .global_get(key);
         s.f64_const((*v).into()).call(box_);
         s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
@@ -1577,7 +1577,7 @@ fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
         Namespace::Reflect => object::CLASS_REFLECT,
     });
     s.call(obj_proto).call(alloc).local_tee(O);
-    s.ref_cast_non_null(runtime::object()).global_set(g);
+    s.cast_object().global_set(g);
     if ns == Namespace::Math {
         define_constants(cx, &mut s, O, &js2wasi3_ir::MATH_CONSTANTS);
     }
@@ -1586,7 +1586,7 @@ fn namespace(cx: &mut dyn Cx, ns: js2wasi3_ir::Namespace) -> Function {
     }
     for (key, code, len) in methods {
         s.local_get(O)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .global_get(key);
         s.i32_const(cx.code_slot(code));
         s.i32_const(-1);

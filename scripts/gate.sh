@@ -11,6 +11,9 @@
 # times differ by more than 2%; outputs must match node's). Micro-benchmarks: each case's minimum over the runs,
 # `slower`/`faster` when they differ by more than 1 ns and 3%. Minimums because noise only adds time.
 # The rule (docs/design.md, "Speed work"): nothing slower; a fast path's miss may not cost more than the old path.
+# Programs also get an `instr` column (instructions retired, base → new) when `perf` can count: on PATH, or
+# PERF=<path> (a-03: PERF=/usr/lib/linux-tools/5.15.0-198-generic/perf). Equal instructions with a slower time =
+# code placement, not added work (T113).
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,11 +21,11 @@ RUNS=5 OUT=$ROOT/out/gate
 while getopts "r:o:" o; do
   case $o in
     r) RUNS=$OPTARG ;; o) OUT=$OPTARG ;;
-    *) sed -n '2,13p' "$0"; exit 2 ;;
+    *) sed -n '2,16p' "$0"; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))
-[ $# -ge 1 ] || { sed -n '2,13p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,16p' "$0"; exit 2; }
 REF=$1; shift
 mkdir -p "$OUT" || exit 1
 OUT=$(cd "$OUT" && pwd)

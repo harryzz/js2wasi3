@@ -27,6 +27,7 @@ use crate::runtime::{
     self, Cx, G_UNDEFINED, T_BYTES, T_GENERATOR, T_I32S, T_KEYS, T_OBJECT, T_PROMISE, T_RESUME,
     T_VALS, TAG, jsval, rt,
 };
+use crate::runtime::JsTest as _;
 use crate::{func, object, promise};
 
 /// `yielded` of an `await` in an async generator (`Intrinsic::GenSuspend { awaiting }`).
@@ -170,7 +171,7 @@ pub fn is_async_gen(s: &mut InstructionSink, v: u32) {
     s.local_get(v).ref_test_non_null(generator::generator());
     s.if_(BlockType::Result(ValType::I32));
     s.local_get(v)
-        .ref_cast_non_null(runtime::object())
+        .cast_object()
         .struct_get(T_OBJECT, object::F_CLASS)
         .i32_const(object::CLASS_MASK)
         .i32_and()

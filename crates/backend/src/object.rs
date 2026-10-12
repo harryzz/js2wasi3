@@ -807,7 +807,7 @@ impl Helper {
                 s.if_(BlockType::Empty);
                 s.i32_const(1).return_();
                 s.end();
-                s.local_get(V).ref_cast_non_null(object()).global_get(key);
+                s.local_get(V).cast_object().global_get(key);
                 s.call(holder).local_tee(HD).ref_is_null();
                 s.if_(BlockType::Empty);
                 s.i32_const(1).return_();
@@ -882,7 +882,7 @@ pub fn is_error(s: &mut InstructionSink, v: u32) {
     s.test_object(v);
     s.if_(BlockType::Result(ValType::I32));
     s.local_get(v)
-        .ref_cast_non_null(object())
+        .cast_object()
         .struct_get(T_OBJECT, F_CLASS)
         .i32_const(CLASS_MASK)
         .i32_and()
@@ -895,7 +895,7 @@ pub fn is_error(s: &mut InstructionSink, v: u32) {
 
 /// Push local `v` (a jsval) cast to `(ref $object)`.
 pub fn as_obj(s: &mut InstructionSink, v: u32) {
-    s.local_get(v).ref_cast_non_null(object());
+    s.local_get(v).cast_object();
 }
 
 /// `for (i = 0; i < n; i++) body`, with `i` and `n` locals already holding values
@@ -1310,8 +1310,8 @@ fn layout_define(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     s.block(BlockType::Empty);
     // The literal's object (made by `new_object_layout`, an exact `$object`), its next layout key.
-    s.local_get(V).ref_test_non_null(runtime::object()).i32_eqz().br_if(0);
-    s.local_get(V).ref_cast_non_null(runtime::object()).local_tee(O);
+    s.local_get(V).is_object().i32_eqz().br_if(0);
+    s.local_get(V).cast_object().local_tee(O);
     s.struct_get(T_OBJECT, F_INDEX).local_get(IDX).ref_eq().i32_eqz().br_if(0);
     s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_get(SLOT).i32_ne().br_if(0);
     runtime::count(&mut s, on, "layout_define.fast");
@@ -2583,7 +2583,7 @@ fn alloc() -> Function {
     s.i32_const(0).array_new_default(T_BYTES);
     s.i32_const(0);
     s.ref_null(wasm_encoder::HeapType::Concrete(T_I32S));
-    s.struct_new(T_OBJECT);
+    s.struct_new(runtime::T_PLAIN);
     s.end();
     f
 }
@@ -2597,7 +2597,7 @@ fn alloc_sized() -> Function {
     s.local_get(2).array_new_default(T_BYTES);
     s.i32_const(0);
     s.ref_null(wasm_encoder::HeapType::Concrete(T_I32S));
-    s.struct_new(T_OBJECT);
+    s.struct_new(runtime::T_PLAIN);
     s.end();
     f
 }
@@ -2957,7 +2957,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             .local_set(M);
         if exec == Some(name) {
             s.local_get(M)
-                .ref_cast_non_null(object())
+                .cast_object()
                 .global_set(runtime::G_REGEXP_EXEC);
         }
         for key in keys {
@@ -3436,7 +3436,7 @@ fn key_text(cx: &mut dyn Cx, s: &mut InstructionSink, key: u32, to_key: u32) {
     let inspect = rh(cx, runtime::Helper::Inspect);
     s.test_object(key);
     s.if_(BlockType::Result(rt(false, T_STRING)));
-    s.local_get(key).ref_cast_non_null(object()).call(desc);
+    s.local_get(key).cast_object().call(desc);
     s.else_();
     s.local_get(key).ref_test_non_null(runtime::symbol());
     s.if_(BlockType::Result(rt(false, T_STRING)));
@@ -3887,7 +3887,7 @@ fn set_proto() -> Function {
     s.i32_const(1).global_set(runtime::G_INDEX_PROTO);
     s.end();
     // T90: a new prototype of a flagged object.
-    s.local_get(O).ref_test_non_null(object());
+    s.local_get(O).is_object();
     s.if_(BlockType::Empty);
     as_obj(&mut s, O);
     s.local_set(Q);
@@ -3897,7 +3897,7 @@ fn set_proto() -> Function {
     s.if_(BlockType::Empty);
     as_obj(&mut s, O);
     s.local_get(P)
-        .ref_cast_non_null(object())
+        .cast_object()
         .struct_set(T_OBJECT, F_PROTO);
     s.end();
     s.local_get(P).global_get(G_NULL).ref_eq();
@@ -4247,7 +4247,7 @@ fn for_in_keys(cx: &mut dyn Cx) -> Function {
     s.i32_const(0).array_new_default(T_KEYS).return_();
     s.end();
     s.i32_const(8).array_new_default(T_KEYS).local_set(OUT);
-    s.local_get(V).ref_cast_non_null(object()).local_set(O);
+    s.local_get(V).cast_object().local_set(O);
     s.block(BlockType::Empty).loop_(BlockType::Empty);
     s.local_get(O).ref_is_null().br_if(1);
     s.local_get(O)
@@ -4260,7 +4260,7 @@ fn for_in_keys(cx: &mut dyn Cx) -> Function {
         s.local_get(KS).local_get(I).array_get(T_KEYS).local_set(KK);
         // Shadowed by an object before O on the chain?
         s.i32_const(0).local_set(SEEN);
-        s.local_get(V).ref_cast_non_null(object()).local_set(Q);
+        s.local_get(V).cast_object().local_set(Q);
         s.block(BlockType::Empty).loop_(BlockType::Empty);
         s.local_get(Q).local_get(O).ref_eq().br_if(1);
         s.local_get(Q)
@@ -4955,7 +4955,7 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
             s.array_new_fixed(T_VALS, 1);
             s.global_get(to_primitive_key(cx));
             s.call(call_value).local_tee(R);
-            s.ref_test_non_null(object());
+            s.is_object();
             s.if_(BlockType::Empty);
             s.global_get(no_prim).call(throw);
             s.end();
@@ -5110,7 +5110,7 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
     s.i32_const(0).array_new_default(T_VALS);
     s.local_get(KEY).ref_as_non_null();
     s.call(call_value).local_tee(T);
-    s.ref_test_non_null(object()).i32_eqz();
+    s.is_object().i32_eqz();
     s.if_(BlockType::Empty);
     s.local_get(T).return_();
     s.end();
@@ -5661,7 +5661,7 @@ pub fn define_tag(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, tag: &str) {
         ),
     );
     let tag = cx.str(tag);
-    s.local_get(o).ref_cast_non_null(object());
+    s.local_get(o).cast_object();
     s.call(sym).ref_cast_non_null(string());
     s.global_get(tag);
     s.i32_const(HIDDEN | READONLY).call(define);

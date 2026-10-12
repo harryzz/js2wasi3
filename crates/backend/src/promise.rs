@@ -416,7 +416,7 @@ impl Helper {
                 s.global_get(G_QUEUE_MICROTASK).return_();
                 s.end();
                 native(cx, &mut s, new, code, None, name, 1);
-                s.ref_cast_non_null(runtime::object())
+                s.cast_object()
                     .global_set(G_QUEUE_MICROTASK);
                 s.global_get(G_QUEUE_MICROTASK);
                 s.end();
@@ -462,7 +462,7 @@ impl Helper {
                 s.test_object(V);
                 s.if_(BlockType::Empty);
                 s.local_get(V)
-                    .ref_cast_non_null(runtime::object())
+                    .cast_object()
                     .call(desc);
                 s.return_();
                 s.end();
@@ -669,17 +669,17 @@ fn ctor(cx: &mut dyn Cx) -> Function {
     s.ref_null(vals());
     s.global_get(name).i32_const(1).i32_const(0);
     s.call(new).local_tee(F);
-    s.ref_cast_non_null(runtime::object())
+    s.cast_object()
         .global_set(G_PROMISE_CTOR);
     s.call(proto).local_set(P);
-    s.local_get(F).ref_cast_non_null(runtime::object());
+    s.local_get(F).cast_object();
     s.global_get(prototype).local_get(P);
     s.i32_const(object::HIDDEN | object::READONLY | object::FIXED)
         .call(define);
     s.local_get(P).ref_as_non_null().global_get(constructor);
     s.local_get(F).i32_const(object::HIDDEN).call(define);
     for (code, name, len) in statics {
-        s.local_get(F).ref_cast_non_null(runtime::object());
+        s.local_get(F).cast_object();
         s.global_get(name);
         native(cx, &mut s, new, code, None, name, len);
         s.i32_const(object::HIDDEN).call(define);
@@ -701,10 +701,10 @@ fn proto_from_new_target(cx: &mut dyn Cx, s: &mut InstructionSink, p: u32, tmp: 
         .global_get(prototype)
         .call(get)
         .local_tee(tmp);
-    s.ref_test_non_null(runtime::object());
+    s.is_object();
     s.if_(BlockType::Empty);
-    s.local_get(p).ref_cast_non_null(runtime::object());
-    s.local_get(tmp).ref_cast_non_null(runtime::object());
+    s.local_get(p).cast_object();
+    s.local_get(tmp).cast_object();
     s.struct_set(T_OBJECT, object::F_PROTO);
     s.end();
     s.end();
@@ -1419,7 +1419,7 @@ fn any_reject(cx: &mut dyn Cx) -> Function {
     s.local_get(STATE).i32_const(0).array_get(T_VALS);
     s.global_get(msg).global_get(G_UNDEFINED);
     s.call(new_error).local_tee(E);
-    s.ref_cast_non_null(runtime::object()).global_get(stack);
+    s.cast_object().global_get(stack);
     s.global_get(header).i32_const(object::HIDDEN).call(define);
     s.local_get(STATE).i32_const(3).array_get(T_VALS);
     s.global_get(G_UNDEFINED);
@@ -1686,14 +1686,14 @@ fn check_callback(cx: &mut dyn Cx) -> Function {
         s.test_object(CB);
         s.if_(BlockType::Result(string_ref()));
         s.local_get(CB)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .call(ctor_name)
             .local_tee(N)
             .ref_is_null();
         s.if_(BlockType::Result(string_ref()));
         // `Object` and `Array` aren't function objects yet (F47).
         s.local_get(CB)
-            .ref_cast_non_null(runtime::object())
+            .cast_object()
             .struct_get(T_OBJECT, object::F_PROTO)
             .ref_is_null();
         s.if_(BlockType::Result(string_ref()));
@@ -1759,7 +1759,7 @@ fn throw_arg_type(cx: &mut dyn Cx) -> Function {
         .call(new_error)
         .local_set(E);
     s.global_get(code).array_new_fixed(T_VALS, 1).local_set(ENV);
-    s.local_get(E).ref_cast_non_null(runtime::object());
+    s.local_get(E).cast_object();
     s.global_get(to_string_key);
     native(cx, &mut s, new, to_string, Some(ENV), to_string_key, 0);
     s.i32_const(object::HIDDEN).call(define);

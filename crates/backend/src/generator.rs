@@ -25,6 +25,7 @@ use crate::runtime::{
     self, Cx, G_FALSE, G_TRUE, G_UNDEFINED, T_BYTES, T_GENERATOR, T_I32S, T_ITER, T_KEYS, T_RESUME,
     T_VALS, TAG, jsval, rt,
 };
+use crate::runtime::JsTest as _;
 use crate::{func, iter, object, promise};
 
 /// `$generator` field indices after the object's.
@@ -373,7 +374,7 @@ fn delegate_step(cx: &mut dyn Cx) -> Function {
     s.local_get(MODE).i32_const(RESUME_NEXT).i32_eq();
     s.typed_select(runtime::string_ref());
     s.call(call_value).local_tee(R);
-    s.ref_test_non_null(runtime::object()).i32_eqz();
+    s.is_object().i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(result_s);
     s.local_get(R).call(inspect).call(concat);

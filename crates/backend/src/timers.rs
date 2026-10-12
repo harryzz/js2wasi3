@@ -35,6 +35,7 @@ use crate::runtime::{
     G_TIMER_ID, G_TIMERS, G_TIMERS_N, G_TRUE, G_UNDEFINED, T_BYTES, T_I32S, T_KEYS, T_TIMER,
     T_VALS, jsval, rt,
 };
+use crate::runtime::JsTest as _;
 use crate::{func, object, promise};
 
 /// `$timer` field indices after the object's.
@@ -160,7 +161,7 @@ impl Helper {
                 s.end();
                 // node: setTimeout.length is 1 (callback), the clear functions' 1 (timer).
                 promise::native(cx, &mut s, new, code, None, name, 1);
-                s.ref_cast_non_null(runtime::object()).global_set(g);
+                s.cast_object().global_set(g);
                 s.global_get(g);
                 s.end();
                 f

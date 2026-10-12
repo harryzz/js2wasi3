@@ -17,6 +17,9 @@
 #       `runs` times each; `slower`/`faster` when the minimums differ by more than 2% (noise only adds time, so
 #       the minimum is the measure), else `same`.
 #       Outputs must match node's first run. Details in <outdir>/gate.tsv.
+#       With `perf` (on PATH, or $PERF): one more run of each under `perf stat -e instructions:u`, the `instr`
+#       column: a time change with an instruction change under 0.5% is code placement (the same work, run from
+#       another address; T113: pidigits +5.5% at equal instructions), not work the change added.
 # Each program is built once (`js2wasi3 build` with the release compiler, `wasmtime compile`; not timed) and then
 # run as `wasmtime run -Sp3 --allow-precompiled x.cwasm`, the same source as `node x.js`; wall time from outside.
 # Outputs (stdout, stderr, exit status of the first run) must be equal bytes, else the row says DIFF.
@@ -64,6 +67,11 @@ OUT=$(cd "$OUT" && pwd)
 echo '{"type":"commonjs"}' >"$OUT/package.json"
 (cd "$ROOT" && cargo build --release -q -p js2wasi3) || exit 1
 J=$ROOT/target/release/js2wasi3
+# perf for the gate's instruction counts: $PERF, else `perf` on PATH if it can count (perf stat needs the full
+# path of what it runs).
+PERF=${PERF:-$(command -v perf || true)}
+[ -n "$PERF" ] && ! "$PERF" stat -x, -e instructions:u true >/dev/null 2>&1 && PERF=
+WASMTIME=$(command -v wasmtime)
 
 now_ns() { date +%s%N; }
 ms() { echo $((($2 - $1) / 1000000)); }
@@ -88,7 +96,7 @@ source_of() {
 if [ -n "$COUNT" ]; then
   printf 'program\tcounter\tn\n' >"$OUT/counts.tsv"
 elif [ -n "$BASE" ]; then
-  printf '| program | base min ms | new min ms | change (min) | verdict | output |\n|---|---|---|---|---|---|\n'
+  printf '| program | base min ms | new min ms | change (min) | verdict | instr | output |\n|---|---|---|---|---|---|---|\n'
   printf 'program\tbase_ms\tnew_ms\tverdict\tsame\n' >"$OUT/gate.tsv"
 else
   printf '| program | argument / input | node min (median) s | js2wasi3 min (median) s | ratio (min) | output | .wasm KB |\n'
@@ -117,10 +125,10 @@ for name in "$@"; do
   if [ -n "$BASE" ]; then
     if ! "$BASE" build "$OUT/$name.js" -o "$OUT/$name.base.wasm" >>"$OUT/$name.build" 2>&1 ||
        ! wasmtime compile "${GC[@]}" "$OUT/$name.base.wasm" -o "$OUT/$name.base.cwasm" 2>>"$OUT/$name.build"; then
-      printf '| %s%s | base build fails | | | | |\n' "$name" "$mark"; continue
+      printf '| %s%s | base build fails | | | | | |\n' "$name" "$mark"; continue
     fi
     if cmp -s "$OUT/$name.wasm" "$OUT/$name.base.wasm"; then
-      printf '| %s%s | | | | identical | |\n' "$name" "$mark"
+      printf '| %s%s | | | | identical | | |\n' "$name" "$mark"
       printf '%s\t\t\tidentical\t\n' "$name" >>"$OUT/gate.tsv"; continue
     fi
     (cd "$OUT" && env -u FORCE_COLOR timeout "$TIMEOUT" node "$name.js" $arg <"$stdin" >"$OUT/$name.node.out" 2>&1; echo "exit $?" >>"$OUT/$name.node.out")
@@ -144,8 +152,19 @@ for name in "$@"; do
             wmin = wmax = w[1]; for (i in w) { if (w[i] < wmin) wmin = w[i]; if (w[i] > wmax) wmax = w[i] }
             v = (wmin > bmin * 1.02) ? "slower" : (wmin < bmin * 0.98) ? "faster" : "same"; print bmin, wmin, v }')
     pct=$(awk -v b="$bmin" -v w="$wmin" 'BEGIN { printf "%+.1f%%", 100 * (w - b) / b }')
-    printf '| %s%s | %s | %s | %s | %s | %s |\n' "$name" "$mark" "$bmin" "$wmin" "$pct" "$verdict" "$same"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "${bt[*]}" "${wt[*]}" "$verdict" "$same" >>"$OUT/gate.tsv"
+    ipct=
+    if [ -n "$PERF" ]; then
+      for v in base new; do
+        c=$name.cwasm; [ $v = base ] && c=$name.base.cwasm
+        n=$(cd "$OUT" && timeout "$TIMEOUT" "$PERF" stat -x, -e instructions:u -o "$OUT/$name.$v.instr" \
+          "$WASMTIME" run "${GC[@]}" -Sp3 --allow-precompiled --dir "$OUT::/" "$c" $arg <"$stdin" >/dev/null 2>&1;
+          grep instructions "$OUT/$name.$v.instr" | cut -d, -f1)
+        [ $v = base ] && bi=$n || wi=$n
+      done
+      ipct=$(awk -v b="$bi" -v w="$wi" 'BEGIN { if (b > 0 && w > 0) printf "%+.2f%%", 100 * (w - b) / b; else print "?" }')
+    fi
+    printf '| %s%s | %s | %s | %s | %s | %s | %s |\n' "$name" "$mark" "$bmin" "$wmin" "$pct" "$verdict" "$ipct" "$same"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "${bt[*]}" "${wt[*]}" "$verdict" "$same" "$ipct" >>"$OUT/gate.tsv"
     continue
   fi
   if [ -n "$COUNT" ]; then

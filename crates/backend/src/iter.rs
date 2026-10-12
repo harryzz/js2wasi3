@@ -276,7 +276,7 @@ fn async_open(cx: &mut dyn Cx) -> Function {
     s.local_get(M).local_get(V);
     empty_args(&mut s);
     s.global_get(what).call(call_value).local_tee(IT);
-    s.ref_test_non_null(runtime::object()).i32_eqz();
+    s.is_object().i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(not_obj).call(throw);
     s.end();
@@ -407,7 +407,7 @@ fn open(cx: &mut dyn Cx) -> Function {
     s.local_get(M).local_get(V);
     empty_args(&mut s);
     s.global_get(method).call(call_value).local_tee(IT);
-    s.ref_test_non_null(runtime::object()).i32_eqz();
+    s.is_object().i32_eqz();
     s.if_(BlockType::Empty);
     s.global_get(not_obj).call(throw);
     s.end();
@@ -650,7 +650,7 @@ fn step(cx: &mut dyn Cx) -> Function {
     s.struct_get(T_ITER, F_OBJ);
     empty_args(&mut s);
     s.global_get(next).call(call_value).local_tee(R);
-    s.ref_test_non_null(runtime::object()).i32_eqz();
+    s.is_object().i32_eqz();
     s.if_(BlockType::Empty);
     it(&mut s, IT);
     s.i32_const(DONE).struct_set(T_ITER, F_KIND);
@@ -882,7 +882,7 @@ fn next(cx: &mut dyn Cx) -> Function {
     s.test_object(THIS);
     s.if_(BlockType::Empty);
     s.local_get(THIS)
-        .ref_cast_non_null(runtime::object())
+        .cast_object()
         .global_get(runtime::G_SYM_STATE)
         .call(own)
         .local_set(ST);
