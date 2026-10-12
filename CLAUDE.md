@@ -21,7 +21,9 @@ T101 (the Node.js compatibility page, `scripts/compat.mjs`, https://harryzz.gith
 `set_named`: nbody −14%, richards −11%) is done. T106 (`let x;` stays `f64`: spectralnorm −32%) is done. T107 (F391: number arrays
 unboxed: spectralnorm −49%, navier-stokes −19%) is done. T108 (F401: element reads in a `+`
 under a numeric consumer unboxed: navier-stokes −47%) is done. T109 (F392, object layouts per
-allocation site: splay −27%, binarytrees −26%, earley-boyer −24%, replay −1.2%) is done. T110 (F405, layout reads/writes inline) is paused: knucleotide +7.2% (F409), code uncommitted in the working tree. Next task: T111 (F406, number fields unboxed; `tasks/T111-number-fields.md`, not started).
+allocation site: splay −27%, binarytrees −26%, earley-boyer −24%, replay −1.2%) is done. T110 (F405, layout reads/writes inline) is paused: knucleotide +7.2% (F409), code uncommitted in the working tree. T111 (F406, number fields unboxed) is paused before implementation. T112 (root-cause map `docs/root-causes.md`, `build --count`, `scripts/gate.sh`, rules in `docs/design.md` "Speed work") is done. Next task: T113 (R1, a plain-object test without `is_subtype`; `tasks/T113-plain-object-test.md`), in progress. Every speed change goes through `scripts/gate.sh`.
+**User, 2026-10-12: all comparisons and data only from the standard tests and benchmarks (fixtures, test262, the 18
+programs of `tests/bench`, micro-benchmarks).**
 
 ## Rules
 - Stay inside the task's scope. Record anything left for later (in the task file and in the Follow-ups table of `tasks/README.md`); don't implement it.

@@ -991,6 +991,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwnNamed);
     let append = h(cx, Helper::AppendNamed);
     let store = h(cx, Helper::IcStore);
+    let on = cx.counting();
     const V: u32 = 0;
     const K: u32 = 1;
     const X: u32 = 2;
@@ -1010,6 +1011,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
     let mut s = f.instructions();
     // Not an object: the generic `set` (T93: one test-and-cast chain, as in `get_named`).
     runtime::object_or(&mut s, V, |s| {
+        runtime::count(s, on, "set_named.not_object");
         s.local_get(V).local_get(K).local_get(X).call(set);
         s.return_();
     });
@@ -1035,6 +1037,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
         .i32_const(ACCESSOR | READONLY | WATCHED)
         .i32_and()
         .br_if(0);
+    runtime::count(&mut s, on, "set_named.guess_hit");
     s.local_get(O)
         .struct_get(T_OBJECT, F_VALS)
         .local_get(E)
@@ -1055,6 +1058,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
             .i32_and()
             .i32_eqz();
         s.if_(BlockType::Empty);
+        runtime::count(&mut s, on, "set_named.own");
         s.local_get(ICS).local_get(E).call(store);
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
@@ -1101,6 +1105,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
             .ref_eq()
             .i32_eqz()
             .br_if(0);
+        runtime::count(&mut s, on, "set_named.add_cached");
         s.local_get(O)
             .ref_as_non_null()
             .local_get(K)
@@ -1112,6 +1117,7 @@ fn set_named(cx: &mut dyn Cx) -> Function {
         s.end();
     }
     s.end();
+    runtime::count(&mut s, on, "set_named.other");
     s.local_get(O)
         .ref_as_non_null()
         .local_get(K)
@@ -1148,6 +1154,7 @@ const SHARED_INDEX: i32 = 64;
 /// `layout_set(v, k, x, hash, site, ics, index, slot)` (see [`Helper::LayoutSet`]).
 fn layout_set(cx: &mut dyn Cx) -> Function {
     let set_named = h(cx, Helper::SetNamed);
+    let on = cx.counting();
     const V: u32 = 0;
     const K: u32 = 1;
     const X: u32 = 2;
@@ -1212,6 +1219,7 @@ fn layout_set(cx: &mut dyn Cx) -> Function {
             .i32_eqz()
             .br_if(1);
         layout_changed(&mut s, O);
+        runtime::count(&mut s, on, "layout_set.add");
         // The arrays have the layout's size (a `grow` drops the shared index); attributes are 0.
         s.local_get(O)
             .struct_get(T_OBJECT, F_KEYS)
@@ -1249,6 +1257,7 @@ fn layout_set(cx: &mut dyn Cx) -> Function {
         .i32_const(ACCESSOR | READONLY | WATCHED)
         .i32_and()
         .br_if(0);
+    runtime::count(&mut s, on, "layout_set.overwrite");
     s.local_get(O)
         .struct_get(T_OBJECT, F_VALS)
         .local_get(SLOT)
@@ -1256,6 +1265,7 @@ fn layout_set(cx: &mut dyn Cx) -> Function {
         .array_set(T_VALS);
     s.return_();
     s.end();
+    runtime::count(&mut s, on, "layout_set.fallback");
     s.local_get(V)
         .local_get(K)
         .local_get(X)
@@ -1288,6 +1298,7 @@ fn new_object_layout(cx: &mut dyn Cx) -> Function {
 /// `layout_define(o, k, x, hash, index, slot)` (see [`Helper::LayoutDefine`]).
 fn layout_define(cx: &mut dyn Cx) -> Function {
     let define_named = h(cx, Helper::DefineNamed);
+    let on = cx.counting();
     const V: u32 = 0;
     const K: u32 = 1;
     const X: u32 = 2;
@@ -1303,6 +1314,7 @@ fn layout_define(cx: &mut dyn Cx) -> Function {
     s.local_get(V).ref_cast_non_null(runtime::object()).local_tee(O);
     s.struct_get(T_OBJECT, F_INDEX).local_get(IDX).ref_eq().i32_eqz().br_if(0);
     s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_get(SLOT).i32_ne().br_if(0);
+    runtime::count(&mut s, on, "layout_define.fast");
     s.local_get(O)
         .struct_get(T_OBJECT, F_KEYS)
         .local_get(SLOT)
@@ -1320,6 +1332,7 @@ fn layout_define(cx: &mut dyn Cx) -> Function {
         .struct_set(T_OBJECT, F_COUNT);
     s.return_();
     s.end();
+    runtime::count(&mut s, on, "layout_define.fallback");
     s.local_get(V)
         .local_get(K)
         .local_get(X)
@@ -1512,6 +1525,7 @@ fn get_named(cx: &mut dyn Cx) -> Function {
     let get = h(cx, Helper::Get);
     let sproto = h(cx, Helper::Proto(Builtin::String));
     let value = rh(cx, runtime::Helper::Prop(props::Helper::Value));
+    let on = cx.counting();
     const V: u32 = 0;
     const K: u32 = 1;
     const H: u32 = 2;
@@ -1530,6 +1544,7 @@ fn get_named(cx: &mut dyn Cx) -> Function {
     // Not an object: a string's methods come from `String.prototype` (a constant key is never
     // `length` or an index); anything else through `get`.
     runtime::object_or(&mut s, V, |s| {
+        runtime::count(s, on, "get_named.not_object");
         runtime::is_string(s, V);
         s.if_(BlockType::Result(jsval()));
         s.call(sproto);
@@ -1558,6 +1573,7 @@ fn get_named(cx: &mut dyn Cx) -> Function {
             .local_get(K)
             .ref_eq();
         s.if_(BlockType::Empty);
+        runtime::count(&mut s, on, "get_named.guess_hit");
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
             .local_get(E)
@@ -1584,12 +1600,14 @@ fn get_named(cx: &mut dyn Cx) -> Function {
             .local_tee(E);
         s.i32_const(0).i32_ge_s();
         s.if_(BlockType::Result(jsval()));
+        runtime::count(&mut s, on, "get_named.own");
         s.local_get(SITE).local_get(E).call(store);
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
             .local_get(E)
             .array_get(T_VALS);
         s.else_();
+        runtime::count(&mut s, on, "get_named.proto_or_absent");
         s.local_get(O).struct_get(T_OBJECT, F_PROTO);
         s.local_get(K).local_get(H).call(lookup);
         s.end();
@@ -2143,6 +2161,7 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     let index = h(cx, Helper::ArrayIndex);
     let grow = h(cx, Helper::Grow);
     let reindex = h(cx, Helper::Reindex);
+    let on = cx.counting();
     let hash = h(cx, Helper::Hash);
     const O: u32 = 0;
     const K: u32 = 1;
@@ -2271,6 +2290,7 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
             .i32_add()
             .i32_eq();
         s.if_(BlockType::Empty);
+        runtime::count(&mut s, on, "define.shared_kept");
         s.return_();
         s.end();
         s.local_get(idx).local_get(i).array_get(T_I32S).i32_eqz().br_if(1);
@@ -2284,6 +2304,7 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
             .i32_and()
             .local_set(i);
         s.br(0).end().end();
+        runtime::count(&mut s, on, "define.shared_dropped");
         s.local_get(O)
             .ref_null(wasm_encoder::HeapType::Concrete(T_I32S))
             .struct_set(T_OBJECT, F_INDEX);

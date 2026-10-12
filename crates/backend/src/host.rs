@@ -327,6 +327,8 @@ pub enum Helper {
     Flush,
     /// `(v: jsval)`: report an uncaught exception: `Uncaught <describe(v)>` to stderr, `run` fails.
     Uncaught,
+    /// `()` (T112): print the fast-path counters to stderr (`build --count`).
+    Counts,
     /// `(text: (ref $string))`: `Uncaught <text>` to stderr, `run` fails.
     Report,
     /// `() -> i32`: the event loop's next step: wait for timers, or [`Helper::Flush`].
@@ -368,6 +370,7 @@ impl Helper {
             Helper::Step(_) => "step_stderr",
             Helper::Flush => "flush",
             Helper::Uncaught => "uncaught",
+            Helper::Counts => "counts",
             Helper::Report => "report_uncaught",
             Helper::Loop => "event_loop",
             Helper::Tick => "timers_tick",
@@ -389,6 +392,7 @@ impl Helper {
             Helper::Append(_) => (vec![runtime::string_ref()], vec![]),
             Helper::Advance(_) | Helper::Closed(_) => (vec![I32], vec![]),
             Helper::Uncaught => (vec![runtime::jsval()], vec![]),
+            Helper::Counts => (vec![], vec![]),
             Helper::Report => (vec![runtime::string_ref()], vec![]),
             Helper::Pump(_) | Helper::Step(_) | Helper::Flush | Helper::Loop | Helper::Run => {
                 (vec![], vec![I32])
@@ -528,6 +532,7 @@ impl Helper {
                 const ST: u32 = 1;
                 let exits = cx.exits();
                 let at_exit = cx.process_at_exit().is_some().then(|| cx.helper(runtime::Helper::Host(Helper::AtExit)));
+                let counts = cx.counting().then(|| cx.helper(runtime::Helper::Host(Helper::Counts)));
                 let mut f = Function::new([(1, ValType::I64), (1, ValType::I32)]);
                 let mut s = f.instructions();
                 s.loop_(BlockType::Empty);
@@ -598,8 +603,35 @@ impl Helper {
                 if let Some(at_exit) = at_exit {
                     s.call(at_exit);
                 }
+                if let Some(counts) = counts {
+                    s.call(counts);
+                }
                 s.call(disarm);
                 s.call(flush);
+                s.end();
+                f
+            }
+            Helper::Counts => {
+                // T112: `count <name> <n>` per counter to stderr (when any was counted).
+                let concat = cx.helper(runtime::Helper::Concat);
+                let append = cx.helper(runtime::Helper::Host(Helper::Append(1)));
+                let to_string =
+                    cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+                let newline = cx.str("\n");
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.global_get(runtime::G_COUNTS).ref_is_null();
+                s.if_(BlockType::Empty);
+                s.return_();
+                s.end();
+                for (k, name) in runtime::COUNTS.iter().enumerate() {
+                    let label = cx.str(&format!("count {name} "));
+                    s.global_get(label);
+                    s.global_get(runtime::G_COUNTS).i32_const(k as i32).array_get(runtime::T_NUMS);
+                    s.call(to_string).call(concat);
+                    s.global_get(newline).call(concat);
+                    s.call(append);
+                }
                 s.end();
                 f
             }

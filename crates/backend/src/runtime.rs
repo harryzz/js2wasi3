@@ -214,8 +214,10 @@ pub const G_HASH_VAL: u32 = G_HASH_KEY + 1;
 /// `object::Helper::TypedLengthSnapshot`), then two cached prototypes with the `G_EPOCH` at which their chain to
 /// `%TypedArray%.prototype` had no other `length` (`[2]`, `[3]` and `[4]`, `[5]`; `object::Helper::TypedLengthFill`).
 pub const G_TLEN: u32 = G_HASH_VAL + 1;
+/// `(mut (ref null $nums))` (T112): the fast-path counters (exact to 2^53) of a `build --count` module ([`COUNTS`]); null otherwise.
+pub const G_COUNTS: u32 = G_TLEN + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_TLEN + 1;
+pub const GLOBALS: u32 = G_COUNTS + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -422,6 +424,10 @@ pub trait Cx {
     fn exits(&mut self) -> bool {
         false
     }
+    /// `build --count` (T112): emit the fast-path counters ([`count`]).
+    fn counting(&mut self) -> bool {
+        false
+    }
     /// The prelude's `$$processAtExit(status)` (T55): its function index, and whether it returns
     /// a value.
     fn process_at_exit(&mut self) -> Option<(u32, bool)> {
@@ -549,6 +555,68 @@ impl JsTest for InstructionSink<'_> {
 /// isn't exactly `$object` (`$object` isn't final): twice per method call on a `Map`, an array or a
 /// function. The other final subtypes (promise, typed array, …) still take that call, in the last
 /// `br_on_cast`.
+/// T112: the fast-path events a `build --count` module counts, in `G_COUNTS` order; printed at exit as
+/// `count <name> <n>`.
+pub const COUNTS: &[&str] = &[
+    "get_named.guess_hit",
+    "get_named.own",
+    "get_named.proto_or_absent",
+    "get_named.not_object",
+    "set_named.guess_hit",
+    "set_named.own",
+    "set_named.add_cached",
+    "set_named.other",
+    "set_named.not_object",
+    "inline_read.hit",
+    "inline_read.miss_not_object",
+    "inline_read.miss_subtype",
+    "inline_read.miss_plain",
+    "inline_write.hit",
+    "inline_write.miss_not_object",
+    "inline_write.miss_subtype",
+    "inline_write.miss_plain",
+    "layout_set.add",
+    "layout_set.overwrite",
+    "layout_set.fallback",
+    "layout_define.fast",
+    "layout_define.fallback",
+    "define.shared_kept",
+    "define.shared_dropped",
+];
+
+/// T112: the index of counter `name` in [`COUNTS`].
+pub fn count_index(name: &str) -> i32 {
+    COUNTS.iter().position(|c| *c == name).expect("a counter in COUNTS") as i32
+}
+
+/// T112: `G_COUNTS[name] += 1` when `on` (a `build --count` module); nothing otherwise.
+pub fn count(s: &mut InstructionSink, on: bool, name: &str) {
+    if !on {
+        return;
+    }
+    let k = count_index(name);
+    s.global_get(G_COUNTS).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.i32_const(COUNTS.len() as i32).array_new_default(T_NUMS).global_set(G_COUNTS);
+    s.end();
+    s.global_get(G_COUNTS).i32_const(k);
+    s.global_get(G_COUNTS).i32_const(k).array_get(T_NUMS);
+    s.f64_const(1.0.into()).f64_add().array_set(T_NUMS);
+}
+
+/// T112: the `$object` subtypes (for the counters only: an exact test of each, and the non-final ones call
+/// `is_subtype` on a mismatch).
+pub const OBJECT_SUBTYPES: [u32; 10] =
+    [T_FUNCTION, T_ARRAY, T_PROMISE, T_GENERATOR, T_TIMER, T_MAP, T_MAPITER, T_BUFFER, T_TYPED, T_WRAPPER];
+
+/// T112: push 1 when local `o` (a `(ref null $object)`) is one of [`OBJECT_SUBTYPES`], else 0.
+pub fn is_object_subtype(s: &mut InstructionSink, o: u32) {
+    s.i32_const(0);
+    for t in OBJECT_SUBTYPES {
+        s.local_get(o).ref_test_nullable(HeapType::Concrete(t)).i32_or();
+    }
+}
+
 pub fn object_or(s: &mut InstructionSink, v: u32, not_object: impl FnOnce(&mut InstructionSink)) {
     s.block(BlockType::Result(rt(false, T_OBJECT)));
     s.block(BlockType::Empty);
@@ -1123,6 +1191,15 @@ pub fn globals(
             shared: false,
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
+    );
+    // T112: the fast-path counters.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_NUMS),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_NUMS)),
     );
     for _ in 0..extra {
         globals.global(

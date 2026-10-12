@@ -899,3 +899,18 @@ node and js2wasi3; `scripts/profile-compare.py <outdir>` splits CPU by category.
   Broad suites run only at the end of a task or on request.
 - Unsupported syntax reports the construct and its source location. It never miscompiles silently.
 - No C, Rust or LLVM IR source is generated as an intermediate step. Wasm is emitted directly.
+
+## Speed work (T112)
+The rules after T106–T110, where each speed fix made another program slower (`docs/root-causes.md`):
+- **Root cause first.** A speed task names the root it works on (`docs/root-causes.md`, R1–R9) and the follow-ups
+  it closes. A regression is fixed in the design, not by narrowing a guess for the program that showed it.
+- **Count before designing.** A fast path that guesses (a key, a slot, a type) is first measured with
+  `build --count` / `scripts/bench.sh -c` on the 18 programs: how often the guess holds where it would run.
+- **A miss may not cost more than the old path.** Every fast path has a hit case and its miss cases (other
+  layout, prototype, not an object, an `$object` subtype) in `tests/bench/micro/`; the miss is measured against
+  the build without the fast path.
+- **One gate before a speed commit**: `scripts/gate.sh <base-ref>`: the 18 programs (identical `.wasm` = no
+  change; `slower`/`faster` when the minimum times differ by more than 2%) and the micro-benchmarks (more than
+  1 ns and 3%). Nothing slower, on the laptop first and on a-03 (ask) before the commit.
+- **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
+  the micro-benchmarks (user, 2026-10-12).

@@ -58,6 +58,10 @@ enum Cmd {
         /// still works on top.
         #[arg(long, value_name = "MIB", default_value_t = 16, value_parser = clap::value_parser!(u32).range(0..=1024))]
         gc_reserve: u32,
+        /// Count the hits and misses of the fast paths and print them to stderr at exit (T112;
+        /// for measuring, slower).
+        #[arg(long)]
+        count: bool,
     },
 }
 
@@ -515,6 +519,7 @@ fn main() -> anyhow::Result<()> {
             include,
             unhandled_rejections,
             gc_reserve,
+            count,
         } => {
             let ignore_unhandled = unhandled_rejections == "none";
             let source = read(&entry)?;
@@ -537,6 +542,7 @@ fn main() -> anyhow::Result<()> {
                 let mut ir = js2wasi3_lower::lower_with(&program, Some(&boundary))?;
                 ir.ignore_unhandled = ignore_unhandled;
                 ir.gc_reserve_mib = gc_reserve;
+                ir.count = count;
                 for e in &mut ir.exports {
                     e.name = names[&e.name].clone();
                 }
@@ -593,6 +599,7 @@ fn main() -> anyhow::Result<()> {
             let mut ir = js2wasi3_lower::lower_with(&program, wasi.as_ref())?;
             ir.ignore_unhandled = ignore_unhandled;
             ir.gc_reserve_mib = gc_reserve;
+            ir.count = count;
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?
             } else {

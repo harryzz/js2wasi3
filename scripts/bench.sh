@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # T78: run-time benchmarks against node: the Benchmarks Game's programs and Octane 2 (tests/bench; results on the compatibility page: `node scripts/compat.mjs bench <outdir>/results.tsv`).
 #
-# Usage: scripts/bench.sh [-r runs] [-s small|official] [-g] [-o outdir] [name...]
+# Usage: scripts/bench.sh [-r runs] [-s small|official] [-g] [-c] [-b base-compiler] [-o outdir] [name...]
 #   name: a Benchmarks Game program (binarytrees, fannkuchredux, fasta, knucleotide, mandelbrot, nbody, pidigits,
 #   regexredux, revcomp, spectralnorm) or an Octane benchmark (octane-richards, octane-deltablue, octane-raytrace,
 #   octane-navier-stokes, octane-crypto, octane-splay, octane-earley-boyer, octane-regexp); default: all of them.
@@ -10,6 +10,13 @@
 #       deterministicIterations, which take minutes to hours under js2wasi3).
 #   -g: also give wasmtime `-O gc-heap-initial-size=268435456` (compile and run).
 #   -o: work directory (default out/bench).
+#   -c: count instead of timing (T112): build with `--count`, run once, check stdout against node's, and write
+#       the fast-path counters (`count <name> <n>` on stderr) to <outdir>/counts.tsv (program, counter, n).
+#   -b: compare against another js2wasi3 binary instead of node (T112's gate, `scripts/gate.sh`): a program whose
+#       `.wasm` is the same bytes under both is reported `identical` and not run; else base and new alternate,
+#       `runs` times each; `slower`/`faster` when the minimums differ by more than 2% (noise only adds time, so
+#       the minimum is the measure), else `same`.
+#       Outputs must match node's first run. Details in <outdir>/gate.tsv.
 # Each program is built once (`js2wasi3 build` with the release compiler, `wasmtime compile`; not timed) and then
 # run as `wasmtime run -Sp3 --allow-precompiled x.cwasm`, the same source as `node x.js`; wall time from outside.
 # Outputs (stdout, stderr, exit status of the first run) must be equal bytes, else the row says DIFF.
@@ -20,10 +27,10 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 B=$ROOT/tests/bench
-RUNS=5 SIZE=small GC=() OUT=$ROOT/out/bench TIMEOUT=${TIMEOUT:-3600}
-while getopts "r:s:go:" o; do
+RUNS=5 SIZE=small GC=() OUT=$ROOT/out/bench TIMEOUT=${TIMEOUT:-3600} COUNT= BASE=
+while getopts "r:s:gcb:o:" o; do
   case $o in
-    r) RUNS=$OPTARG ;; s) SIZE=$OPTARG ;; g) GC=(-O gc-heap-initial-size=268435456) ;; o) OUT=$OPTARG ;;
+    r) RUNS=$OPTARG ;; s) SIZE=$OPTARG ;; g) GC=(-O gc-heap-initial-size=268435456) ;; c) COUNT=--count ;; b) BASE=$(realpath "$OPTARG") ;; o) OUT=$OPTARG ;;
     *) sed -n '2,20p' "$0"; exit 2 ;;
   esac
 done
@@ -78,9 +85,16 @@ source_of() {
   esac
 }
 
-printf '| program | argument / input | node min (median) s | js2wasi3 min (median) s | ratio (min) | output | .wasm KB |\n'
-printf '|---|---|---|---|---|---|---|\n'
-printf 'program\targ\tinput\tnode_ms\twasm_ms\tsame\twasm_bytes\n' >"$OUT/results.tsv"
+if [ -n "$COUNT" ]; then
+  printf 'program\tcounter\tn\n' >"$OUT/counts.tsv"
+elif [ -n "$BASE" ]; then
+  printf '| program | base min ms | new min ms | change (min) | verdict | output |\n|---|---|---|---|---|---|\n'
+  printf 'program\tbase_ms\tnew_ms\tverdict\tsame\n' >"$OUT/gate.tsv"
+else
+  printf '| program | argument / input | node min (median) s | js2wasi3 min (median) s | ratio (min) | output | .wasm KB |\n'
+  printf '|---|---|---|---|---|---|---|\n'
+  printf 'program\targ\tinput\tnode_ms\twasm_ms\tsame\twasm_bytes\n' >"$OUT/results.tsv"
+fi
 for name in "$@"; do
   line=$(echo "$PROGRAMS" | grep "^$name|") || { echo "unknown program: $name" >&2; continue; }
   IFS='|' read -r _ a_small a_off in_small in_off <<<"$line"
@@ -94,12 +108,56 @@ for name in "$@"; do
     stdin=$OUT/input.fa
     shown="fasta $input"
   fi
-  if ! "$J" build "$OUT/$name.js" -o "$OUT/$name.wasm" >"$OUT/$name.build" 2>&1 ||
+  if ! "$J" build $COUNT "$OUT/$name.js" -o "$OUT/$name.wasm" >"$OUT/$name.build" 2>&1 ||
      ! wasmtime compile "${GC[@]}" "$OUT/$name.wasm" -o "$OUT/$name.cwasm" 2>>"$OUT/$name.build"; then
     printf '| %s%s | %s | | | | build fails: %s | |\n' "$name" "$mark" "$shown" "$(grep -m1 error "$OUT/$name.build" | sed 's/.*error: //' | cut -c1-120)"
     continue
   fi
   size=$(stat -c %s "$OUT/$name.wasm")
+  if [ -n "$BASE" ]; then
+    if ! "$BASE" build "$OUT/$name.js" -o "$OUT/$name.base.wasm" >>"$OUT/$name.build" 2>&1 ||
+       ! wasmtime compile "${GC[@]}" "$OUT/$name.base.wasm" -o "$OUT/$name.base.cwasm" 2>>"$OUT/$name.build"; then
+      printf '| %s%s | base build fails | | | | |\n' "$name" "$mark"; continue
+    fi
+    if cmp -s "$OUT/$name.wasm" "$OUT/$name.base.wasm"; then
+      printf '| %s%s | | | | identical | |\n' "$name" "$mark"
+      printf '%s\t\t\tidentical\t\n' "$name" >>"$OUT/gate.tsv"; continue
+    fi
+    (cd "$OUT" && env -u FORCE_COLOR timeout "$TIMEOUT" node "$name.js" $arg <"$stdin" >"$OUT/$name.node.out" 2>&1; echo "exit $?" >>"$OUT/$name.node.out")
+    bt=() wt=() same=SAME
+    for i in $(seq "$RUNS"); do
+      for v in base new; do
+        c=$name.cwasm; [ $v = base ] && c=$name.base.cwasm
+        s=$(now_ns)
+        (cd "$OUT" && timeout "$TIMEOUT" wasmtime run "${GC[@]}" -Sp3 --allow-precompiled --dir "$OUT::/" "$c" $arg \
+          <"$stdin" >"$OUT/$name.$v.out" 2>&1; echo "exit $?" >>"$OUT/$name.$v.out")
+        e=$(now_ns)
+        [ $v = base ] && bt+=("$(ms "$s" "$e")") || wt+=("$(ms "$s" "$e")")
+        cmp -s "$OUT/$name.node.out" "$OUT/$name.$v.out" || same="DIFF ($v)"
+      done
+    done
+    read -r bmin wmin verdict < <(printf '%s\n%s\n' "${bt[*]}" "${wt[*]}" | awk '
+      function med(a, n,   t, i, j) { for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
+        return (n % 2) ? a[(n + 1) / 2] : int((a[n / 2] + a[n / 2 + 1]) / 2) }
+      NR == 1 { nb = split($0, b, " ") } NR == 2 { nw = split($0, w, " ") }
+      END { bmin = bmax = b[1]; for (i in b) { if (b[i] < bmin) bmin = b[i]; if (b[i] > bmax) bmax = b[i] }
+            wmin = wmax = w[1]; for (i in w) { if (w[i] < wmin) wmin = w[i]; if (w[i] > wmax) wmax = w[i] }
+            v = (wmin > bmin * 1.02) ? "slower" : (wmin < bmin * 0.98) ? "faster" : "same"; print bmin, wmin, v }')
+    pct=$(awk -v b="$bmin" -v w="$wmin" 'BEGIN { printf "%+.1f%%", 100 * (w - b) / b }')
+    printf '| %s%s | %s | %s | %s | %s | %s |\n' "$name" "$mark" "$bmin" "$wmin" "$pct" "$verdict" "$same"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "${bt[*]}" "${wt[*]}" "$verdict" "$same" >>"$OUT/gate.tsv"
+    continue
+  fi
+  if [ -n "$COUNT" ]; then
+    # One run each: stdout must be node's; the counters go to counts.tsv.
+    (cd "$OUT" && env -u FORCE_COLOR timeout "$TIMEOUT" node "$name.js" $arg <"$stdin" >"$OUT/$name.node.stdout" 2>/dev/null)
+    (cd "$OUT" && timeout "$TIMEOUT" wasmtime run "${GC[@]}" -Sp3 --allow-precompiled --dir "$OUT::/" "$name.cwasm" $arg \
+      <"$stdin" >"$OUT/$name.wasm.stdout" 2>"$OUT/$name.counts")
+    cmp -s "$OUT/$name.node.stdout" "$OUT/$name.wasm.stdout" && same=SAME || same=DIFF
+    grep '^count ' "$OUT/$name.counts" | awk -v p="$name" '{ print p "\t" $2 "\t" $3 }' >>"$OUT/counts.tsv"
+    echo "$name$mark: $same, $(grep -c '^count ' "$OUT/$name.counts") counters"
+    continue
+  fi
   nt=() wt=() same=SAME
   for i in $(seq "$RUNS"); do
     s=$(now_ns)

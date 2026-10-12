@@ -961,6 +961,25 @@ enum Frame {
     Anon,
 }
 
+/// T112: count a T110 inline site's miss (`build --count`): `o` is null when the receiver wasn't an `$object`
+/// (it's reset before the cast), else one of its subtypes or a plain object whose slots didn't match.
+fn count_miss(s: &mut wasm_encoder::InstructionSink, on: bool, o: u32, site: &str) {
+    if !on {
+        return;
+    }
+    s.local_get(o).ref_is_null();
+    s.if_(BlockType::Empty);
+    runtime::count(s, on, &format!("{site}.miss_not_object"));
+    s.else_();
+    runtime::is_object_subtype(s, o);
+    s.if_(BlockType::Empty);
+    runtime::count(s, on, &format!("{site}.miss_subtype"));
+    s.else_();
+    runtime::count(s, on, &format!("{site}.miss_plain"));
+    s.end();
+    s.end();
+}
+
 /// T110: the most slots a constant-key read tries inline (a key at more distinct slots calls `get_named`).
 const LAYOUT_GUESSES: usize = 3;
 
@@ -1109,6 +1128,10 @@ impl runtime::Cx for Emitter<'_> {
 
     fn exits(&mut self) -> bool {
         self.exits
+    }
+
+    fn counting(&mut self) -> bool {
+        self.m.count
     }
 
     fn process_at_exit(&mut self) -> Option<(u32, bool)> {
@@ -1927,7 +1950,11 @@ impl Emitter<'_> {
                     let slots = self.layout_slots.get(units).cloned().unwrap_or_default();
                     if !slots.is_empty() && slots.len() <= LAYOUT_GUESSES {
                         let (v, o, r) = (self.scratch_js, self.scratch_obj, self.scratch_val);
+                        let on = self.m.count;
                         s.local_set(v);
+                        if on {
+                            s.ref_null(runtime::object()).local_set(o);
+                        }
                         s.block(BlockType::Result(runtime::jsval()));
                         s.block(BlockType::Result(runtime::jsval()));
                         s.local_get(v);
@@ -1954,6 +1981,7 @@ impl Emitter<'_> {
                             s.local_get(r).global_get(runtime::G_BUILTIN).ref_eq();
                             s.i32_or().i32_eqz();
                             s.if_(BlockType::Empty);
+                            runtime::count(s, on, "inline_read.hit");
                             s.local_get(r).br(4);
                             s.end();
                             s.end();
@@ -1961,6 +1989,7 @@ impl Emitter<'_> {
                         }
                         s.local_get(v);
                         s.end();
+                        count_miss(s, on, o, "inline_read");
                         s.global_get(g);
                         s.i32_const(object::key_hash(units));
                         s.i32_const(self.ic_sites as i32);
@@ -2056,7 +2085,11 @@ impl Emitter<'_> {
                     if inline {
                         self.expr(s, frames, value)?;
                         let (v, o, x) = (self.scratch_js, self.scratch_obj, self.scratch_val);
+                        let on = self.m.count;
                         s.local_set(x).local_set(v);
+                        if on {
+                            s.ref_null(runtime::object()).local_set(o);
+                        }
                         s.block(BlockType::Empty);
                         s.block(BlockType::Result(runtime::jsval()));
                         s.local_get(v);
@@ -2084,6 +2117,7 @@ impl Emitter<'_> {
                             s.if_(BlockType::Empty);
                             s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
                             s.i32_const(slot as i32).local_get(x).array_set(runtime::T_VALS);
+                            runtime::count(s, on, "inline_write.hit");
                             s.br(4);
                             s.end();
                             s.end();
@@ -2091,6 +2125,7 @@ impl Emitter<'_> {
                         }
                         s.local_get(v);
                         s.end();
+                        count_miss(s, on, o, "inline_write");
                         s.global_get(g);
                         s.local_get(x);
                     } else {

@@ -1,6 +1,6 @@
 # T110: constant-key reads and writes by layout, inline (F405)
 
-Status: in progress | Depends on: T109 | Local (+ a-03: benchmarks, test262, zigbee2mqtt replay)
+Status: paused (F409) | Depends on: T109 | Local (+ a-03: benchmarks, test262)
 
 ## Goal
 T109 gave objects from constructors and literals a **layout** (its shared hash index in `F_INDEX`; invariant:
@@ -38,13 +38,10 @@ only nbody's (11.9%); F406 builds on this task.
   prototype keys, polymorphic sites).
 - [ ] Writes inline (outside constructors).
 - [ ] `scripts/diff.sh` on `objects/`, `classes/`, `builtins/`, `arrays/`, `commonjs/`, `modules/`, `node/`;
-  test262 full on a-03 (ask); a-03 benchmarks T109 vs T110 (ask); zigbee2mqtt build time (F408) and `.wasm` size.
-- [ ] **Acceptance check: zigbee2mqtt replay on a-03** (ask first): T109 vs T110, alternating, ms CPU per event vs
-  node (`tasks/T79-files/run-replay.sh`; T109: 20.29 s steady CPU, 37.03 ms/event; node 8.66 s).
+  test262 full on a-03 (ask); a-03 benchmarks T109 vs T110 (ask); `.wasm` size.
 
 ## Acceptance
 - Every fixture = node; test262 0 regressions; nbody, richards, deltablue faster; nothing slower beyond noise.
-- zigbee2mqtt replay not slower than T109 beyond ~1%; slower = not kept; a tie = ask the user.
 
 ## Notes / Result
 
@@ -122,3 +119,5 @@ only nbody's (11.9%); F406 builds on this task.
   4. So each `counts.get` / `counts.set` pays an extra libcall on top of the old cost.
   The bug is not knucleotide's: T110 decides by key name alone, and any key also used on Maps, arrays, functions
   (the other `$object` subtypes) makes those sites slower, wherever it happens (F409).
+- 2026-10-12: user: no zigbee2mqtt runs for tests or measurement until asked; the replay acceptance check is
+  removed (standard tests and benchmarks only).
