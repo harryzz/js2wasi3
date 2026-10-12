@@ -75,7 +75,7 @@ can still differ from node in details. Language conformance is the test262 secti
 
 ## Language (test262)
 
-test262 subset, `tests/test262/baseline.json` of 2026-10-08: **28105 of 28984** tests run pass (97.0%), 2477 skipped. History: [tests/test262/HISTORY.md](../tests/test262/HISTORY.md); keywords: [docs/keywords.md](keywords.md).
+test262 subset, `tests/test262/baseline.json` of 2026-10-10: **28105 of 28984** tests run pass (97.0%), 2477 skipped. History: [tests/test262/HISTORY.md](../tests/test262/HISTORY.md); keywords: [docs/keywords.md](keywords.md).
 
 | Directory | Pass | Run | Pass % |
 |---|---|---|---|
@@ -113,28 +113,28 @@ test262 subset, `tests/test262/baseline.json` of 2026-10-08: **28105 of 28984** 
 
 ## Benchmarks
 
-`scripts/bench.sh` on 2026-10-10 at db0b31b on a Xeon Gold 6240 server (72 threads, WSL2), wasmtime 49.0.2, node v24.21.0; scripts/bench.sh (default flags: 16 MiB GC heap reserved at start), minimum of the runs. Programs: [tests/bench](../tests/bench/README.md).
+`scripts/bench.sh` on 2026-10-12 at a47ff0b on a Xeon Gold 6240 server (72 threads, WSL2), wasmtime 49.0.2, node v24.21.0; scripts/bench.sh (default flags: 16 MiB GC heap reserved at start), minimum of the runs. Programs: [tests/bench](../tests/bench/README.md).
 
 | Program | Input | node | js2wasi3 | × node | Output = node |
 |---|---|---|---|---|---|
-| binarytrees | 16 | 0.38 s | 9.17 s | 24.1 | yes |
-| fannkuchredux | 10 | 0.39 s | 8.96 s | 23.2 | yes |
-| fasta | 250000 | 0.25 s | 0.95 s | 3.8 | yes |
-| knucleotide | 250000 | 1.18 s | 5.17 s | 4.4 | yes |
-| mandelbrot | 1000 | 0.18 s | 3.89 s | 21.1 | yes |
-| nbody | 500000 | 0.15 s | 6.04 s | 39.0 | yes |
-| pidigits | 2000 | 0.34 s | 0.99 s | 2.9 | yes |
-| regexredux | 500000 | 0.43 s | 2.99 s | 7.0 | yes |
-| revcomp | 250000 | 0.10 s | 0.51 s | 5.3 | yes |
-| spectralnorm | 500 | 0.12 s | 1.28 s | 10.3 | yes |
-| octane-richards | fixed 0.05 | 0.12 s | 5.04 s | 43.0 | yes |
-| octane-deltablue | fixed 0.05 | 0.13 s | 3.75 s | 29.3 | yes |
-| octane-raytrace | fixed 0.05 | 0.22 s | 7.30 s | 33.6 | yes |
-| octane-navier-stokes | fixed 0.05 | 0.18 s | 3.41 s | 18.7 | yes |
-| octane-crypto | fixed 0.05 | 0.26 s | 5.84 s | 22.4 | yes |
-| octane-splay | fixed 0.05 | 0.21 s | 3.44 s | 16.1 | yes |
-| octane-earley-boyer | fixed 0.05 | 0.49 s | 10.17 s | 20.8 | yes |
-| octane-regexp | fixed 0.05 | 0.41 s | 22.29 s | 54.4 | yes |
+| binarytrees | 16 | 0.39 s | 6.70 s | 17.4 | yes |
+| fannkuchredux | 10 | 0.38 s | 7.44 s | 19.5 | yes |
+| fasta | 250000 | 0.24 s | 0.85 s | 3.6 | yes |
+| knucleotide | 250000 | 1.18 s | 5.14 s | 4.3 | yes |
+| mandelbrot | 1000 | 0.19 s | 0.25 s | 1.3 | yes |
+| nbody | 500000 | 0.15 s | 5.09 s | 34.0 | yes |
+| pidigits | 2000 | 0.35 s | 0.99 s | 2.8 | yes |
+| regexredux | 500000 | 0.44 s | 2.98 s | 6.8 | yes |
+| revcomp | 250000 | 0.10 s | 0.52 s | 5.2 | yes |
+| spectralnorm | 500 | 0.13 s | 0.43 s | 3.3 | yes |
+| octane-richards | fixed 0.05 | 0.13 s | 4.32 s | 32.5 | yes |
+| octane-deltablue | fixed 0.05 | 0.14 s | 3.70 s | 26.1 | yes |
+| octane-raytrace | fixed 0.05 | 0.21 s | 7.31 s | 34.1 | yes |
+| octane-navier-stokes | fixed 0.05 | 0.19 s | 1.50 s | 7.7 | yes |
+| octane-crypto | fixed 0.05 | 0.27 s | 5.33 s | 19.6 | yes |
+| octane-splay | fixed 0.05 | 0.22 s | 2.60 s | 12.0 | yes |
+| octane-earley-boyer | fixed 0.05 | 0.51 s | 7.67 s | 15.2 | yes |
+| octane-regexp | fixed 0.05 | 0.39 s | 21.89 s | 56.7 | yes |
 
 ## APIs
 
@@ -1338,7 +1338,7 @@ test262 subset, `tests/test262/baseline.json` of 2026-10-08: **28105 of 28984** 
 | `path` | property | not probed | instance property (not on the prototype) |  |
 | `port` | property | not probed | instance property (not on the prototype) |  |
 | `syscall` | property | not probed | instance property (not on the prototype) |  |
-| `TypeError` | class | supported | test-backed (`tests/fixtures/async/async-yield-star.js`) |  |
+| `TypeError` | class | supported | test-backed (`tests/fixtures/arrays/elem-reads.js`) |  |
 | `AbortController` | class | supported | test-backed (`tests/fixtures/node/abort.js`) |  |
 | `abortController.abort([reason])` | method | supported | test-backed (`tests/fixtures/node/abort.js`) |  |
 | `signal` | property | supported | test-backed (`tests/fixtures/node/abort.js`) |  |
