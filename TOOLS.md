@@ -39,6 +39,7 @@ to recheck when they release:
 
 | runtime | version tried | status with js2wasi3 output |
 |---|---|---|
+| node 24.21.0's V8 through [jco](https://github.com/bytecodealliance/jco) 1.37.0 + preview3-shim 0.9.0 (in `~/.local/jco`) | 2026-10-13, T116 | **runs all 18 benchmarks** (outputs = node) with `jco transpile --bindgen-enable-wasm-exnref` and `--map wasi:<pkg>/*@0.3.1=@bytecodealliance/preview3-shim/<pkg>#*` (jco knows WASI 0.3.0 only); runner `scripts/v8run.mjs`, comparison `scripts/v8bench.sh`. A measurement engine, not a test host |
 | [zwasm](https://github.com/zwasm/zwasm) (Zig, Apache-2.0; interpreter, single-pass JIT, AOT `.cwasm`) | v2.7.0 (2026-09-14), release binary in `~/tools/zwasm-2.7.0/`; probed 2026-10-04 | **can't run it yet**, see below |
 
 zwasm v2.7.0, what stops it now:

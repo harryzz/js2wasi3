@@ -159,6 +159,53 @@ reason.
    interpreter, as Hermes: octane-regexp 56.7× → 10.5× node, regexredux 6.8× → 4.5× (a-03).
 4. Numbers in object fields without boxing (F323): needs shapes (F321). Arrays: done (T107).
 
+## Same components on node's V8 (T116, 2026-10-13)
+
+The same `.wasm` (build `7afb3a3`) on wasmtime 49.0.2 and on node 24.21.0's V8, through jco 1.37 +
+preview3-shim 0.9 (`scripts/v8bench.sh`, `scripts/v8run.mjs`; laptop, wall time, minimum of 3; "V8 run" leaves
+out V8's startup: import, compile, instantiate). Only the standard 18 programs. All outputs = node's.
+
+| program | node JS ms | wasmtime ms | V8 total ms | V8 startup ms | V8 run ms | wasmtime / V8 run | V8 run / node | output |
+|---|---|---|---|---|---|---|---|---|
+| binarytrees | 345 | 8691 | 3129 | 31 | 2973 | 2.92× | 8.6× | SAME |
+| fannkuchredux* | 421 | 7254 | 7720 | 31 | 7606 | 0.95× | 18.1× | SAME |
+| fasta | 228 | 989 | 1099 | 31 | 979 | 1.01× | 4.3× | SAME |
+| knucleotide* | 1544 | 6623 | 4268 | 64 | 4100 | 1.62× | 2.7× | SAME |
+| mandelbrot* | 176 | 239 | 500 | 34 | 387 | 0.62× | 2.2× | SAME |
+| nbody* | 140 | 2445 | 1361 | 31 | 1249 | 1.96× | 8.9× | SAME |
+| pidigits | 389 | 1095 | 628 | 31 | 517 | 2.12× | 1.3× | SAME |
+| regexredux* | 442 | 2200 | 1885 | 66 | 1691 | 1.30× | 3.8× | SAME |
+| revcomp* | 78 | 605 | 930 | 69 | 766 | 0.79× | 9.8× | SAME |
+| spectralnorm* | 102 | 480 | 475 | 31 | 365 | 1.31× | 3.6× | SAME |
+| octane-richards | 132 | 3576 | 2296 | 38 | 2178 | 1.64× | 16.5× | SAME |
+| octane-deltablue | 147 | 4421 | 2520 | 39 | 2385 | 1.85× | 16.2× | SAME |
+| octane-raytrace* | 248 | 8975 | 5021 | 51 | 4886 | 1.84× | 19.7× | SAME |
+| octane-navier-stokes* | 188 | 1779 | 1346 | 40 | 1232 | 1.44× | 6.6× | SAME |
+| octane-crypto | 309 | 6226 | 5151 | 41 | 5022 | 1.24× | 16.3× | SAME |
+| octane-splay | 238 | 3665 | 1567 | 43 | 1386 | 2.65× | 5.8× | SAME |
+| octane-earley-boyer* | 557 | 8631 | 3867 | 45 | 3706 | 2.33× | 6.7× | SAME |
+| octane-regexp | 438 | 5870 | 3169 | 50 | 3023 | 1.94× | 6.9× | SAME |
+
+Geometric means: wasmtime / V8 run **1.52×**; V8 run / node JS **6.8×**; wasmtime / node JS 10.3×. So about a
+third of our time on wasmtime is the engine; the larger part (6.8× node on V8) is our code.
+
+GC (V8: `node --trace-gc`, the sum of main-thread pauses; wasmtime: `perf record`, the share of samples in
+`CopyingHeap::forward`/`scan_field`/`collect_increment` times its wall time):
+
+| program | wasmtime ms | wasmtime GC ms (share) | V8 run ms | V8 GC pauses ms | GC wasmtime/V8 | rest wasmtime ms | rest V8 ms | rest wasmtime/V8 |
+|---|---|---|---|---|---|---|---|---|
+| binarytrees | 8691 | 4424 (51%) | 2973 | 546 | 8.1× | 4267 | 2427 | 1.76× |
+| octane-splay | 3665 | 2664 (73%) | 1386 | 606 | 4.4× | 1001 | 780 | 1.28× |
+| octane-earley-boyer | 8631 | 2270 (26%) | 3706 | 568 | 4.0× | 6361 | 3138 | 2.03× |
+| nbody | 2445 | 0 (0%) | 1249 | 27 | — | 2445 | 1222 | 2.00× |
+
+- **GC: wasmtime's copying collector takes 4–8× V8's GC time** on the same allocations (V8: mostly young-generation
+  scavenges, 1–2 full collections per program; wasmtime copies all live data each time, root R5).
+- **Without GC wasmtime is still 1.3–2× slower** where objects, calls and casts dominate (nbody, earley-boyer,
+  richards/deltablue/raytrace 1.6–1.9× overall): Cranelift vs TurboFan, `is_subtype` (R1). F426.
+- **wasmtime is as fast or faster on plain number loops**: mandelbrot 0.62×, revcomp 0.79×, fannkuchredux 0.95×,
+  fasta 1.01× (revcomp/fasta also pay jco's JS host for I/O).
+
 ## Same programs under scriptc
 
 [scriptc](https://github.com/vercel-labs/scriptc) 0.2.7 compiles TypeScript and JavaScript ahead of time to native
