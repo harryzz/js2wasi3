@@ -4,7 +4,8 @@ Profiles of the 18 benchmark programs (`tests/bench`, `scripts/bench.sh`'s small
 js2wasi3 + wasmtime 49.0.2, taken 2026-10-10 on a Xeon Gold 6240 server (72 threads, WSL2) with the build at
 `e13d22c`. Run times and node ratios are on the [compatibility page](compatibility.md#benchmarks): at the time js2wasi3
 was 2.9× (pidigits) to 54× (octane-regexp) node's wall time; after T103–T109 (2026-10-12, `a47ff0b`) 1.3×
-(mandelbrot) to 57× (octane-regexp), most Octane programs 12–34×.
+(mandelbrot) to 57× (octane-regexp), most Octane programs 12–34×; after T110–T114 (2026-10-13, `d0a44b1`) 1.3×
+(mandelbrot) to 31× (octane-raytrace), octane-regexp 10.5×, most Octane programs 11–31×.
 
 **Summary.** The order of costs isn't node's. In node, property access and number arithmetic aren't costs of their
 own: its optimizing JIT turns `o.x` into a hidden-class check and a load, and keeps doubles unboxed in registers, all

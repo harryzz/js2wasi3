@@ -113,28 +113,28 @@ test262 subset, `tests/test262/baseline.json` of 2026-10-10: **28105 of 28984** 
 
 ## Benchmarks
 
-`scripts/bench.sh` on 2026-10-12 at a47ff0b on a Xeon Gold 6240 server (72 threads, WSL2), wasmtime 49.0.2, node v24.21.0; scripts/bench.sh (default flags: 16 MiB GC heap reserved at start), minimum of the runs. Programs: [tests/bench](../tests/bench/README.md).
+`scripts/bench.sh` on 2026-10-13 at d0a44b1 on a Xeon Gold 6240 server (72 threads, WSL2), wasmtime 49.0.2, node v24.21.0; scripts/bench.sh (default flags: 16 MiB GC heap reserved at start), minimum of the runs. Programs: [tests/bench](../tests/bench/README.md).
 
 | Program | Input | node | js2wasi3 | × node | Output = node |
 |---|---|---|---|---|---|
-| binarytrees | 16 | 0.39 s | 6.70 s | 17.4 | yes |
-| fannkuchredux | 10 | 0.38 s | 7.44 s | 19.5 | yes |
-| fasta | 250000 | 0.24 s | 0.85 s | 3.6 | yes |
-| knucleotide | 250000 | 1.18 s | 5.14 s | 4.3 | yes |
-| mandelbrot | 1000 | 0.19 s | 0.25 s | 1.3 | yes |
-| nbody | 500000 | 0.15 s | 5.09 s | 34.0 | yes |
-| pidigits | 2000 | 0.35 s | 0.99 s | 2.8 | yes |
-| regexredux | 500000 | 0.44 s | 2.98 s | 6.8 | yes |
-| revcomp | 250000 | 0.10 s | 0.52 s | 5.2 | yes |
-| spectralnorm | 500 | 0.13 s | 0.43 s | 3.3 | yes |
-| octane-richards | fixed 0.05 | 0.13 s | 4.32 s | 32.5 | yes |
-| octane-deltablue | fixed 0.05 | 0.14 s | 3.70 s | 26.1 | yes |
-| octane-raytrace | fixed 0.05 | 0.21 s | 7.31 s | 34.1 | yes |
-| octane-navier-stokes | fixed 0.05 | 0.19 s | 1.50 s | 7.7 | yes |
-| octane-crypto | fixed 0.05 | 0.27 s | 5.33 s | 19.6 | yes |
-| octane-splay | fixed 0.05 | 0.22 s | 2.60 s | 12.0 | yes |
-| octane-earley-boyer | fixed 0.05 | 0.51 s | 7.67 s | 15.2 | yes |
-| octane-regexp | fixed 0.05 | 0.39 s | 21.89 s | 56.7 | yes |
+| binarytrees | 16 | 0.38 s | 6.01 s | 15.8 | yes |
+| fannkuchredux | 10 | 0.39 s | 7.11 s | 18.3 | yes |
+| fasta | 250000 | 0.23 s | 0.83 s | 3.6 | yes |
+| knucleotide | 250000 | 1.17 s | 5.18 s | 4.4 | yes |
+| mandelbrot | 1000 | 0.20 s | 0.26 s | 1.3 | yes |
+| nbody | 500000 | 0.16 s | 3.15 s | 19.4 | yes |
+| pidigits | 2000 | 0.34 s | 1.04 s | 3.0 | yes |
+| regexredux | 500000 | 0.43 s | 1.94 s | 4.5 | yes |
+| revcomp | 250000 | 0.09 s | 0.52 s | 5.6 | yes |
+| spectralnorm | 500 | 0.12 s | 0.43 s | 3.6 | yes |
+| octane-richards | fixed 0.05 | 0.12 s | 2.98 s | 25.1 | yes |
+| octane-deltablue | fixed 0.05 | 0.13 s | 3.11 s | 23.9 | yes |
+| octane-raytrace | fixed 0.05 | 0.22 s | 6.81 s | 31.4 | yes |
+| octane-navier-stokes | fixed 0.05 | 0.20 s | 1.49 s | 7.5 | yes |
+| octane-crypto | fixed 0.05 | 0.27 s | 4.91 s | 18.5 | yes |
+| octane-splay | fixed 0.05 | 0.20 s | 2.62 s | 12.8 | yes |
+| octane-earley-boyer | fixed 0.05 | 0.49 s | 6.21 s | 12.6 | yes |
+| octane-regexp | fixed 0.05 | 0.41 s | 4.33 s | 10.5 | yes |
 
 ## APIs
 
