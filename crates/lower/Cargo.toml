@@ -10,6 +10,7 @@ license.workspace = true
 js2wasi3-frontend.workspace = true
 js2wasi3-ir.workspace = true
 oxc_ast.workspace = true
+oxc_regular_expression.workspace = true
 oxc_semantic.workspace = true
 oxc_span.workspace = true
 oxc_syntax.workspace = true

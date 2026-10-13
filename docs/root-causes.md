@@ -79,7 +79,8 @@ binarytrees −26%). Every allocation saved in R2/R3/R4 lands here too.
 ### R6. Regex runs in a JS-written VM
 octane-regexp 81%, regexredux 84% (node compiles each pattern to machine code).
 - Follow-ups: F336, F179, F178, F354, F209 (test262 directory left out for its speed).
-- T114 (proposed 2026-10-13): literals compiled to Wasm at build time; profile and prior art in the task file.
+- Fixed for literals in the subset by T114 (2026-10-13): build-time programs run by one Wasm interpreter, as Hermes
+  (octane-regexp 56.7× → 10.5× node, regexredux 6.8× → 4.5×); left: F415, F416, F417, F419.
 
 ### R7. Strings
 UTF-16 always (F352), repeated appends to properties/captured variables copy (F337, F365), number → string without a

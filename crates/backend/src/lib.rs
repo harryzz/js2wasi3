@@ -52,6 +52,7 @@ mod object;
 mod pow;
 mod promise;
 mod props;
+mod regex;
 mod runtime;
 mod timers;
 mod typed;
@@ -267,6 +268,8 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         type_ids: HashMap::new(),
         helper_base: func_base + n + adapted.len() as u32 + 3 * lifted.len() as u32,
         helpers: Vec::new(),
+        regexes: module.regexes.clone(),
+        regex_vm: module.regex_vm,
         strings: Vec::new(),
         string_ids: HashMap::new(),
         tables: false,
@@ -622,7 +625,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         fnames.append(lift + 1, &format!("{}$callback", x.name));
     }
     for (k, h) in e.helpers.iter().enumerate() {
-        fnames.append(e.helper_base + k as u32, h.name());
+        fnames.append(e.helper_base + k as u32, &h.name());
     }
     for (k, name) in const_data.1.iter().enumerate() {
         fnames.append(init_base + k as u32, name);
@@ -932,15 +935,24 @@ enum Helper {
     JsPow,
     ToInt32,
     Js(runtime::Helper),
+    /// T114: `re_exec(prog, s, from, mode, caps) -> i32`: the regex interpreter (`regex.rs`).
+    ReExec,
+    /// T114: `re_class_wide(prog, cls, c) -> i32`: a unit above 127 in a program's class.
+    ReClassWide,
+    /// T114: `re_grow(stack, need) -> stack`: the regex backtrack stack, grown.
+    ReGrow,
 }
 
 impl Helper {
-    fn name(self) -> &'static str {
+    fn name(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Helper::JsRem => "js_rem",
-            Helper::JsPow => "js_pow",
-            Helper::ToInt32 => "to_int32",
-            Helper::Js(h) => h.name(),
+            Helper::JsRem => "js_rem".into(),
+            Helper::JsPow => "js_pow".into(),
+            Helper::ToInt32 => "to_int32".into(),
+            Helper::Js(h) => h.name().into(),
+            Helper::ReExec => "re_exec".into(),
+            Helper::ReClassWide => "re_class_wide".into(),
+            Helper::ReGrow => "re_grow".into(),
         }
     }
 
@@ -949,6 +961,24 @@ impl Helper {
             Helper::JsRem | Helper::JsPow => (vec![ValType::F64, ValType::F64], vec![ValType::F64]),
             Helper::ToInt32 => (vec![ValType::F64], vec![ValType::I32]),
             Helper::Js(h) => h.signature(),
+            Helper::ReExec => (
+                vec![
+                    runtime::rt(false, runtime::T_STRING),
+                    runtime::rt(false, runtime::T_STRING),
+                    ValType::I32,
+                    ValType::I32,
+                    runtime::rt(false, runtime::T_I32S),
+                ],
+                vec![ValType::I32],
+            ),
+            Helper::ReClassWide => (
+                vec![runtime::rt(false, runtime::T_STRING), ValType::I32, ValType::I32],
+                vec![ValType::I32],
+            ),
+            Helper::ReGrow => (
+                vec![runtime::rt(true, runtime::T_I32S), ValType::I32],
+                vec![runtime::rt(false, runtime::T_I32S)],
+            ),
         }
     }
 }
@@ -1026,6 +1056,9 @@ struct Emitter<'m> {
     helper_base: u32,
     /// Helpers in index order. Helper `k` has function index `helper_base + k`.
     helpers: Vec<Helper>,
+    /// T114: `module.regexes` (`Helper::Regex`), and `module.regex_vm`.
+    regexes: Vec<Vec<u16>>,
+    regex_vm: bool,
     /// Interned string constants, emitted as globals after the user globals.
     /// String constants, and BigInt constants (T40): globals after the module's.
     strings: Vec<ConstGlobal>,
@@ -2188,6 +2221,12 @@ impl Emitter<'_> {
                     {
                         s.ref_cast_non_null(runtime::string());
                     }
+                    if op == &Intrinsic::ReExec && i <= 1 {
+                        s.ref_cast_non_null(runtime::string());
+                    }
+                    if op == &Intrinsic::ReExec && i == 4 {
+                        s.ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_I32S));
+                    }
                     if matches!(
                         op,
                         Intrinsic::I32Get | Intrinsic::I32Set | Intrinsic::I32Len
@@ -2364,6 +2403,20 @@ impl Emitter<'_> {
                         s.i64_reinterpret_f64().i32_wrap_i64();
                         return Ok(true);
                     }
+                    Intrinsic::RegexId(k) => {
+                        if self.regex_vm {
+                            s.global_get(runtime::G_NULL);
+                        } else {
+                            let prog = self.regexes[*k as usize].clone();
+                            let g = runtime::Cx::string(self, &prog);
+                            s.global_get(g);
+                        }
+                        return Ok(true);
+                    }
+                    Intrinsic::ReExec => {
+                        s.call(self.helper_index(Helper::ReExec));
+                        return Ok(true);
+                    }
                     Intrinsic::RandomSeed => {
                         s.call(self.imports.get(host::Import::InsecureRandom))
                             .i32_wrap_i64();
@@ -2443,6 +2496,7 @@ impl Emitter<'_> {
                     _ => {}
                 }
                 let h = match op {
+                    Intrinsic::RegexId(_) | Intrinsic::ReExec => unreachable!("above"),
                     Intrinsic::JsAdd => H::JsAdd,
                     Intrinsic::ToNumeric => H::Big(bigint::Helper::ToNumeric),
                     Intrinsic::Numeric(n) => H::Big(bigint::Helper::Numeric(*n)),
@@ -2891,6 +2945,13 @@ impl Emitter<'_> {
                 to_int32(rem)
             }
             Helper::Js(h) => h.body(self),
+            Helper::ReExec => {
+                let wide = self.helper_index(Helper::ReClassWide);
+                let grow = self.helper_index(Helper::ReGrow);
+                regex::exec(wide, grow)
+            }
+            Helper::ReClassWide => regex::class_wide(),
+            Helper::ReGrow => regex::grow(),
         }
     }
 }

@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-13: T114 regex literals run by a Wasm interpreter (two full runs)
+
+- Compiler (`main` at 58dc1b0 + T114, uncommitted at the runs): regex literals in the subset (no `u`/`v`,
+  backreferences, lookarounds, modifiers) are compiled at build time into programs for one Wasm interpreter
+  (`backend/regex.rs`, `re_exec`); the rest stay in the JS VM. Runner: unchanged.
+- Full run on `a-03` (`~/t262-t114b.log`, 1,425 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged. (An earlier run of the first, native-code version,
+  `~/t262-t114.log`, also had no changes.)
+
 ## 2026-10-12: T113 a final type for plain objects (full run)
 
 - Compiler (`main` at db256bc + T113, uncommitted at the run): plain objects are a final `$plain`; every object

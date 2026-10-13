@@ -409,6 +409,7 @@ dependencies = [
  "js2wasi3-frontend",
  "js2wasi3-ir",
  "oxc_ast",
+ "oxc_regular_expression",
  "oxc_semantic",
  "oxc_span",
  "oxc_syntax",

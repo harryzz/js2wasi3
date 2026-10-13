@@ -133,6 +133,12 @@ pub struct Module {
     pub gc_reserve_mib: u32,
     /// `build --count` (T112): fast paths count their hits and misses, printed to stderr at exit.
     pub count: bool,
+    /// T114: regex literals compiled at build time to programs for the runtime's regex interpreter
+    /// (`Intrinsic::RegexId`, `Intrinsic::ReExec`; format in `lower/src/regex.rs`); a literal outside the
+    /// subset isn't listed and runs in the prelude's VM.
+    pub regexes: Vec<Vec<u16>>,
+    /// `build --regex-vm` (T114): every regex runs in the prelude's VM (`RegexId` is `null`).
+    pub regex_vm: bool,
     /// The entry is a CommonJS module (T60): after its code node runs the `nextTick` queue before
     /// the microtasks (after an ES module's, the microtasks first).
     pub cjs_main: bool,
@@ -844,6 +850,13 @@ pub enum Intrinsic {
     /// string `s` from `from` (only at `from` with `y`), with its start and end in `caps` (`$i32s`);
     /// -1 if none. `ascii`/`wide` (`$i32s`, or `null`): the first-unit filter of `$$reFirstSet`.
     ReAltsFind,
+    /// T114: (prog, s, from: `i32`, mode: `i32`, caps) -> `i32`: runs the regex program `prog` (a string of
+    /// [`Module::regexes`]) on string `s`: mode 0 searches from `from`, mode 1 tries `from` only; the end of the
+    /// match, its captures in `caps` (`$i32s`, as regexp.js's `$$reRun` leaves them), or -1.
+    ReExec,
+    /// T114: the program [`Module::regexes`]`[k]` as a string constant, `null` with [`Module::regex_vm`]: the
+    /// third argument of `$$RegExpCreate`.
+    RegexId(u32),
     /// T76: write QuoteJSONString of string `s` into string `buf` at `i` (args: buf, i: `i32`, s);
     /// the index after it (`i32`). `buf` must have room for `6 * len + 2` units.
     JsonQuoteInto,
@@ -1465,6 +1478,8 @@ impl Intrinsic {
             Intrinsic::StrBufAppend => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::StrBufLen => (&[JsVal], Some(F64)),
             Intrinsic::ReAltsFind => (&[JsVal, JsVal, JsVal, I32, I32, JsVal, JsVal, JsVal], Some(I32)),
+            Intrinsic::ReExec => (&[JsVal, JsVal, I32, I32, JsVal], Some(I32)),
+            Intrinsic::RegexId(_) => (&[], Some(JsVal)),
             Intrinsic::JsonQuoteInto => (&[JsVal, I32, JsVal], Some(I32)),
             Intrinsic::JsonScan => (&[JsVal, I32, I32], Some(I32)),
             Intrinsic::StringLength => (&[JsVal], Some(F64)),
@@ -1621,6 +1636,8 @@ impl Intrinsic {
             Intrinsic::StrBufAppend => "str_buf_append",
             Intrinsic::StrBufLen => "str_buf_len",
             Intrinsic::ReAltsFind => "re_alts_find",
+            Intrinsic::ReExec => "re_exec",
+            Intrinsic::RegexId(_) => "regex_id",
             Intrinsic::JsonQuoteInto => "json_quote_into",
             Intrinsic::JsonScan => "json_scan",
             Intrinsic::StringLength => "string_length",

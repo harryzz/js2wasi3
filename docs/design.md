@@ -624,7 +624,19 @@ the pattern can't match the empty string; `$$reSearch` skips the other positions
 pattern that is an alternation of fixed sequences of characters and classes (`agggtaaa|tttaccct`, `Ha[DS]|WaS`;
 with `i` ASCII only) is a table that the native `re_alts_find` (runtime.rs) searches without the VM: the filter,
 then each alternative in order (no element can backtrack, so this is the VM's answer), writing `caps[0..1]`.
-`$$reRun` keeps the `code` fields it read last and returns a number (`f64`, not boxed).)
+`$$reRun` keeps the `code` fields it read last and returns a number (`f64`, not boxed).
+T114: regex literals in a subset (no `u`/`v`, backreferences, lookarounds or modifier groups; `i` only when folding
+is ASCII letters) are compiled at build time into programs for one interpreter in Wasm, as Hermes ships build-time
+regex bytecode (no proven engine compiles every regex to native code ahead of time; a first version that did grew
+octane-regexp's `.wasm` by 48.6% and was dropped). `lower/src/regex.rs` turns oxc's pattern tree into a program
+of 16-bit words, stored as a string constant (`Module::regexes`, `Intrinsic::RegexId`): a header with the search
+data (`^` without `m`; up to 4 sets of units at fixed offsets from the start; a literal every match contains and
+its offset), the ops, the classes (ASCII bitmap + ranges). `backend/src/regex.rs`'s `re_exec(prog, s, from,
+mode, caps)` searches (the required literal by its first unit, a jump to it at a known offset; the smallest set
+as an i64 mask in a tight loop) and matches with a `br_table` over the ops and an explicit backtrack stack
+(`G_RE_STACK`, kept between calls); slots (captures, loop registers) live in `caps[2..]`. `$$RegExpCreate(source,
+flags, prog)` keeps the program in `code[12]`; `$$reSearch` and `split`'s anchored runs use it when set, the VM
+otherwise. `build --regex-vm` keeps every regex in the VM, for comparing the two.)
 (T26: `Date` in `builtins/date.js`: a Date is a `$object` of class `CLASS_DATE` with its data `[time value]` under the
 private `G_SYM_STATE` key (intrinsics `date_new`, `date_data`); the setters mutate that array. All of `Date` is
 prelude code on `f64`s (the spec's MakeDay/MakeTime/TimeClip, Hinnant's days <-> civil dates); `Date.parse` is the

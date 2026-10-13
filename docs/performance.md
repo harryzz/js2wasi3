@@ -154,7 +154,8 @@ reason.
    nbody −14.2%, richards −10.6%).
 2. ~~`var x;` with every read after a write stays `f64` (F389): mandelbrot's 77%.~~ Done (T103: mandelbrot 15.6×
    faster, the other 17 benchmarks unchanged).
-3. Regex literals compiled to Wasm ahead of time (F336): octane-regexp, regexredux.
+3. ~~Regex literals compiled ahead of time (F336).~~ Done (T114, 2026-10-13): build-time programs run by one Wasm
+   interpreter, as Hermes: octane-regexp 56.7× → 10.5× node, regexredux 6.8× → 4.5× (a-03).
 4. Numbers in object fields without boxing (F323): needs shapes (F321). Arrays: done (T107).
 
 ## Same programs under scriptc

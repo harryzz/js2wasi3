@@ -4,11 +4,13 @@
 // canonical order): `__intrinsic_regexp_new(data)` makes one,
 // `__intrinsic_regexp_data(v)` reads it back (`null` for `RegExp.prototype`, `undefined` for
 // anything else). `code` is the compiled pattern, shared by every RegExp of the same source and
-// flags: `[prog, sets, groups, names, flagBits, regs, source, flags, caps, regs, firstSet, alts]`: `prog`, `caps`
+// flags: `[prog, sets, groups, names, flagBits, regs, source, flags, caps, regs, firstSet, alts, compiled]`: `prog`, `caps`
 // and `regs` are `$i32s` arrays (`__intrinsic_i32_*`: typed, unboxed); `sets` holds two slots per
 // class (`negate`, its ranges as `$i32s`) or backreference (its groups, `null`); the escaped source
 // and the canonical flags; `caps`/`regs` are reused by every match (no user code runs while
-// matching).
+// matching); `compiled` (T114): the program of a literal with this source and flags, compiled at build time
+// for the runtime's regex interpreter (`__intrinsic_re_exec(prog, …)` searches and matches; its loop
+// registers also live in `caps`), else null.
 // - The pattern is parsed into an AST of arrays (`$$reParse*`, node types `$$RE_*` below), then
 //   compiled into `prog`, an array of numeric instructions (`$$reEmit`, opcodes `$$OP_*`).
 // - `$$reRun` runs `prog` at one position with an explicit backtrack stack (never JS recursion,
@@ -1730,7 +1732,7 @@ function $$reCompile(src, flagText, bits) {
   }
   const code = [$$reI32($$reProg), $$reSets, $$reGroups + 1, names, bits, $$reRegs,
     $$reEscapeSource(src), f, __intrinsic_i32_new(2 * ($$reGroups + 1)), __intrinsic_i32_new($$reRegs),
-    firstSet, altsProg];
+    firstSet, altsProg, null];
   $$reProg = null;
   $$reSets = null;
   $$reNames = null;
@@ -1755,9 +1757,31 @@ function $$reCreate(src, flagText) {
   return __intrinsic_regexp_new([code[6], code[7], code]);
 }
 
-// A regex literal (the lowering calls it; oxc checked the pattern).
-function $$RegExpCreate(src, flagText) {
-  return $$reCreate(src, flagText);
+// A regex literal (the lowering calls it; oxc checked the pattern). `prog` (T114): its program when the
+// literal is in the compiled subset, else null.
+function $$RegExpCreate(src, flagText, prog) {
+  const r = $$reCreate(src, flagText);
+  if (prog !== null) {
+    const code = __intrinsic_regexp_data(r)[2];
+    if (code[12] === null) {
+      // Room for the program's slots (captures, then loop registers) after the match's start and end.
+      const n = 2 + __intrinsic_unit(prog, 0);
+      if (n > __intrinsic_i32_len(code[8])) {
+        code[8] = __intrinsic_i32_new(n);
+      }
+      code[12] = prog;
+    }
+  }
+  return r;
+}
+
+// `$$reRun` at `pos` only, or the compiled program (T114).
+function $$reRunAt(code, s, pos) {
+  const prog = code[12];
+  if (prog !== null) {
+    return __intrinsic_re_exec(prog, s, pos, 1, code[8]);
+  }
+  return $$reRun(code, s, pos);
 }
 
 // `RegExp(pattern, flags)` and `new RegExp(pattern, flags)`.
@@ -2424,7 +2448,6 @@ function $$reWhat(v) {
 // `lastIndex` updated.
 function $$reSearch(r, data, s) {
   const code = data[2];
-  const prog = code[0];
   const bits = +code[4];
   const global = (bits & 130) !== 0;
   const sticky = (bits & 128) !== 0;
@@ -2443,6 +2466,22 @@ function $$reSearch(r, data, s) {
       lastIndex--;
     }
   }
+  const compiled = code[12];
+  if (compiled !== null) {
+    // T114: the compiled program searches (or, sticky, tries `lastIndex`) and matches.
+    const end = lastIndex <= len ? __intrinsic_re_exec(compiled, s, lastIndex, sticky ? 1 : 0, code[8]) : -1;
+    if (end < 0) {
+      if (global) {
+        r.lastIndex = 0;
+      }
+      return -1;
+    }
+    if (global) {
+      r.lastIndex = end;
+    }
+    return end;
+  }
+  const prog = code[0];
   // A one-character instruction (CHAR or CLASS, forwards) every match starts with: positions whose
   // character it rejects are skipped without starting the VM. -1: none.
   let first = -1;
@@ -3144,7 +3183,7 @@ function $$RegExp_prototype_$split(string, limit) {
   const direct = plain || __intrinsic_regexp_builtin_exec(splitter.exec);
   const size = s.length;
   if (size === 0) {
-    if (direct ? $$reRun(code, s, 0) < 0 : $$reExecAny(splitter, s) === null) {
+    if (direct ? $$reRunAt(code, s, 0) < 0 : $$reExecAny(splitter, s) === null) {
       $$append(a, s);
     }
     return a;
@@ -3168,7 +3207,7 @@ function $$RegExp_prototype_$split(string, limit) {
       }
     }
     if (direct) {
-      e = $$reRun(code, s, q);
+      e = $$reRunAt(code, s, q);
     } else {
       splitter.lastIndex = q;
       z = $$reExecAny(splitter, s);

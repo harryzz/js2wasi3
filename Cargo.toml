@@ -14,6 +14,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 oxc_allocator = "0.151.0"
 oxc_ast = "0.151.0"
+oxc_regular_expression = "0.151.0"
 oxc_parser = "0.151.0"
 oxc_semantic = "0.151.0"
 oxc_span = "0.151.0"

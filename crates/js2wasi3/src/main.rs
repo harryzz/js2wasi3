@@ -62,6 +62,9 @@ enum Cmd {
         /// for measuring, slower).
         #[arg(long)]
         count: bool,
+        /// Run every regex in the prelude's VM, none compiled to Wasm (T114; for comparing the two).
+        #[arg(long)]
+        regex_vm: bool,
     },
 }
 
@@ -520,6 +523,7 @@ fn main() -> anyhow::Result<()> {
             unhandled_rejections,
             gc_reserve,
             count,
+            regex_vm,
         } => {
             let ignore_unhandled = unhandled_rejections == "none";
             let source = read(&entry)?;
@@ -543,6 +547,8 @@ fn main() -> anyhow::Result<()> {
                 ir.ignore_unhandled = ignore_unhandled;
                 ir.gc_reserve_mib = gc_reserve;
                 ir.count = count;
+            ir.regex_vm = regex_vm;
+                ir.regex_vm = regex_vm;
                 for e in &mut ir.exports {
                     e.name = names[&e.name].clone();
                 }
@@ -600,6 +606,7 @@ fn main() -> anyhow::Result<()> {
             ir.ignore_unhandled = ignore_unhandled;
             ir.gc_reserve_mib = gc_reserve;
             ir.count = count;
+            ir.regex_vm = regex_vm;
             let bytes = if core {
                 js2wasi3_backend::emit(&ir)?
             } else {

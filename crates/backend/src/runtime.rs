@@ -231,8 +231,10 @@ pub const G_HASH_VAL: u32 = G_HASH_KEY + 1;
 pub const G_TLEN: u32 = G_HASH_VAL + 1;
 /// `(mut (ref null $nums))` (T112): the fast-path counters (exact to 2^53) of a `build --count` module ([`COUNTS`]); null otherwise.
 pub const G_COUNTS: u32 = G_TLEN + 1;
+/// `(mut (ref null $i32s))` (T114): the regex interpreter's backtrack stack (`regex.rs`), kept between calls.
+pub const G_RE_STACK: u32 = G_COUNTS + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_COUNTS + 1;
+pub const GLOBALS: u32 = G_RE_STACK + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -1254,6 +1256,15 @@ pub fn globals(
             shared: false,
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_NUMS)),
+    );
+    // T114: the regex backtrack stack.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_I32S),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_I32S)),
     );
     for _ in 0..extra {
         globals.global(

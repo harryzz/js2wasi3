@@ -97,6 +97,7 @@ mod closures;
 mod definite;
 mod generators;
 mod patterns;
+mod regex;
 mod unicode_props;
 
 use std::collections::{HashMap, HashSet};
@@ -4550,7 +4551,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 // A new RegExp per evaluation (T27); oxc checked the pattern.
                 let src = Expr::Str(utf16(r.regex.pattern.text.as_str(), false));
                 let flags = Expr::Str(utf16(&r.regex.flags.to_string(), false));
-                let e = self.prelude_call(builtins::REGEXP_CREATE, vec![src, flags]);
+                // T114: a literal in the compiled subset passes its program (a string constant), else null.
+                let id = match regex::lower(r) {
+                    Some(prog) => {
+                        let rs = &mut self.module.regexes;
+                        let k = match rs.iter().position(|x| *x == prog) {
+                            Some(k) => k,
+                            None => {
+                                rs.push(prog);
+                                rs.len() - 1
+                            }
+                        };
+                        Expr::intrinsic(Intrinsic::RegexId(k as u32), vec![])
+                    }
+                    None => Expr::Const(Const::Null),
+                };
+                let e = self.prelude_call(builtins::REGEXP_CREATE, vec![src, flags, id]);
                 Ok(Val::js(e, Kind::Any))
             }
             Expression::StaticMemberExpression(m) if m.property.name == "length" && !m.optional => {
@@ -6073,6 +6089,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "sub" | "str_set" | "define" | "i32_set" | "str_copy" | "json_quote_into"
             | "json_scan" => 3,
             "re_alts_find" => 8,
+            "re_exec" => 5,
             "global_init" => 1,
             "write_stdout" | "write_stderr" => 1,
             "i32_new" | "i32_len" => 1,
@@ -6123,6 +6140,19 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             } else {
                 (from_i32(e), Call::Intrinsic(Some(Kind::Num)))
             });
+        }
+        if name == "re_exec" {
+            // T114: (prog, s, from, mode, caps) -> i32; from and mode are `i32`s.
+            let mut args = Vec::new();
+            for (i, a) in c.arguments.iter().enumerate() {
+                let Some(e) = a.as_expression() else {
+                    return Err(self.unsupported(a.span(), "spread argument", "T21"));
+                };
+                let v = self.expr(cx, e)?;
+                args.push(if i == 2 || i == 3 { to_i32(self.num(v, e.span())?) } else { jsval_of(v) });
+            }
+            let e = from_i32(Expr::intrinsic(Intrinsic::ReExec, args));
+            return Ok((e, Call::Intrinsic(Some(Kind::Num))));
         }
         if name == "re_alts_find" {
             // T78: (alts, classes, s, from: i32, flags: i32, ascii, wide, caps) -> i32.
