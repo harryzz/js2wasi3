@@ -67,6 +67,9 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   overwrite fast path first), `get_num`/`set_num` (the backend's `+o[k]` / `o[k] = <f64>` peepholes), the statement
   `o[k] += <number>` (`ElemNum`), push/pop, iteration. A generic read of a non-integer element boxes it (a new
   `$number`). See `crates/backend/src/array.rs`.)
+  (T115: `obj[key]` with a non-constant key reads an `$array`'s element inline (`lib.rs` `elem_get`: an i31 or an
+  integer-valued `f64` key, inside the store, not a hole or an accessor); an array miss calls `get`, any other
+  receiver `get_other` (`get` without its array fast path), so a miss never runs the `$array` test twice.)
   (T108: a `+` with an element read among its operands, under a numeric consumer (an operand of `-`/`*`/`/`/`%`/`**`
   or a relational operator), is lowered by `Lowerer::num_sum`: each operand in source order to an `f64` (an element
   by `ElemNum`, else `get` + `NumOrHole`; another value by `NumOrHole`, which gives HOLE's bits for a non-number),
@@ -930,6 +933,9 @@ The rules after T106–T110, where each speed fix made another program slower (`
   in `==`, `+`, `typeof`, property access and BigInt code, so `tests/bench/micro/primitives.js` and
   `object-kinds.js` cover null, undefined, booleans, numbers, strings, symbols, BigInts and each object kind. Two
   forms of one test (`is_object`, `object_or`) must give every kind the same exits.
+- **A miss doesn't repeat the inline test** (T115): when the helper a miss calls starts with the same test the
+  inline path made, the miss calls a variant without it (`get_other`): revcomp's Buffer reads paid `$array` twice
+  (+4.2%, instructions +1.9%) until then.
 - **Equal instructions = placement** (T113): the gate's `instr` column (`perf stat -e instructions:u`) tells a
   slowdown from added work from one from code moving in memory (pidigits +5.3% at +0.01% instructions: its loops
   left the uop cache). Placement isn't fixed by changing the test that moved it.

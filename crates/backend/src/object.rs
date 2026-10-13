@@ -367,6 +367,9 @@ pub enum Helper {
     ToKey,
     /// `(v, key: jsval) -> jsval`: `v[key]`.
     Get,
+    /// `(v, key: jsval) -> jsval`: `v[key]` for a `v` that isn't an `$array` (T115: the miss of an inline
+    /// element read, which tested that already): [`Helper::Get`] without its array fast path.
+    GetOther,
     /// `(v, key, value: jsval)`: `v[key] = value`.
     Set,
     /// `(o, key, value: jsval)`: an own enumerable property of object `o` (literals).
@@ -547,6 +550,7 @@ impl Helper {
             Helper::ArrayIndex => "array_index",
             Helper::ToKey => "to_property_key",
             Helper::Get => "get",
+            Helper::GetOther => "get_other",
             Helper::Set => "set",
             Helper::DefineProp => "define_property",
             Helper::Delete => "delete",
@@ -637,7 +641,7 @@ impl Helper {
             Helper::Proto(_) => (vec![], vec![o]),
             Helper::ArrayIndex => (vec![s], vec![I64]),
             Helper::ToKey => (vec![v], vec![s]),
-            Helper::Get => (vec![v, v], vec![v]),
+            Helper::Get | Helper::GetOther => (vec![v, v], vec![v]),
             Helper::Set | Helper::DefineProp => (vec![v, v, v], vec![]),
             Helper::Delete | Helper::Has | Helper::HasOwn => (vec![v, v], vec![I32]),
             Helper::NewObject => (vec![], vec![v]),
@@ -714,7 +718,8 @@ impl Helper {
             Helper::Proto(b) => proto(cx, b),
             Helper::ArrayIndex => array_index(),
             Helper::ToKey => to_key(cx),
-            Helper::Get => get(cx),
+            Helper::Get => get(cx, true),
+            Helper::GetOther => get(cx, false),
             Helper::Set => set(cx),
             Helper::DefineProp => {
                 let to_key = h(cx, Helper::ToKey);
@@ -3235,7 +3240,8 @@ fn primitive_proto(cx: &mut dyn Cx, s: &mut InstructionSink, v: u32) {
     }
 }
 
-fn get(cx: &mut dyn Cx) -> Function {
+/// `arrays`: with the array fast path (`get`); without it for `get_other` (T115).
+fn get(cx: &mut dyn Cx, arrays: bool) -> Function {
     let to_key = h(cx, Helper::ToKey);
     let lookup = h(cx, Helper::Lookup);
     let is_nullish = rh(cx, runtime::Helper::IsNullish);
@@ -3266,56 +3272,58 @@ fn get(cx: &mut dyn Cx) -> Function {
     const EL: u32 = 8;
     // Fast path: an array element at a small integer index. Below the store's size first: a generic
     // array's elements (null past `length`); an array in number mode has an empty store (T107).
-    s.local_get(V).ref_test_non_null(array::array());
-    s.local_get(KEY)
-        .ref_test_non_null(wasm_encoder::HeapType::I31);
-    s.i32_and();
-    s.if_(BlockType::Empty);
-    s.local_get(KEY)
-        .ref_cast_non_null(wasm_encoder::HeapType::I31)
-        .i31_get_s()
-        .local_tee(J);
-    s.local_get(V)
-        .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_ELEMS)
-        .local_tee(EL)
-        .array_len();
-    s.i32_lt_u();
-    s.if_(BlockType::Empty);
-    s.local_get(EL).local_get(J).array_get(T_VALS).local_tee(R);
-    s.ref_is_null().i32_eqz();
-    s.if_(BlockType::Empty);
-    // An accessor element (T32): its getter.
-    s.local_get(R)
-        .ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
-    s.if_(BlockType::Empty);
-    s.local_get(R).local_get(V).call(value).return_();
-    s.end();
-    s.local_get(R).return_();
-    s.end();
-    s.end();
-    // T107: number mode: the element boxed (a hole: the general path below).
-    s.local_get(V)
-        .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_NUMS)
-        .local_set(NUMS);
-    array::is_num_mode(&mut s, NUMS);
-    s.if_(BlockType::Empty);
-    s.local_get(J)
-        .local_get(V)
-        .ref_cast_non_null(array::array())
-        .struct_get(T_ARRAY, array::F_LENGTH)
-        .i32_lt_u();
-    s.if_(BlockType::Empty);
-    s.local_get(NUMS).local_get(J).array_get(runtime::T_NUMS).local_tee(XF);
-    s.i64_reinterpret_f64().i64_const(array::HOLE).i64_ne();
-    s.if_(BlockType::Empty);
-    runtime::box_inline(&mut s, XF, J);
-    s.return_();
-    s.end();
-    s.end();
-    s.end();
-    s.end();
+    if arrays {
+        s.local_get(V).ref_test_non_null(array::array());
+        s.local_get(KEY)
+            .ref_test_non_null(wasm_encoder::HeapType::I31);
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(KEY)
+            .ref_cast_non_null(wasm_encoder::HeapType::I31)
+            .i31_get_s()
+            .local_tee(J);
+        s.local_get(V)
+            .ref_cast_non_null(array::array())
+            .struct_get(T_ARRAY, array::F_ELEMS)
+            .local_tee(EL)
+            .array_len();
+        s.i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(EL).local_get(J).array_get(T_VALS).local_tee(R);
+        s.ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        // An accessor element (T32): its getter.
+        s.local_get(R)
+            .ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
+        s.if_(BlockType::Empty);
+        s.local_get(R).local_get(V).call(value).return_();
+        s.end();
+        s.local_get(R).return_();
+        s.end();
+        s.end();
+        // T107: number mode: the element boxed (a hole: the general path below).
+        s.local_get(V)
+            .ref_cast_non_null(array::array())
+            .struct_get(T_ARRAY, array::F_NUMS)
+            .local_set(NUMS);
+        array::is_num_mode(&mut s, NUMS);
+        s.if_(BlockType::Empty);
+        s.local_get(J)
+            .local_get(V)
+            .ref_cast_non_null(array::array())
+            .struct_get(T_ARRAY, array::F_LENGTH)
+            .i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(NUMS).local_get(J).array_get(runtime::T_NUMS).local_tee(XF);
+        s.i64_reinterpret_f64().i64_const(array::HOLE).i64_ne();
+        s.if_(BlockType::Empty);
+        runtime::box_inline(&mut s, XF, J);
+        s.return_();
+        s.end();
+        s.end();
+        s.end();
+        s.end();
+    }
     if cx.names("$typed") {
         // A typed array (T20): an index key (an `i31` or an array-index string) reads the
         // element, or `undefined` out of range; never the prototype chain.

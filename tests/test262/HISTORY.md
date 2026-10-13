@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-13: T115 array element reads inline (full run)
+
+- Compiler (`main` at dfe054b + T115's `get_other`, uncommitted at the run): `obj[key]` with a non-constant key
+  reads an `$array` element inline; misses call `get` (arrays) or `get_other` (anything else). Runner: unchanged.
+- Full run on `a-03` (`~/t262-t115.log`, 1,450 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-13: T114 regex literals run by a Wasm interpreter (two full runs)
 
 - Compiler (`main` at 58dc1b0 + T114, uncommitted at the runs): regex literals in the subset (no `u`/`v`,

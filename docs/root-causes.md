@@ -15,6 +15,7 @@ root. Fresh counts and profiles: T112 steps 2–3.
 | T108 | navier-stokes −47% | mandelbrot +3.5% (first version) | lost an existing peephole (patched) |
 | T109 | splay −27%, binarytrees −26% | raytrace +3% | a static guess (constructor = `this` stores) wrong for `initialize.apply` (patched by a name filter) |
 | T110 | nbody −34%, richards −27% | knucleotide +7.2% | R1: inline cast of a Map at a key-name guess calls `is_subtype` |
+| T115 | nbody −12.7%, fannkuchredux −9.9% | revcomp +4.2% (first version) | the miss repeated the inline `$array` test in `get` (fixed: `get_other`) |
 
 Common pattern: a **static guess** whose **miss costs more than the old path**. Each patch narrowed the guess for
 the program that showed it; the root stayed.

@@ -1579,6 +1579,7 @@ impl Emitter<'_> {
     ) -> anyhow::Result<()> {
         use wasm_encoder::HeapType as Ht;
         let get = self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::Get)));
+        let get_other = self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::GetOther)));
         let (o, k, j, el, r, x) =
             (self.scratch_val, self.scratch_js, self.scratch_i32, self.scratch_vals, self.scratch_r, self.scratch_f64);
         let num = match key {
@@ -1597,41 +1598,48 @@ impl Emitter<'_> {
             }
         }
         s.local_set(o);
+        // The array misses call `get`; any other receiver calls `get_other`, which skips the `$array` test.
         s.block(BlockType::Result(runtime::jsval()));
+        s.block(BlockType::Empty);
         s.block(BlockType::Empty);
         s.local_get(o).ref_test_non_null(array::array()).i32_eqz().br_if(0);
         match num {
             Some(_) => {
                 // An integer-valued f64 (-0 is index 0, as ToPropertyKey says).
                 s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
-                s.local_get(x).f64_ne().br_if(0);
+                s.local_get(x).f64_ne().br_if(1);
             }
             None => {
-                s.local_get(k).ref_test_non_null(Ht::I31).i32_eqz().br_if(0);
+                s.local_get(k).ref_test_non_null(Ht::I31).i32_eqz().br_if(1);
                 s.local_get(k).ref_cast_non_null(Ht::I31).i31_get_s().local_set(j);
             }
         }
         // Inside the element store (negative: no), a data value (null: a hole or past `length`).
         s.local_get(j);
         s.local_get(o).ref_cast_non_null(array::array()).struct_get(runtime::T_ARRAY, array::F_ELEMS);
-        s.local_tee(el).array_len().i32_ge_u().br_if(0);
+        s.local_tee(el).array_len().i32_ge_u().br_if(1);
         s.local_get(el).local_get(j).array_get(runtime::T_VALS).local_tee(r);
-        s.ref_is_null().br_if(0);
-        s.local_get(r).ref_test_non_null(Ht::Concrete(runtime::T_ACCESSOR)).br_if(0);
-        s.local_get(r).br(1);
+        s.ref_is_null().br_if(1);
+        s.local_get(r).ref_test_non_null(Ht::Concrete(runtime::T_ACCESSOR)).br_if(1);
+        s.local_get(r).br(2);
         s.end();
-        s.local_get(o);
-        match num {
-            Some(_) => {
-                s.local_get(x).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
-            }
-            None => {
-                s.local_get(k);
-            }
-        }
-        s.call(get);
+        self.elem_get_call(s, num.is_some(), get_other);
+        s.br(1);
+        s.end();
+        self.elem_get_call(s, num.is_some(), get);
         s.end();
         Ok(())
+    }
+
+    /// T115: `elem_get`'s miss: `helper(obj, key)`, an `f64` key boxed.
+    fn elem_get_call(&mut self, s: &mut wasm_encoder::InstructionSink, num: bool, helper: u32) {
+        s.local_get(self.scratch_val);
+        if num {
+            s.local_get(self.scratch_f64).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+        } else {
+            s.local_get(self.scratch_js);
+        }
+        s.call(helper);
     }
 
     fn depth(frames: &[Frame], target: Frame) -> anyhow::Result<u32> {
