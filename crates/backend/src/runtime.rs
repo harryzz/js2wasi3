@@ -626,6 +626,19 @@ pub const COUNTS: &[&str] = &[
     "layout_define.fallback",
     "define.shared_kept",
     "define.shared_dropped",
+    // T111: numeric reads and writes of layout keys.
+    "num_read.cell",
+    "num_read.i31",
+    "num_read.number",
+    "num_read.miss_not_object",
+    "num_read.miss_subtype",
+    "num_read.miss_plain",
+    "num_write.cell",
+    "num_write.new_cell",
+    "num_write.i31",
+    "num_write.miss_not_object",
+    "num_write.miss_subtype",
+    "num_write.miss_plain",
 ];
 
 /// T112: the index of counter `name` in [`COUNTS`].
@@ -892,10 +905,12 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
                 field(StorageType::Val(jsval()), true),
             ]),
         })),
+        // $accessor: get, set, num (T111).
         sub(CompositeInnerType::Struct(StructType {
             fields: Box::new([
                 field(StorageType::Val(jsval()), true),
                 field(StorageType::Val(jsval()), true),
+                field(StorageType::Val(ValType::F64), true),
             ]),
         })),
         sub_of(
@@ -1621,8 +1636,48 @@ fn box_number() -> Function {
 
 /// [`Helper::Box`] inline (T107: hot element reads): the `f64` in local `x` as a `jsval`, local `i` (an i32)
 /// as scratch.
+/// T111: a number cell is an `$accessor` whose `get` is this `i31` (a getter is a function, `undefined` or
+/// `G_BUILTIN`) and whose `num` holds the number: a data property's value kept unboxed in its slot, owned by the
+/// object (V8's double field box), written in place, copied out by every read. Only in a `$plain` object's data
+/// slots (its attributes never say accessor). Sharing `$accessor` keeps the slot tests of the read paths as
+/// they were: an accessor already goes the slow way (`property_value`).
+pub const NUMCELL_MARK: i32 = 0;
+/// T111: `$accessor`'s `num` field.
+pub const F_ACCESSOR_NUM: u32 = 2;
+
+/// T111: push 1 when the `$accessor` on the stack is a number cell ([`NUMCELL_MARK`]).
+pub fn is_numcell(s: &mut InstructionSink) {
+    s.struct_get(T_ACCESSOR, 0).ref_test_non_null(HeapType::I31);
+}
+
+/// T111: if local `r` (a slot's raw value) is a number cell, replace it with its number as a JS value (an `i31`
+/// or a new `$number`, as [`box_inline`]; `x`/`i` are `f64`/`i32` scratch locals).
+pub fn numcell_out(s: &mut InstructionSink, r: u32, x: u32, i: u32) {
+    let acc = HeapType::Concrete(T_ACCESSOR);
+    s.local_get(r).ref_test_non_null(acc);
+    s.if_(BlockType::Empty);
+    s.local_get(r).ref_cast_non_null(acc);
+    is_numcell(s);
+    s.if_(BlockType::Empty);
+    s.local_get(r).ref_cast_non_null(acc).struct_get(T_ACCESSOR, F_ACCESSOR_NUM).local_set(x);
+    box_inline(s, x, i);
+    s.local_set(r);
+    s.end();
+    s.end();
+}
+
 pub fn box_inline(s: &mut InstructionSink, x: u32, i: u32) {
-    // i = trunc_sat(x); keep as i31 if f64(i) == x, i in range and x is not -0.
+    fits_i31(s, x, i);
+    s.if_(BlockType::Result(jsval()));
+    s.local_get(i).ref_i31();
+    s.else_();
+    s.local_get(x).struct_new(T_NUMBER);
+    s.end();
+}
+
+/// Push 1 when `f64` local `x` is a number an `i31` holds (set in `i32` local `i`), else 0.
+pub fn fits_i31(s: &mut InstructionSink, x: u32, i: u32) {
+    // i = trunc_sat(x); an i31 if f64(i) == x, i in range and x is not -0.
     s.local_get(x)
         .i32_trunc_sat_f64_s()
         .local_tee(i)
@@ -1636,11 +1691,6 @@ pub fn box_inline(s: &mut InstructionSink, x: u32, i: u32) {
         .i64_const(i64::MIN)
         .i64_ne()
         .i32_and();
-    s.if_(BlockType::Result(jsval()));
-    s.local_get(i).ref_i31();
-    s.else_();
-    s.local_get(x).struct_new(T_NUMBER);
-    s.end();
 }
 
 /// Push the `$oddball` kind of local `v` (which must be an oddball).

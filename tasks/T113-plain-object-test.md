@@ -106,7 +106,7 @@ The goal is a test "is this a plain object?" that costs one inline compare on th
   T112 code measured 12.0 / 14.5 for these earlier today, so the base's 6.5 is laptop noise: the micro noise on
   the laptop is several ns). Gate verdict: fails (pidigits, richards, several micro cases).
 - 2026-10-12: user: "yes run it on a-03". Synced the working tree to a-03 (rsync), built there, started
-  `scripts/gate.sh -r 5 db256bc` into `~/gate-t113.log` on a-03.
+  `scripts/gate.sh -r 5 db256bc` on a-03 (log copied to `out/gate-t113-a03.log`).
 - 2026-10-12: gate on a-03 (`scripts/gate.sh -r 5 db256bc`; log copied to `out/gate-t113-a03.log`). Programs
   (minimums): faster: knucleotide −6.0%, raytrace −5.7%, nbody −5.0%, crypto −4.9%, earley-boyer −4.6%,
   deltablue −4.0%, binarytrees −3.7%, fasta −2.1%; same: the other 8; **slower: pidigits +5.6%** (runs 998–1024

@@ -300,8 +300,12 @@ pub enum Helper {
     /// `(o: (ref $object), k: (ref $string)) -> i32`: own entry index or -1 (dictionary part).
     FindOwn,
     /// `(o: (ref $object), k: (ref $string)) -> eqref`: the own property's value (an array's
-    /// elements and `length` included), Wasm null if there's none.
+    /// elements and `length` included), Wasm null if there's none. An accessor's slot as is; a number
+    /// cell (T111) copied out.
     OwnGet,
+    /// [`Helper::OwnGet`] with a number cell as is (T111): for callers that only test for null or pass the
+    /// value to `property_value` (which copies a cell), so they skip the test.
+    OwnGetRaw,
     /// `(o: (ref null $object), k) -> jsval`: the value on the prototype chain, Wasm null if absent.
     Lookup,
     /// `(o: (ref null $object), k) -> (ref null $object)`: the object on the chain that has `k`.
@@ -367,6 +371,8 @@ pub enum Helper {
     ToKey,
     /// `(v, key: jsval) -> jsval`: `v[key]`.
     Get,
+    /// `(raw: jsval) -> jsval` (T111): a slot's raw value with a number cell copied out (anything else as is).
+    CellOut,
     /// `(v, key: jsval) -> jsval`: `v[key]` for a `v` that isn't an `$array` (T115: the miss of an inline
     /// element read, which tested that already): [`Helper::Get`] without its array fast path.
     GetOther,
@@ -490,6 +496,7 @@ impl Helper {
             Helper::Hash => "string_hash",
             Helper::FindOwn => "find_own",
             Helper::OwnGet => "own_get",
+            Helper::OwnGetRaw => "own_get_raw",
             Helper::Lookup => "lookup",
             Helper::Holder => "holder",
             Helper::FindOwnNamed => "find_own_named",
@@ -551,6 +558,7 @@ impl Helper {
             Helper::ToKey => "to_property_key",
             Helper::Get => "get",
             Helper::GetOther => "get_other",
+            Helper::CellOut => "cell_out",
             Helper::Set => "set",
             Helper::DefineProp => "define_property",
             Helper::Delete => "delete",
@@ -616,7 +624,7 @@ impl Helper {
         match self {
             Helper::Hash => (vec![s], vec![I32]),
             Helper::FindOwn => (vec![o, s], vec![I32]),
-            Helper::OwnGet => (vec![o, s], vec![v]),
+            Helper::OwnGet | Helper::OwnGetRaw => (vec![o, s], vec![v]),
             Helper::Lookup => (vec![on, s], vec![v]),
             Helper::Holder => (vec![on, s], vec![on]),
             Helper::FindOwnNamed => (vec![o, s, I32], vec![I32]),
@@ -642,6 +650,7 @@ impl Helper {
             Helper::ArrayIndex => (vec![s], vec![I64]),
             Helper::ToKey => (vec![v], vec![s]),
             Helper::Get | Helper::GetOther => (vec![v, v], vec![v]),
+            Helper::CellOut => (vec![v], vec![v]),
             Helper::Set | Helper::DefineProp => (vec![v, v, v], vec![]),
             Helper::Delete | Helper::Has | Helper::HasOwn => (vec![v, v], vec![I32]),
             Helper::NewObject => (vec![], vec![v]),
@@ -703,7 +712,8 @@ impl Helper {
             Helper::GetNum => get_num(cx),
             Helper::SetNum => set_num(cx),
             Helper::ElemNum => elem_num(),
-            Helper::OwnGet => own_get(cx),
+            Helper::OwnGet => own_get(cx, true),
+            Helper::OwnGetRaw => own_get(cx, false),
             Helper::Lookup => lookup(cx, false),
             Helper::Holder => lookup(cx, true),
             Helper::Define => define(cx, false),
@@ -720,6 +730,7 @@ impl Helper {
             Helper::ToKey => to_key(cx),
             Helper::Get => get(cx, true),
             Helper::GetOther => get(cx, false),
+            Helper::CellOut => cell_out(),
             Helper::Set => set(cx),
             Helper::DefineProp => {
                 let to_key = h(cx, Helper::ToKey);
@@ -1584,7 +1595,8 @@ fn get_named(cx: &mut dyn Cx) -> Function {
             .local_get(E)
             .array_get(T_VALS)
             .local_tee(R);
-        // A plain value as is; an accessor or a built-in sentinel through `property_value`.
+        // A plain value as is; an accessor (or a number cell, T111) or a built-in sentinel through
+        // `property_value`.
         s.ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
         s.local_get(R).global_get(runtime::G_BUILTIN).ref_eq();
         s.i32_or();
@@ -2090,14 +2102,26 @@ fn ic_store() -> Function {
     f
 }
 
-fn own_get(cx: &mut dyn Cx) -> Function {
+/// `cell_out(raw)` (see [`Helper::CellOut`]).
+fn cell_out() -> Function {
+    let mut f = Function::new([(1, ValType::F64), (1, ValType::I32)]);
+    let mut s = f.instructions();
+    runtime::numcell_out(&mut s, 0, 1, 2);
+    s.local_get(0);
+    s.end();
+    f
+}
+
+/// `copy`: a number cell copied out (`own_get`); as is for `own_get_raw` (T111).
+fn own_get(cx: &mut dyn Cx, copy: bool) -> Function {
     let find = h(cx, Helper::FindOwn);
     let array_own = cx.helper(runtime::Helper::Arr(array::Helper::OwnGet));
     const O: u32 = 0;
     const K: u32 = 1;
     const E: u32 = 2;
     const R: u32 = 3;
-    let mut f = Function::new([(1, ValType::I32), (1, jsval())]);
+    const X: u32 = 4;
+    let mut f = Function::new([(1, ValType::I32), (1, jsval()), (1, ValType::F64)]);
     let mut s = f.instructions();
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
@@ -2117,7 +2141,13 @@ fn own_get(cx: &mut dyn Cx) -> Function {
     s.local_get(O)
         .struct_get(T_OBJECT, F_VALS)
         .local_get(E)
-        .array_get(T_VALS);
+        .array_get(T_VALS)
+        .local_set(R);
+    // T111: a number cell: a copy.
+    if copy {
+        runtime::numcell_out(&mut s, R, X, E);
+    }
+    s.local_get(R);
     s.else_();
     s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
     s.end();
@@ -2125,9 +2155,10 @@ fn own_get(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `$lookup` / `$holder`: walk the prototype chain.
+/// `$lookup` / `$holder`: walk the prototype chain. A number cell as is (T111): every caller tests for null
+/// or passes the value to `property_value`.
 fn lookup(cx: &mut dyn Cx, holder: bool) -> Function {
-    let own = h(cx, Helper::OwnGet);
+    let own = h(cx, Helper::OwnGetRaw);
     const O: u32 = 0;
     const K: u32 = 1;
     const R: u32 = 2;
@@ -3832,7 +3863,7 @@ fn has(cx: &mut dyn Cx) -> Function {
 
 fn has_own(cx: &mut dyn Cx) -> Function {
     let to_key = h(cx, Helper::ToKey);
-    let own = h(cx, Helper::OwnGet);
+    let own = h(cx, Helper::OwnGetRaw);
     let is_nullish = rh(cx, runtime::Helper::IsNullish);
     let throw = h(cx, Helper::Throw(ErrorKind::TypeError));
     let convert = cx.str("Cannot convert undefined or null to object");
@@ -4817,7 +4848,7 @@ fn new_error(cx: &mut dyn Cx, k: ErrorKind) -> Function {
         // recognize. Programs that never name `stack` keep the sentinel (reading it traps).
         s.global_get(G_BUILTIN)
             .global_get(G_BUILTIN)
-            .struct_new(runtime::T_ACCESSOR);
+            .f64_const(0.0.into()).struct_new(runtime::T_ACCESSOR);
         s.i32_const(HIDDEN | ACCESSOR).call(define);
     } else {
         s.global_get(G_BUILTIN);

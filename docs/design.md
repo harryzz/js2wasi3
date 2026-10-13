@@ -189,6 +189,14 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   past `SMALL`); every generic path works unchanged. Objects with no layout are still pre-sized by the static count
   (JSC's `StaticPropertyAnalyzer`). Reads are unchanged (T74/T105 guesses). splay −27%, binarytrees −26%,
   earley-boyer −24%, richards −3%; zigbee2mqtt replay −1.2%.)
+  (T111: **number fields**, V8's double fields: the slot owns a box written in place, and every generic read
+  copies it. Our box is a **number cell**: an `$accessor` whose `get` is the `i31` `NUMCELL_MARK` and whose third
+  field `num` holds the `f64`, in a data slot of a `$plain` object (so the read paths' accessor test already sends
+  it to `property_value`, which copies it; `own_get` and `cell_out` copy too, `own_get_raw` doesn't). Only the
+  backend's numeric write at a layout key makes one (`o.k = <f64>`, `-=`, `o.k += x` via `elem_add_stmt`): in
+  place into a cell, else an `i31` for an integer (V8's Smi fields), else a new cell. Numeric reads (`+o.k`,
+  `ElemNum(o, "k")`) take the `f64` from a cell, `i31` or `$number` inline. Writers that don't know cells
+  overwrite them. nbody −20.8%.)
   (T92: **object tests without `is_subtype`**. `$object` isn't final, so wasmtime compiles `ref.test`/`ref.cast
   (ref $object)` inline only for an exact `$object` and calls its `is_subtype` runtime function for every other
   object (a `Map`, array, function…). `runtime::object_or` tests and casts in one chain: abstract `struct`,

@@ -4078,10 +4078,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.push(Stmt::Expr(v.e));
                 Ok(())
             }
+            // T111: `o.k += x` too (its read: a number property kept in its slot).
             Expression::AssignmentExpression(a)
                 if a.operator == AssignmentOperator::Addition
-                    && matches!(&a.left, AssignmentTarget::ComputedMemberExpression(m)
-                        if !matches!(m.object, Expression::Super(_))) =>
+                    && match &a.left {
+                        AssignmentTarget::ComputedMemberExpression(m) => !matches!(m.object, Expression::Super(_)),
+                        AssignmentTarget::StaticMemberExpression(m) => !matches!(m.object, Expression::Super(_)),
+                        _ => false,
+                    } =>
             {
                 self.elem_add_stmt(cx, a, out)
             }
@@ -7233,7 +7237,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// T107: the statement `o[k] += x`. With a number `x`: the element is read first, unboxed from an array
     /// in number mode (`ElemNum`; anything else: `get`), then `x`, then the sum is stored (`set(o, k,
-    /// f64->jsval(…))`, which the backend stores unboxed); else as [`Self::member_assign`].
+    /// f64->jsval(…))`, which the backend stores unboxed); else as [`Self::member_assign`]. T111: `o.k += x`
+    /// the same way (the backend's `ElemNum` with a constant key reads a number property from its slot).
     fn elem_add_stmt(
         &mut self,
         cx: &mut FnCx,

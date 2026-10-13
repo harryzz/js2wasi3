@@ -1631,6 +1631,167 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// T111: the layout slots a constant-key site tries inline (T110), or none (the key isn't in a layout, or
+    /// at too many slots).
+    fn num_slots(&self, units: &[u16]) -> Vec<u32> {
+        let slots = self.layout_slots.get(units).cloned().unwrap_or_default();
+        if slots.len() <= LAYOUT_GUESSES { slots } else { Vec::new() }
+    }
+
+    /// T111: with an object value on the stack (kept in `scratch_js`), push own property `units` of a plain
+    /// object at one of its layout slots as an `f64` when it holds a number (a number cell, an `i31`, a
+    /// `$number`), else the HOLE NaN ([`Intrinsic::F64IsHole`]). Never runs JS code.
+    fn num_slot_read(&mut self, s: &mut wasm_encoder::InstructionSink, units: &[u16]) {
+        use wasm_encoder::HeapType as Ht;
+        let slots = self.num_slots(units);
+        let (v, o, r) = (self.scratch_js, self.scratch_obj, self.scratch_val);
+        let on = self.m.count;
+        s.local_set(v);
+        if slots.is_empty() {
+            s.i64_const(array::HOLE).f64_reinterpret_i64();
+            return;
+        }
+        let g = runtime::Cx::string(self, units);
+        if on {
+            s.ref_null(runtime::object()).local_set(o);
+        }
+        s.block(BlockType::Result(ValType::F64));
+        s.block(BlockType::Result(runtime::jsval()));
+        s.local_get(v);
+        s.br_on_cast_fail(
+            0,
+            wasm_encoder::RefType::EQREF,
+            wasm_encoder::RefType { nullable: false, heap_type: Ht::Concrete(runtime::T_PLAIN) },
+        );
+        s.local_set(o);
+        for &slot in &slots {
+            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_COUNT);
+            s.i32_const(slot as i32).i32_gt_u();
+            s.if_(BlockType::Empty);
+            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_KEYS);
+            s.i32_const(slot as i32).array_get(runtime::T_KEYS);
+            s.global_get(g).ref_eq();
+            s.if_(BlockType::Empty);
+            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+            s.i32_const(slot as i32).array_get(runtime::T_VALS).local_tee(r);
+            s.ref_test_non_null(Ht::Concrete(runtime::T_ACCESSOR));
+            s.if_(BlockType::Empty);
+            s.local_get(r).ref_cast_non_null(Ht::Concrete(runtime::T_ACCESSOR));
+            runtime::is_numcell(s);
+            s.if_(BlockType::Empty);
+            runtime::count(s, on, "num_read.cell");
+            s.local_get(r)
+                .ref_cast_non_null(Ht::Concrete(runtime::T_ACCESSOR))
+                .struct_get(runtime::T_ACCESSOR, runtime::F_ACCESSOR_NUM);
+            s.br(5);
+            s.end();
+            s.end();
+            s.local_get(r).ref_test_non_null(Ht::I31);
+            s.if_(BlockType::Empty);
+            runtime::count(s, on, "num_read.i31");
+            s.local_get(r).ref_cast_non_null(Ht::I31).i31_get_s().f64_convert_i32_s();
+            s.br(4);
+            s.end();
+            s.local_get(r).ref_test_non_null(Ht::Concrete(runtime::T_NUMBER));
+            s.if_(BlockType::Empty);
+            runtime::count(s, on, "num_read.number");
+            s.local_get(r).ref_cast_non_null(Ht::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0);
+            s.br(4);
+            s.end();
+            s.end();
+            s.end();
+        }
+        s.local_get(v);
+        s.end();
+        count_miss(s, on, o, "num_read");
+        s.drop();
+        s.i64_const(array::HOLE).f64_reinterpret_i64();
+        s.end();
+    }
+
+    /// T111: `o.k = x` with `x` an `f64`, the object and `x` on the stack: at one of the key's layout slots of a
+    /// plain object, a writable data property, the number goes into the slot's number cell in place; a slot
+    /// without one gets an `i31` for an integer, else a new cell (V8's Smi and double fields: the box is owned
+    /// by the object); anywhere else `x` is boxed and `set_named` called.
+    fn num_slot_write(&mut self, s: &mut wasm_encoder::InstructionSink, units: &[u16]) {
+        use wasm_encoder::HeapType as Ht;
+        let slots = self.num_slots(units);
+        let g = runtime::Cx::string(self, units);
+        let (v, o, x, r) = (self.scratch_js, self.scratch_obj, self.scratch_f64, self.scratch_val);
+        let on = self.m.count;
+        s.local_set(x).local_set(v);
+        s.block(BlockType::Empty);
+        if !slots.is_empty() {
+            if on {
+                s.ref_null(runtime::object()).local_set(o);
+            }
+            s.block(BlockType::Result(runtime::jsval()));
+            s.local_get(v);
+            s.br_on_cast_fail(
+                0,
+                wasm_encoder::RefType::EQREF,
+                wasm_encoder::RefType { nullable: false, heap_type: Ht::Concrete(runtime::T_PLAIN) },
+            );
+            s.local_set(o);
+            for &slot in &slots {
+                s.local_get(o).struct_get(runtime::T_OBJECT, object::F_COUNT);
+                s.i32_const(slot as i32).i32_gt_u();
+                s.if_(BlockType::Empty);
+                s.local_get(o).struct_get(runtime::T_OBJECT, object::F_KEYS);
+                s.i32_const(slot as i32).array_get(runtime::T_KEYS);
+                s.global_get(g).ref_eq();
+                s.if_(BlockType::Empty);
+                s.local_get(o).struct_get(runtime::T_OBJECT, object::F_ATTRS);
+                s.i32_const(slot as i32).array_get_u(runtime::T_BYTES);
+                s.i32_const(object::ACCESSOR | object::READONLY | object::WATCHED);
+                s.i32_and().i32_eqz();
+                s.if_(BlockType::Empty);
+                s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+                // A data slot (the attributes say so) holding an `$accessor` holds a number cell.
+                s.i32_const(slot as i32).array_get(runtime::T_VALS).local_tee(r);
+                s.ref_test_non_null(Ht::Concrete(runtime::T_ACCESSOR));
+                s.if_(BlockType::Empty);
+                runtime::count(s, on, "num_write.cell");
+                s.local_get(r).ref_cast_non_null(Ht::Concrete(runtime::T_ACCESSOR));
+                s.local_get(x).struct_set(runtime::T_ACCESSOR, runtime::F_ACCESSOR_NUM);
+                s.br(5);
+                s.end();
+                // An integer stays an `i31` (V8: a Smi field); a cell for anything else.
+                s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+                s.i32_const(slot as i32);
+                runtime::fits_i31(s, x, self.scratch_i32);
+                s.if_(BlockType::Result(runtime::jsval()));
+                runtime::count(s, on, "num_write.i31");
+                s.local_get(self.scratch_i32).ref_i31();
+                s.else_();
+                runtime::count(s, on, "num_write.new_cell");
+                s.i32_const(runtime::NUMCELL_MARK).ref_i31();
+                s.global_get(runtime::G_UNDEFINED);
+                s.local_get(x).struct_new(runtime::T_ACCESSOR);
+                s.end();
+                s.array_set(runtime::T_VALS);
+                s.br(4);
+                s.end();
+                s.end();
+                s.end();
+            }
+            s.local_get(v);
+            s.end();
+            count_miss(s, on, o, "num_write");
+        } else {
+            s.local_get(v);
+        }
+        s.global_get(g);
+        s.local_get(x).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+        s.i32_const(object::key_hash(units));
+        s.i32_const(self.set_sites as i32);
+        self.set_sites += 1;
+        s.i32_const(self.ic_sites as i32);
+        self.ic_sites += 1;
+        s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::SetNamed))));
+        s.end();
+    }
+
     /// T115: `elem_get`'s miss: `helper(obj, key)`, an `f64` key boxed.
     fn elem_get_call(&mut self, s: &mut wasm_encoder::InstructionSink, num: bool, helper: u32) {
         s.local_get(self.scratch_val);
@@ -1929,6 +2090,37 @@ impl Emitter<'_> {
                 from: Type::JsVal,
                 to: Type::F64,
                 arg,
+            } if matches!(&**arg, Expr::Intrinsic { op: Intrinsic::GetProp, args }
+                if matches!(&args[1], Expr::Str(u) if object::named_key(u) && !self.num_slots(u).is_empty())) =>
+            {
+                // T111: `+o.k` at a layout key: the number straight from the slot (a number cell: no box);
+                // anything else as before (`get_named`, ToNumber).
+                let Expr::Intrinsic { args, .. } = &**arg else {
+                    unreachable!()
+                };
+                let Expr::Str(units) = &args[1] else {
+                    unreachable!()
+                };
+                self.expr(s, frames, &args[0])?;
+                self.num_slot_read(s, units);
+                let (v, x) = (self.scratch_js, self.scratch_f64);
+                s.local_tee(x).i64_reinterpret_f64().i64_const(array::HOLE).i64_eq();
+                s.if_(BlockType::Result(ValType::F64));
+                s.local_get(v);
+                s.global_get(runtime::Cx::string(self, units));
+                s.i32_const(object::key_hash(units));
+                s.i32_const(self.ic_sites as i32);
+                self.ic_sites += 1;
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::GetNamed))));
+                s.call(self.helper_index(Helper::Js(runtime::Helper::ToNumber)));
+                s.else_();
+                s.local_get(x);
+                s.end();
+            }
+            Expr::Convert {
+                from: Type::JsVal,
+                to: Type::F64,
+                arg,
             } if matches!(&**arg, Expr::Intrinsic { op: Intrinsic::GetProp, args } if !matches!(args[1], Expr::Str(_))) =>
             {
                 // T107: `+o[k]` (an element read as a number): unboxed from an array in number mode.
@@ -2059,6 +2251,12 @@ impl Emitter<'_> {
                         bigint::Helper::ToString
                     };
                     s.call(self.helper_index(Helper::Js(H::Big(h))));
+                    return Ok(true);
+                }
+                if let (Intrinsic::ElemNum, [obj, Expr::Str(units)]) = (op, args.as_slice()) {
+                    // T111: `o.k += x`'s read: a number property of a plain object at a layout slot, else HOLE.
+                    self.expr(s, frames, obj)?;
+                    self.num_slot_read(s, units);
                     return Ok(true);
                 }
                 if let (Intrinsic::GetProp, [obj, key]) = (op, args.as_slice())
@@ -2198,6 +2396,20 @@ impl Emitter<'_> {
                     s.global_get(self.layout_global(*l));
                     s.call(self.helper_index(Helper::Js(H::Func(func::Helper::CreateThisLayout))));
                     return Ok(true);
+                }
+                if let (
+                    Intrinsic::SetProp,
+                    [obj, Expr::Str(units), Expr::Convert { from: Type::F64, to: Type::JsVal, arg: x }],
+                ) = (op, args.as_slice())
+                    && object::named_key(units)
+                    && units != "__proto__".encode_utf16().collect::<Vec<_>>().as_slice()
+                    && !self.num_slots(units).is_empty()
+                {
+                    // T111: `o.k = <number>` at a layout key: into the slot's number cell.
+                    self.expr(s, frames, obj)?;
+                    self.expr(s, frames, x)?;
+                    self.num_slot_write(s, units);
+                    return Ok(false);
                 }
                 if let (Intrinsic::SetProp, [obj, Expr::Str(units), value]) = (op, args.as_slice())
                     && object::named_key(units)

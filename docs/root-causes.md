@@ -16,6 +16,7 @@ root. Fresh counts and profiles: T112 steps 2–3.
 | T109 | splay −27%, binarytrees −26% | raytrace +3% | a static guess (constructor = `this` stores) wrong for `initialize.apply` (patched by a name filter) |
 | T110 | nbody −34%, richards −27% | knucleotide +7.2% | R1: inline cast of a Map at a key-name guess calls `is_subtype` |
 | T115 | nbody −12.7%, fannkuchredux −9.9% | revcomp +4.2% (first version) | the miss repeated the inline `$array` test in `get` (fixed: `get_other`) |
+| T111 | nbody −20.8% | richards +8.8% instr, then +2.9%; `o[k]`/`k in o` +9 instr (first versions) | integer cells made generic reads miss (fixed: `i31` stays); a new type test on every read hit (fixed: cells are `$accessor`s); a copy in `own_get` (fixed: `own_get_raw`) |
 
 Common pattern: a **static guess** whose **miss costs more than the old path**. Each patch narrowed the guess for
 the program that showed it; the root stayed.
@@ -46,7 +47,9 @@ T110 with 3 exact tests before its inline cast lost half its gain (laptop: nbody
 A non-i31 number in a `jsval` slot (object field, generic array, parameter, `jsval` local) is a new `$number` per
 write and an unbox per use. `docs/performance.md`: numbers 16.3% of js2wasi3's time on average (node 0).
 - Fixed since: T103 (mandelbrot 77% → ~0), T106 (`let x;`), T107 (number arrays), T108 (element reads in `+`).
-- Left: nbody fields (F406, `box_number` 11.9% from `advance`), crypto `am3` parameters/locals (F404, 18.6%),
+- T111 (2026-10-13): nbody fields (F406) in number cells owned by the object (V8's double fields): nbody −20.8%;
+  left F423 (cells only at numeric writes of layout keys), F424 (generic reads copy).
+- Left: crypto `am3` parameters/locals (F404, 18.6%),
   navier-stokes `lin_solve` local (F403), comparisons over elements (F402, ≤ 1.1%), booleans boxed (F14), integer
   loops on `f64` (F335), BigInt allocation per op (F188; pidigits 89% BigInt), conservative definite assignment
   (F398), F323, F334.

@@ -168,7 +168,7 @@ impl Helper {
             Helper::NewAccessor => {
                 let mut f = Function::new([]);
                 let mut s = f.instructions();
-                s.local_get(0).local_get(1).struct_new(T_ACCESSOR);
+                s.local_get(0).local_get(1).f64_const(0.0.into()).struct_new(T_ACCESSOR);
                 s.end();
                 f
             }
@@ -226,7 +226,9 @@ fn value(cx: &mut dyn Cx) -> Function {
     const RAW: u32 = 0;
     const RCV: u32 = 1;
     const G: u32 = 2;
-    let mut f = Function::new([(1, jsval())]);
+    const X: u32 = 3;
+    const I: u32 = 4;
+    let mut f = Function::new([(1, jsval()), (1, ValType::F64), (1, ValType::I32)]);
     let mut s = f.instructions();
     s.local_get(RAW).ref_is_null();
     s.if_(BlockType::Empty);
@@ -234,6 +236,12 @@ fn value(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(RAW).ref_test_non_null(accessor());
     s.if_(BlockType::Empty);
+    // T111: a number cell: a copy of its number.
+    runtime::numcell_out(&mut s, RAW, X, I);
+    s.local_get(RAW).ref_test_non_null(accessor()).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(RAW).return_();
+    s.end();
     s.local_get(RAW)
         .ref_cast_non_null(accessor())
         .struct_get(T_ACCESSOR, 0)
@@ -742,7 +750,7 @@ fn define_accessor(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     s.global_get(G_UNDEFINED)
         .global_get(G_UNDEFINED)
-        .struct_new(T_ACCESSOR)
+        .f64_const(0.0.into()).struct_new(T_ACCESSOR)
         .local_set(X);
     s.local_get(O)
         .ref_as_non_null()
@@ -948,9 +956,14 @@ fn define_property(cx: &mut dyn Cx) -> Function {
             s.local_get(O).ref_as_non_null().struct_get(T_OBJECT, F_VALS);
         }
     };
+    // T111: a number cell copied out (read-only "same value" checks compare the number).
+    let cell_out = oh(cx, object::Helper::CellOut);
     let load_slot = |s: &mut InstructionSink, elem: bool| {
         slots(s, elem);
         s.local_get(E).array_get(T_VALS);
+        if !elem {
+            s.call(cell_out);
+        }
     };
     let store_attrs = |s: &mut InstructionSink, elem: bool| {
         if elem {
@@ -1061,7 +1074,7 @@ fn define_property(cx: &mut dyn Cx) -> Function {
             s.local_get(E);
             s.global_get(G_UNDEFINED)
                 .global_get(G_UNDEFINED)
-                .struct_new(T_ACCESSOR);
+                .f64_const(0.0.into()).struct_new(T_ACCESSOR);
             s.array_set(T_VALS);
             s.local_get(A)
                 .i32_const(!READONLY)
@@ -1415,6 +1428,7 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
         .struct_get(T_OBJECT, F_VALS)
         .local_get(E)
         .array_get(T_VALS)
+        .call(oh(cx, object::Helper::CellOut))
         .local_set(X);
     s.end();
     if cx.names("stack") {
