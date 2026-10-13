@@ -246,6 +246,9 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         scratch_js: 0,
         scratch_obj: 0,
         scratch_val: 0,
+        scratch_i32: 0,
+        scratch_vals: 0,
+        scratch_r: 0,
         layout_slots,
         m: module,
         exits,
@@ -1025,6 +1028,10 @@ struct Emitter<'m> {
     /// T110: a `(ref null $object)` and a second `jsval` local for the inline layout reads.
     scratch_obj: u32,
     scratch_val: u32,
+    /// T115: an `i32`, a `(ref null $vals)` and a third `jsval` local for the inline element reads.
+    scratch_i32: u32,
+    scratch_vals: u32,
+    scratch_r: u32,
     /// T110: a key's distinct slots in the module's layouts.
     layout_slots: HashMap<Vec<u16>, Vec<u32>>,
     imports: host::Imports,
@@ -1535,10 +1542,16 @@ impl Emitter<'_> {
         locals.push((1, runtime::jsval()));
         locals.push((1, runtime::rt(true, runtime::T_OBJECT)));
         locals.push((1, runtime::jsval()));
+        locals.push((1, ValType::I32));
+        locals.push((1, runtime::rt(true, runtime::T_VALS)));
+        locals.push((1, runtime::jsval()));
         self.scratch_f64 = f.locals.len() as u32;
         self.scratch_js = self.scratch_f64 + 1;
         self.scratch_obj = self.scratch_f64 + 2;
         self.scratch_val = self.scratch_f64 + 3;
+        self.scratch_i32 = self.scratch_f64 + 4;
+        self.scratch_vals = self.scratch_f64 + 5;
+        self.scratch_r = self.scratch_f64 + 6;
         let mut func = Function::new(locals);
         let mut frames = Vec::new();
         {
@@ -1552,6 +1565,73 @@ impl Emitter<'_> {
             sink.end();
         }
         Ok(func)
+    }
+
+    /// T115: `obj[key]` with a key that isn't a constant string: an element of an array (`$array`, its element
+    /// store, a data value) read inline, as the `get` helper's first fast path; anything else calls `get`. An
+    /// `f64` key (a typed index, `a[i]`) is tested as is and boxed only for the call.
+    fn elem_get(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        frames: &mut Vec<Frame>,
+        obj: &Expr,
+        key: &Expr,
+    ) -> anyhow::Result<()> {
+        use wasm_encoder::HeapType as Ht;
+        let get = self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::Get)));
+        let (o, k, j, el, r, x) =
+            (self.scratch_val, self.scratch_js, self.scratch_i32, self.scratch_vals, self.scratch_r, self.scratch_f64);
+        let num = match key {
+            Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => Some(&**arg),
+            _ => None,
+        };
+        self.expr(s, frames, obj)?;
+        match num {
+            Some(i) => {
+                self.expr(s, frames, i)?;
+                s.local_set(x);
+            }
+            None => {
+                self.expr(s, frames, key)?;
+                s.local_set(k);
+            }
+        }
+        s.local_set(o);
+        s.block(BlockType::Result(runtime::jsval()));
+        s.block(BlockType::Empty);
+        s.local_get(o).ref_test_non_null(array::array()).i32_eqz().br_if(0);
+        match num {
+            Some(_) => {
+                // An integer-valued f64 (-0 is index 0, as ToPropertyKey says).
+                s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
+                s.local_get(x).f64_ne().br_if(0);
+            }
+            None => {
+                s.local_get(k).ref_test_non_null(Ht::I31).i32_eqz().br_if(0);
+                s.local_get(k).ref_cast_non_null(Ht::I31).i31_get_s().local_set(j);
+            }
+        }
+        // Inside the element store (negative: no), a data value (null: a hole or past `length`).
+        s.local_get(j);
+        s.local_get(o).ref_cast_non_null(array::array()).struct_get(runtime::T_ARRAY, array::F_ELEMS);
+        s.local_tee(el).array_len().i32_ge_u().br_if(0);
+        s.local_get(el).local_get(j).array_get(runtime::T_VALS).local_tee(r);
+        s.ref_is_null().br_if(0);
+        s.local_get(r).ref_test_non_null(Ht::Concrete(runtime::T_ACCESSOR)).br_if(0);
+        s.local_get(r).br(1);
+        s.end();
+        s.local_get(o);
+        match num {
+            Some(_) => {
+                s.local_get(x).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+            }
+            None => {
+                s.local_get(k);
+            }
+        }
+        s.call(get);
+        s.end();
+        Ok(())
     }
 
     fn depth(frames: &[Frame], target: Frame) -> anyhow::Result<u32> {
@@ -1971,6 +2051,12 @@ impl Emitter<'_> {
                         bigint::Helper::ToString
                     };
                     s.call(self.helper_index(Helper::Js(H::Big(h))));
+                    return Ok(true);
+                }
+                if let (Intrinsic::GetProp, [obj, key]) = (op, args.as_slice())
+                    && !matches!(key, Expr::Str(_))
+                {
+                    self.elem_get(s, frames, obj, key)?;
                     return Ok(true);
                 }
                 if let (Intrinsic::GetProp, [obj, Expr::Str(units)]) = (op, args.as_slice())
