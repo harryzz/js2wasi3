@@ -16,6 +16,7 @@ root. Fresh counts and profiles: T112 steps 2–3.
 | T109 | splay −27%, binarytrees −26% | raytrace +3% | a static guess (constructor = `this` stores) wrong for `initialize.apply` (patched by a name filter) |
 | T110 | nbody −34%, richards −27% | knucleotide +7.2% | R1: inline cast of a Map at a key-name guess calls `is_subtype` |
 | T115 | nbody −12.7%, fannkuchredux −9.9% | revcomp +4.2% (first version) | the miss repeated the inline `$array` test in `get` (fixed: `get_other`) |
+| T117 | earley-boyer −22.7%, binarytrees −5.1% | splay +65% (instructions +80%, all in wasmtime's collector) | a smaller live set landed under one semi-space: wasmtime collects instead of growing (F304) |
 | T111 | nbody −20.8% | richards +8.8% instr, then +2.9%; `o[k]`/`k in o` +9 instr (first versions) | integer cells made generic reads miss (fixed: `i31` stays); a new type test on every read hit (fixed: cells are `$accessor`s); a copy in `own_get` (fixed: `own_get_raw`) |
 
 Common pattern: a **static guess** whose **miss costs more than the old path**. Each patch narrowed the guess for
@@ -47,6 +48,8 @@ T110 with 3 exact tests before its inline cast lost half its gain (laptop: nbody
 A non-i31 number in a `jsval` slot (object field, generic array, parameter, `jsval` local) is a new `$number` per
 write and an unbox per use. `docs/performance.md`: numbers 16.3% of js2wasi3's time on average (node 0).
 - Fixed since: T103 (mandelbrot 77% → ~0), T106 (`let x;`), T107 (number arrays), T108 (element reads in `+`).
+- T117 (2026-10-13, R5): layout objects share keys/attributes (2 allocations instead of 4): earley-boyer −22.7%,
+  binarytrees −5.1%; splay +65% from wasmtime's grow-or-collect rule (F304), memory 72 vs 87 MB mean.
 - T111 (2026-10-13): nbody fields (F406) in number cells owned by the object (V8's double fields): nbody −20.8%;
   left F423 (cells only at numeric writes of layout keys), F424 (generic reads copy).
 - Left: crypto `am3` parameters/locals (F404, 18.6%),

@@ -528,6 +528,30 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
             &ConstExpr::extended(init),
         );
     }
+    // T117: each layout's shared keys (filled by the start function) and attributes (all default).
+    for _ in &module.layouts {
+        globals.global(
+            GlobalType {
+                val_type: runtime::rt(true, runtime::T_KEYS),
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::ref_null(wasm_encoder::HeapType::Concrete(runtime::T_KEYS)),
+        );
+    }
+    for keys in &module.layouts {
+        globals.global(
+            GlobalType {
+                val_type: runtime::rt(false, runtime::T_BYTES),
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::extended([
+                wasm_encoder::Instruction::I32Const(keys.len() as i32),
+                wasm_encoder::Instruction::ArrayNewDefault(runtime::T_BYTES),
+            ]),
+        );
+    }
     // String and BigInt constants (T57): mutable globals holding a placeholder (the first one or
     // two globals here), filled by the start function (see `const_inits`).
     if !e.strings.is_empty() {
@@ -1392,9 +1416,25 @@ impl Emitter<'_> {
         self.global_base + (self.m.globals.len() + self.shared.len()) as u32 + l
     }
 
+    /// T117: layout `l`'s shared keys (`(ref null $keys)`, filled by the start function) and attributes
+    /// (`(ref $bytes)`, all default), after the shared indexes.
+    fn layout_keys_global(&self, l: u32) -> u32 {
+        self.layout_global(self.m.layouts.len() as u32 + l)
+    }
+
+    fn layout_attrs_global(&self, l: u32) -> u32 {
+        self.layout_global(2 * self.m.layouts.len() as u32 + l)
+    }
+
+    /// T117: push layout `l`'s shared keys and attributes.
+    fn layout_shape(&self, s: &mut wasm_encoder::InstructionSink, l: u32) {
+        s.global_get(self.layout_keys_global(l)).ref_as_non_null();
+        s.global_get(self.layout_attrs_global(l));
+    }
+
     fn const_base(&self) -> u32 {
         self.global_base
-            + (self.m.globals.len() + self.shared.len() + self.m.layouts.len()) as u32
+            + (self.m.globals.len() + self.shared.len() + 3 * self.m.layouts.len()) as u32
             + 1
             + self.m.bigint as u32
     }
@@ -1415,6 +1455,14 @@ impl Emitter<'_> {
     ) -> (Vec<u8>, Vec<String>) {
         let mut bytes = Vec::new();
         let mut names = Vec::new();
+        // T117: the layouts' keys, for their shared key arrays (made at the end of the start function).
+        let layout_keys: Vec<Vec<u32>> = self
+            .m
+            .layouts
+            .clone()
+            .iter()
+            .map(|keys| keys.iter().map(|k| self.const_global(ConstGlobal::Str(k.encode_utf16().collect()))).collect())
+            .collect();
         if self.strings.is_empty() {
             return (bytes, names);
         }
@@ -1475,6 +1523,15 @@ impl Emitter<'_> {
             if j + 1 == chunks && chunks > 1 {
                 for i in 0..chunks as u32 - 1 {
                     s.call(first_chunk + i);
+                }
+            }
+            if j + 1 == chunks {
+                for (l, keys) in layout_keys.iter().enumerate() {
+                    for &g in keys {
+                        s.global_get(g);
+                    }
+                    s.array_new_fixed(runtime::T_KEYS, keys.len() as u32);
+                    s.global_set(self.layout_keys_global(l as u32));
                 }
             }
             s.end();
@@ -2356,6 +2413,7 @@ impl Emitter<'_> {
                 if let Intrinsic::NewObjectLayout(l) = op {
                     s.i32_const(self.m.layouts[*l as usize].len() as i32);
                     s.global_get(self.layout_global(*l));
+                    self.layout_shape(s, *l);
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::NewObjectLayout))));
                     return Ok(true);
                 }
@@ -2394,6 +2452,7 @@ impl Emitter<'_> {
                     self.expr(s, frames, &args[0])?;
                     s.i32_const(self.m.layouts[*l as usize].len() as i32);
                     s.global_get(self.layout_global(*l));
+                    self.layout_shape(s, *l);
                     s.call(self.helper_index(Helper::Js(H::Func(func::Helper::CreateThisLayout))));
                     return Ok(true);
                 }

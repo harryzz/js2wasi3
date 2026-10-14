@@ -197,6 +197,12 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   place into a cell, else an `i31` for an integer (V8's Smi fields), else a new cell. Numeric reads (`+o.k`,
   `ElemNum(o, "k")`) take the `f64` from a cell, `i31` or `$number` inline. Writers that don't know cells
   overwrite them. nbody −20.8%.)
+  (T117: **shared keys and attributes**, V8's shared `DescriptorArray`: a layout's objects hold its shared index,
+  keys and attributes (globals; the keys built by the start function) and only `vals` of their own, 2 allocations
+  instead of 4. Invariant: shared index ⇒ shared keys/attrs; `object::unshare` (`own_shape`) copies them before
+  any write to an object's keys or attributes (`define`, which grows a full object directly, `remove`,
+  `watch_mark`, `define_property`, `integrity`); index hits need `e < count`. earley-boyer −22.7%, binarytrees
+  −5.1%; splay +65% from wasmtime's grow-or-collect rule, F304.)
   (T92: **object tests without `is_subtype`**. `$object` isn't final, so wasmtime compiles `ref.test`/`ref.cast
   (ref $object)` inline only for an exact `$object` and calls its `is_subtype` runtime function for every other
   object (a `Map`, array, function…). `runtime::object_or` tests and casts in one chain: abstract `struct`,

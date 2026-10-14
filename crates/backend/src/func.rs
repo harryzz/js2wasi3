@@ -240,7 +240,10 @@ impl Helper {
             Helper::ConstructOrdinary => (vec![v, v, v], vec![v]),
             Helper::CreateThis | Helper::ClassHeritage | Helper::FnPrototype => (vec![v], vec![v]),
             Helper::CreateThisSized => (vec![v, ValType::I32], vec![v]),
-            Helper::CreateThisLayout => (vec![v, ValType::I32, rt(false, runtime::T_I32S)], vec![v]),
+            Helper::CreateThisLayout => (
+                vec![v, ValType::I32, rt(false, runtime::T_I32S), rt(false, runtime::T_KEYS), rt(false, runtime::T_BYTES)],
+                vec![v],
+            ),
             Helper::ClassSetup => (vec![v, v, v], vec![v]),
             Helper::InstanceOfValue => (vec![v, v], vec![ValType::I32]),
             Helper::CtorReturn { .. } => (vec![v, v], vec![v]),
@@ -596,20 +599,25 @@ fn create_this(cx: &mut dyn Cx, sized: bool) -> Function {
     f
 }
 
+/// `create_this_layout(new_target, n, index, keys, attrs)`: `create_this_sized`'s object with its layout's shared
+/// index, keys and attributes (T109, T117).
 fn create_this_layout(cx: &mut dyn Cx) -> Function {
-    let sized = fh(cx, Helper::CreateThisSized);
-    const O: u32 = 3;
-    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let fn_prototype = fh(cx, Helper::FnPrototype);
+    let alloc = oh(cx, object::Helper::AllocLayout);
+    let obj_proto = oh(cx, object::Helper::Proto(Builtin::Object));
+    const NT: u32 = 0;
+    const P: u32 = 5;
+    let mut f = Function::new([(1, jsval())]);
     let mut s = f.instructions();
-    // `alloc` made an exact `$object`.
-    s.local_get(0)
-        .local_get(1)
-        .call(sized)
-        .cast_object()
-        .local_tee(O)
-        .local_get(2)
-        .struct_set(T_OBJECT, object::F_INDEX);
-    s.local_get(O).ref_as_non_null();
+    s.i32_const(object::CLASS_PLAIN);
+    s.local_get(NT).call(fn_prototype).local_set(P);
+    s.test_object(P);
+    s.if_(BlockType::Result(rt(true, T_OBJECT)));
+    s.local_get(P).cast_object();
+    s.else_();
+    s.call(obj_proto);
+    s.end();
+    s.local_get(1).local_get(2).local_get(3).local_get(4).call(alloc);
     s.end();
     f
 }

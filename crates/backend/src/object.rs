@@ -363,6 +363,13 @@ pub enum Helper {
     /// `(class: i32, proto: (ref null $object), n: i32) -> (ref $object)` (T109): [`Helper::Alloc`] with room
     /// for `n` properties (JSC's static property count), so the first `n` adds don't grow.
     AllocSized,
+    /// `(class: i32, proto: (ref null $object), n: i32, index: (ref $i32s), keys: (ref $keys), attrs: (ref $bytes))
+    /// -> (ref $object)` (T117): an empty object of a layout: its shared index, keys and attributes (V8's shared
+    /// descriptor array), only `vals` its own.
+    AllocLayout,
+    /// `(o: (ref $object))` (T117): give `o` its own keys and attributes (copies of its layout's first `count`)
+    /// and drop the shared index, before anything changes them (V8's normalization). See [`unshare`].
+    OwnShape,
     /// `() -> (ref $object)`: a built-in prototype.
     Proto(Builtin),
     /// `(s: (ref $string)) -> i64`: the array index `s` denotes (canonical, < 2^32 - 1), or -1.
@@ -518,6 +525,8 @@ impl Helper {
             Helper::Reindex => "reindex",
             Helper::Alloc => "alloc_object",
             Helper::AllocSized => "alloc_object_sized",
+            Helper::AllocLayout => "alloc_object_layout",
+            Helper::OwnShape => "own_shape",
             Helper::Proto(b) => match b {
                 Builtin::Object => "Object.prototype",
                 Builtin::String => "String.prototype",
@@ -646,6 +655,11 @@ impl Helper {
             Helper::Reindex => (vec![o, I32], vec![]),
             Helper::Alloc => (vec![I32, on], vec![o]),
             Helper::AllocSized => (vec![I32, on, I32], vec![o]),
+            Helper::AllocLayout => (
+                vec![I32, on, I32, rt(false, T_I32S), rt(false, T_KEYS), rt(false, T_BYTES)],
+                vec![o],
+            ),
+            Helper::OwnShape => (vec![o], vec![]),
             Helper::Proto(_) => (vec![], vec![o]),
             Helper::ArrayIndex => (vec![s], vec![I64]),
             Helper::ToKey => (vec![v], vec![s]),
@@ -656,7 +670,9 @@ impl Helper {
             Helper::NewObject => (vec![], vec![v]),
             Helper::NewObjectSized => (vec![I32], vec![v]),
             Helper::LayoutSet => (vec![v, s, v, I32, I32, I32, rt(false, T_I32S), I32], vec![]),
-            Helper::NewObjectLayout => (vec![I32, rt(false, T_I32S)], vec![v]),
+            Helper::NewObjectLayout => {
+                (vec![I32, rt(false, T_I32S), rt(false, T_KEYS), rt(false, T_BYTES)], vec![v])
+            }
             Helper::LayoutDefine => (vec![v, s, v, I32, rt(false, T_I32S), I32], vec![]),
             Helper::SetProto | Helper::CopyProps => (vec![v, v], vec![]),
             Helper::OwnKeys | Helper::OwnNames => (vec![o], vec![rt(false, T_KEYS)]),
@@ -725,6 +741,8 @@ impl Helper {
             Helper::Reindex => reindex(cx),
             Helper::Alloc => alloc(),
             Helper::AllocSized => alloc_sized(),
+            Helper::AllocLayout => alloc_layout(),
+            Helper::OwnShape => own_shape(),
             Helper::Proto(b) => proto(cx, b),
             Helper::ArrayIndex => array_index(),
             Helper::ToKey => to_key(cx),
@@ -1236,12 +1254,8 @@ fn layout_set(cx: &mut dyn Cx) -> Function {
             .br_if(1);
         layout_changed(&mut s, O);
         runtime::count(&mut s, on, "layout_set.add");
-        // The arrays have the layout's size (a `grow` drops the shared index); attributes are 0.
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_KEYS)
-            .local_get(SLOT)
-            .local_get(K)
-            .array_set(T_KEYS);
+        // The arrays have the layout's size (a `grow` drops the shared index); the keys and attributes are the
+        // layout's shared ones (T117): `keys[slot]` is `k` already, its attributes 0.
         s.local_get(O)
             .struct_get(T_OBJECT, F_VALS)
             .local_get(SLOT)
@@ -1293,20 +1307,15 @@ fn layout_set(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// `new_object_layout(n, index, keys, attrs)`: a literal's object with its layout's shared index, keys and
+/// attributes (T109, T117).
 fn new_object_layout(cx: &mut dyn Cx) -> Function {
-    let alloc = h(cx, Helper::AllocSized);
+    let alloc = h(cx, Helper::AllocLayout);
     let proto = h(cx, Helper::Proto(Builtin::Object));
-    const O: u32 = 2;
-    let mut f = Function::new([(1, rt(true, T_OBJECT))]);
+    let mut f = Function::new([]);
     let mut s = f.instructions();
-    s.i32_const(CLASS_PLAIN)
-        .call(proto)
-        .local_get(0)
-        .call(alloc)
-        .local_tee(O)
-        .local_get(1)
-        .struct_set(T_OBJECT, F_INDEX);
-    s.local_get(O).ref_as_non_null();
+    s.i32_const(CLASS_PLAIN).call(proto);
+    s.local_get(0).local_get(1).local_get(2).local_get(3).call(alloc);
     s.end();
     f
 }
@@ -1331,11 +1340,7 @@ fn layout_define(cx: &mut dyn Cx) -> Function {
     s.struct_get(T_OBJECT, F_INDEX).local_get(IDX).ref_eq().i32_eqz().br_if(0);
     s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_get(SLOT).i32_ne().br_if(0);
     runtime::count(&mut s, on, "layout_define.fast");
-    s.local_get(O)
-        .struct_get(T_OBJECT, F_KEYS)
-        .local_get(SLOT)
-        .local_get(K)
-        .array_set(T_KEYS);
+    // The layout's shared keys (T117): `keys[slot]` is `k` already.
     s.local_get(O)
         .struct_get(T_OBJECT, F_VALS)
         .local_get(SLOT)
@@ -1482,6 +1487,8 @@ fn find_own(cx: &mut dyn Cx, hashed: bool) -> Function {
     s.end();
     s.local_get(e).i32_const(1).i32_sub().local_set(e);
     matches(&mut s);
+    // T117: a layout's shared index and keys cover all its keys: an entry at or past `count` isn't added yet.
+    s.local_get(e).local_get(O).struct_get(T_OBJECT, F_COUNT).i32_lt_u().i32_and();
     s.if_(BlockType::Empty);
     s.local_get(e).return_();
     s.end();
@@ -2208,8 +2215,25 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     let p = named as u32;
     let (e, mask, i, idx) = (4 + p, 5 + p, 6 + p, 7 + p);
     let array_define = cx.helper(runtime::Helper::Arr(array::Helper::Define { set: false }));
+    let own = h(cx, Helper::OwnShape);
     let mut f = Function::new([(3, ValType::I32), (1, rt(true, T_I32S))]);
     let mut s = f.instructions();
+    // T117: a layout's shared keys/attributes: the object's own copies first; a full object (an add past its
+    // layout's keys, e.g. a key set after the constructor) gets them from `grow` instead, which copies anyway.
+    s.local_get(O).struct_get(T_OBJECT, F_INDEX).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(O).struct_get(T_OBJECT, F_INDEX).ref_as_non_null().array_len().i32_const(SHARED_INDEX).i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT);
+    s.local_get(O).struct_get(T_OBJECT, F_KEYS).array_len();
+    s.i32_eq();
+    s.if_(BlockType::Empty);
+    s.local_get(O).call(grow);
+    s.else_();
+    s.local_get(O).call(own);
+    s.end();
+    s.end();
+    s.end();
     if !named {
     // An array's index or `length`.
     s.local_get(O).ref_test_non_null(array::array());
@@ -2406,11 +2430,14 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
 
 fn remove(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwn);
+    let own = h(cx, Helper::OwnShape);
     const O: u32 = 0;
     const K: u32 = 1;
     const E: u32 = 2;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
+    // T117: a layout's shared keys/attributes: the object's own copies first.
+    unshare(&mut s, O, own);
     s.local_get(O).local_get(K).call(find).local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
@@ -2636,6 +2663,59 @@ fn alloc_sized() -> Function {
     s.struct_new(runtime::T_PLAIN);
     s.end();
     f
+}
+
+/// `alloc_object_layout(class, proto, n, index, keys, attrs)` (see [`Helper::AllocLayout`]).
+fn alloc_layout() -> Function {
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    s.local_get(0).local_get(1).local_get(4);
+    s.local_get(2).array_new_default(T_VALS);
+    s.local_get(5);
+    s.i32_const(0);
+    s.local_get(3);
+    s.struct_new(runtime::T_PLAIN);
+    s.end();
+    f
+}
+
+/// `own_shape(o)` (see [`Helper::OwnShape`]): the entries past `count` stay null, as in an object's own arrays.
+fn own_shape() -> Function {
+    const O: u32 = 0;
+    const N: u32 = 1;
+    const C: u32 = 2;
+    const NEW: u32 = 3;
+    const NEWA: u32 = 4;
+    let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_KEYS)), (1, rt(true, T_BYTES))]);
+    let mut s = f.instructions();
+    s.local_get(O).struct_get(T_OBJECT, F_KEYS).array_len().local_set(N);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(C);
+    s.local_get(N).array_new_default(T_KEYS).local_tee(NEW);
+    s.i32_const(0);
+    s.local_get(O).struct_get(T_OBJECT, F_KEYS).i32_const(0).local_get(C);
+    s.array_copy(T_KEYS, T_KEYS);
+    s.local_get(N).array_new_default(T_BYTES).local_tee(NEWA);
+    s.i32_const(0);
+    s.local_get(O).struct_get(T_OBJECT, F_ATTRS).i32_const(0).local_get(C);
+    s.array_copy(T_BYTES, T_BYTES);
+    s.local_get(O).local_get(NEW).ref_as_non_null().struct_set(T_OBJECT, F_KEYS);
+    s.local_get(O).local_get(NEWA).ref_as_non_null().struct_set(T_OBJECT, F_ATTRS);
+    s.local_get(O).ref_null(wasm_encoder::HeapType::Concrete(T_I32S)).struct_set(T_OBJECT, F_INDEX);
+    s.end();
+    f
+}
+
+/// T117: before a write to the keys or attributes of the object in local `o` (a `(ref null $object)`, not
+/// null): if it holds a layout's shared index, its keys and attributes are the layout's shared arrays, so
+/// it gets its own copies first (`own_shape`, the helper index `own`).
+pub fn unshare(s: &mut InstructionSink, o: u32, own: u32) {
+    s.local_get(o).struct_get(T_OBJECT, F_INDEX).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(o).struct_get(T_OBJECT, F_INDEX).ref_as_non_null().array_len().i32_const(SHARED_INDEX).i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(o).ref_as_non_null().call(own);
+    s.end();
+    s.end();
 }
 
 /// `$<B>.prototype()`: created on first use, with its properties (see the module docs).
@@ -4529,12 +4609,15 @@ fn typed_length_fill(cx: &mut dyn Cx) -> Function {
 /// `$watch_mark(o, k, bits)` (T102), see [`Helper::WatchMark`].
 fn watch_mark(cx: &mut dyn Cx) -> Function {
     let find = h(cx, Helper::FindOwn);
+    let own = h(cx, Helper::OwnShape);
     const O: u32 = 0;
     const K: u32 = 1;
     const BITS: u32 = 2;
     const E: u32 = 3;
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
+    // T117: a layout's shared keys/attributes: the object's own copies first.
+    unshare(&mut s, O, own);
     s.local_get(O).local_get(K).call(find).local_tee(E);
     s.i32_const(0).i32_lt_s();
     s.if_(BlockType::Empty);

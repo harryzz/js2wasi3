@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-13: T117 layout objects share keys and attributes (full run)
+
+- Compiler (`main` at e726771 + T117, uncommitted at the run): a layout's objects share its keys/attributes arrays,
+  copied on the first change to one object's shape; index lookups check `e < count`. Runner: unchanged.
+- Full run on `a-03` (log copied to `out/t262-t117.log`, 1,489 s, -j 36): **no changes since the baseline**: 28,105 of
+  28,984 run pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-13: T111 number fields kept unboxed (full run)
 
 - Compiler (`main` at 40ba0c5 + T111, uncommitted at the run): a numeric write at a layout key keeps a non-integer

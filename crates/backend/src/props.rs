@@ -156,7 +156,7 @@ impl Helper {
             Helper::DefineAccessor => define_accessor(cx),
             Helper::DefineProperty => define_property(cx),
             Helper::GetOwnPropertyDescriptor => get_own_property_descriptor(cx),
-            Helper::Integrity(op) => integrity(op),
+            Helper::Integrity(op) => integrity(cx, op),
             Helper::TestIntegrity(op) => test_integrity(op, cx.names("$module")),
             Helper::SuperGet => super_get(cx),
             Helper::SuperSet => super_set(cx),
@@ -865,6 +865,8 @@ fn define_property(cx: &mut dyn Cx) -> Function {
     s.global_get(non_object).call(throw);
     s.end();
     s.local_get(OV).cast_object().local_set(O);
+    // T117: a layout's shared keys/attributes: the object's own copies first.
+    object::unshare(&mut s, O, oh(cx, object::Helper::OwnShape));
     s.local_get(KEY).call(to_key).local_set(K);
     s.test_object(D).i32_eqz();
     s.if_(BlockType::Empty);
@@ -1500,7 +1502,8 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn integrity(op: u8) -> Function {
+fn integrity(cx: &mut dyn Cx, op: u8) -> Function {
+    let own = oh(cx, object::Helper::OwnShape);
     const V: u32 = 0;
     const O: u32 = 1;
     const E: u32 = 2;
@@ -1513,6 +1516,8 @@ fn integrity(op: u8) -> Function {
     s.local_get(V).return_();
     s.end();
     s.local_get(V).cast_object().local_set(O);
+    // T117: a layout's shared keys/attributes: the object's own copies first.
+    object::unshare(&mut s, O, own);
     let mut flags = NO_EXTEND;
     if op >= 1 {
         flags |= SEALED;
