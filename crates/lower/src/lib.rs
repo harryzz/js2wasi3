@@ -7469,7 +7469,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .expect("checked by the caller");
         let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
-        let tk = cx.func.add_local("key", Type::JsVal);
+        let mut body = vec![Stmt::Set(to, obj)];
+        // T119: a constant key stays in place (as `member_assign`), so the backend's named paths see it.
+        let key_of = self.key_temp(cx, key, &mut body);
         if self.module.bigint {
             // T40: the property may hold a BigInt: ToNumeric, then `± 1` of its kind.
             let old = cx.func.add_local("old", Type::JsVal);
@@ -7479,22 +7481,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             } else {
                 ir::NumericOp::Dec
             };
-            let get = member_get(&private, Expr::Local(to), Expr::Local(tk));
-            let body = vec![
-                Stmt::Set(to, obj),
-                Stmt::Set(tk, key),
+            let get = member_get(&private, Expr::Local(to), key_of.clone());
+            body.extend([
                 Stmt::Set(old, Expr::intrinsic(Intrinsic::ToNumeric, vec![get])),
                 Stmt::Set(
                     new,
                     Expr::intrinsic(Intrinsic::Numeric(n), vec![Expr::Local(old)]),
                 ),
-                Stmt::Expr(member_set(
-                    &private,
-                    Expr::Local(to),
-                    Expr::Local(tk),
-                    Expr::Local(new),
-                )),
-            ];
+                Stmt::Expr(member_set(&private, Expr::Local(to), key_of, Expr::Local(new))),
+            ]);
             let value = Box::new(Expr::Local(if u.prefix { new } else { old }));
             return Ok(Val::js(Expr::Seq { body, value }, Kind::Any));
         }
@@ -7505,10 +7500,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         } else {
             BinOp::Sub
         };
-        let get = member_get(&private, Expr::Local(to), Expr::Local(tk));
-        let body = vec![
-            Stmt::Set(to, obj),
-            Stmt::Set(tk, key),
+        let get = member_get(&private, Expr::Local(to), key_of.clone());
+        body.extend([
             Stmt::Set(old, Expr::convert(Type::JsVal, Type::F64, get)),
             Stmt::Set(
                 new,
@@ -7517,10 +7510,10 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             Stmt::Expr(member_set(
                 &private,
                 Expr::Local(to),
-                Expr::Local(tk),
+                key_of,
                 Expr::convert(Type::F64, Type::JsVal, Expr::Local(new)),
             )),
-        ];
+        ]);
         let value = Box::new(Expr::Local(if u.prefix { new } else { old }));
         Ok(Val::num(Expr::Seq { body, value }))
     }

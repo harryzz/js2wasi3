@@ -155,7 +155,7 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   cache** entry in `G_IC` (a growable `$i32s`): the entry index where it last found an own property, used when
   that entry's key is identical to the site's (constant strings are interned per module, so objects built by
   the same code hit); prototype hits and keys built at run time miss and take the lookup. The lowering keeps a
-  constant key in place in `o.k = v`/`o.k op= v` (`key_temp`). Shapes/hidden classes remain undone (F321).)
+  constant key in place in `o.k = v`/`o.k op= v` (`key_temp`), and since T119 in `o.k++`/`--o.k`. Shapes/hidden classes remain undone (F321).)
   (T75: **operators and conversions on `jsval`s**. `===`/`!==` with a constant operand are inline in the backend
   (`runtime::strict_eq_const`: an oddball is `ref.eq`; a string constant is identity, then a string of the same
   length and `string_eq`; a number compares an i31 or a `$number`); `strict_eq` itself tries `ref.eq` first and

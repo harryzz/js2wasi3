@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-15: T119 `o.k++` with a constant key (full run)
+
+- Compiler (`main` at b7788d1 + T119, uncommitted at the run): `o.k++`/`--o.k` keep a constant key in place
+  (`key_temp`), so they take the named paths. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t119.log`, 1,515 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-15: T118 array element writes inline (full run)
 
 - Compiler (`main` at 8b0a51d + T118, uncommitted at the run): `obj[key] = value` with a non-constant key

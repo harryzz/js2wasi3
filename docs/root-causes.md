@@ -67,7 +67,7 @@ deltablue 77%, richards 74%, raytrace 69%, earley-boyer 39%, fannkuchredux 36% (
 - Left: prototype (method) reads (deltablue ~13%, richards ~4%; T99's cache didn't pay; F321 closed with no open
   successor), computed keys (F363 closed by T94/T95, remainder pointed at F321: no open follow-up), fields set by another function (F407: deltablue `superConstructor.call`, raytrace `initialize.apply`),
   polymorphic sites (F357), shapes work parked (F358, F360, F361, F40), elements of generic arrays (fannkuchredux:
-  reads inline since T115, writes since T118: −24.5%), `o.k++` through the generic path (F428).
+  reads inline since T115, writes since T118: −24.5%), `o.k++` through the generic path (F428, fixed by T119: richards −9.4%).
 - Follow-ups: F40, F357, F358, F359, F360, F361, F405, F407, F96 (JSON.parse builds dictionaries); prototype reads
   and computed keys need new follow-ups (T112 step 6).
 
