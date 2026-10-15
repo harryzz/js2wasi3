@@ -639,6 +639,19 @@ pub const COUNTS: &[&str] = &[
     "num_write.miss_not_object",
     "num_write.miss_subtype",
     "num_write.miss_plain",
+    "elem_write.hit",
+    "elem_write.nums",
+    "elem_write.typed",
+    "elem_write.miss",
+    "elem_write.miss_other",
+    "elem_write.miss_generic",
+    "set.call",
+    "set.typed_i31",
+    "set.array_i31",
+    "set.array_overwrite",
+    "set_num.call",
+    "set_num.nums_overwrite",
+    "set_num.generic_overwrite",
 ];
 
 /// T112: the index of counter `name` in [`COUNTS`].

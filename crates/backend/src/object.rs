@@ -385,6 +385,13 @@ pub enum Helper {
     GetOther,
     /// `(v, key, value: jsval)`: `v[key] = value`.
     Set,
+    /// `(v, key, value: jsval)`: `v[key] = value` for a `v` that isn't an `$array` (T118: a miss of an inline
+    /// element write, which tested that already): [`Helper::Set`] without its array fast path.
+    SetOther,
+    /// `(v, key, value: jsval)`: `v[key] = value` for a key that isn't an `i31`, or a `v` that is neither an
+    /// `$array` nor a typed array (T118: a miss of an inline element write): [`Helper::Set`] without its typed
+    /// and array fast paths (both need an `i31` key).
+    SetGeneric,
     /// `(o, key, value: jsval)`: an own enumerable property of object `o` (literals).
     DefineProp,
     /// `(v, key) -> i32`: `delete v[key]`.
@@ -569,6 +576,8 @@ impl Helper {
             Helper::GetOther => "get_other",
             Helper::CellOut => "cell_out",
             Helper::Set => "set",
+            Helper::SetOther => "set_other",
+            Helper::SetGeneric => "set_generic",
             Helper::DefineProp => "define_property",
             Helper::Delete => "delete",
             Helper::Has => "has",
@@ -665,7 +674,7 @@ impl Helper {
             Helper::ToKey => (vec![v], vec![s]),
             Helper::Get | Helper::GetOther => (vec![v, v], vec![v]),
             Helper::CellOut => (vec![v], vec![v]),
-            Helper::Set | Helper::DefineProp => (vec![v, v, v], vec![]),
+            Helper::Set | Helper::SetOther | Helper::SetGeneric | Helper::DefineProp => (vec![v, v, v], vec![]),
             Helper::Delete | Helper::Has | Helper::HasOwn => (vec![v, v], vec![I32]),
             Helper::NewObject => (vec![], vec![v]),
             Helper::NewObjectSized => (vec![I32], vec![v]),
@@ -749,7 +758,9 @@ impl Helper {
             Helper::Get => get(cx, true),
             Helper::GetOther => get(cx, false),
             Helper::CellOut => cell_out(),
-            Helper::Set => set(cx),
+            Helper::Set => set(cx, true, true),
+            Helper::SetOther => set(cx, false, true),
+            Helper::SetGeneric => set(cx, false, false),
             Helper::DefineProp => {
                 let to_key = h(cx, Helper::ToKey);
                 let define = h(cx, Helper::Define);
@@ -1732,6 +1743,8 @@ fn set_num(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_VALS)),
     ]);
     let mut s = f.instructions();
+    let on = cx.counting();
+    runtime::count(&mut s, on, "set_num.call");
     s.block(BlockType::Empty);
     s.local_get(V).ref_test_non_null(array::array()).i32_eqz().br_if(0);
     s.local_get(K).ref_test_non_null(wasm_encoder::HeapType::I31).i32_eqz().br_if(0);
@@ -1768,6 +1781,7 @@ fn set_num(cx: &mut dyn Cx) -> Function {
             .i32_and()
             .br_if(2);
         s.local_get(N).local_get(J).local_get(X).array_set(runtime::T_NUMS);
+        runtime::count(&mut s, on, "set_num.nums_overwrite");
         s.return_();
         s.end();
         s.global_get(runtime::G_INDEX_PROTO).br_if(1);
@@ -1797,6 +1811,7 @@ fn set_num(cx: &mut dyn Cx) -> Function {
     s.local_get(A).struct_get(T_ARRAY, array::F_HINT);
     s.i32_and().br_if(0);
     s.local_get(E).local_get(J).local_get(B).array_set(T_VALS);
+    runtime::count(&mut s, on, "set_num.generic_overwrite");
     s.return_();
     s.end();
     s.local_get(V).local_get(K);
@@ -3566,7 +3581,9 @@ fn key_text(cx: &mut dyn Cx, s: &mut InstructionSink, key: u32, to_key: u32) {
     s.end();
 }
 
-fn set(cx: &mut dyn Cx) -> Function {
+/// `arrays`/`typed`: with the array/typed-array fast path (`set`); `set_other` has no array path, `set_generic`
+/// neither (T118).
+fn set(cx: &mut dyn Cx, arrays: bool, typed: bool) -> Function {
     let to_key = h(cx, Helper::ToKey);
     let prop_set = rh(cx, runtime::Helper::Prop(props::Helper::Set));
     let holder = h(cx, Helper::Holder);
@@ -3601,10 +3618,20 @@ fn set(cx: &mut dyn Cx) -> Function {
         (1, rt(true, T_OBJECT)),
     ]);
     let mut s = f.instructions();
+    let counting = cx.counting();
+    runtime::count(&mut s, counting, "set.call");
     let k = |s: &mut InstructionSink| {
         s.local_get(K).ref_as_non_null();
     };
-    if cx.names("$typed") {
+    if typed && cx.names("$typed") {
+        if counting {
+            s.local_get(V).ref_test_non_null(crate::typed::typed());
+            s.local_get(KEY).ref_test_non_null(wasm_encoder::HeapType::I31);
+            s.i32_and();
+            s.if_(BlockType::Empty);
+            runtime::count(&mut s, counting, "set.typed_i31");
+            s.end();
+        }
         // A typed array element (T20): the value is converted first; out of range, dropped.
         let elem = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Set));
         let to_number = rh(cx, runtime::Helper::ToNumber);
@@ -3658,24 +3685,49 @@ fn set(cx: &mut dyn Cx) -> Function {
         s.end();
     }
     // Fast path: an array element at a non-negative small integer index.
-    s.local_get(V).ref_test_non_null(array::array());
-    s.local_get(KEY)
-        .ref_test_non_null(wasm_encoder::HeapType::I31);
-    s.i32_and();
-    s.if_(BlockType::Empty);
-    s.local_get(KEY)
-        .ref_cast_non_null(wasm_encoder::HeapType::I31)
-        .i31_get_s()
-        .i32_const(0)
-        .i32_ge_s();
-    s.if_(BlockType::Empty);
-    s.local_get(V).ref_cast_non_null(array::array());
-    s.local_get(KEY)
-        .ref_cast_non_null(wasm_encoder::HeapType::I31)
-        .i31_get_s();
-    s.local_get(VAL).call(set_index).return_();
-    s.end();
-    s.end();
+    if arrays {
+        s.local_get(V).ref_test_non_null(array::array());
+        s.local_get(KEY).ref_test_non_null(wasm_encoder::HeapType::I31);
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(KEY).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s().i32_const(0).i32_ge_s();
+        s.if_(BlockType::Empty);
+        if counting {
+            // F422: how many of these `array_set_index`'s first fast path takes (an element that's there).
+            runtime::count(&mut s, counting, "set.array_i31");
+            let a = |s: &mut InstructionSink| {
+                s.local_get(V).ref_cast_non_null(array::array());
+            };
+            let i = |s: &mut InstructionSink| {
+                s.local_get(KEY).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s();
+            };
+            s.block(BlockType::Empty);
+            i(&mut s);
+            a(&mut s);
+            s.struct_get(T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
+            a(&mut s);
+            s.struct_get(T_ARRAY, array::F_NUMS).ref_is_null().i32_eqz().br_if(0);
+            a(&mut s);
+            s.struct_get(T_ARRAY, array::F_HINT);
+            s.local_get(VAL).ref_test_non_null(wasm_encoder::HeapType::I31).i32_eqz();
+            s.i32_and().br_if(0);
+            a(&mut s);
+            s.struct_get(T_ARRAY, array::F_EATTRS).ref_is_null().i32_eqz().br_if(0);
+            a(&mut s);
+            s.struct_get(T_ARRAY, F_CLASS).i32_const(SEALED | FROZEN).i32_and().br_if(0);
+            a(&mut s);
+            s.struct_get(T_ARRAY, array::F_ELEMS);
+            i(&mut s);
+            s.array_get(T_VALS).ref_is_null().br_if(0);
+            runtime::count(&mut s, counting, "set.array_overwrite");
+            s.end();
+        }
+        s.local_get(V).ref_cast_non_null(array::array());
+        s.local_get(KEY).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s();
+        s.local_get(VAL).call(set_index).return_();
+        s.end();
+        s.end();
+    }
     // Concatenate the string globals / pushes in `parts`, then throw.
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);

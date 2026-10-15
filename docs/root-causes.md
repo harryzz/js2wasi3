@@ -17,6 +17,7 @@ root. Fresh counts and profiles: T112 steps 2–3.
 | T110 | nbody −34%, richards −27% | knucleotide +7.2% | R1: inline cast of a Map at a key-name guess calls `is_subtype` |
 | T115 | nbody −12.7%, fannkuchredux −9.9% | revcomp +4.2% (first version) | the miss repeated the inline `$array` test in `get` (fixed: `get_other`) |
 | T117 | earley-boyer −22.7%, binarytrees −5.1% | splay +65% (instructions +80%, all in wasmtime's collector) | a smaller live set landed under one semi-space: wasmtime collects instead of growing (F304) |
+| T118 | fannkuchredux −24.5%, spectralnorm −11.3% | mandelbrot +11.5% (first version), `o[k] = v` string-key misses +3 ns (second) | typed-array writes missed into `set_num` (fixed: inline typed path); misses repeated the inline tests (fixed: key first, `set_other`/`set_generic`); mandelbrot +5.5% left at −8.8% instructions (placement) |
 | T111 | nbody −20.8% | richards +8.8% instr, then +2.9%; `o[k]`/`k in o` +9 instr (first versions) | integer cells made generic reads miss (fixed: `i31` stays); a new type test on every read hit (fixed: cells are `$accessor`s); a copy in `own_get` (fixed: `own_get_raw`) |
 
 Common pattern: a **static guess** whose **miss costs more than the old path**. Each patch narrowed the guess for
@@ -65,7 +66,8 @@ deltablue 77%, richards 74%, raytrace 69%, earley-boyer 39%, fannkuchredux 36% (
 - T110 (a-03): nbody −34%, richards −27%, earley-boyer −15%, deltablue −11%, binarytrees −6%; blocked by R1.
 - Left: prototype (method) reads (deltablue ~13%, richards ~4%; T99's cache didn't pay; F321 closed with no open
   successor), computed keys (F363 closed by T94/T95, remainder pointed at F321: no open follow-up), fields set by another function (F407: deltablue `superConstructor.call`, raytrace `initialize.apply`),
-  polymorphic sites (F357), shapes work parked (F358, F360, F361, F40), elements of generic arrays (fannkuchredux).
+  polymorphic sites (F357), shapes work parked (F358, F360, F361, F40), elements of generic arrays (fannkuchredux:
+  reads inline since T115, writes since T118: −24.5%), `o.k++` through the generic path (F428).
 - Follow-ups: F40, F357, F358, F359, F360, F361, F405, F407, F96 (JSON.parse builds dictionaries); prototype reads
   and computed keys need new follow-ups (T112 step 6).
 

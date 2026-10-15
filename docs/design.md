@@ -70,6 +70,11 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   (T115: `obj[key]` with a non-constant key reads an `$array`'s element inline (`lib.rs` `elem_get`: an i31 or an
   integer-valued `f64` key, inside the store, not a hole or an accessor); an array miss calls `get`, any other
   receiver `get_other` (`get` without its array fast path), so a miss never runs the `$array` test twice.)
+  (T118: `obj[key] = value` with a non-constant key overwrites an `$array` element inline (`lib.rs` `elem_set`:
+  the key first, an i31 or an integer-valued `f64`; then `set_index`'s first fast path: below `length`, an element
+  that's there, no attributes, not sealed/frozen; number mode for an `f64` value, not a hole); an `f64` value into
+  a typed array calls `typed_set`. Misses: an array with an integer key `set`/`set_num`; another receiver with an
+  integer key `set_other` (no array path); any other key `set_generic` (no typed and no array path).)
   (T108: a `+` with an element read among its operands, under a numeric consumer (an operand of `-`/`*`/`/`/`%`/`**`
   or a relational operator), is lowered by `Lowerer::num_sum`: each operand in source order to an `f64` (an element
   by `ElemNum`, else `get` + `NumOrHole`; another value by `NumOrHole`, which gives HOLE's bits for a non-number),

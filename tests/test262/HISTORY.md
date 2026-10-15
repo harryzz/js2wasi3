@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-15: T118 array element writes inline (full run)
+
+- Compiler (`main` at 8b0a51d + T118, uncommitted at the run): `obj[key] = value` with a non-constant key
+  overwrites an `$array` element inline (an `f64` value into a typed array calls `typed_set` directly); misses
+  call `set`/`set_num`, `set_other` or `set_generic`. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t118c.log`, 1,517 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged. Two earlier versions the same (`out/t262-t118-prefix.log`,
+  `out/t262-t118b.log`).
+
 ## 2026-10-13: T117 layout objects share keys and attributes (full run)
 
 - Compiler (`main` at e726771 + T117, uncommitted at the run): a layout's objects share its keys/attributes arrays,

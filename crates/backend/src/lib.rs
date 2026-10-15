@@ -249,6 +249,8 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         scratch_i32: 0,
         scratch_vals: 0,
         scratch_r: 0,
+        scratch_arr: 0,
+        scratch_x: 0,
         layout_slots,
         m: module,
         exits,
@@ -1056,6 +1058,9 @@ struct Emitter<'m> {
     scratch_i32: u32,
     scratch_vals: u32,
     scratch_r: u32,
+    /// T118: a `(ref null $array)` and a second `f64` local for the inline element writes.
+    scratch_arr: u32,
+    scratch_x: u32,
     /// T110: a key's distinct slots in the module's layouts.
     layout_slots: HashMap<Vec<u16>, Vec<u32>>,
     imports: host::Imports,
@@ -1602,6 +1607,8 @@ impl Emitter<'_> {
         locals.push((1, ValType::I32));
         locals.push((1, runtime::rt(true, runtime::T_VALS)));
         locals.push((1, runtime::jsval()));
+        locals.push((1, runtime::rt(true, runtime::T_ARRAY)));
+        locals.push((1, ValType::F64));
         self.scratch_f64 = f.locals.len() as u32;
         self.scratch_js = self.scratch_f64 + 1;
         self.scratch_obj = self.scratch_f64 + 2;
@@ -1609,6 +1616,8 @@ impl Emitter<'_> {
         self.scratch_i32 = self.scratch_f64 + 4;
         self.scratch_vals = self.scratch_f64 + 5;
         self.scratch_r = self.scratch_f64 + 6;
+        self.scratch_arr = self.scratch_f64 + 7;
+        self.scratch_x = self.scratch_f64 + 8;
         let mut func = Function::new(locals);
         let mut frames = Vec::new();
         {
@@ -1686,6 +1695,184 @@ impl Emitter<'_> {
         self.elem_get_call(s, num.is_some(), get);
         s.end();
         Ok(())
+    }
+
+    /// T118: `obj[key] = value` with a key that isn't a constant string: overwriting an element that's there in
+    /// an array, inline, as `array_set_index`'s first fast path (`i31` or integer-valued `f64` key below
+    /// `length`, no element attributes, not sealed/frozen, a generic store: a value an `i31` when the array is
+    /// hinted; number mode, for an `f64` value: not a hole, no `preventExtensions`/`seal`/`freeze`/read-only
+    /// `length`); an `f64` value into a typed array at an index below its length calls `typed_set` directly.
+    /// Anything else calls `set` (`set_num` for an `f64` value), an `f64` key boxed only then.
+    fn elem_set(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        frames: &mut Vec<Frame>,
+        obj: &Expr,
+        key: &Expr,
+        value: &Expr,
+        num_value: bool,
+    ) -> anyhow::Result<()> {
+        use wasm_encoder::HeapType as Ht;
+        let (o, k, j, el, v, kx, a, x) = (
+            self.scratch_val,
+            self.scratch_js,
+            self.scratch_i32,
+            self.scratch_vals,
+            self.scratch_r,
+            self.scratch_f64,
+            self.scratch_arr,
+            self.scratch_x,
+        );
+        let on = self.m.count;
+        let num_key = match key {
+            Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => Some(&**arg),
+            _ => None,
+        };
+        self.expr(s, frames, obj)?;
+        self.expr(s, frames, num_key.unwrap_or(key))?;
+        self.expr(s, frames, value)?;
+        s.local_set(if num_value { x } else { v });
+        s.local_set(if num_key.is_some() { kx } else { k });
+        s.local_set(o);
+        // Blocks: done; a miss for `set_generic`; a miss for `set`/`set_num` (an array, an integer key).
+        s.block(BlockType::Empty);
+        s.block(BlockType::Empty);
+        s.block(BlockType::Empty);
+        // The key first: a string key misses before the array cast.
+        match num_key {
+            Some(_) => {
+                // An integer-valued f64 (-0 is index 0).
+                s.local_get(kx).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
+                s.local_get(kx).f64_ne().br_if(1);
+            }
+            None => {
+                s.local_get(k).ref_test_non_null(Ht::I31).i32_eqz().br_if(1);
+                s.local_get(k).ref_cast_non_null(Ht::I31).i31_get_s().local_set(j);
+            }
+        }
+        s.block(BlockType::Result(runtime::jsval()));
+        s.local_get(o);
+        s.br_on_cast_fail(
+            0,
+            wasm_encoder::RefType::EQREF,
+            wasm_encoder::RefType { nullable: false, heap_type: array::array() },
+        );
+        s.local_set(a);
+        // Below `length` (negative: no).
+        s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(1);
+        if num_value {
+            // Number mode: no hole, no attributes in the way; a NaN canonicalized (no value has HOLE's bits).
+            s.local_get(a).struct_get(runtime::T_ARRAY, array::F_NUMS).ref_is_null().i32_eqz();
+            s.if_(BlockType::Empty);
+            s.local_get(a)
+                .struct_get(runtime::T_ARRAY, object::F_CLASS)
+                .i32_const(object::NO_EXTEND | object::SEALED | object::FROZEN | object::LENGTH_READONLY)
+                .i32_and()
+                .br_if(2);
+            s.local_get(a).struct_get(runtime::T_ARRAY, array::F_NUMS).local_get(j);
+            s.array_get(runtime::T_NUMS).i64_reinterpret_f64().i64_const(array::HOLE).i64_eq().br_if(2);
+            s.local_get(x).local_get(x).f64_ne();
+            s.if_(BlockType::Empty);
+            s.f64_const(f64::NAN.into()).local_set(x);
+            s.end();
+            s.local_get(a).struct_get(runtime::T_ARRAY, array::F_NUMS);
+            s.local_get(j).local_get(x).array_set(runtime::T_NUMS);
+            runtime::count(s, on, "elem_write.nums");
+            s.br(4);
+            s.end();
+        } else {
+            s.local_get(a).struct_get(runtime::T_ARRAY, array::F_NUMS).ref_is_null().i32_eqz().br_if(1);
+            // A hinted array keeps only `i31`s in its generic store.
+            s.local_get(a).struct_get(runtime::T_ARRAY, array::F_HINT);
+            s.local_get(v).ref_test_non_null(Ht::I31).i32_eqz();
+            s.i32_and().br_if(1);
+        }
+        s.local_get(a).struct_get(runtime::T_ARRAY, array::F_EATTRS).ref_is_null().i32_eqz().br_if(1);
+        s.local_get(a)
+            .struct_get(runtime::T_ARRAY, object::F_CLASS)
+            .i32_const(object::SEALED | object::FROZEN)
+            .i32_and()
+            .br_if(1);
+        s.local_get(a).struct_get(runtime::T_ARRAY, array::F_ELEMS).local_tee(el);
+        s.local_get(j).array_get(runtime::T_VALS).ref_is_null().br_if(1);
+        if num_value {
+            // An integer as an `i31`; another number calls `set_num` (it boxes). `fits_i31` sets `j` to the
+            // value, so the index waits in `k` (an `i31` key already holds it).
+            s.local_get(j).ref_i31().local_set(k);
+            runtime::fits_i31(s, x, j);
+            s.i32_eqz().br_if(1);
+            s.local_get(el);
+            s.local_get(k).ref_cast_non_null(Ht::I31).i31_get_s();
+            s.local_get(j).ref_i31();
+        } else {
+            s.local_get(el).local_get(j).local_get(v);
+        }
+        s.array_set(runtime::T_VALS);
+        runtime::count(s, on, "elem_write.hit");
+        s.br(3);
+        s.end();
+        s.drop();
+        // Not an array, an integer key.
+        if num_value {
+            if runtime::Cx::names(self, "$typed") {
+                // A typed array (`set`'s typed path without `set_num`, the box and `to_number`): an index below
+                // its length, not a BigInt array; another typed array miss calls `set_num`.
+                let typed = typed::typed();
+                s.local_get(o).ref_test_non_null(typed).i32_eqz().br_if(1);
+                s.local_get(j);
+                s.local_get(o).ref_cast_non_null(typed);
+                typed::Length::new(self).emit(s);
+                s.i32_ge_u().br_if(0);
+                if runtime::Cx::big_typed(self) {
+                    s.local_get(o).ref_cast_non_null(typed).struct_get(runtime::T_TYPED, typed::F_KIND);
+                    s.i32_const(ir::TYPED_BIGINT64 as i32).i32_ge_u().br_if(0);
+                }
+                s.local_get(o).ref_cast_non_null(typed).local_get(j).local_get(x);
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Typed(typed::Helper::Set))));
+                runtime::count(s, on, "elem_write.typed");
+                s.br(2);
+            } else {
+                s.br(1);
+            }
+        } else {
+            runtime::count(s, on, "elem_write.miss_other");
+            self.elem_set_call(s, o, (k, kx, num_key.is_some()), v, object::Helper::SetOther);
+            s.br(2);
+        }
+        s.end();
+        runtime::count(s, on, "elem_write.miss");
+        let helper = if num_value { object::Helper::SetNum } else { object::Helper::Set };
+        self.elem_set_call(s, o, (k, kx, num_key.is_some()), if num_value { x } else { v }, helper);
+        s.br(1);
+        s.end();
+        runtime::count(s, on, "elem_write.miss_generic");
+        if num_value {
+            // The value boxed into `v` for `set_generic`.
+            s.local_get(x).call(self.helper_index(Helper::Js(runtime::Helper::Box))).local_set(v);
+        }
+        self.elem_set_call(s, o, (k, kx, num_key.is_some()), v, object::Helper::SetGeneric);
+        s.end();
+        Ok(())
+    }
+
+    /// T118: an inline element write's miss: `helper(o, key, value)` with the key in `k`, or in `kx` (boxed)
+    /// for an `f64` key.
+    fn elem_set_call(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        o: u32,
+        (k, kx, num_key): (u32, u32, bool),
+        value: u32,
+        helper: object::Helper,
+    ) {
+        s.local_get(o);
+        if num_key {
+            s.local_get(kx).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+        } else {
+            s.local_get(k);
+        }
+        s.local_get(value);
+        s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(helper))));
     }
 
     /// T111: the layout slots a constant-key site tries inline (T110), or none (the key isn't in a layout, or
@@ -2557,11 +2744,14 @@ impl Emitter<'_> {
                 ) = (op, args.as_slice())
                     && !matches!(key, Expr::Str(_))
                 {
-                    // T107: `o[k] = x` with a number: unboxed into an array in number mode.
-                    self.expr(s, frames, obj)?;
-                    self.expr(s, frames, key)?;
-                    self.expr(s, frames, x)?;
-                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNum))));
+                    // T107: `o[k] = x` with a number: unboxed into an array in number mode (T118: inline).
+                    self.elem_set(s, frames, obj, key, x, true)?;
+                    return Ok(false);
+                }
+                if let (Intrinsic::SetProp, [obj, key, value]) = (op, args.as_slice())
+                    && !matches!(key, Expr::Str(_))
+                {
+                    self.elem_set(s, frames, obj, key, value, false)?;
                     return Ok(false);
                 }
                 if let Intrinsic::F64FromWords = op {
