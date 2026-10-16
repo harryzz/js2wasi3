@@ -593,7 +593,8 @@ what V8 uses (fdlibm), so results match node bit for bit where V8 does; see `bui
 (`x.slice`, `x["slice"]`); the lowering lists the kept ones in `ir::Module::builtin_methods` and the backend installs
 them on the prototype over the sentinels, so calls go through the (mutable) prototype. `$$parseInt` is the global
 `parseInt`. String intrinsics read code units and build new strings. The runtime's ToNumber of a string calls the
-prelude's `$$StringToNumber` (`ir::Module::string_to_number`), kept when the IR converts a JS value to a number; its
+prelude's `$$StringToNumber` (`ir::Module::string_to_number`), always linked since T125 (the runtime converts strings
+in ~28 helpers; linking it only when the IR converted one left those trapping, F85; +11.6 KB, F437); its
 decimal conversion is correctly rounded (Clinger's fast path, else big-integer comparisons), `toString(radix)` is V8's
 algorithm and `toFixed` exact, so the digits match node; see `builtins/string.js`.)
 (T21 slice 3: `Array.prototype` methods are the spec's generic algorithms in `builtins/array.js` (`this[k]`, `k in this`,

@@ -1,5 +1,6 @@
 global @calls: f64 mut = 0.0
 global @LIMIT: f64 = -1.0
+global @$$parse_end: f64 mut = 0.0
 func sumOdd#0(n.0: f64) -> f64 {
   local s.1: f64
   local i.2: f64
@@ -80,6 +81,557 @@ func helper#3(x.0: f64) {
 func count#4() -> f64 {
   call helper#3(1.0)
   return @calls
+}
+func $$isSpace#5(c.0: f64) -> jsval {
+  if f64.lt(c.0, 128.0) {
+    return bool->jsval(cond.bool(f64.eq(c.0, 32.0), true, cond.bool(f64.ge(c.0, 9.0), f64.le(c.0, 13.0), false)))
+  }
+  return bool->jsval(cond.bool(cond.bool(cond.bool(cond.bool(cond.bool(cond.bool(cond.bool(cond.bool(f64.eq(c.0, 160.0), true, f64.eq(c.0, 5760.0)), true, cond.bool(f64.ge(c.0, 8192.0), f64.le(c.0, 8202.0), false)), true, f64.eq(c.0, 8232.0)), true, f64.eq(c.0, 8233.0)), true, f64.eq(c.0, 8239.0)), true, f64.eq(c.0, 8287.0)), true, f64.eq(c.0, 12288.0)), true, f64.eq(c.0, 65279.0)))
+}
+func $$occursAt#6(s.0: jsval, t.1: jsval, i.2: f64) -> jsval {
+  local m.3: f64
+  local j.4: f64
+  m.3 = $string_length(t.1)
+  if cond.bool(f64.lt(i.2, 0.0), true, f64.gt(f64.add(i.2, m.3), $string_length(s.0))) {
+    return bool->jsval(false)
+  }
+  j.4 = 0.0
+  loop L0 {
+    if bool.not(f64.lt(j.4, m.3)) {
+      break L0
+    }
+    if f64.ne(i32->f64($str_unit(s.0, f64->i32(f64.add(i.2, j.4)))), i32->f64($str_unit(t.1, f64->i32(j.4)))) {
+      return bool->jsval(false)
+    }
+    j.4 = f64.add(j.4, 1.0)
+    continue L0
+  }
+  return bool->jsval(true)
+}
+func $$isDigit#7(c.0: f64) -> jsval {
+  return bool->jsval(cond.bool(f64.ge(c.0, 48.0), f64.le(c.0, 57.0), false))
+}
+func $$digitValue#8(c.0: f64) -> f64 {
+  if cond.bool(f64.ge(c.0, 48.0), f64.le(c.0, 57.0), false) {
+    return f64.sub(c.0, 48.0)
+  }
+  if cond.bool(f64.ge(c.0, 97.0), f64.le(c.0, 122.0), false) {
+    return f64.sub(c.0, 87.0)
+  }
+  if cond.bool(f64.ge(c.0, 65.0), f64.le(c.0, 90.0), false) {
+    return f64.sub(c.0, 55.0)
+  }
+  return 99.0
+}
+func $$pow10#9(n.0: f64) -> f64 {
+  local p.1: f64
+  local i.2: f64
+  p.1 = 1.0
+  i.2 = 0.0
+  loop L0 {
+    if bool.not(f64.lt(i.2, n.0)) {
+      break L0
+    }
+    p.1 = f64.mul(p.1, 10.0)
+    i.2 = f64.add(i.2, 1.0)
+    continue L0
+  }
+  return p.1
+}
+func $$parseDecimal#10(s.0: jsval, i.1: f64, end.2: f64) -> f64 {
+  local begin.3: f64
+  local neg.4: jsval
+  local c.5: f64
+  local a0.6: f64
+  local a1.7: f64
+  local b0.8: f64
+  local b1.9: f64
+  local exp.10: f64
+  local j.11: f64
+  local eneg.12: jsval
+  local c.13: f64
+  local e.14: f64
+  local v.15: f64
+  begin.3 = i.1
+  neg.4 = bool->jsval(false)
+  if f64.lt(i.1, end.2) {
+    c.5 = i32->f64($str_unit(s.0, f64->i32(i.1)))
+    if cond.bool(f64.eq(c.5, 43.0), true, f64.eq(c.5, 45.0)) {
+      neg.4 = bool->jsval(f64.eq(c.5, 45.0))
+      i.1 = f64.add(i.1, 1.0)
+    }
+  }
+  if cond.bool(jsval->bool(call $$occursAt#6(s.0, "Infinity", i.1)), f64.le(f64.add(i.1, 8.0), end.2), false) {
+    @$$parse_end = f64.add(i.1, 8.0)
+    return cond.f64(jsval->bool(neg.4), f64.neg(inf), inf)
+  }
+  a0.6 = i.1
+  loop L0 {
+    if bool.not(cond.bool(f64.lt(i.1, end.2), jsval->bool(call $$isDigit#7(i32->f64($str_unit(s.0, f64->i32(i.1))))), false)) {
+      break L0
+    }
+    i.1 = f64.add(i.1, 1.0)
+    continue L0
+  }
+  a1.7 = i.1
+  b0.8 = i.1
+  b1.9 = i.1
+  if cond.bool(f64.lt(i.1, end.2), f64.eq(i32->f64($str_unit(s.0, f64->i32(i.1))), 46.0), false) {
+    i.1 = f64.add(i.1, 1.0)
+    b0.8 = i.1
+    loop L1 {
+      if bool.not(cond.bool(f64.lt(i.1, end.2), jsval->bool(call $$isDigit#7(i32->f64($str_unit(s.0, f64->i32(i.1))))), false)) {
+        break L1
+      }
+      i.1 = f64.add(i.1, 1.0)
+      continue L1
+    }
+    b1.9 = i.1
+  }
+  if cond.bool(f64.eq(a0.6, a1.7), f64.eq(b0.8, b1.9), false) {
+    @$$parse_end = begin.3
+    return NaN
+  }
+  exp.10 = 0.0
+  if cond.bool(f64.lt(i.1, end.2), cond.bool(f64.eq(i32->f64($str_unit(s.0, f64->i32(i.1))), 101.0), true, f64.eq(i32->f64($str_unit(s.0, f64->i32(i.1))), 69.0)), false) {
+    j.11 = f64.add(i.1, 1.0)
+    eneg.12 = bool->jsval(false)
+    if f64.lt(j.11, end.2) {
+      c.13 = i32->f64($str_unit(s.0, f64->i32(j.11)))
+      if cond.bool(f64.eq(c.13, 43.0), true, f64.eq(c.13, 45.0)) {
+        eneg.12 = bool->jsval(f64.eq(c.13, 45.0))
+        j.11 = f64.add(j.11, 1.0)
+      }
+    }
+    if cond.bool(f64.lt(j.11, end.2), jsval->bool(call $$isDigit#7(i32->f64($str_unit(s.0, f64->i32(j.11))))), false) {
+      e.14 = 0.0
+      loop L2 {
+        if bool.not(cond.bool(f64.lt(j.11, end.2), jsval->bool(call $$isDigit#7(i32->f64($str_unit(s.0, f64->i32(j.11))))), false)) {
+          break L2
+        }
+        if f64.lt(e.14, 100000.0) {
+          e.14 = f64.add(f64.mul(e.14, 10.0), f64.sub(i32->f64($str_unit(s.0, f64->i32(j.11))), 48.0))
+        }
+        j.11 = f64.add(j.11, 1.0)
+        continue L2
+      }
+      exp.10 = cond.f64(jsval->bool(eneg.12), f64.neg(e.14), e.14)
+      i.1 = j.11
+    }
+  }
+  @$$parse_end = i.1
+  v.15 = call $$decimalToDouble#11(s.0, a0.6, a1.7, b0.8, b1.9, exp.10)
+  return cond.f64(jsval->bool(neg.4), f64.neg(v.15), v.15)
+}
+func $$decimalToDouble#11(s.0: jsval, a0.1: f64, a1.2: f64, b0.3: f64, b1.4: f64, exp.5: f64) -> f64 {
+  local ds.6: jsval
+  local nd.7: f64
+  local i.8: f64
+  local d.9: f64
+  local e.10: f64
+  local d.11: f64
+  local i.12: f64
+  local used.13: f64
+  local g.14: f64
+  local i.15: f64
+  local ge.16: f64
+  ds.6 = []
+  nd.7 = 0.0
+  i.8 = a0.1
+  loop L0 {
+    if bool.not(f64.lt(i.8, b1.4)) {
+      break L0
+    }
+    if f64.eq(i.8, a1.2) {
+      i.8 = b0.3
+      if f64.ge(i.8, b1.4) {
+        break L0
+      }
+    }
+    d.9 = f64.sub(i32->f64($str_unit(s.0, f64->i32(i.8))), 48.0)
+    if cond.bool(f64.gt(nd.7, 0.0), true, f64.ne(d.9, 0.0)) {
+      call $$append#23(ds.6, f64->jsval(d.9))
+      nd.7 = f64.add(nd.7, 1.0)
+    }
+    i.8 = f64.add(i.8, 1.0)
+    continue L0
+  }
+  e.10 = f64.sub(exp.5, f64.sub(b1.4, b0.3))
+  loop L1 {
+    if bool.not(cond.bool(f64.gt(nd.7, 0.0), jsval.eq($get(ds.6, f64->jsval(f64.sub(nd.7, 1.0))), f64->jsval(0.0)), false)) {
+      break L1
+    }
+    nd.7 = f64.sub(nd.7, 1.0)
+    e.10 = f64.add(e.10, 1.0)
+    continue L1
+  }
+  if f64.eq(nd.7, 0.0) {
+    return 0.0
+  }
+  if f64.gt(f64.add(nd.7, e.10), 310.0) {
+    return inf
+  }
+  if f64.lt(f64.add(nd.7, e.10), f64.neg(324.0)) {
+    return 0.0
+  }
+  if f64.le(nd.7, 15.0) {
+    d.11 = 0.0
+    i.12 = 0.0
+    loop L2 {
+      if bool.not(f64.lt(i.12, nd.7)) {
+        break L2
+      }
+      d.11 = f64.add(f64.mul(d.11, 10.0), jsval->f64($get(ds.6, f64->jsval(i.12))))
+      i.12 = f64.add(i.12, 1.0)
+      continue L2
+    }
+    if cond.bool(f64.ge(e.10, 0.0), f64.le(e.10, 22.0), false) {
+      return f64.mul(d.11, call $$pow10#9(e.10))
+    }
+    if cond.bool(f64.lt(e.10, 0.0), f64.ge(e.10, f64.neg(22.0)), false) {
+      return f64.div(d.11, call $$pow10#9(f64.neg(e.10)))
+    }
+    if cond.bool(f64.gt(e.10, 22.0), f64.le(e.10, f64.sub(37.0, nd.7)), false) {
+      return f64.mul(f64.mul(d.11, call $$pow10#9(f64.sub(e.10, 22.0))), 1e22)
+    }
+  }
+  used.13 = cond.f64(f64.lt(nd.7, 17.0), nd.7, 17.0)
+  g.14 = 0.0
+  i.15 = 0.0
+  loop L3 {
+    if bool.not(f64.lt(i.15, used.13)) {
+      break L3
+    }
+    g.14 = f64.add(f64.mul(g.14, 10.0), jsval->f64($get(ds.6, f64->jsval(i.15))))
+    i.15 = f64.add(i.15, 1.0)
+    continue L3
+  }
+  ge.16 = f64.add(e.10, f64.sub(nd.7, used.13))
+  if f64.ge(ge.16, 0.0) {
+    g.14 = f64.mul(g.14, f64.pow(10.0, ge.16))
+  } else {
+    if f64.ge(ge.16, f64.neg(300.0)) {
+      g.14 = f64.div(g.14, f64.pow(10.0, f64.neg(ge.16)))
+    } else {
+      g.14 = f64.div(f64.div(g.14, 1e300), f64.pow(10.0, f64.sub(f64.neg(ge.16), 300.0)))
+    }
+  }
+  return call $$refine#21(ds.6, nd.7, e.10, g.14)
+}
+func $$bigFrom#12(x.0: f64) -> jsval {
+  local a.1: jsval
+  local q.2: f64
+  a.1 = []
+  loop L0 {
+    if bool.not(f64.gt(x.0, 0.0)) {
+      break L0
+    }
+    q.2 = f64.floor(f64.div(x.0, 16777216.0))
+    call $$append#23(a.1, f64->jsval(f64.sub(x.0, f64.mul(q.2, 16777216.0))))
+    x.0 = q.2
+    continue L0
+  }
+  return a.1
+}
+func $$bigMulAdd#13(a.0: jsval, m.1: f64, c.2: f64) {
+  local n.3: jsval
+  local i.4: f64
+  local t.5: f64
+  local q.6: f64
+  n.3 = $get(a.0, "length")
+  i.4 = 0.0
+  loop L0 {
+    if bool.not(f64.lt(i.4, jsval->f64(n.3))) {
+      break L0
+    }
+    t.5 = f64.add(f64.mul(jsval->f64($get(a.0, f64->jsval(i.4))), m.1), c.2)
+    c.2 = f64.floor(f64.div(t.5, 16777216.0))
+    $define(a.0, f64->jsval(i.4), f64->jsval(f64.sub(t.5, f64.mul(c.2, 16777216.0))))
+    i.4 = f64.add(i.4, 1.0)
+    continue L0
+  }
+  loop L1 {
+    if bool.not(f64.gt(c.2, 0.0)) {
+      break L1
+    }
+    q.6 = f64.floor(f64.div(c.2, 16777216.0))
+    call $$append#23(a.0, f64->jsval(f64.sub(c.2, f64.mul(q.6, 16777216.0))))
+    c.2 = q.6
+    continue L1
+  }
+}
+func $$bigMulPow2#14(a.0: jsval, n.1: f64) {
+  loop L0 {
+    if bool.not(f64.ge(n.1, 24.0)) {
+      break L0
+    }
+    call $$bigMulAdd#13(a.0, 16777216.0, 0.0)
+    n.1 = f64.sub(n.1, 24.0)
+    continue L0
+  }
+  if f64.gt(n.1, 0.0) {
+    call $$bigMulAdd#13(a.0, f64.pow(2.0, n.1), 0.0)
+  }
+}
+func $$bigMulPow10#15(a.0: jsval, n.1: f64) {
+  loop L0 {
+    if bool.not(f64.ge(n.1, 7.0)) {
+      break L0
+    }
+    call $$bigMulAdd#13(a.0, 10000000.0, 0.0)
+    n.1 = f64.sub(n.1, 7.0)
+    continue L0
+  }
+  if f64.gt(n.1, 0.0) {
+    call $$bigMulAdd#13(a.0, call $$pow10#9(n.1), 0.0)
+  }
+}
+func $$bigCopy#16(a.0: jsval) -> jsval {
+  local b.1: jsval
+  local i.2: f64
+  b.1 = []
+  i.2 = 0.0
+  loop L0 {
+    if bool.not(f64.lt(i.2, jsval->f64($get(a.0, "length")))) {
+      break L0
+    }
+    call $$append#23(b.1, $get(a.0, f64->jsval(i.2)))
+    i.2 = f64.add(i.2, 1.0)
+    continue L0
+  }
+  return b.1
+}
+func $$bigLen#17(a.0: jsval) -> jsval {
+  local n.1: jsval
+  n.1 = $get(a.0, "length")
+  loop L0 {
+    if bool.not(cond.bool(f64.gt(jsval->f64(n.1), 0.0), jsval.eq($get(a.0, f64->jsval(f64.sub(jsval->f64(n.1), 1.0))), f64->jsval(0.0)), false)) {
+      break L0
+    }
+    n.1 = f64->jsval(f64.sub(jsval->f64(n.1), 1.0))
+    continue L0
+  }
+  return n.1
+}
+func $$bigCmp#18(a.0: jsval, b.1: jsval) -> f64 {
+  local n.2: jsval
+  local m.3: jsval
+  local i.4: f64
+  n.2 = call $$bigLen#17(a.0)
+  m.3 = call $$bigLen#17(b.1)
+  if jsval.ne(n.2, m.3) {
+    return cond.f64($js_less(n.2, m.3), f64.neg(1.0), 1.0)
+  }
+  i.4 = f64.sub(jsval->f64(n.2), 1.0)
+  loop L0 {
+    if bool.not(f64.ge(i.4, 0.0)) {
+      break L0
+    }
+    if jsval.ne($get(a.0, f64->jsval(i.4)), $get(b.1, f64->jsval(i.4))) {
+      return cond.f64($js_less($get(a.0, f64->jsval(i.4)), $get(b.1, f64->jsval(i.4))), f64.neg(1.0), 1.0)
+    }
+    i.4 = f64.sub(i.4, 1.0)
+    continue L0
+  }
+  return 0.0
+}
+func $$nextUp#19(x.0: f64) -> f64 {
+  local hi.1: f64
+  local lo.2: f64
+  hi.1 = i32->f64($f64_hi(x.0))
+  lo.2 = i32->f64($f64_lo(x.0))
+  if f64.eq(lo.2, f64.neg(1.0)) {
+    return $f64_from_words(f64->i32(f64.add(hi.1, 1.0)), f64->i32(0.0))
+  }
+  return $f64_from_words(f64->i32(hi.1), f64->i32(f64.add(lo.2, 1.0)))
+}
+func $$nextDown#20(x.0: f64) -> f64 {
+  local hi.1: f64
+  local lo.2: f64
+  hi.1 = i32->f64($f64_hi(x.0))
+  lo.2 = i32->f64($f64_lo(x.0))
+  if f64.eq(lo.2, 0.0) {
+    return $f64_from_words(f64->i32(f64.sub(hi.1, 1.0)), f64->i32(f64.neg(1.0)))
+  }
+  return $f64_from_words(f64->i32(hi.1), f64->i32(f64.sub(lo.2, 1.0)))
+}
+func $$refine#21(ds.0: jsval, nd.1: f64, e.2: f64, x.3: f64) -> f64 {
+  local D.4: jsval
+  local i.5: f64
+  local e10.6: f64
+  local d10.7: f64
+  local hi.8: f64
+  local u32.9: f64
+  local be.10: f64
+  local top.11: f64
+  local u32.12: f64
+  local low.13: f64
+  local m.14: f64
+  local k.15: f64
+  local s.16: f64
+  local t.17: f64
+  local X.18: jsval
+  local H.19: jsval
+  local odd.20: jsval
+  local c.21: f64
+  local L.22: jsval
+  local d.23: f64
+  D.4 = []
+  i.5 = 0.0
+  loop L0 {
+    if bool.not(f64.lt(i.5, nd.1)) {
+      break L0
+    }
+    call $$bigMulAdd#13(D.4, 10.0, jsval->f64($get(ds.0, f64->jsval(i.5))))
+    i.5 = f64.add(i.5, 1.0)
+    continue L0
+  }
+  if f64.eq(x.3, inf) {
+    x.3 = 1.7976931348623157e308
+  }
+  if f64.eq(x.3, 0.0) {
+    x.3 = 5e-324
+  }
+  e10.6 = cond.f64(f64.gt(e.2, 0.0), e.2, 0.0)
+  d10.7 = cond.f64(f64.lt(e.2, 0.0), f64.neg(e.2), 0.0)
+  loop L1 {
+    block L2 {
+      hi.8 = i32->f64($f64_hi(x.3))
+      be.10 = i32->f64(i32.and(f64->i32(cond.f64(f64.lt((u32.9 := i32->f64(i32.shr_u(f64->i32(hi.8), f64->i32(20.0)))), 0.0), f64.add(u32.9, 4294967296.0), u32.9)), f64->i32(2047.0)))
+      top.11 = i32->f64(i32.and(f64->i32(hi.8), f64->i32(1048575.0)))
+      low.13 = cond.f64(f64.lt((u32.12 := i32->f64(i32.shr_u(f64->i32(i32->f64($f64_lo(x.3))), f64->i32(0.0)))), 0.0), f64.add(u32.12, 4294967296.0), u32.12)
+      m.14 = f64.add(f64.mul(top.11, 4294967296.0), low.13)
+      k.15 = f64.neg(1074.0)
+      if f64.ne(be.10, 0.0) {
+        m.14 = f64.add(m.14, 4503599627370496.0)
+        k.15 = f64.sub(be.10, 1075.0)
+      }
+      s.16 = cond.f64(f64.lt(k.15, 2.0), f64.sub(2.0, k.15), 0.0)
+      t.17 = f64.add(f64.sub(k.15, 1.0), s.16)
+      X.18 = call $$bigCopy#16(D.4)
+      call $$bigMulPow10#15(X.18, e10.6)
+      call $$bigMulPow2#14(X.18, s.16)
+      H.19 = call $$bigFrom#12(m.14)
+      call $$bigMulAdd#13(H.19, 2.0, 1.0)
+      call $$bigMulPow10#15(H.19, d10.7)
+      call $$bigMulPow2#14(H.19, t.17)
+      odd.20 = bool->jsval(f64.eq(f64.rem(m.14, 2.0), 1.0))
+      c.21 = call $$bigCmp#18(X.18, H.19)
+      if cond.bool(f64.gt(c.21, 0.0), true, cond.bool(f64.eq(c.21, 0.0), jsval->bool(odd.20), false)) {
+        if f64.eq(x.3, 1.7976931348623157e308) {
+          return inf
+        }
+        x.3 = call $$nextUp#19(x.3)
+        break L2
+      }
+      if cond.bool(f64.eq(m.14, 4503599627370496.0), f64.gt(be.10, 1.0), false) {
+        L.22 = call $$bigFrom#12(f64.sub(m.14, 1.0))
+        call $$bigMulAdd#13(L.22, 4.0, 3.0)
+        call $$bigMulPow10#15(L.22, d10.7)
+        call $$bigMulPow2#14(L.22, f64.sub(t.17, 1.0))
+      } else {
+        L.22 = call $$bigFrom#12(f64.sub(m.14, 1.0))
+        call $$bigMulAdd#13(L.22, 2.0, 1.0)
+        call $$bigMulPow10#15(L.22, d10.7)
+        call $$bigMulPow2#14(L.22, t.17)
+      }
+      d.23 = call $$bigCmp#18(X.18, L.22)
+      if cond.bool(f64.lt(d.23, 0.0), true, cond.bool(f64.eq(d.23, 0.0), jsval->bool(odd.20), false)) {
+        x.3 = call $$nextDown#20(x.3)
+        if f64.eq(x.3, 0.0) {
+          return 0.0
+        }
+        break L2
+      }
+      return x.3
+    }
+    continue L1
+  }
+  return x.3
+}
+func $$StringToNumber#22(s.0: jsval) -> f64 {
+  local start.1: f64
+  local end.2: f64
+  local c.3: f64
+  local radix.4: f64
+  local v.5: f64
+  local i.6: f64
+  local d.7: f64
+  local v.8: f64
+  start.1 = 0.0
+  end.2 = $string_length(s.0)
+  loop L0 {
+    if bool.not(cond.bool(f64.lt(start.1, end.2), jsval->bool(call $$isSpace#5(i32->f64($str_unit(s.0, f64->i32(start.1))))), false)) {
+      break L0
+    }
+    start.1 = f64.add(start.1, 1.0)
+    continue L0
+  }
+  loop L1 {
+    if bool.not(cond.bool(f64.gt(end.2, start.1), jsval->bool(call $$isSpace#5(i32->f64($str_unit(s.0, f64->i32(f64.sub(end.2, 1.0)))))), false)) {
+      break L1
+    }
+    end.2 = f64.sub(end.2, 1.0)
+    continue L1
+  }
+  if f64.eq(start.1, end.2) {
+    return 0.0
+  }
+  if cond.bool(f64.gt(f64.sub(end.2, start.1), 2.0), f64.eq(i32->f64($str_unit(s.0, f64->i32(start.1))), 48.0), false) {
+    c.3 = i32->f64($str_unit(s.0, f64->i32(f64.add(start.1, 1.0))))
+    radix.4 = 0.0
+    if cond.bool(f64.eq(c.3, 120.0), true, f64.eq(c.3, 88.0)) {
+      radix.4 = 16.0
+    } else {
+      if cond.bool(f64.eq(c.3, 111.0), true, f64.eq(c.3, 79.0)) {
+        radix.4 = 8.0
+      } else {
+        if cond.bool(f64.eq(c.3, 98.0), true, f64.eq(c.3, 66.0)) {
+          radix.4 = 2.0
+        }
+      }
+    }
+    if f64.ne(radix.4, 0.0) {
+      v.5 = 0.0
+      i.6 = f64.add(start.1, 2.0)
+      loop L2 {
+        if bool.not(f64.lt(i.6, end.2)) {
+          break L2
+        }
+        d.7 = call $$digitValue#8(i32->f64($str_unit(s.0, f64->i32(i.6))))
+        if f64.ge(d.7, radix.4) {
+          return NaN
+        }
+        v.5 = f64.add(f64.mul(v.5, radix.4), d.7)
+        i.6 = f64.add(i.6, 1.0)
+        continue L2
+      }
+      return v.5
+    }
+  }
+  v.8 = call $$parseDecimal#10(s.0, start.1, end.2)
+  if f64.ne(@$$parse_end, end.2) {
+    return NaN
+  }
+  return v.8
+}
+func $$append#23(a.0: jsval, v.1: jsval) {
+  $define(a.0, f64->jsval(jsval->f64($get(a.0, "length"))), v.1)
+}
+func $$typedThis#24(v.0: jsval) -> f64 {
+  local kind.1: f64
+  kind.1 = i32->f64($typed_kind(v.0))
+  if f64.lt(kind.1, 0.0) {
+    throw $new_TypeError("this is not a typed array.", undefined)
+  }
+  return kind.1
+}
+func $$TypedArray_prototype_length#25(this.0: jsval) -> f64 {
+  call $$typedThis#24(this.0)
+  return i32->f64($typed_length(this.0))
+}
+func $$TypedArray_prototype_length$code#26(self.0: jsval, this.1: jsval, args.2: jsval) -> jsval {
+  return f64->jsval(call $$TypedArray_prototype_length#25(this.1))
 }
 export "sumOdd" = sumOdd#0
 export "firstPair" = firstPair#1

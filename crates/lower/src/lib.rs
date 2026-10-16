@@ -68,8 +68,10 @@
 //! **Built-ins** (T21): the prelude (JS in `builtins/`, see [`builtins`]) is parsed with the user's
 //! code; `Math.x(…)` is a direct call of its `$$Math_x`, `Math.<constant>` a number, `parseInt(…)` a
 //! direct call of `$$parseInt`. Prototype methods (`$$String_prototype_slice`) go into
-//! `ir::Module::builtin_methods`; the StringToNumber hook is kept when the IR can convert a JS value
-//! to a number (another round with it as a root, [`Facts::string_to_number`]).
+//! `ir::Module::builtin_methods`; the StringToNumber hook is always kept (T125, F85: the runtime's ToNumber
+//! converts strings in ~28 helpers, so a module without it trapped, e.g. `setTimeout(f, "10")`; +11.6 KB in a
+//! program that never converts a string. [`Lowerer::may_convert_string`] is the start of linking it only when
+//! needed, F437).
 //!
 //! An export whose IR signature differs from its boundary types gets a wrapper `<name>$export`
 //! that converts (box an `f64`, ToNumber / ToString of the result).
@@ -196,7 +198,8 @@ pub fn lower_with(
     program: &Program,
     boundary: Option<&Boundary>,
 ) -> Result<ir::Module, Diagnostics> {
-    let mut facts = Facts::default();
+    // T125: StringToNumber from the first round (see the module docs).
+    let mut facts = Facts { string_to_number: true, ..Facts::default() };
     let mut an = closures::analyze(&program.semantic);
     (an.definite, an.maybe_undefined) = definite::analyze(&program.semantic, &an);
     loop {
@@ -841,7 +844,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// Can the IR so far call ToNumber on a string (a `JsVal` → `f64` conversion, `==` on JS
-    /// values, `JsLess`)? Then the runtime needs the prelude's StringToNumber.
+    /// values, `JsLess`)? Then the runtime needs the prelude's StringToNumber. (T125: unused while it's always
+    /// linked; it misses the runtime's own conversions, F437.)
     fn may_convert_string(&self) -> bool {
         // T120: a typed array tells canonical numeric string keys (`"1.5"`) from others by StringToNumber.
         let mut found = self.module.names.contains("$typed");
