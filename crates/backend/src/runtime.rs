@@ -626,6 +626,9 @@ pub const COUNTS: &[&str] = &[
     "layout_define.fallback",
     "define.shared_kept",
     "define.shared_dropped",
+    "define.layout_grow",
+    "define.layout_own",
+    "grow.call",
     // T111: numeric reads and writes of layout keys.
     "num_read.cell",
     "num_read.i31",

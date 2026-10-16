@@ -2295,8 +2295,10 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     s.local_get(O).struct_get(T_OBJECT, F_KEYS).array_len();
     s.i32_eq();
     s.if_(BlockType::Empty);
+    runtime::count(&mut s, on, "define.layout_grow");
     s.local_get(O).call(grow);
     s.else_();
+    runtime::count(&mut s, on, "define.layout_own");
     s.local_get(O).call(own);
     s.end();
     s.end();
@@ -2532,6 +2534,7 @@ fn remove(cx: &mut dyn Cx) -> Function {
 /// `$grow(o)`: new arrays of twice the live entries (at least 4), live entries copied in order.
 fn grow(cx: &mut dyn Cx) -> Function {
     let reindex = h(cx, Helper::Reindex);
+    let on = cx.counting();
     const O: u32 = 0;
     const I: u32 = 1;
     const N: u32 = 2;
@@ -2553,6 +2556,7 @@ fn grow(cx: &mut dyn Cx) -> Function {
             .local_get(I)
             .array_get(T_KEYS);
     };
+    runtime::count(&mut s, on, "grow.call");
     s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_set(N);
     count_loop(&mut s, I, N, |s| {
         key(s);
