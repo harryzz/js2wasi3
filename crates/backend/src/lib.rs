@@ -1235,6 +1235,10 @@ impl runtime::Cx for Emitter<'_> {
         self.m.string_to_bigint.map(|f| self.func_base + f.0)
     }
 
+    fn promise_capability(&mut self) -> Option<u32> {
+        self.m.promise_capability.map(|f| self.func_base + f.0)
+    }
+
     fn js_rem(&mut self) -> u32 {
         self.helper_index(Helper::JsRem)
     }

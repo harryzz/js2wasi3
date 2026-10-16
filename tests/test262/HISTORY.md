@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-16: T127 Promise species (full run)
+
+- Compiler (`main` at 61baaab + T127, uncommitted at the run): native `then` uses SpeciesConstructor and
+  NewPromiseCapability. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t127.log`): **4 new passes, 0 regressions**: 28,123 of 28,984 run pass (97.0%):
+  `built-ins/Promise/prototype/then/{capability-executor-called-twice,capability-executor-not-callable,ctor-custom,
+  deferred-is-resolved-value}`. `baseline.json` updated for those 4 (laptop).
+
 ## 2026-10-16: T126 subclasses of built-ins (full run)
 
 - Compiler (`main` at d3de5dc + T126, uncommitted at the run): `extends Array`/`Object`/`RegExp` instances get the

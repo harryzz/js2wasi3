@@ -1279,6 +1279,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 }
                 continue;
             }
+            if name == builtins::PROMISE_CAPABILITY && self.prelude.subclassing {
+                // Called by the native `then` with any value (T127).
+                self.module.promise_capability = Some(func);
+                if let Some(Some(p)) = self.func_params[&func].first() {
+                    self.observe(Slot::Var(*p), Kind::Any);
+                }
+                continue;
+            }
             if name == builtins::STRING_TO_BIGINT {
                 // Called by the runtime with a string (T40).
                 self.module.string_to_bigint = Some(func);

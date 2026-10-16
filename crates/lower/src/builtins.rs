@@ -208,6 +208,9 @@ pub(crate) const STRING_TO_NUMBER: &str = "$$StringToNumber";
 
 /// The prelude's StringToBigInt (T40): the runtime's comparisons of strings with BigInts call it.
 pub(crate) const STRING_TO_BIGINT: &str = "$$StringToBigInt";
+/// T127: the prelude's NewPromiseCapability(C), called by the native `then` for a promise whose species
+/// constructor isn't `%Promise%` (a subclass), in modules with built-in subclasses.
+pub(crate) const PROMISE_CAPABILITY: &str = "$$promiseCapability";
 /// The prelude's ToBigInt (T48): the runtime's element writes of the BigInt arrays call it.
 pub(crate) const TO_BIGINT: &str = "$$toBigInt";
 
@@ -956,6 +959,13 @@ impl Prelude {
         // T48: element writes of the BigInt arrays call ToBigInt.
         if out.big_typed
             && let Some(sym) = out.names.get(TO_BIGINT)
+        {
+            roots.push(item_of[sym]);
+        }
+        // T127: `then` on a promise subclass's instance builds its result through NewPromiseCapability.
+        if out.subclassing
+            && ["then", "catch", "finally"].iter().any(|k| user_props.contains(*k))
+            && let Some(sym) = out.names.get(PROMISE_CAPABILITY)
         {
             roots.push(item_of[sym]);
         }

@@ -462,6 +462,10 @@ pub trait Cx {
     }
     /// Function index of the prelude's StringToBigInt `(jsval) -> jsval` (T40).
     fn string_to_bigint(&mut self) -> Option<u32>;
+    /// Function index of the prelude's NewPromiseCapability `(c: jsval) -> jsval` (T127).
+    fn promise_capability(&mut self) -> Option<u32> {
+        None
+    }
     /// Function indices of the backend's `f64` `%` and `**` helpers (T40).
     fn js_rem(&mut self) -> u32;
     fn js_pow(&mut self) -> u32;

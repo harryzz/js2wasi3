@@ -1409,6 +1409,19 @@ fn format_object(cx: &mut dyn Cx) -> Function {
             s.end();
         }
         s.end();
+        if cx.subclassing() && !cx.names("toStringTag") {
+            // T127: a `Promise` subclass's instance: `P [Promise] { … }` (node reads `Promise.prototype`'s tag; it's
+            // installed only when the code names `toStringTag`, else this).
+            let (promise_name, tagged) = (cx.str("Promise"), cx.str(" [Promise] "));
+            s.local_get(O).ref_test_non_null(promise::promise());
+            s.local_get(NAME).ref_is_null().i32_eqz().i32_and();
+            s.if_(BlockType::Empty);
+            s.local_get(NAME).ref_as_non_null().global_get(promise_name).call(str_eq).i32_eqz();
+            s.if_(BlockType::Empty);
+            s.local_get(NAME).ref_as_non_null().global_get(tagged).call(concat).local_set(PREFIX);
+            s.end();
+            s.end();
+        }
         if cx.names("toStringTag") {
             // A `Symbol.toStringTag` that isn't an own enumerable property and differs from the
             // constructor's name (T25): `Name [tag] ` / `Object [tag] `.

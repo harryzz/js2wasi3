@@ -220,6 +220,10 @@ pub struct Module {
     /// The prelude's StringToBigInt `(JsVal) -> JsVal` (T40): a BigInt, or `undefined` if the
     /// string isn't a StringIntegerLiteral. Set with [`Module::bigint`].
     pub string_to_bigint: Option<FuncId>,
+    /// T127: the prelude's NewPromiseCapability `(c: JsVal) -> JsVal` (`[promise, resolve, reject]`), for the native
+    /// `then` on a promise whose species isn't `%Promise%`. Only in modules with built-in subclasses that name
+    /// `then`/`catch`/`finally`.
+    pub promise_capability: Option<FuncId>,
 }
 
 /// A function a user world imports (T20 slice 5): core import `name` of module `module` (the

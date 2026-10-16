@@ -713,7 +713,9 @@ Subclassing `Map`/`Set`/`ArrayBuffer`/typed arrays: their constructor values' co
 only in a module with `extends` or the name `construct` (`ir::Module::subclassing`). T126: `Array`/`Object`/`RegExp`
 too; the prelude's `if (__intrinsic_subclass_mode()) { … }` blocks exist only in such modules (ArraySpeciesCreate for an
 array whose prototype isn't `Array.prototype`, `Array.of` with `this`); `Array[Symbol.species]` is a getter; inspect
-names subclass instances as node's `getPrefix` (`inspect::Helper::SubclassName`).)
+names subclass instances as node's `getPrefix` (`inspect::Helper::SubclassName`). T127: `Promise.prototype.then`
+uses SpeciesConstructor and the prelude's NewPromiseCapability (`ir::Module::promise_capability`); a capability that
+isn't a native promise with our own resolving functions gets handlers calling its `resolve`/`reject` in the same job.)
 (T48: **`BigInt64Array`/`BigUint64Array`** are kinds 9–10, only in a module whose code names one (`ir::Module::
 big_typed`, which implies `bigint`): `Builtin::Typed(9|10)` are outside `Builtin::ALL`, their prototype and constructor
 globals come after the stacks' (each group brings the ones before it), and the backend's loops over kinds go to 11

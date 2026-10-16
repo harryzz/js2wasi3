@@ -20,8 +20,9 @@
 //! gives the reason of the first recorded one that still has none (node checks after draining the
 //! microtasks, then exits with the error).
 //!
-//! Not modelled: subclassing through species (`then` and the statics always make `%Promise%`
-//! promises), `Symbol.toStringTag`, `Promise.any` (AggregateError).
+//! Species (T127): in modules with built-in subclasses, `then` uses SpeciesConstructor and the prelude's
+//! NewPromiseCapability (the statics are the prelude's, T50). Not modelled: `Symbol.toStringTag` (unless the code
+//! names it; `console.log` shows `P [Promise]` for subclasses).
 
 use crate::runtime::JsTest;
 use js2wasi3_ir::{Builtin, ErrorKind};
@@ -127,6 +128,12 @@ pub enum Helper {
     AwaitThen,
     /// The code of `Promise.prototype.then`.
     Then,
+    /// The code of `get Promise[Symbol.species]` (T127): `this`.
+    SpeciesGetter,
+    /// T127: a reaction handler for a capability that isn't ours (`env`: `[handler, resolve, reject]`): call the
+    /// handler (none: pass the value / reason on), then the capability's `resolve` with its result, or `reject`
+    /// with what it threw: PromiseReactionJob's steps, in the same job.
+    CapHandler { rejected: bool },
     /// `Promise.prototype.catch`.
     Catch,
     /// `Promise.prototype.finally`.
@@ -200,6 +207,8 @@ impl Helper {
             Helper::PerformThen => "perform_promise_then",
             Helper::AwaitThen => "perform_promise_then_await",
             Helper::Then => "Promise.prototype.then",
+            Helper::SpeciesGetter => "get_promise_species",
+            Helper::CapHandler { .. } => "promise_capability_handler",
             Helper::Catch => "Promise.prototype.catch",
             Helper::Finally => "Promise.prototype.finally",
             Helper::FinallyFn { catch: false } => "then_finally",
@@ -260,6 +269,8 @@ impl Helper {
             | Helper::ResolveFn
             | Helper::RejectFn
             | Helper::Then
+            | Helper::SpeciesGetter
+            | Helper::CapHandler { .. }
             | Helper::Catch
             | Helper::Finally
             | Helper::FinallyFn { .. }
@@ -295,6 +306,14 @@ impl Helper {
             Helper::PerformThen => perform_then(cx, false),
             Helper::AwaitThen => perform_then(cx, true),
             Helper::Then => then(cx),
+            Helper::CapHandler { rejected } => cap_handler(cx, rejected),
+            Helper::SpeciesGetter => {
+                let mut f = Function::new([]);
+                let mut s = f.instructions();
+                s.local_get(THIS);
+                s.end();
+                f
+            }
             Helper::Catch => {
                 let invoke = ph(cx, Helper::Invoke);
                 let key = cx.str("then");
@@ -684,6 +703,20 @@ fn ctor(cx: &mut dyn Cx) -> Function {
         native(cx, &mut s, new, code, None, name, len);
         s.i32_const(object::HIDDEN).call(define);
     }
+    if cx.subclassing() {
+        // T127: `get Promise[Symbol.species]` (`this`), which a subclass inherits.
+        let getter = ph(cx, Helper::SpeciesGetter);
+        cx.declare_func(getter);
+        let define_accessor = cx.helper(runtime::Helper::Prop(props::Helper::DefineAccessor));
+        let species = cx.helper(runtime::Helper::WellKnownSymbol(
+            js2wasi3_ir::well_known_symbol("species").expect("well-known"),
+        ));
+        let getter_name = cx.str("get [Symbol.species]");
+        s.local_get(F);
+        s.call(species);
+        native(cx, &mut s, new, getter, None, getter_name, 0);
+        s.i32_const(0).i32_const(object::HIDDEN).call(define_accessor);
+    }
     s.local_get(F);
     s.end();
     f
@@ -1042,7 +1075,12 @@ fn then(cx: &mut dyn Cx) -> Function {
     let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
     let msg = cx.str("Method Promise.prototype.then called on incompatible receiver ");
     const D: u32 = 3;
-    let mut f = Function::new([(1, rt(true, T_PROMISE))]);
+    // T127: (4: species constructor, 5: capability, 6: its promise, 7: a handler's environment; only with species.)
+    let mut locals = vec![(1, rt(true, T_PROMISE))];
+    if cx.promise_capability().is_some() {
+        locals.extend([(1, jsval()), (1, rt(true, T_VALS)), (1, jsval()), (1, rt(true, T_VALS))]);
+    }
+    let mut f = Function::new(locals);
     let mut s = f.instructions();
     s.local_get(THIS).ref_test_non_null(promise()).i32_eqz();
     s.if_(BlockType::Empty);
@@ -1050,12 +1088,141 @@ fn then(cx: &mut dyn Cx) -> Function {
     s.local_get(THIS).call(describe).call(concat);
     s.call(throw);
     s.end();
+    if let Some(capability) = cx.promise_capability() {
+        // T127: SpeciesConstructor(promise, %Promise%); another constructor (a subclass) makes the result through
+        // NewPromiseCapability (the prelude's). A capability whose promise is settled by our own resolving functions
+        // (a subclass calling `super(executor)`) is the reaction's `derived` (the spec's order); any other: an inner
+        // promise whose settlement calls its `resolve`/`reject` (one more job).
+        let get = oh(cx, object::Helper::Get);
+        let ctor = ph(cx, Helper::Ctor);
+        let is_constructor = cx.helper(runtime::Helper::Func(func::Helper::IsConstructor));
+        let elems = cx.helper(runtime::Helper::Arr(array::Helper::Elems));
+        let throw = oh(cx, object::Helper::Throw(ErrorKind::TypeError));
+        let species = cx.helper(runtime::Helper::WellKnownSymbol(
+            js2wasi3_ir::well_known_symbol("species").expect("well-known"),
+        ));
+        let resolve_fn = ph(cx, Helper::ResolveFn);
+        let (constructor, not_object, not_ctor) = (
+            cx.str("constructor"),
+            cx.str("The .constructor property is not an object"),
+            cx.str("object.constructor[Symbol.species] is not a constructor"),
+        );
+        const C: u32 = 4;
+        const CAP: u32 = 5;
+        const RP: u32 = 6;
+        s.block(BlockType::Empty);
+        s.local_get(THIS).global_get(constructor).call(get).local_tee(C);
+        s.global_get(G_UNDEFINED).ref_eq().br_if(0);
+        s.test_object(C).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.global_get(not_object).call(throw);
+        s.end();
+        s.local_get(C).call(species).call(get).local_tee(C);
+        s.global_get(G_UNDEFINED).ref_eq();
+        s.local_get(C).global_get(runtime::G_NULL).ref_eq().i32_or().br_if(0);
+        s.local_get(C).call(is_constructor).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.global_get(not_ctor).call(throw);
+        s.end();
+        s.local_get(C).call(ctor).ref_eq().br_if(0);
+        s.local_get(C).call(capability).ref_cast_non_null(array::array()).call(elems).local_set(CAP);
+        let cap = |s: &mut InstructionSink, i: i32| {
+            s.local_get(CAP).ref_as_non_null().i32_const(i).array_get(T_VALS);
+        };
+        cap(&mut s, 0);
+        s.local_set(RP);
+        // Our resolving functions of that very promise: `derived` is it.
+        s.block(BlockType::Empty);
+        s.local_get(RP).ref_test_non_null(promise()).i32_eqz().br_if(0);
+        cap(&mut s, 1);
+        s.ref_test_non_null(function()).i32_eqz().br_if(0);
+        cap(&mut s, 1);
+        s.ref_cast_non_null(function()).struct_get(T_FUNCTION, func::F_CODE);
+        s.i32_const(cx.code_slot(resolve_fn)).i32_ne().br_if(0);
+        cap(&mut s, 1);
+        s.ref_cast_non_null(function()).struct_get(T_FUNCTION, F_ENV).ref_as_non_null();
+        s.i32_const(0).array_get(T_VALS).local_get(RP).ref_eq().i32_eqz().br_if(0);
+        s.local_get(THIS).ref_cast_non_null(promise());
+        arg(cx, &mut s, 0);
+        arg(cx, &mut s, 1);
+        s.local_get(RP).ref_cast_non_null(promise()).call(perform);
+        s.local_get(RP).return_();
+        s.end();
+        // Any other capability: handlers that call its `resolve`/`reject` (no `derived`).
+        let new_function = cx.helper(runtime::Helper::Func(func::Helper::New));
+        let on_fulfilled = ph(cx, Helper::CapHandler { rejected: false });
+        let on_rejected = ph(cx, Helper::CapHandler { rejected: true });
+        cx.declare_func(on_fulfilled);
+        cx.declare_func(on_rejected);
+        let empty = cx.str("");
+        const ENV: u32 = 7;
+        s.local_get(THIS).ref_cast_non_null(promise());
+        for (i, code) in [(0, on_fulfilled), (1, on_rejected)] {
+            arg(cx, &mut s, i);
+            cap(&mut s, 1);
+            cap(&mut s, 2);
+            s.array_new_fixed(T_VALS, 3).local_set(ENV);
+            native(cx, &mut s, new_function, code, Some(ENV), empty, 1);
+        }
+        s.ref_null(HeapType::Concrete(T_PROMISE)).call(perform);
+        s.local_get(RP).return_();
+        s.end();
+    }
     s.call(new).local_set(D);
     s.local_get(THIS).ref_cast_non_null(promise());
     arg(cx, &mut s, 0);
     arg(cx, &mut s, 1);
     s.local_get(D).call(perform);
     s.local_get(D);
+    s.end();
+    f
+}
+
+/// `promise_capability_handler` (see [`Helper::CapHandler`]).
+fn cap_handler(cx: &mut dyn Cx, rejected: bool) -> Function {
+    let call_value = cx.helper(runtime::Helper::Func(func::Helper::CallValue));
+    let empty = cx.str("");
+    const ENV: u32 = 3;
+    const V: u32 = 4;
+    let mut f = Function::new([(1, rt(true, T_VALS)), (1, jsval())]);
+    let mut s = f.instructions();
+    let slot = |s: &mut InstructionSink, i: i32| {
+        s.local_get(ENV).ref_as_non_null().i32_const(i).array_get(T_VALS);
+    };
+    let call1 = |s: &mut InstructionSink, i: i32| {
+        // `env[i](V)`
+        s.local_get(ENV).ref_as_non_null().i32_const(i).array_get(T_VALS);
+        s.global_get(G_UNDEFINED);
+        s.local_get(V).array_new_fixed(T_VALS, 1);
+        s.global_get(empty).call(call_value).drop();
+    };
+    env(&mut s);
+    s.local_set(ENV);
+    arg(cx, &mut s, 0);
+    s.local_set(V);
+    // Not callable (every callable is a `$function`): pass the value / reason on.
+    slot(&mut s, 0);
+    s.ref_test_non_null(function()).i32_eqz();
+    s.if_(BlockType::Empty);
+    call1(&mut s, if rejected { 2 } else { 1 });
+    s.global_get(G_UNDEFINED).return_();
+    s.end();
+    try_catch(
+        &mut s,
+        |s| {
+            slot(s, 0);
+            s.global_get(G_UNDEFINED);
+            s.local_get(V).array_new_fixed(T_VALS, 1);
+            s.global_get(empty).call(call_value).local_set(V);
+        },
+        |s| {
+            s.local_set(V);
+            call1(s, 2);
+            s.global_get(G_UNDEFINED).return_();
+        },
+    );
+    call1(&mut s, 1);
+    s.global_get(G_UNDEFINED);
     s.end();
     f
 }
