@@ -391,8 +391,23 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
             s.local_get(HV);
         }
     };
-    let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_OBJECT)), (1, jsval())]);
+    let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_OBJECT)), (1, jsval()), (1, ValType::I64)]);
     let mut s = f.instructions();
+    if !named && cx.names("$typed") {
+        // T120: a typed array's numeric key: TypedArraySetElement (an invalid index converts and drops the
+        // value); never an ordinary property. (Constant keys that could be numeric never take `named`.)
+        let ix = 7;
+        let typed_index = oh(cx, object::Helper::TypedIndex);
+        let typed_put = oh(cx, object::Helper::TypedPut);
+        s.local_get(O).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(K).call(typed_index).local_tee(ix).i64_const(-1).i64_ne();
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_cast_non_null(crate::typed::typed()).local_get(ix).local_get(V).call(typed_put);
+        s.return_();
+        s.end();
+        s.end();
+    }
     // An own property.
     s.local_get(O);
     find_k(&mut s);
@@ -933,6 +948,40 @@ fn define_property(cx: &mut dyn Cx) -> Function {
         .call(concat);
     s.call(throw);
     s.end();
+    if cx.names("$typed") {
+        // T120: a typed array's numeric key (ECMA-262 10.4.5.3): an invalid index throws; an element takes only
+        // a data descriptor that's configurable, enumerable and writable where it says, then its value.
+        let typed_index = oh(cx, object::Helper::TypedIndex);
+        let typed_put = oh(cx, object::Helper::TypedPut);
+        let length_t = crate::typed::Length::new(cx);
+        let invalid = cx.str("Invalid typed array index");
+        s.local_get(O).ref_as_non_null().ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(K).ref_as_non_null().call(typed_index).local_tee(J).i64_const(-1).i64_ne();
+        s.if_(BlockType::Empty);
+        s.local_get(J).i64_const(0).i64_ge_s();
+        s.local_get(O).ref_cast_non_null(crate::typed::typed());
+        length_t.emit(&mut s);
+        s.i64_extend_i32_u().local_get(J).i64_gt_s();
+        s.i32_and().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.global_get(invalid).call(throw);
+        s.end();
+        s.local_get(HAS).i32_const(D_GET | D_SET).i32_and();
+        s.local_get(HAS).local_get(BITS).i32_const(-1).i32_xor().i32_and();
+        s.i32_const(D_CONF | D_ENUM | D_WRIT).i32_and();
+        s.i32_or();
+        s.if_(BlockType::Empty);
+        fail(&mut s, redefine);
+        s.end();
+        s.local_get(HAS).i32_const(D_VALUE).i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_cast_non_null(crate::typed::typed()).local_get(J).local_get(VAL).call(typed_put);
+        s.end();
+        s.local_get(O).ref_as_non_null().return_();
+        s.end();
+        s.end();
+    }
     let arr = |s: &mut InstructionSink| {
         s.local_get(O).ref_cast_non_null(array::array());
     };
@@ -1344,11 +1393,13 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     const A: u32 = 5;
     const R: u32 = 6;
     const X: u32 = 7;
+    const IX: u32 = 8;
     let mut f = Function::new([
         (1, rt(true, T_OBJECT)),
         (1, rt(true, T_STRING)),
         (2, ValType::I32),
         (2, jsval()),
+        (1, ValType::I64),
     ]);
     let mut s = f.instructions();
     let bool_of = |s: &mut InstructionSink| {
@@ -1374,6 +1425,37 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(V).cast_object().local_set(O);
     s.local_get(KEY).call(to_key).local_set(K);
+    if cx.names("$typed") {
+        // T120: a typed array's numeric key: an element in range is a writable, enumerable, configurable data
+        // property; another is absent.
+        let typed_index = oh(cx, object::Helper::TypedIndex);
+        let elem = cx.helper(runtime::Helper::Typed(crate::typed::Helper::Get));
+        let length_t = crate::typed::Length::new(cx);
+        s.local_get(O).ref_as_non_null().ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(K).ref_as_non_null().call(typed_index).local_tee(IX).i64_const(-1).i64_ne();
+        s.if_(BlockType::Empty);
+        s.local_get(IX).i64_const(0).i64_ge_s();
+        s.local_get(O).ref_cast_non_null(crate::typed::typed());
+        length_t.emit(&mut s);
+        s.i64_extend_i32_u().local_get(IX).i64_gt_s();
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.call(new_object).local_set(R);
+        field(&mut s, value, &|s| {
+            s.local_get(O).ref_cast_non_null(crate::typed::typed()).local_get(IX).i32_wrap_i64().call(elem);
+        });
+        for key in [writable, enumerable, configurable] {
+            field(&mut s, key, &|s| {
+                s.global_get(G_TRUE);
+            });
+        }
+        s.local_get(R).return_();
+        s.end();
+        s.global_get(G_UNDEFINED).return_();
+        s.end();
+        s.end();
+    }
     s.call(new_object).local_set(R);
     // The property's attributes (`A`) and slot (`X`): an array's index or `length` (T32), or an
     // entry of the dictionary part.

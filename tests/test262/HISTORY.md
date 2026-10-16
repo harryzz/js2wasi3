@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-16: T120 typed arrays' keys (full run)
+
+- Compiler (`main` at 03c518b + T120, uncommitted at the run): typed arrays follow ECMA-262 10.4.5 for every key
+  (`typed_index`/`typed_put` in get, set, has, delete, defineProperty, getOwnPropertyDescriptor). Runner: unchanged.
+- Full run on `a-03` (`out/t262-t120.log`, 1,519 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged. Outside the subset (laptop):
+  `built-ins/TypedArrayConstructors/internals` 71 → 107 of 240 pass (`out/t262-t120-internals.log`).
+
 ## 2026-10-15: T119 `o.k++` with a constant key (full run)
 
 - Compiler (`main` at b7788d1 + T119, uncommitted at the run): `o.k++`/`--o.k` keep a constant key in place

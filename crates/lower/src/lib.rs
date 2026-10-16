@@ -843,7 +843,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// Can the IR so far call ToNumber on a string (a `JsVal` → `f64` conversion, `==` on JS
     /// values, `JsLess`)? Then the runtime needs the prelude's StringToNumber.
     fn may_convert_string(&self) -> bool {
-        let mut found = false;
+        // T120: a typed array tells canonical numeric string keys (`"1.5"`) from others by StringToNumber.
+        let mut found = self.module.names.contains("$typed");
         for f in &self.module.functions {
             ir::visit_exprs(&f.body, &mut |e| {
                 found |= match e {

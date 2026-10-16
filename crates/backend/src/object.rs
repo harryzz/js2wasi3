@@ -385,6 +385,13 @@ pub enum Helper {
     GetOther,
     /// `(v, key, value: jsval)`: `v[key] = value`.
     Set,
+    /// `(key: jsval) -> i64` (T120): a typed array's view of a key (an `i31`, a `$number` or a string; anything
+    /// else -1): a valid integer index (≥ 0; the caller checks the length), -2 for another canonical numeric
+    /// key (`1.5`, `"-0"`, `-1`, `"NaN"`, `"Infinity"`: never an ordinary property), -1 for an ordinary key.
+    TypedIndex,
+    /// `(t: (ref $typed), i: i64, v: jsval)` (T120): TypedArraySetElement: `v` converted (ToBigInt or
+    /// ToNumber), then stored when `i` is below the length (rechecked after the conversion).
+    TypedPut,
     /// `(v, key, value: jsval)`: `v[key] = value` for a `v` that isn't an `$array` (T118: a miss of an inline
     /// element write, which tested that already): [`Helper::Set`] without its array fast path.
     SetOther,
@@ -576,6 +583,8 @@ impl Helper {
             Helper::GetOther => "get_other",
             Helper::CellOut => "cell_out",
             Helper::Set => "set",
+            Helper::TypedIndex => "typed_index",
+            Helper::TypedPut => "typed_put",
             Helper::SetOther => "set_other",
             Helper::SetGeneric => "set_generic",
             Helper::DefineProp => "define_property",
@@ -675,6 +684,8 @@ impl Helper {
             Helper::Get | Helper::GetOther => (vec![v, v], vec![v]),
             Helper::CellOut => (vec![v], vec![v]),
             Helper::Set | Helper::SetOther | Helper::SetGeneric | Helper::DefineProp => (vec![v, v, v], vec![]),
+            Helper::TypedIndex => (vec![v], vec![ValType::I64]),
+            Helper::TypedPut => (vec![rt(false, runtime::T_TYPED), ValType::I64, v], vec![]),
             Helper::Delete | Helper::Has | Helper::HasOwn => (vec![v, v], vec![I32]),
             Helper::NewObject => (vec![], vec![v]),
             Helper::NewObjectSized => (vec![I32], vec![v]),
@@ -759,6 +770,8 @@ impl Helper {
             Helper::GetOther => get(cx, false),
             Helper::CellOut => cell_out(),
             Helper::Set => set(cx, true, true),
+            Helper::TypedIndex => typed_index(cx),
+            Helper::TypedPut => typed_put(cx),
             Helper::SetOther => set(cx, false, true),
             Helper::SetGeneric => set(cx, false, false),
             Helper::DefineProp => {
@@ -1391,7 +1404,12 @@ pub fn named_key(units: &[u16]) -> bool {
         && (units.len() == 1 || units[0] != b'0' as u16)
         && units.len() <= 10
         && String::from_utf16_lossy(units).parse::<u64>().is_ok_and(|n| n < u32::MAX as u64);
-    !is_index && units != "length".encode_utf16().collect::<Vec<_>>().as_slice()
+    // T120: a key that could be canonical numeric (`"1.5"`, `"-1"`, `"NaN"`, `"Infinity"`) takes the generic paths,
+    // where a typed array treats it as numeric (never an ordinary property): a digit or `-` first, or NaN/Infinity.
+    let numeric = units.first().is_some_and(|&u| u == b'-' as u16 || (b'0' as u16..=b'9' as u16).contains(&u))
+        || units == "NaN".encode_utf16().collect::<Vec<_>>().as_slice()
+        || units == "Infinity".encode_utf16().collect::<Vec<_>>().as_slice();
+    !is_index && !numeric && units != "length".encode_utf16().collect::<Vec<_>>().as_slice()
 }
 
 /// Does the key in local `kk` (a `(ref null $string)`, null: a deleted entry) equal `k`? Leaves an
@@ -2143,7 +2161,8 @@ fn own_get(cx: &mut dyn Cx, copy: bool) -> Function {
     const E: u32 = 2;
     const R: u32 = 3;
     const X: u32 = 4;
-    let mut f = Function::new([(1, ValType::I32), (1, jsval()), (1, ValType::F64)]);
+    const IX: u32 = 5;
+    let mut f = Function::new([(1, ValType::I32), (1, jsval()), (1, ValType::F64), (1, ValType::I64)]);
     let mut s = f.instructions();
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
@@ -2171,6 +2190,24 @@ fn own_get(cx: &mut dyn Cx, copy: bool) -> Function {
     }
     s.local_get(R);
     s.else_();
+    if cx.names("$typed") {
+        // T120: a typed array's numeric key is an element (in range) or nothing; never an entry, so only a key
+        // `find` missed is tested (no cost on a hit).
+        let typed_index = h(cx, Helper::TypedIndex);
+        let elem = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Get));
+        let length = crate::typed::Length::new(cx);
+        s.local_get(O).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(K).call(typed_index).local_tee(IX).i64_const(0).i64_ge_s();
+        s.local_get(O).ref_cast_non_null(crate::typed::typed());
+        length.emit(&mut s);
+        s.i64_extend_i32_u().local_get(IX).i64_gt_s();
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_cast_non_null(crate::typed::typed()).local_get(IX).i32_wrap_i64().call(elem).return_();
+        s.end();
+        s.end();
+    }
     s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
     s.end();
     s.end();
@@ -2201,6 +2238,21 @@ fn lookup(cx: &mut dyn Cx, holder: bool) -> Function {
         s.local_get(R).return_();
     }
     s.end();
+    if cx.names("$typed") {
+        // T120: a typed array's numeric key ends the search (its [[Get]] / [[HasProperty]] never go on).
+        let typed_index = h(cx, Helper::TypedIndex);
+        s.local_get(O).ref_as_non_null().ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(K).call(typed_index).i64_const(-1).i64_ne();
+        s.if_(BlockType::Empty);
+        if holder {
+            s.ref_null(object()).return_();
+        } else {
+            s.ref_null(wasm_encoder::RefType::EQREF.heap_type).return_();
+        }
+        s.end();
+        s.end();
+    }
     s.local_get(O).struct_get(T_OBJECT, F_PROTO).local_set(O);
     s.br(0).end().end();
     if holder {
@@ -3469,7 +3521,8 @@ fn get(cx: &mut dyn Cx, arrays: bool) -> Function {
                 .i31_get_s()
                 .i64_extend_i32_s();
             s.else_();
-            s.test_string(KEY);
+            // A string, not a `$symbol` (a `$string` holding its description, T120).
+            runtime::is_string(&mut s, KEY);
             s.if_(BlockType::Result(ValType::I64));
             s.local_get(KEY).ref_cast_non_null(string()).call(index);
             s.else_();
@@ -3579,6 +3632,130 @@ fn key_text(cx: &mut dyn Cx, s: &mut InstructionSink, key: u32, to_key: u32) {
     s.local_get(key).call(to_key).ref_as_non_null();
     s.end();
     s.end();
+}
+
+/// `typed_index(key)` (see [`Helper::TypedIndex`]): ECMA-262 CanonicalNumericIndexString and IsValidIntegerIndex
+/// without the length. A number key is canonical (its ToPropertyKey is its NumberToString; -0's is "0"). A string
+/// is canonical when it's "-0" or NumberToString(StringToNumber(s)) is `s`; only strings starting with a digit,
+/// `-`, `I` or `N` can be, so others answer -1 without parsing. Without the prelude's StringToNumber (a module
+/// that never converts a string) only array-index strings and "-0" are told apart.
+fn typed_index(cx: &mut dyn Cx) -> Function {
+    use wasm_encoder::HeapType as Ht;
+    let index = h(cx, Helper::ArrayIndex);
+    let str_eq = rh(cx, runtime::Helper::StrEq);
+    let number_to_string = rh(cx, runtime::Helper::Num(numstr::Helper::NumberToString));
+    let string_to_number = cx.string_to_number();
+    let minus_zero = cx.str("-0");
+    const KEY: u32 = 0;
+    const X: u32 = 1;
+    const S: u32 = 2;
+    const C: u32 = 3;
+    const IX: u32 = 4;
+    let mut f = Function::new([(1, ValType::F64), (1, rt(true, T_STRING)), (1, ValType::I32), (1, ValType::I64)]);
+    let mut s = f.instructions();
+    // An `i31`: itself, or -2 when negative.
+    s.local_get(KEY).ref_test_non_null(Ht::I31);
+    s.if_(BlockType::Empty);
+    s.local_get(KEY).ref_cast_non_null(Ht::I31).i31_get_s().local_tee(C).i64_extend_i32_s();
+    s.i64_const(-2);
+    s.local_get(C).i32_const(0).i32_ge_s();
+    s.select().return_();
+    s.end();
+    // A `$number`: ±0 is 0, an integer in [1, 2^53) itself, anything else -2.
+    s.local_get(KEY).ref_test_non_null(Ht::Concrete(runtime::T_NUMBER));
+    s.if_(BlockType::Empty);
+    s.local_get(KEY).ref_cast_non_null(Ht::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0).local_tee(X);
+    s.f64_const(0.0.into()).f64_eq();
+    s.if_(BlockType::Empty);
+    s.i64_const(0).return_();
+    s.end();
+    s.local_get(X).f64_trunc().local_get(X).f64_eq();
+    s.local_get(X).f64_const(0.0.into()).f64_gt().i32_and();
+    s.local_get(X).f64_const(9007199254740992.0.into()).f64_lt().i32_and();
+    s.if_(BlockType::Empty);
+    s.local_get(X).i64_trunc_f64_s().return_();
+    s.end();
+    s.i64_const(-2).return_();
+    s.end();
+    // A string (a `$symbol` is a `$string` holding its description: an ordinary key).
+    runtime::is_string(&mut s, KEY);
+    s.if_(BlockType::Empty);
+    {
+        s.local_get(KEY).ref_cast_non_null(string()).local_tee(S).ref_as_non_null();
+        s.call(index).local_tee(IX).i64_const(0).i64_ge_s();
+        s.if_(BlockType::Empty);
+        s.local_get(IX).return_();
+        s.end();
+        s.local_get(S).ref_as_non_null().array_len().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.i64_const(-1).return_();
+        s.end();
+        s.local_get(S).ref_as_non_null().i32_const(0).array_get_u(T_STRING).local_tee(C);
+        s.i32_const(b'0' as i32).i32_sub().i32_const(10).i32_lt_u();
+        for c in [b'-', b'I', b'N'] {
+            s.local_get(C).i32_const(c as i32).i32_eq().i32_or();
+        }
+        s.i32_eqz();
+        s.if_(BlockType::Empty);
+        s.i64_const(-1).return_();
+        s.end();
+        s.local_get(S).ref_as_non_null().global_get(minus_zero).call(str_eq);
+        s.if_(BlockType::Empty);
+        s.i64_const(-2).return_();
+        s.end();
+        if let Some(to_number) = string_to_number {
+            s.local_get(S).ref_as_non_null().call(to_number).call(number_to_string);
+            s.local_get(S).ref_as_non_null().call(str_eq);
+            s.if_(BlockType::Empty);
+            s.i64_const(-2).return_();
+            s.end();
+        }
+    }
+    s.end();
+    s.i64_const(-1);
+    s.end();
+    f
+}
+
+/// `typed_put(t, i, v)` (see [`Helper::TypedPut`]).
+fn typed_put(cx: &mut dyn Cx) -> Function {
+    let elem = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Set));
+    let to_number = rh(cx, runtime::Helper::ToNumber);
+    let length = crate::typed::Length::new(cx);
+    const T: u32 = 0;
+    const I: u32 = 1;
+    const V: u32 = 2;
+    const X: u32 = 3;
+    let mut f = Function::new([(1, ValType::F64)]);
+    let mut s = f.instructions();
+    let in_range = |s: &mut InstructionSink| {
+        s.local_get(I).i64_const(0).i64_ge_s();
+        s.local_get(T);
+        length.emit(s);
+        s.i64_extend_i32_u().local_get(I).i64_gt_s();
+        s.i32_and();
+    };
+    if cx.big_typed() {
+        let to_bigint = cx.to_bigint().expect("`$$toBigInt` with the BigInt arrays");
+        let set_big = rh(cx, runtime::Helper::Typed(crate::typed::Helper::SetBig));
+        s.local_get(T).struct_get(runtime::T_TYPED, crate::typed::F_KIND);
+        s.i32_const(js2wasi3_ir::TYPED_BIGINT64 as i32).i32_ge_u();
+        s.if_(BlockType::Empty);
+        s.local_get(V).call(to_bigint).local_set(V);
+        in_range(&mut s);
+        s.if_(BlockType::Empty);
+        s.local_get(T).local_get(I).i32_wrap_i64().local_get(V).call(set_big);
+        s.end();
+        s.return_();
+        s.end();
+    }
+    s.local_get(V).call(to_number).local_set(X);
+    in_range(&mut s);
+    s.if_(BlockType::Empty);
+    s.local_get(T).local_get(I).i32_wrap_i64().local_get(X).call(elem);
+    s.end();
+    s.end();
+    f
 }
 
 /// `arrays`/`typed`: with the array/typed-array fast path (`set`); `set_other` has no array path, `set_generic`
@@ -3814,13 +3991,44 @@ fn delete(cx: &mut dyn Cx) -> Function {
     const KEY: u32 = 1;
     const K: u32 = 2;
     const E: u32 = 3;
-    let mut f = Function::new([(1, rt(true, T_STRING)), (1, ValType::I32)]);
+    const IX: u32 = 4;
+    let mut f = Function::new([(1, rt(true, T_STRING)), (1, ValType::I32), (1, ValType::I64)]);
     let mut s = f.instructions();
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
     s.global_get(convert).call(throw);
     s.end();
     s.local_get(KEY).call(to_key).local_set(K);
+    if cx.names("$typed") {
+        // T120: a typed array's element can't be deleted (strict: node's TypeError); another numeric key is
+        // never there (true).
+        let typed_index = h(cx, Helper::TypedIndex);
+        let name = rh(cx, runtime::Helper::Typed(crate::typed::Helper::Name));
+        let length_t = crate::typed::Length::new(cx);
+        let of_typed = cx.str("' of [object ");
+        let close = cx.str("]");
+        s.local_get(V).ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(K).ref_as_non_null().call(typed_index).local_tee(IX).i64_const(-1).i64_ne();
+        s.if_(BlockType::Empty);
+        s.local_get(IX).i64_const(0).i64_ge_s();
+        s.local_get(V).ref_cast_non_null(crate::typed::typed());
+        length_t.emit(&mut s);
+        s.i64_extend_i32_u().local_get(IX).i64_gt_s();
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        s.global_get(cannot);
+        s.local_get(K).ref_as_non_null().call(concat);
+        s.global_get(of_typed).call(concat);
+        s.local_get(V).ref_cast_non_null(crate::typed::typed()).struct_get(runtime::T_TYPED, crate::typed::F_KIND);
+        s.call(name).call(concat);
+        s.global_get(close).call(concat);
+        s.call(throw);
+        s.end();
+        s.i32_const(1).return_();
+        s.end();
+        s.end();
+    }
     // An array: `length` can't be deleted; an element becomes a hole.
     s.local_get(V).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
@@ -3920,8 +4128,8 @@ fn has(cx: &mut dyn Cx) -> Function {
     let mut f = Function::new([(1, ValType::I32), (1, ValType::I64)]);
     let mut s = f.instructions();
     if cx.names("$typed") {
-        // A typed array (T20): an index key is there iff it's in range.
-        let index = h(cx, Helper::ArrayIndex);
+        // A typed array (T20): an index key is there iff it's in range; another numeric key never (T120).
+        let typed_index = h(cx, Helper::TypedIndex);
         let length = crate::typed::Length::new(cx);
         const IDX: u32 = 3;
         s.local_get(V).ref_test_non_null(crate::typed::typed());
@@ -3933,9 +4141,11 @@ fn has(cx: &mut dyn Cx) -> Function {
             s.local_get(KEY)
                 .ref_cast_non_null(wasm_encoder::HeapType::I31)
                 .i31_get_s()
+                .local_tee(J)
                 .i64_extend_i32_s();
+            s.i64_const(-2).local_get(J).i32_const(0).i32_ge_s().select();
             s.else_();
-            s.local_get(KEY).call(to_key).call(index);
+            s.local_get(KEY).call(to_key).call(typed_index);
             s.end();
             s.local_tee(IDX).i64_const(-1).i64_ne();
             s.if_(BlockType::Empty);
