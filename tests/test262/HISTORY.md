@@ -3,6 +3,12 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-16: T122 wasmtime 49.0.3 (full run)
+
+- Compiler: `main` at 4ae6eea, unchanged. Runtime: wasmtime 49.0.2 → 49.0.3 (crash fixes). Runner: unchanged.
+- Full run on `a-03` (`out/t262-t122.log`, 1,530 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged.
+
 ## 2026-10-16: T121 `%TypedArray%`, typed `[[Set]]` with another receiver (full run)
 
 - Compiler (`main` at c7af6e6 + T121, uncommitted at the run): `%TypedArray%` as the typed constructors' [[Prototype]];

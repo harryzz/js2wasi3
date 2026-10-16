@@ -874,7 +874,7 @@ properties) or, since T54, a CommonJS module (a function: top-level `this` is `m
   private `G_SYM_STATE` key (like a Date); its methods are in `builtins/dispose.js`.
 
 ## Testing
-Test host: wasmtime 49.0.2 (`TOOLS.md`). JS oracle: `node`.
+Test host: wasmtime 49.0.3 (`TOOLS.md`). JS oracle: `node`.
 
 | Layer | Where | Checks |
 |---|---|---|

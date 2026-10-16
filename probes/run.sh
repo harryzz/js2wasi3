@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M0 feasibility probes. Tools: wasmtime 49.0.2, wasm-tools 1.259.0, wkg 0.16.1, WASI 0.3.1
+# M0 feasibility probes. Tools: wasmtime 49.0.3, wasm-tools 1.259.0, wkg 0.16.1, WASI 0.3.1
 set -e; cd "$(dirname "$0")"; mkdir -p out
 echo "1) GC + EH + async-lifted export";      wasm-tools parse p.wat -o out/p.wasm && wasmtime run --invoke 'run()' out/p.wasm
 echo "2) P3 command: stream stdout + timer + GC/EH (callback loop)"
@@ -18,7 +18,7 @@ wasm-tools parse bench_cm.wat -o out/bench_cm.wasm && wasm-tools parse bench_ss.
 time wasmtime run -W component-model-async-stackful=y,component-model-threading=y --invoke 'run()' out/bench_cm.wasm
 time wasmtime run -W stack-switching=y --invoke main out/bench_ss.wasm 2>/dev/null
 echo "8) timers: two concurrent wait-until (50 ms) + a cancelled 5 s one (expect ~50 ms, exit 0)"
-wasm-tools parse timers.wat -o out/timers.core.wasm && wasm-tools component embed wit out/timers.core.wasm -o out/timers.emb.wasm && wasm-tools component new out/timers.emb.wasm -o out/timers.wasm && time wasmtime run -Sp3 out/timers.wasm
+wasm-tools parse timers.wat -o out/timers.core.wasm && wasm-tools component embed wit --world cmd out/timers.core.wasm -o out/timers.emb.wasm && wasm-tools component new out/timers.emb.wasm -o out/timers.wasm && time wasmtime run -Sp3 out/timers.wasm
 echo "9) blocking filesystem calls from a callback-lifted run (T59): expect 'hello from a preopened file'"
 mkdir -p out/fsdir && printf 'hello from a preopened file\n' > out/fsdir/hello.txt
 wasm-tools parse fs.wat -o out/fs.core.wasm && wasm-tools component embed wit --world cmdfs out/fs.core.wasm -o out/fs.emb.wasm && wasm-tools component new out/fs.emb.wasm -o out/fs.wasm && wasmtime run -Sp3 --dir out/fsdir::/ out/fs.wasm
@@ -29,5 +29,5 @@ time wasmtime run --invoke run_table out/funcref.wasm 2>/dev/null
 echo "11) T113 (R1): 50M ref.test against a final vs a non-final struct type, hit and miss (the non-final misses call is_subtype)"
 wasm-tools parse casts.wat -o out/casts.wasm
 for c in final_hit final_miss_subtype final_miss_other final_miss_i31 nonfinal_exact nonfinal_subtype nonfinal_other nonfinal_i31; do
-  /usr/bin/time -f "   $c %es" wasmtime run --invoke $c out/casts.wasm >/dev/null
+  TIMEFORMAT="   $c %Rs"; time wasmtime run --invoke $c out/casts.wasm >/dev/null
 done

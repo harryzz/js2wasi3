@@ -5,7 +5,7 @@ check() { # tool expected-substring
   got=$($1 --version 2>/dev/null | head -1)
   case "$got" in *"$2"*) echo "ok   $1: $got";; *) echo "FAIL $1: want $2, got '${got:-missing}'"; fail=1;; esac
 }
-check wasmtime 49.0.2
+check wasmtime 49.0.3
 check wasm-tools 1.259.0
 check wkg 0.16.1
 check wit-bindgen 0.62.0
