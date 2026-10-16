@@ -149,6 +149,10 @@ function $$Reflect_get(target, propertyKey, ...rest) {
   const receiver = rest[0];
   let o = target;
   for (;;) {
+    if ($$typedElementKey(o, key)) {
+      // T121: a typed array's numeric key ends the search (its element or `undefined`).
+      return o[key];
+    }
     const d = Object.getOwnPropertyDescriptor(o, key);
     if (d !== undefined) {
       if ("value" in d) {
@@ -206,16 +210,23 @@ function $$Reflect_set(target, propertyKey, V, ...rest) {
   $$reflectTarget(target, "set");
   const key = __intrinsic_to_key(propertyKey);
   const receiver = +rest.length === 0 ? target : rest[0];
-  if (receiver === target && $$typedElementKey(target, key)) {
-    // A number key: `ta["0"] = v` makes a dictionary property today (F163).
-    if (key !== "-0") {
-      target[+key] = V;
-    }
-    return true;
-  }
   let o = target;
   let own;
   for (;;) {
+    if ($$typedElementKey(o, key)) {
+      // T121: a typed array's [[Set]] (ECMA-262 10.4.5.5) for a numeric key: its own element when it's the
+      // receiver (TypedArraySetElement: an invalid index converts and drops); for another receiver an invalid
+      // index does nothing and a valid one is a writable data property (defined on the receiver below).
+      if (o === receiver) {
+        o[key] = V;
+        return true;
+      }
+      own = Object.getOwnPropertyDescriptor(o, key);
+      if (own === undefined) {
+        return true;
+      }
+      break;
+    }
     own = Object.getOwnPropertyDescriptor(o, key);
     if (own !== undefined) {
       break;

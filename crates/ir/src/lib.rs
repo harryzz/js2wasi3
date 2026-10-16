@@ -797,6 +797,8 @@ impl Builtin {
             Builtin::Map | Builtin::Set => Some(0),
             Builtin::ArrayBuffer => Some(1),
             Builtin::Typed(_) => Some(3),
+            // T121: `%TypedArray%`.
+            Builtin::TypedArray => Some(0),
             Builtin::RegExp => Some(2),
             Builtin::Date => Some(7),
             Builtin::BigInt => Some(1),
@@ -1385,6 +1387,9 @@ pub enum TypedOp {
     /// T80: `(t, start, end) -> jsval`: the string of elements `start..end` (in range) of a typed
     /// array of bytes decoded as UTF-8 (WHATWG: U+FFFD per maximal invalid subpart).
     Utf8Slice,
+    /// T121: `(c) -> i32`: the kind of typed-array constructor value `c`, or of the first one on its
+    /// [[Prototype]] chain (a subclass), else -1 (`%TypedArray%.from`/`of` with `c` as `this`).
+    CtorKind,
 }
 
 pub const MAP_KIND_MAP: u8 = 0;
@@ -1600,7 +1605,7 @@ impl Intrinsic {
             Intrinsic::Typed(op) => match op {
                 TypedOp::New => (&[I32, I32], Some(JsVal)),
                 TypedOp::View => (&[I32, JsVal, I32, I32], Some(JsVal)),
-                TypedOp::Kind | TypedOp::Length | TypedOp::ByteOffset | TypedOp::BufferLength => {
+                TypedOp::Kind | TypedOp::Length | TypedOp::ByteOffset | TypedOp::BufferLength | TypedOp::CtorKind => {
                     (&[JsVal], Some(I32))
                 }
                 TypedOp::Buffer => (&[JsVal], Some(JsVal)),
@@ -1834,6 +1839,7 @@ impl Intrinsic {
                 TypedOp::New => "typed_new",
                 TypedOp::View => "typed_view",
                 TypedOp::Kind => "typed_kind",
+                TypedOp::CtorKind => "typed_ctor_kind",
                 TypedOp::Length => "typed_length",
                 TypedOp::ByteOffset => "typed_byte_offset",
                 TypedOp::Buffer => "typed_buffer",

@@ -1456,16 +1456,27 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     if let Some(c) = construct {
         cx.declare_func(c);
     }
-    let statics: Vec<(u32, u32, u32)> = cx
+    let statics: Vec<(u32, u32, u32, Option<u32>)> = cx
         .builtin_statics(b)
         .into_iter()
         .map(|(key, code, len)| {
             cx.declare_func(code);
-            (cx.str(&key), code, len)
+            match key.strip_prefix('$').and_then(js2wasi3_ir::well_known_symbol) {
+                Some(k) => {
+                    let sym = cx.helper(runtime::Helper::WellKnownSymbol(k));
+                    (cx.str(&format!("get [Symbol.{}]", &key[1..])), code, len, Some(sym))
+                }
+                None => (cx.str(&key), code, len, None),
+            }
         })
         .collect();
-    let (name, prototype, constructor) =
-        (cx.str(b.name()), cx.str("prototype"), cx.str("constructor"));
+    // T121: `%TypedArray%` is named `TypedArray`; a typed-array constructor's [[Prototype]] is it.
+    let (name, prototype, constructor) = (
+        cx.str(if b == Builtin::TypedArray { "TypedArray" } else { b.name() }),
+        cx.str("prototype"),
+        cx.str("constructor"),
+    );
+    let typed_parent = matches!(b, Builtin::Typed(_)).then(|| fh(cx, Helper::BuiltinCtor(Builtin::TypedArray)));
     let g = runtime::ctor_global(b);
     const F: u32 = 0;
     const P: u32 = 1;
@@ -1484,6 +1495,11 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
     s.global_get(name).i32_const(length as i32).i32_const(0);
     s.call(new).local_tee(F);
     s.cast_object().global_set(g);
+    if let Some(parent) = typed_parent {
+        s.local_get(F).cast_object();
+        s.call(parent).cast_object();
+        s.struct_set(T_OBJECT, object::F_PROTO);
+    }
     s.call(proto).local_set(P);
     s.local_get(F).cast_object();
     s.global_get(prototype).local_get(P);
@@ -1518,7 +1534,20 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
                 .call(define);
         }
     }
-    for (key, code, len) in statics {
+    for (key, code, len, symbol) in statics {
+        if let Some(sym) = symbol {
+            // T121: a `$name` static is a getter at `Symbol.name` (`%TypedArray%[Symbol.species]`).
+            let define_accessor = cx.helper(runtime::Helper::Prop(crate::props::Helper::DefineAccessor));
+            s.local_get(F).cast_object();
+            s.call(sym);
+            s.i32_const(cx.code_slot(code));
+            s.i32_const(-1);
+            s.ref_null(HeapType::Concrete(T_VALS));
+            s.global_get(key).i32_const(len as i32).i32_const(0);
+            s.call(new);
+            s.i32_const(0).i32_const(object::HIDDEN).call(define_accessor);
+            continue;
+        }
         s.local_get(F)
             .cast_object()
             .global_get(key);

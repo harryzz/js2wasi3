@@ -157,7 +157,10 @@ impl Helper {
             Helper::DefineProperty => define_property(cx),
             Helper::GetOwnPropertyDescriptor => get_own_property_descriptor(cx),
             Helper::Integrity(op) => integrity(cx, op),
-            Helper::TestIntegrity(op) => test_integrity(op, cx.names("$module")),
+            Helper::TestIntegrity(op) => {
+                let module = cx.names("$module");
+                test_integrity(cx, op, module)
+            }
             Helper::SuperGet => super_get(cx),
             Helper::SuperSet => super_set(cx),
             Helper::PrivateGet | Helper::PrivateSet => {
@@ -482,6 +485,25 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
             .i32_eqz()
             .br_if(2);
         s.end();
+        if cx.names("$typed") {
+            // T121: a typed array on the chain, a numeric key (ECMA-262 10.4.5.5 with another receiver): its
+            // element is a writable data property (a new own property of `O`); an invalid index does nothing.
+            let ix = 7;
+            let typed_index = oh(cx, object::Helper::TypedIndex);
+            let length_t = crate::typed::Length::new(cx);
+            s.local_get(p).ref_as_non_null().ref_test_non_null(crate::typed::typed());
+            s.if_(BlockType::Empty);
+            s.local_get(K).call(typed_index).local_tee(ix).i64_const(-1).i64_ne();
+            s.if_(BlockType::Empty);
+            s.local_get(ix).i64_const(0).i64_ge_s();
+            s.local_get(p).ref_cast_non_null(crate::typed::typed());
+            length_t.emit(&mut s);
+            s.i64_extend_i32_u().local_get(ix).i64_gt_s();
+            s.i32_and().br_if(3);
+            s.return_();
+            s.end();
+            s.end();
+        }
     }
     s.local_get(p).ref_as_non_null();
     find_k(&mut s);
@@ -1600,6 +1622,28 @@ fn integrity(cx: &mut dyn Cx, op: u8) -> Function {
     s.local_get(V).cast_object().local_set(O);
     // T117: a layout's shared keys/attributes: the object's own copies first.
     object::unshare(&mut s, O, own);
+    if op >= 1 && cx.names("$typed") {
+        // T121: a typed array's elements can't be made non-configurable (SetIntegrityLevel: not extensible
+        // first, then node's TypeError).
+        let throw = oh(cx, object::Helper::Throw(js2wasi3_ir::ErrorKind::TypeError));
+        let length_t = crate::typed::Length::new(cx);
+        let msg = cx.str(if op == 2 {
+            "Cannot freeze array buffer views with elements"
+        } else {
+            "Cannot seal array buffer views with elements"
+        });
+        s.local_get(O).ref_as_non_null().ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_cast_non_null(crate::typed::typed());
+        length_t.emit(&mut s);
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_as_non_null();
+        s.local_get(O).ref_as_non_null().struct_get(T_OBJECT, F_CLASS).i32_const(NO_EXTEND).i32_or();
+        s.struct_set(T_OBJECT, F_CLASS);
+        s.global_get(msg).call(throw);
+        s.end();
+        s.end();
+    }
     let mut flags = NO_EXTEND;
     if op >= 1 {
         flags |= SEALED;
@@ -1650,7 +1694,7 @@ fn integrity(cx: &mut dyn Cx, op: u8) -> Function {
 }
 
 /// `module`: the program has module namespaces (T41), whose exports (getters) count as writable.
-fn test_integrity(op: u8, module: bool) -> Function {
+fn test_integrity(cx: &mut dyn Cx, op: u8, module: bool) -> Function {
     const V: u32 = 0;
     const O: u32 = 1;
     const E: u32 = 2;
@@ -1677,6 +1721,18 @@ fn test_integrity(op: u8, module: bool) -> Function {
     s.if_(BlockType::Empty);
     s.i32_const(0).return_();
     s.end();
+    if op == 2 && cx.names("$typed") {
+        // T121: a typed array with elements isn't frozen (they're writable).
+        let length_t = crate::typed::Length::new(cx);
+        s.local_get(O).ref_as_non_null().ref_test_non_null(crate::typed::typed());
+        s.if_(BlockType::Empty);
+        s.local_get(O).ref_cast_non_null(crate::typed::typed());
+        length_t.emit(&mut s);
+        s.if_(BlockType::Empty);
+        s.i32_const(0).return_();
+        s.end();
+        s.end();
+    }
     // Arrays: their elements.
     s.local_get(O).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);

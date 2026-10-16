@@ -237,6 +237,10 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   the value) or an ordinary key (symbols too). `own_get` (on a `find` miss), `lookup`, `has`, `delete`, `props::set`,
   `define_property` and `get_own_property_descriptor` use it; constant keys that could be numeric skip the named
   paths (`object::named_key`); modules with typed arrays link the prelude's StringToNumber for the canonical test.)
+  (T121: **`%TypedArray%`** is a constructor value like the others (`builtin_ctor(Builtin::TypedArray)`, named
+  `TypedArray`, abstract) and the typed constructors' [[Prototype]]; its `from`/`of` find the kind from `this`
+  (`TypedOp::CtorKind`), its `Symbol.species` is a getter (a prelude static `$$X_$name`). A typed array met on a
+  prototype chain with a numeric key: a valid element makes the receiver's own property, an invalid one nothing.)
   (T98: **GC heap reserved at start**. wasmtime's copying collector grows its heap only when the live data fills a
   semi-space, so on its small default heap programs collect constantly (27–60% of allocation-heavy benchmarks). The
   start function allocates and drops a byte array of `build --gc-reserve` MiB (default 16, 0 off): the heap grows

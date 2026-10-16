@@ -31,6 +31,21 @@ use crate::unicode_props::{NAMES, TABLES};
 /// fallbacks (T35).
 pub const ARRAY_NATIVE: &[&str] = &["push", "pop", "join", "toString"];
 
+/// T121: the typed-array constructors (their [[Prototype]] is `%TypedArray%`).
+const TYPED_CTORS: &[&str] = &[
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+    "BigInt64Array",
+    "BigUint64Array",
+];
+
 pub const PRELUDE: &str = concat!(
     include_str!("../builtins/math.js"),
     include_str!("../builtins/string.js"),
@@ -1040,6 +1055,10 @@ impl Prelude {
                 }
             }
         }
+        // T121: a typed-array constructor as a value has `%TypedArray%` as its [[Prototype]].
+        if TYPED_CTORS.iter().any(|c| out.ctor_values.contains(*c)) {
+            out.ctor_values.insert("TypedArray".to_string());
+        }
         // Constructors used as values: their function, and the statics the code names.
         for (name, sym) in &out.names {
             let Some(rest) = name.strip_prefix("$$") else {
@@ -1047,9 +1066,10 @@ impl Prelude {
             };
             let (b, key) = rest.split_once('_').unwrap_or((rest, ""));
             let key = key.strip_suffix(VALUE).unwrap_or(key);
+            // T121: a `$name` static is a getter keyed by `Symbol.name` (`$$TypedArray_$species`).
             if out.ctor_values.contains(b)
                 && !key.starts_with("prototype")
-                && (key.is_empty() || user_props.contains(key))
+                && (key.is_empty() || user_props.contains(key.strip_prefix('$').unwrap_or(key)))
             {
                 roots.push(item_of[sym]);
             }

@@ -22,6 +22,7 @@ use js2wasi3_ir::{Builtin, TYPED_NAMES, TypedOp};
 use wasm_encoder::{BlockType, Function, HeapType, InstructionSink, ValType};
 
 use crate::inspect;
+use crate::runtime::JsTest;
 use crate::object;
 use crate::runtime::{
     self, Cx, T_BUFFER, T_BYTES, T_I32S, T_KEYS, T_TYPED, T_VALS, jsval, rt, string_ref,
@@ -616,6 +617,28 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             let mut f = Function::new([]);
             let mut s = f.instructions();
             new_typed(cx, &mut s, 0, 1, 2, Some(3));
+            s.end();
+            f
+        }
+        TypedOp::CtorKind => {
+            // T121: compare `c` and then each object on its chain with the typed constructors made so far.
+            const C: u32 = 0;
+            let kinds = if cx.big_typed() { 11 } else { 9 };
+            let mut f = Function::new([]);
+            let mut s = f.instructions();
+            s.block(BlockType::Empty).loop_(BlockType::Empty);
+            s.local_get(C).ref_is_null().br_if(1);
+            for k in 0..kinds {
+                s.global_get(runtime::ctor_global(js2wasi3_ir::Builtin::Typed(k))).local_get(C).ref_eq();
+                s.if_(BlockType::Empty);
+                s.i32_const(k as i32).return_();
+                s.end();
+            }
+            s.test_object(C).i32_eqz().br_if(1);
+            s.local_get(C).cast_object();
+            s.struct_get(runtime::T_OBJECT, crate::object::F_PROTO).local_set(C);
+            s.br(0).end().end();
+            s.i32_const(-1);
             s.end();
             f
         }

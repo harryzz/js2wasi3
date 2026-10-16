@@ -230,6 +230,34 @@ function $$BigUint64Array(a, b, c) {
   return $$typedCreate(10, a, b, c);
 }
 
+// T121: %TypedArray% (ECMA-262 23.2.1), the [[Prototype]] of the typed-array constructors: abstract; its
+// `from`/`of` take the kind from `this` (a typed-array constructor or a subclass of one; results have that
+// kind: no subclass instances), `[Symbol.species]` is `this`. `Int8Array.from(…)` written as such calls
+// `$$Int8Array_from` directly.
+function $$TypedArray() {
+  throw new TypeError("Abstract class TypedArray not directly constructable");
+}
+
+function $$typedCtorOf(c) {
+  const kind = __intrinsic_typed_ctor_kind(c);
+  if (kind < 0) {
+    throw new TypeError($$reflectWhat(c) + " is not a constructor");
+  }
+  return kind;
+}
+
+function $$TypedArray_from(source, ...rest) {
+  return $$typedFrom($$typedCtorOf(this), source, rest);
+}
+
+function $$TypedArray_of(...items) {
+  return $$typedOf($$typedCtorOf(this), items);
+}
+
+function $$TypedArray_$species() {
+  return this;
+}
+
 // %TypedArray%.from(source, mapfn, thisArg) for one kind.
 function $$typedFrom(kind, source, rest) {
   const mapfn = rest[0];

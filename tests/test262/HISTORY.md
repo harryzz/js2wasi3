@@ -3,6 +3,14 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-16: T121 `%TypedArray%`, typed `[[Set]]` with another receiver (full run)
+
+- Compiler (`main` at c7af6e6 + T121, uncommitted at the run): `%TypedArray%` as the typed constructors' [[Prototype]];
+  typed [[Set]] with another receiver; `Object.freeze`/`seal` of typed arrays with elements throw. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t121.log`, 1,534 s, -j 36): **no changes since the baseline**: 28,105 of 28,984 run
+  pass (97.0%), 0 regressions; `baseline.json` unchanged. Outside the subset (laptop):
+  `built-ins/TypedArrayConstructors/internals` 107 → 160 of 240 (`out/t262-t121-internals.log`).
+
 ## 2026-10-16: T120 typed arrays' keys (full run)
 
 - Compiler (`main` at 03c518b + T120, uncommitted at the run): typed arrays follow ECMA-262 10.4.5 for every key

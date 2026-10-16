@@ -1326,7 +1326,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     self.module.namespace_methods.push((ns, m));
                     continue;
                 }
-                let owner = Builtin::parse(b).expect("a built-in constructor");
+                // (`TypedArray`: `%TypedArray%`, T121.)
+                let owner = Builtin::parse_prelude(b).expect("a built-in constructor");
+                // T121: a typed-array constructor's `from`/`of` are `%TypedArray%`'s, inherited (its own
+                // `$$Int8Array_from` stays for direct calls).
+                if matches!(owner, Builtin::Typed(_)) && !key.is_empty() {
+                    continue;
+                }
                 let m = ir::BuiltinMethod {
                     proto: owner,
                     key: key.to_string(),
@@ -9029,6 +9035,7 @@ fn typed_op(name: &str) -> Option<ir::TypedOp> {
         "typed_new" => T::New,
         "typed_view" => T::View,
         "typed_kind" => T::Kind,
+        "typed_ctor_kind" => T::CtorKind,
         "typed_length" => T::Length,
         "typed_byte_offset" => T::ByteOffset,
         "typed_buffer" => T::Buffer,
