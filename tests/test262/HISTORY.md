@@ -3,6 +3,16 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-16: T126 subclasses of built-ins (full run)
+
+- Compiler (`main` at d3de5dc + T126, uncommitted at the run): `extends Array`/`Object`/`RegExp` instances get the
+  subclass's prototype, Array species. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t126.log`): **14 new passes, 0 regressions**: 28,119 of 28,984 run pass (97.0%):
+  `built-ins/Array/Symbol.species` (4), `built-ins/RegExp/named-groups/groups-object-subclass*` (2),
+  `language/{expressions,statements}/class/subclass-builtins/subclass-{Array,Object,RegExp}` (6),
+  `language/statements/class/subclass/builtin-objects/Object/*` (2). `baseline.json` updated for those 14 (laptop,
+  `--update` on the 14 files).
+
 ## 2026-10-16: T125 StringToNumber always linked (full run)
 
 - Compiler (`main` at 5c8ec94 + T125, uncommitted at the run): the prelude's StringToNumber is linked in every module

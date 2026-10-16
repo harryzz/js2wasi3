@@ -66,6 +66,10 @@ pub enum Helper {
     /// `(m: (ref $map), depth, indent) -> (ref $string)`: `Map(n) { k => v, … }` / `Set(n) { … }`
     /// (T25).
     MapSet,
+    /// `(v: jsval, out: (ref $string)) -> (ref $string)` (T126): `out` (a built-in's text starting with its tag:
+    /// `Map(1) {…}`, `Uint8Array(2) […]`, `ArrayBuffer {…}`) for an instance of a subclass, as node's `getPrefix`:
+    /// `M(1) [Map] {…}`, `AB [ArrayBuffer] {…}` when the constructor on the chain isn't the built-in.
+    SubclassName,
     /// `(o: (ref $object), depth, indent, skip_indices: i32) -> (ref $keys)`: `key: value` for its
     /// own enumerable string keys (array indices skipped if `skip_indices`), then its enumerable
     /// symbol keys (`Symbol(x): value`), T25.
@@ -84,6 +88,7 @@ impl Helper {
             Helper::FormatValue => "inspect_format_value",
             Helper::RefOpen => "inspect_ref_open",
             Helper::MapIter => "inspect_map_iterator",
+            Helper::SubclassName => "inspect_subclass_name",
             Helper::At(_) => "inspect_at",
             Helper::AtDepth => "inspect_at_depth",
             Helper::Array => "inspect_array",
@@ -110,6 +115,7 @@ impl Helper {
             Helper::Format | Helper::FormatValue => (vec![v, I32, I32, I32], vec![s]),
             Helper::RefOpen => (vec![s, v], vec![s]),
             Helper::MapIter => (vec![rt(false, runtime::T_MAPITER), I32, I32], vec![s]),
+            Helper::SubclassName => (vec![v, s.clone()], vec![s]),
             Helper::At(_) => (vec![v], vec![v]),
             Helper::AtDepth => (vec![v, ValType::I32], vec![v]),
             Helper::Array => (vec![rt(false, T_ARRAY), I32, I32], vec![s]),
@@ -135,6 +141,7 @@ impl Helper {
             Helper::FormatValue => format(cx),
             Helper::RefOpen => ref_open(cx),
             Helper::MapIter => format_map_iter(cx),
+            Helper::SubclassName => subclass_name(cx),
             Helper::At(_) | Helper::AtDepth => {
                 let format = ih(cx, Helper::Format);
                 let mut f = Function::new([]);
@@ -169,6 +176,73 @@ impl Helper {
 
 fn ih(cx: &mut dyn Cx, h: Helper) -> u32 {
     cx.helper(runtime::Helper::Fmt(h))
+}
+
+/// `inspect_subclass_name(v, out)` (see [`Helper::SubclassName`]).
+fn subclass_name(cx: &mut dyn Cx) -> Function {
+    let ctor_name = cx.helper(runtime::Helper::Prop(props::Helper::CtorName));
+    let str_eq = cx.helper(runtime::Helper::StrEq);
+    let sub = cx.helper(runtime::Helper::StrSub);
+    let concat = cx.helper(runtime::Helper::Concat);
+    let (open, close) = (cx.str(" ["), cx.str("]"));
+    const V: u32 = 0;
+    const OUT: u32 = 1;
+    const T: u32 = 2;
+    const I: u32 = 3;
+    const N: u32 = 4;
+    const NAME: u32 = 5;
+    const TAG: u32 = 6;
+    let mut f = Function::new([(3, ValType::I32), (2, rt(true, T_STRING))]);
+    let mut s = f.instructions();
+    let unit = |s: &mut InstructionSink, i: u32| {
+        s.local_get(OUT).local_get(i).array_get_u(T_STRING);
+    };
+    s.local_get(OUT).array_len().local_set(N);
+    s.test_object(V).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(OUT).return_();
+    s.end();
+    s.local_get(V).cast_object().call(ctor_name).local_tee(NAME).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.local_get(OUT).return_();
+    s.end();
+    // The tag: up to the first `(` or space.
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(T).local_get(N).i32_ge_u().br_if(1);
+    unit(&mut s, T);
+    s.local_tee(I).i32_const(b'(' as i32).i32_eq();
+    s.local_get(I).i32_const(b' ' as i32).i32_eq().i32_or().br_if(1);
+    s.local_get(T).i32_const(1).i32_add().local_set(T);
+    s.br(0).end().end();
+    s.local_get(OUT).i32_const(0).local_get(T).call(sub).local_set(TAG);
+    s.local_get(NAME).ref_as_non_null().local_get(TAG).ref_as_non_null().call(str_eq);
+    s.if_(BlockType::Empty);
+    s.local_get(OUT).return_();
+    s.end();
+    // `(n)` after the tag stays with the name: `M(1) [Map] {…}`; else `AB [ArrayBuffer] {…}`.
+    s.local_get(T).local_set(I);
+    s.local_get(T).local_get(N).i32_lt_u();
+    s.if_(BlockType::Empty);
+    unit(&mut s, T);
+    s.i32_const(b'(' as i32).i32_eq();
+    s.if_(BlockType::Empty);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    unit(&mut s, I);
+    s.i32_const(b')' as i32).i32_eq().br_if(1);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.end();
+    s.end();
+    s.local_get(NAME).ref_as_non_null();
+    s.local_get(OUT).local_get(T).local_get(I).call(sub).call(concat);
+    s.global_get(open).call(concat);
+    s.local_get(TAG).ref_as_non_null().call(concat);
+    s.global_get(close).call(concat);
+    s.local_get(OUT).local_get(I).local_get(N).call(sub).call(concat);
+    s.end();
+    f
 }
 
 fn oh(cx: &mut dyn Cx, h: object::Helper) -> u32 {
@@ -236,6 +310,9 @@ fn format(cx: &mut dyn Cx) -> Function {
     if custom.is_some() {
         locals.push((1, jsval()));
     }
+    // T126: the constructor's name of an `Array` subclass's instance.
+    let sub_name = R + custom.is_some() as u32;
+    locals.push((1, rt(true, T_STRING)));
     let mut f = Function::new(locals);
     let mut s = f.instructions();
     runtime::is_string(&mut s, V);
@@ -441,6 +518,27 @@ fn format(cx: &mut dyn Cx) -> Function {
     s.end();
     s.local_get(V).ref_test_non_null(array::array());
     s.if_(BlockType::Empty);
+    if cx.subclassing() {
+        // T126: an instance of an `Array` subclass: `Name(n) [ … ]`, as node.
+        let ctor_name = cx.helper(runtime::Helper::Prop(props::Helper::CtorName));
+        let str_eq = cx.helper(runtime::Helper::StrEq);
+        let number_to_string = cx.helper(runtime::Helper::Num(crate::numstr::Helper::NumberToString));
+        let (array_name, lparen, rparen) = (cx.str("Array"), cx.str("("), cx.str(") "));
+        s.block(BlockType::Empty);
+        s.local_get(V).cast_object().call(ctor_name);
+        s.br_on_null(0);
+        s.local_tee(sub_name).ref_as_non_null().global_get(array_name).call(str_eq).i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(sub_name).ref_as_non_null().global_get(lparen).call(concat);
+        s.local_get(V).ref_cast_non_null(array::array()).struct_get(runtime::T_ARRAY, F_LENGTH);
+        s.f64_convert_i32_u().call(number_to_string).call(concat);
+        s.global_get(rparen).call(concat);
+        s.local_get(V).ref_cast_non_null(array::array());
+        s.local_get(DEPTH).local_get(INDENT).call(f_array);
+        s.call(concat).return_();
+        s.end();
+        s.end();
+    }
     s.local_get(V).ref_cast_non_null(array::array());
     s.local_get(DEPTH).local_get(INDENT).call(f_array).return_();
     s.end();
@@ -448,28 +546,45 @@ fn format(cx: &mut dyn Cx) -> Function {
         // Typed arrays and `ArrayBuffer`s (T20).
         let f_typed = cx.helper(runtime::Helper::Typed(crate::typed::Helper::Format));
         let f_buffer = cx.helper(runtime::Helper::Typed(crate::typed::Helper::FormatBuffer));
+        let rename = cx.subclassing().then(|| ih(cx, Helper::SubclassName));
         s.local_get(V).ref_test_non_null(crate::typed::typed());
         s.if_(BlockType::Empty);
+        if rename.is_some() {
+            s.local_get(V);
+        }
         s.local_get(V).ref_cast_non_null(crate::typed::typed());
-        s.local_get(DEPTH).local_get(INDENT).call(f_typed).return_();
+        s.local_get(DEPTH).local_get(INDENT).call(f_typed);
+        if let Some(r) = rename {
+            s.call(r);
+        }
+        s.return_();
         s.end();
         s.local_get(V).ref_test_non_null(crate::typed::buffer());
         s.if_(BlockType::Empty);
+        if rename.is_some() {
+            s.local_get(V);
+        }
         s.local_get(V).ref_cast_non_null(crate::typed::buffer());
-        s.local_get(DEPTH)
-            .local_get(INDENT)
-            .call(f_buffer)
-            .return_();
+        s.local_get(DEPTH).local_get(INDENT).call(f_buffer);
+        if let Some(r) = rename {
+            s.call(r);
+        }
+        s.return_();
         s.end();
     }
     if let Some(f_mapset) = f_mapset {
+        let rename = cx.subclassing().then(|| ih(cx, Helper::SubclassName));
         s.local_get(V).ref_test_non_null(mapset::map());
         s.if_(BlockType::Empty);
+        if rename.is_some() {
+            s.local_get(V);
+        }
         s.local_get(V).ref_cast_non_null(mapset::map());
-        s.local_get(DEPTH)
-            .local_get(INDENT)
-            .call(f_mapset)
-            .return_();
+        s.local_get(DEPTH).local_get(INDENT).call(f_mapset);
+        if let Some(r) = rename {
+            s.call(r);
+        }
+        s.return_();
         s.end();
         // Map/Set iterators (T25).
         let f_iter = ih(cx, Helper::MapIter);
@@ -1133,6 +1248,19 @@ fn format_object(cx: &mut dyn Cx) -> Function {
         s.call(concat).global_get(slash).call(concat);
         elem(&mut s, 1);
         s.call(concat).local_set(W_BASE);
+        if cx.subclassing() {
+            // T126: an instance of a `RegExp` subclass: `Name /a+/g`, as node.
+            let regexp_name = cx.str("RegExp");
+            s.block(BlockType::Empty);
+            s.local_get(O).call(ctor_name);
+            s.br_on_null(0);
+            s.local_tee(NAME).ref_as_non_null().global_get(regexp_name).call(str_eq).i32_eqz();
+            s.if_(BlockType::Empty);
+            s.local_get(NAME).ref_as_non_null().global_get(space).call(concat);
+            s.local_get(W_BASE).ref_as_non_null().call(concat).local_set(W_BASE);
+            s.end();
+            s.end();
+        }
         s.local_get(O).call(own_keys).array_len();
         s.local_get(O).call(symbols).i32_or().i32_eqz();
         s.if_(BlockType::Empty);

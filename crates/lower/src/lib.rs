@@ -876,7 +876,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
 
     /// Is `test` the prelude's `__intrinsic_bigint_mode()` (T40), `__intrinsic_regexp_mods()`
     /// (T46), `__intrinsic_rab_mode()` (T47), `__intrinsic_big_typed_mode()` (T48) or
-    /// `__intrinsic_cjs_mode()` (T54), or node's built-in modules' `__intrinsic_species_mode()` (T71)?
+    /// `__intrinsic_cjs_mode()` (T54), `__intrinsic_subclass_mode()` (T126), or node's built-in modules'
+    /// `__intrinsic_species_mode()` (T71)?
     /// Which one.
     fn bigint_mode_test(&self, test: &Expression<'a>) -> Option<&'static str> {
         let Expression::CallExpression(c) = test else {
@@ -895,6 +896,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             "__intrinsic_rab_mode",
             "__intrinsic_big_typed_mode",
             "__intrinsic_cjs_mode",
+            "__intrinsic_subclass_mode",
         ]
             .into_iter()
             .find(|n| id.name == *n)
@@ -3572,6 +3574,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     Some("__intrinsic_rab_mode") => self.module.rab,
                     Some("__intrinsic_big_typed_mode") => self.module.big_typed,
                     Some("__intrinsic_cjs_mode") => self.prelude.cjs,
+                    // T126: a module with built-in subclasses (`class X extends Array`) or `Reflect.construct`.
+                    Some("__intrinsic_subclass_mode") => self.module.subclassing,
                     // T71: in node's built-in modules.
                     Some("__intrinsic_species_mode") => self.prelude.species,
                     _ => self.prelude.regexp_mods,

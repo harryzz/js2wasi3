@@ -165,7 +165,7 @@ pub enum Helper {
     RequiresNew(Builtin),
     /// The construct code of `BigInt` (T40): node's TypeError, "X is not a constructor".
     NotConstructor(Builtin),
-    /// The construct code of `Map`/`Set`/`ArrayBuffer`/a typed array (T47, F116): the prelude
+    /// The construct code of `Map`/`Set`/`ArrayBuffer`/a typed array (T47, F116; T126: `Array`/`Object`/`RegExp`): the prelude
     /// code, then OrdinaryCreateFromConstructor's prototype, `newTarget.prototype` if it's an
     /// object (subclasses, `Reflect.construct`). Their prelude functions don't read `this`.
     ConstructFrom(Builtin),
@@ -1445,7 +1445,14 @@ fn builtin_ctor(cx: &mut dyn Cx, b: Builtin) -> Function {
         // `new BigInt` throws (T40; it has [[Construct]]: `Reflect.construct(f, [], BigInt)`).
         // T49: `new Symbol` too.
         Builtin::BigInt | Builtin::Symbol => Some(fh(cx, Helper::NotConstructor(b))),
-        Builtin::Map | Builtin::Set | Builtin::ArrayBuffer | Builtin::Typed(_)
+        // T126: `Array`/`Object`/`RegExp` too (`class X extends Array`: `super()` gets `new.target`'s prototype).
+        Builtin::Map
+        | Builtin::Set
+        | Builtin::ArrayBuffer
+        | Builtin::Typed(_)
+        | Builtin::Array
+        | Builtin::Object
+        | Builtin::RegExp
             if linked && cx.subclassing() =>
         {
             Some(fh(cx, Helper::ConstructFrom(b)))

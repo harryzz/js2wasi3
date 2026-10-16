@@ -1067,9 +1067,12 @@ impl Prelude {
             let (b, key) = rest.split_once('_').unwrap_or((rest, ""));
             let key = key.strip_suffix(VALUE).unwrap_or(key);
             // T121: a `$name` static is a getter keyed by `Symbol.name` (`$$TypedArray_$species`).
+            // (T126: `[Symbol.species]` also for subclasses of built-ins: `map` on a subclass instance reads it.)
             if out.ctor_values.contains(b)
                 && !key.starts_with("prototype")
-                && (key.is_empty() || user_props.contains(key.strip_prefix('$').unwrap_or(key)))
+                && (key.is_empty()
+                    || user_props.contains(key.strip_prefix('$').unwrap_or(key))
+                    || (key == "$species" && out.subclassing))
             {
                 roots.push(item_of[sym]);
             }

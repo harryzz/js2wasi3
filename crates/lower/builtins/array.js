@@ -34,10 +34,19 @@ function $$lengthOf(o) {
 }
 
 // ArraySpeciesCreate (T35): a plain array unless `o` is an array whose `constructor` has a
-// `Symbol.species` (then `new species(len)`). Built-in constructors have no species here, so
-// without `species` in the user's code the result is always a plain array.
+// `Symbol.species` (then `new species(len)`). Without `species` in the user's code or a subclass of a built-in
+// (T126: `Array[Symbol.species]` is `this`, so a subclass's instances make the subclass) the result is always a
+// plain array.
 function $$speciesCreate(o, len) {
-  if (!__intrinsic_named("species") || !Array.isArray(o)) {
+  let species = __intrinsic_named("species");
+  if (__intrinsic_subclass_mode()) {
+    // Only an array whose prototype isn't `Array.prototype` (a subclass's instance): a plain array's species is
+    // `Array` (and its `constructor` may be a stub when `Array` isn't a value in the program).
+    if (Array.isArray(o) && Object.getPrototypeOf(o) !== Array.prototype) {
+      species = true;
+    }
+  }
+  if (!species || !Array.isArray(o)) {
     return $$newArray(len);
   }
   let c = o.constructor;
@@ -205,12 +214,29 @@ function $$Array(...args) {
   return a;
 }
 
+// `Array.of` (T126: `new C(len)` when `this` is a constructor, as `Array.from`).
 function $$Array_of(...items) {
+  const n = +items.length;
+  if (__intrinsic_subclass_mode()) {
+    if (this !== undefined) {
+      const c = $$fromCreate(this, n);
+      for (let i = 0; i < n; i++) {
+        $$put(c, i, items[i]);
+      }
+      c.length = n;
+      return c;
+    }
+  }
   const a = [];
-  for (let i = 0; i < +items.length; i++) {
+  for (let i = 0; i < n; i++) {
     __intrinsic_define(a, i, items[i]);
   }
   return a;
+}
+
+// `Array[Symbol.species]` (T126; a getter: a `$name` static, T121).
+function $$Array_$species() {
+  return this;
 }
 
 // The array `Array.from`/`fromAsync` fill (T35): `new C()` / `new C(len)` when `this` is a
