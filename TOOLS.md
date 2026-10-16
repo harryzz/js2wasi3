@@ -5,7 +5,7 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 
 | Tool | Version | Used for |
 |---|---|---|
-| wasmtime | 49.0.3 | the only test host (WASI 0.3 via `-Sp3`; 49.0.3 since 2026-10-16: security/panic fixes in Component Model async, streams, exception tags, recursive types (T122); 49.0.2 since 2026-10-03: GC rooting across `try_call`, F224). 50.0.0 (rc.1 2026-10-05: GC field/array alias regions in Cranelift) to measure when final |
+| wasmtime | 49.0.3 | the only test host (WASI 0.3 via `-Sp3`; 49.0.3 since 2026-10-16: security/panic fixes in Component Model async, streams, exception tags, recursive types (T122); 49.0.2 since 2026-10-03: GC rooting across `try_call`, F224). 50.0.0-rc.1 measured (T123: pidigits −26.4%, splay −9.1%, binarytrees −7.2%, test262 no changes): pin 50.0.0 when final (F436) |
 | wasm-tools | 1.259.0 | validate, print, `component embed/new/wit` |
 | wasm crates | 0.259.0 | `wasm-encoder`, `wasmparser`, `wit-parser`, `wit-component` (same code as wasm-tools 1.259) |
 | oxc crates | 0.151.0 | JS/TS parser and semantic analysis |
