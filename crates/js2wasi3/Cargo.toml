@@ -14,3 +14,4 @@ js2wasi3-ir.workspace = true
 js2wasi3-lower.workspace = true
 js2wasi3-backend.workspace = true
 js2wasi3-component.workspace = true
+js2wasi3-types.workspace = true

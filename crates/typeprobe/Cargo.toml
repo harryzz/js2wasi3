@@ -1,0 +1,16 @@
+[package]
+name = "typeprobe"
+description = "T000/T131: rewrites a JS program so that node records the types each site sees (not part of the compiler)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_ast_visit.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
+oxc_syntax.workspace = true

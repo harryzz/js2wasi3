@@ -9,6 +9,7 @@ const map = new Map([[1, 2]]); map.x = 4;                        // a Map with i
 const arr = [1, 2]; arr.x = 5;                                   // an array with its own x
 const str = "abc";                                               // not an object
 const child = Object.create(plain);                              // x only on the prototype
+const dict = {}; dict.q = 1; dict.r = 2;                          // T130: keys in no layout (the site's guess only)
 const defaults = { a: 0 };                                       // T128: a default on a plain prototype
 const fnDefaults = function () {}; fnDefaults.a = 0;             // the same on a function (not cached)
 let sink = 0;
@@ -17,6 +18,7 @@ const loop = time(() => { for (let i = 0; i < N; i++) sink += i & 1; });
 const cases = {
   "read hit (plain, layout slot)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += plain.x; },
   "read miss plain (other slot)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += other.x; },
+  "read guess hit (key in no layout)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += dict.r; },
   "read miss proto (inherited)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += child.x; },
   "read Map own x (subtype)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += map.x; },
   "read array own x (subtype)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += arr.x; },

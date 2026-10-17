@@ -358,6 +358,7 @@ dependencies = [
  "js2wasi3-frontend",
  "js2wasi3-ir",
  "js2wasi3-lower",
+ "js2wasi3-types",
 ]
 
 [[package]]
@@ -410,6 +411,19 @@ dependencies = [
  "js2wasi3-ir",
  "oxc_ast",
  "oxc_regular_expression",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+]
+
+[[package]]
+name = "js2wasi3-types"
+version = "0.0.1"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_parser",
  "oxc_semantic",
  "oxc_span",
  "oxc_syntax",
@@ -941,6 +955,18 @@ dependencies = [
  "displaydoc",
  "serde_core",
  "zerovec",
+]
+
+[[package]]
+name = "typeprobe"
+version = "0.0.1"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_parser",
+ "oxc_span",
+ "oxc_syntax",
 ]
 
 [[package]]

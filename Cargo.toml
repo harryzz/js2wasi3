@@ -14,6 +14,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 oxc_allocator = "0.151.0"
 oxc_ast = "0.151.0"
+oxc_ast_visit = "0.151.0"
 oxc_regular_expression = "0.151.0"
 oxc_parser = "0.151.0"
 oxc_semantic = "0.151.0"
@@ -30,3 +31,4 @@ js2wasi3-ir = { path = "crates/ir" }
 js2wasi3-lower = { path = "crates/lower" }
 js2wasi3-backend = { path = "crates/backend" }
 js2wasi3-component = { path = "crates/component" }
+js2wasi3-types = { path = "crates/types" }

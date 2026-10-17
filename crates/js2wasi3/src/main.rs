@@ -23,6 +23,8 @@ enum Cmd {
     Parse { file: String },
     /// Lower a module to IR and print it.
     Ir { file: String },
+    /// T131: the whole-program type analysis; one line per site: offset, kind, operand types.
+    Types { file: String },
     /// Compile an entry module to a component.
     Build {
         entry: String,
@@ -511,6 +513,23 @@ fn main() -> anyhow::Result<()> {
             let program =
                 js2wasi3_lower::parse_entry(&alloc, &file, &source, &Default::default(), &mut frontend::Fs)?;
             print!("{}", js2wasi3_lower::lower(&program)?);
+        }
+        Cmd::Types { file } => {
+            let source = read(&file)?;
+            let t = std::time::Instant::now();
+            let r = js2wasi3_types::analyze_source(&source).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+            eprintln!(
+                "types: {} sites, {} rounds, {} instances, {} allocations, {} ms",
+                r.sites.len(),
+                r.rounds,
+                r.instances,
+                r.allocs,
+                t.elapsed().as_millis()
+            );
+            for s in r.sites {
+                let j = |v: &Vec<String>| if v.is_empty() { "-".to_string() } else { v.join(",") };
+                println!("{}:{}\t{}\t{}|{}\t{}|{}", s.offset, s.end, s.cat, s.groups.0, s.groups.1, j(&s.tags.0), j(&s.tags.1));
+            }
         }
         Cmd::Build {
             entry,
