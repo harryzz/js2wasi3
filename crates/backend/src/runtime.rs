@@ -613,6 +613,9 @@ pub const COUNTS: &[&str] = &[
     "set_named.guess_hit",
     "set_named.own",
     "set_named.add_cached",
+    "set_named.add_cached_proto",
+    "layout_set.add_cached",
+    "layout_set.add_cached_proto",
     "set_named.other",
     "set_named.not_object",
     "inline_read.hit",
@@ -628,6 +631,10 @@ pub const COUNTS: &[&str] = &[
     "layout_set.fallback",
     "layout_define.fast",
     "layout_define.fallback",
+    "define.layout_next",
+    "construct.learned",
+    "learn.layout",
+    "learn.none",
     "define.shared_kept",
     "define.shared_dropped",
     "define.layout_grow",
@@ -800,9 +807,12 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
     // `code` and `construct` (T89): slots in the code table (-1: none), not funcrefs.
     function_fields.push(field(StorageType::Val(ValType::I32), false));
     function_fields.push(field(StorageType::Val(rt(true, T_VALS)), false));
-    function_fields.push(field(StorageType::Val(ValType::I32), false));
+    // `construct` is mutable (T128: an ordinary function's changes when it has learned its layout).
+    function_fields.push(field(StorageType::Val(ValType::I32), true));
     function_fields.push(field(StorageType::Val(ValType::I32), false));
     function_fields.push(field(StorageType::Val(rt(true, T_STRING)), true));
+    // T128: `learn` (`func::F_LEARN`), the layout `new` learns for the function object.
+    function_fields.push(field(StorageType::Val(ValType::Ref(wasm_encoder::RefType::EQREF)), true));
     let mut generator_fields = object_fields.clone();
     generator_fields.push(field(StorageType::Val(rt(false, T_RESUME)), false));
     generator_fields.push(field(StorageType::Val(rt(false, T_VALS)), false));

@@ -65,10 +65,10 @@ layouts at construction, T110 inline slot checks (paused). `docs/performance.md`
 deltablue 77%, richards 74%, raytrace 69%, earley-boyer 39%, fannkuchredux 36% (elements).
 - T110 (a-03): nbody −34%, richards −27%, earley-boyer −15%, deltablue −11%, binarytrees −6%; blocked by R1.
 - Left: prototype (method) reads (deltablue ~13%, richards ~4%; T99's cache didn't pay; F321 closed with no open
-  successor), computed keys (F363 closed by T94/T95, remainder pointed at F321: no open follow-up), fields set by another function (F407: deltablue `superConstructor.call`, raytrace `initialize.apply`),
+  successor), computed keys (F363 closed by T94/T95, remainder pointed at F321: no open follow-up), fields set by another function (F407, closed by T128: layouts learned per function object at run time and adds over prototype defaults cached: raytrace −3.7%, deltablue −2.2%; left: F441 reads of learned layouts, F443 functions that don't learn, F444 one order per function),
   polymorphic sites (F357), shapes work parked (F358, F360, F361, F40), elements of generic arrays (fannkuchredux:
   reads inline since T115, writes since T118: −24.5%), `o.k++` through the generic path (F428, fixed by T119: richards −9.4%).
-- Follow-ups: F40, F357, F358, F359, F360, F361, F405, F407, F96 (JSON.parse builds dictionaries); prototype reads
+- Follow-ups: F40, F357, F358, F359, F360, F361, F405, F441, F443, F444, F96 (JSON.parse builds dictionaries); prototype reads
   and computed keys need new follow-ups (T112 step 6).
 
 ### R4. Calls through values and argument arrays
@@ -77,7 +77,7 @@ A call through a value builds an argument array and boxes (~230 ns, F92); `apply
 functions called through the prototype (F90, F100, F177).
 - Costs: raytrace ~20%, arrays/args 4.9% and calls 1.5% on average; Map/Set-heavy code (knucleotide "other
   runtime" 28%).
-- Follow-ups: F46, F84, F90, F92, F100, F177, F229, F69, F117, F73, F374.
+- Follow-ups: F46, F84, F90, F92, F100, F177, F229, F69, F117, F73, F374, F442 (T128: `f.apply(this, arguments)` builds an `arguments` dictionary per call, about half of raytrace's remaining grows).
 
 ### R5. GC: wasmtime's copying collector copies all live data
 Share of time like node's (~11%), seconds ~13× node's: more allocation and a full copy per collection.

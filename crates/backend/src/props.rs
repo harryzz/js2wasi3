@@ -470,6 +470,7 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
             .local_get(O)
             .struct_get(T_OBJECT, F_PROTO)
             .global_get(runtime::G_EPOCH)
+            .ref_i31()
             .call(store);
     }
     s.br(2);
@@ -532,6 +533,22 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
         s.if_(BlockType::Empty);
         throw_read_only(cx, &mut s, O, K);
         s.end();
+        if named {
+            // T128: a writable data `k` first on the chain, on a plain object (prototype defaults): the site
+            // remembers its start and that entry (`object::add_cached`).
+            let mark = oh(cx, object::Helper::MarkChain);
+            let store = oh(cx, object::Helper::SetIcStore);
+            s.local_get(p).ref_as_non_null().ref_test_non_null(HeapType::Concrete(runtime::T_PLAIN));
+            s.if_(BlockType::Empty);
+            s.local_get(O).struct_get(T_OBJECT, F_PROTO).call(mark);
+            s.local_get(SITE).local_get(O).struct_get(T_OBJECT, F_PROTO);
+            s.global_get(runtime::G_EPOCH).ref_i31();
+            s.local_get(p);
+            s.local_get(e).ref_i31();
+            s.array_new_fixed(T_VALS, 3);
+            s.call(store);
+            s.end();
+        }
         s.br(2);
     }
     s.end();

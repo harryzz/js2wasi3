@@ -9,6 +9,8 @@ const map = new Map([[1, 2]]); map.x = 4;                        // a Map with i
 const arr = [1, 2]; arr.x = 5;                                   // an array with its own x
 const str = "abc";                                               // not an object
 const child = Object.create(plain);                              // x only on the prototype
+const defaults = { a: 0 };                                       // T128: a default on a plain prototype
+const fnDefaults = function () {}; fnDefaults.a = 0;             // the same on a function (not cached)
 let sink = 0;
 function time(f) { let best = Infinity; for (let r = 0; r < 5; r++) { const t0 = Date.now(); f(); best = Math.min(best, Date.now() - t0); } return best * 1e6 / N; }
 const loop = time(() => { for (let i = 0; i < N; i++) sink += i & 1; });
@@ -24,6 +26,9 @@ const cases = {
   "write miss plain (other slot)": () => { for (let i = 0; i < N; i++) sink += i & 1, other.x = i; },
   "write Map own x (subtype)": () => { for (let i = 0; i < N; i++) sink += i & 1, map.x = i; },
   "new P (layout_set adds)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += new P(i, i).y & 0; },
+  "add absent key ({} .a =)": () => { for (let i = 0; i < N; i++) { sink += i & 1; const o = {}; o.a = i; sink += o.a & 0; } },
+  "add over proto default (plain)": () => { for (let i = 0; i < N; i++) { sink += i & 1; const o = Object.create(defaults); o.a = i; sink += o.a & 0; } },
+  "add over proto default (function: miss)": () => { for (let i = 0; i < N; i++) { sink += i & 1; const o = Object.create(fnDefaults); o.a = i; sink += o.a & 0; } },
   "literal {x, y} (layout_define)": () => { for (let i = 0; i < N; i++) sink += i & 1, sink += ({ x: i, y: i }).y & 0; },
 };
 console.log("loop", loop.toFixed(1));

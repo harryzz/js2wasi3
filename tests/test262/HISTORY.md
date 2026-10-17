@@ -3,6 +3,12 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-17: T128 learned layouts, adds over prototype defaults (full run)
+
+- Compiler (`main` at 2f0747b + T128, uncommitted at the run): ordinary functions learn an object layout at run
+  time; T90's add cache also covers keys found on the prototype as writable data. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t128.log`): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-16: T127 Promise species (full run)
 
 - Compiler (`main` at 61baaab + T127, uncommitted at the run): native `then` uses SpeciesConstructor and

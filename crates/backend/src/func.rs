@@ -39,6 +39,15 @@ pub const F_KIND: u32 = 10;
 /// `source: (mut (ref null $string))` (T25): the source text for `Function.prototype.toString`;
 /// null: a built-in (`function f() { [native code] }`).
 pub const F_SOURCE: u32 = 11;
+/// `learn: (mut eqref)` (T128): the layout `new` learns for an ordinary function without a build-time one
+/// (V8's initial map with in-object slack tracking, per function object): null at first; while learning a
+/// `$vals [first object, i31 count]`; then either a `$vals [index, keys, attrs]` (a layout as T109/T117's, made
+/// at run time from the first object's keys after [`LEARN_AFTER`] constructions; `construct` is then
+/// [`Helper::ConstructLearned`]), or null again with `construct` [`Helper::ConstructOrdinary`] (none).
+pub const F_LEARN: u32 = 12;
+/// T128: constructions before a function's layout is taken from its first object (V8: 7), so keys its objects
+/// get after the constructor (Prototype.js `initialize`, IntersectionInfo-style later fields) are in it.
+pub const LEARN_AFTER: i32 = 8;
 
 pub const KIND_FUNCTION: i32 = 0;
 pub const KIND_CLASS: i32 = 1;
@@ -103,6 +112,12 @@ pub enum Helper {
     /// `(new_target, n: i32, index: (ref $i32s)) -> jsval` (T109): [`Helper::CreateThisSized`] with a
     /// layout's shared index (`object::layout_index`).
     CreateThisLayout,
+    /// T128: the construct codes of an ordinary function while it learns its layout, and once it has one.
+    ConstructLearning,
+    ConstructLearned,
+    /// `(f: (ref $function), this: jsval)` (T128): one more construction of `f` while it learns its layout
+    /// ([`F_LEARN`]).
+    LearnLayout,
     /// `(f: jsval) -> jsval`: `f.prototype`, directly for an ordinary function's own (entry 2), else
     /// `object::Helper::Get` (T89).
     FnPrototype,
@@ -184,9 +199,12 @@ impl Helper {
             Helper::ConstructSame => "construct_same",
             Helper::ConstructList => "construct_list",
             Helper::ConstructOrdinary => "construct_ordinary",
+            Helper::ConstructLearning => "construct_learning",
+            Helper::ConstructLearned => "construct_learned",
             Helper::CreateThis => "create_this",
             Helper::CreateThisSized => "create_this_sized",
             Helper::CreateThisLayout => "create_this_layout",
+            Helper::LearnLayout => "learn_layout",
             Helper::FnPrototype => "fn_prototype",
             Helper::ClassHeritage => "class_heritage",
             Helper::ClassSetup => "class_setup",
@@ -237,13 +255,16 @@ impl Helper {
             Helper::Construct => (vec![v, rt(false, T_VALS), v, s], vec![v]),
             Helper::ConstructSame => (vec![v, rt(false, T_VALS), s], vec![v]),
             Helper::ConstructList => (vec![v, v, v, s], vec![v]),
-            Helper::ConstructOrdinary => (vec![v, v, v], vec![v]),
+            Helper::ConstructOrdinary | Helper::ConstructLearning | Helper::ConstructLearned => {
+                (vec![v, v, v], vec![v])
+            }
             Helper::CreateThis | Helper::ClassHeritage | Helper::FnPrototype => (vec![v], vec![v]),
             Helper::CreateThisSized => (vec![v, ValType::I32], vec![v]),
             Helper::CreateThisLayout => (
                 vec![v, ValType::I32, rt(false, runtime::T_I32S), rt(false, runtime::T_KEYS), rt(false, runtime::T_BYTES)],
                 vec![v],
             ),
+            Helper::LearnLayout => (vec![rt(false, T_FUNCTION), v], vec![]),
             Helper::ClassSetup => (vec![v, v, v], vec![v]),
             Helper::InstanceOfValue => (vec![v, v], vec![ValType::I32]),
             Helper::CtorReturn { .. } => (vec![v, v], vec![v]),
@@ -286,9 +307,12 @@ impl Helper {
             }
             Helper::ConstructList => construct_list(cx),
             Helper::ConstructOrdinary => construct_ordinary(cx),
+            Helper::ConstructLearning => construct_learning(cx),
+            Helper::ConstructLearned => construct_learned(cx),
             Helper::CreateThis => create_this(cx, false),
             Helper::CreateThisSized => create_this(cx, true),
             Helper::CreateThisLayout => create_this_layout(cx),
+            Helper::LearnLayout => learn_layout(cx),
             Helper::FnPrototype => fn_prototype(cx),
             Helper::ClassHeritage => class_heritage(cx),
             Helper::ClassSetup => class_setup(cx),
@@ -432,7 +456,8 @@ fn new(cx: &mut dyn Cx) -> Function {
     let obj_proto = oh(cx, object::Helper::Proto(Builtin::Object));
     let alloc = oh(cx, object::Helper::Alloc);
     let define = oh(cx, object::Helper::Define);
-    let ordinary = fh(cx, Helper::ConstructOrdinary);
+    // T128: ordinary functions start learning their layout.
+    let ordinary = fh(cx, Helper::ConstructLearning);
     let ordinary_slot = cx.code_slot(ordinary);
     let (length, name, prototype, constructor) = (
         cx.str("length"),
@@ -484,6 +509,7 @@ fn new(cx: &mut dyn Cx) -> Function {
     s.local_get(FLAGS).i32_const(NEW_CLASS).i32_and();
     s.select();
     s.ref_null(HeapType::Concrete(runtime::T_STRING));
+    s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
     s.struct_new(T_FUNCTION).local_set(F);
     // `length` and `name`: read-only, configurable.
     s.local_get(F).ref_as_non_null().global_get(length);
@@ -667,22 +693,74 @@ fn fn_prototype(cx: &mut dyn Cx) -> Function {
 }
 
 /// `(self, new_target, args)`: `this` from `new_target.prototype`, the code called with it; an
-/// object result replaces it.
+/// object result replaces it. T128: also what an ordinary function runs once it has learned it gets no layout.
 fn construct_ordinary(cx: &mut dyn Cx) -> Function {
     let create_this = fh(cx, Helper::CreateThis);
+    construct_with(cx, |s| {
+        s.local_get(1).call(create_this);
+    }, None)
+}
+
+/// T128: an ordinary function's first constructions ([`LEARN_AFTER`]), each given to [`Helper::LearnLayout`],
+/// which then switches the function's `construct` to [`Helper::ConstructOrdinary`] or [`Helper::ConstructLearned`]
+/// (V8 swaps a function's construct stub the same way when slack tracking ends).
+fn construct_learning(cx: &mut dyn Cx) -> Function {
+    let create_this = fh(cx, Helper::CreateThis);
+    let learn = fh(cx, Helper::LearnLayout);
+    construct_with(cx, |s| {
+        s.local_get(1).call(create_this);
+    }, Some(learn))
+}
+
+/// T128: `this` with the function object's learned layout ([`F_LEARN`]: `[index, keys, attrs]`).
+fn construct_learned(cx: &mut dyn Cx) -> Function {
+    let create_this_layout = fh(cx, Helper::CreateThisLayout);
+    let on = cx.counting();
+    construct_with(cx, |s| {
+        runtime::count(s, on, "construct.learned");
+        let field = |s: &mut wasm_encoder::InstructionSink, i: i32, t: u32| {
+            s.local_get(5).i32_const(i).array_get(T_VALS).ref_cast_non_null(HeapType::Concrete(t));
+        };
+        s.local_get(0)
+            .ref_cast_non_null(function())
+            .struct_get(T_FUNCTION, F_LEARN)
+            .ref_cast_non_null(HeapType::Concrete(T_VALS))
+            .local_set(5);
+        s.local_get(1);
+        field(s, 1, T_KEYS);
+        s.local_tee(6).array_len();
+        field(s, 0, T_I32S);
+        s.local_get(6).ref_as_non_null();
+        field(s, 2, T_BYTES);
+        s.call(create_this_layout);
+    }, None)
+}
+
+/// The construct codes' shared body: `this` from `make_this` (params `self`, `new_target`, `args`; scratch
+/// locals 5: `(ref null $vals)`, 6: `(ref null $keys)`), the code called with it, then `learn(f, this)` when
+/// given; an object result replaces `this`.
+fn construct_with(
+    cx: &mut dyn Cx,
+    make_this: impl FnOnce(&mut wasm_encoder::InstructionSink),
+    learn: Option<u32>,
+) -> Function {
+    let _ = cx;
     const SELF: u32 = 0;
-    const NT: u32 = 1;
     const ARGS: u32 = 2;
     const THIS: u32 = 3;
     const R: u32 = 4;
-    let mut f = Function::new([(2, jsval())]);
+    let mut f = Function::new([(2, jsval()), (1, rt(true, T_VALS)), (1, rt(true, T_KEYS))]);
     let mut s = f.instructions();
-    s.local_get(NT).call(create_this).local_set(THIS);
+    make_this(&mut s);
+    s.local_set(THIS);
     s.local_get(SELF).local_get(THIS).local_get(ARGS);
     s.local_get(SELF)
         .ref_cast_non_null(function())
         .struct_get(T_FUNCTION, F_CODE);
     s.call_indirect(0, T_CODE).local_set(R);
+    if let Some(learn) = learn {
+        s.local_get(SELF).ref_cast_non_null(function()).local_get(THIS).call(learn);
+    }
     // T93: `test_object`, not `ref.test (ref $object)`: the usual result, `undefined`, isn't an exact
     // `$object`, and the plain test called wasmtime's `is_subtype` on every `new`.
     s.test_object(R);
@@ -691,6 +769,146 @@ fn construct_ordinary(cx: &mut dyn Cx) -> Function {
     s.else_();
     s.local_get(THIS);
     s.end();
+    s.end();
+    f
+}
+
+/// `learn_layout(f, this)` (see [`Helper::LearnLayout`]): the first construction keeps its object; the
+/// [`LEARN_AFTER`]th takes the layout from that object's keys now: a plain object with 1 to `SMALL` entries, no
+/// own index, every entry a live key with the default attributes (a writable data property). Its index is made
+/// as `object::layout_index` makes a build-time layout's; else the function gets none, for good.
+fn learn_layout(cx: &mut dyn Cx) -> Function {
+    let hash = oh(cx, object::Helper::Hash);
+    let ordinary = fh(cx, Helper::ConstructOrdinary);
+    let ordinary = cx.code_slot(ordinary);
+    let learned = fh(cx, Helper::ConstructLearned);
+    let learned = cx.code_slot(learned);
+    let on = cx.counting();
+    const F: u32 = 0;
+    const THIS: u32 = 1;
+    const L: u32 = 2;
+    const C: u32 = 3;
+    const N: u32 = 4;
+    const I: u32 = 5;
+    const CAP: u32 = 6;
+    const J: u32 = 7;
+    const O: u32 = 8;
+    const KEYS: u32 = 9;
+    const IDX: u32 = 10;
+    let mut f = Function::new([
+        (1, rt(true, T_VALS)),
+        (5, ValType::I32),
+        (1, rt(true, runtime::T_PLAIN)),
+        (1, rt(true, T_KEYS)),
+        (1, rt(true, T_I32S)),
+    ]);
+    let mut s = f.instructions();
+    s.local_get(F).struct_get(T_FUNCTION, F_LEARN).ref_is_null();
+    s.if_(BlockType::Empty);
+    s.local_get(F);
+    s.local_get(THIS).i32_const(1).ref_i31().array_new_fixed(T_VALS, 2);
+    s.struct_set(T_FUNCTION, F_LEARN);
+    s.return_();
+    s.end();
+    s.local_get(F)
+        .struct_get(T_FUNCTION, F_LEARN)
+        .ref_cast_non_null(HeapType::Concrete(T_VALS))
+        .local_tee(L);
+    s.i32_const(1)
+        .array_get(T_VALS)
+        .ref_cast_non_null(HeapType::I31)
+        .i31_get_u()
+        .i32_const(1)
+        .i32_add()
+        .local_tee(C);
+    s.i32_const(LEARN_AFTER).i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(L).i32_const(1).local_get(C).ref_i31().array_set(T_VALS);
+    s.return_();
+    s.end();
+    s.block(BlockType::Empty);
+    // The first object.
+    s.local_get(L).i32_const(0).array_get(T_VALS).local_tee(THIS);
+    s.ref_test_non_null(HeapType::Concrete(runtime::T_PLAIN)).i32_eqz().br_if(0);
+    s.local_get(THIS).ref_cast_non_null(HeapType::Concrete(runtime::T_PLAIN)).local_tee(O);
+    s.struct_get(T_OBJECT, object::F_INDEX).ref_is_null().i32_eqz().br_if(0);
+    s.local_get(O).struct_get(T_OBJECT, object::F_COUNT).local_tee(N).i32_eqz().br_if(0);
+    s.local_get(N).i32_const(object::SMALL).i32_gt_u().br_if(0);
+    // Live keys, default attributes.
+    s.i32_const(0).local_set(I);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(O)
+        .struct_get(T_OBJECT, object::F_KEYS)
+        .local_get(I)
+        .array_get(T_KEYS)
+        .ref_is_null()
+        .br_if(2);
+    s.local_get(O)
+        .struct_get(T_OBJECT, object::F_ATTRS)
+        .local_get(I)
+        .array_get_u(T_BYTES)
+        .br_if(2);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    // The keys, then the index: a power of 2 at least 2 * n (as `layout_index`), entry `e + 1` at the
+    // first free slot from `hash & mask`.
+    s.local_get(N).array_new_default(T_KEYS).local_tee(KEYS);
+    s.i32_const(0);
+    s.local_get(O).struct_get(T_OBJECT, object::F_KEYS);
+    s.i32_const(0).local_get(N);
+    s.array_copy(T_KEYS, T_KEYS);
+    s.i32_const(2).local_set(CAP);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(CAP).local_get(N).i32_const(1).i32_shl().i32_ge_u().br_if(1);
+    s.local_get(CAP).i32_const(1).i32_shl().local_set(CAP);
+    s.br(0).end().end();
+    s.local_get(CAP).array_new_default(T_I32S).local_set(IDX);
+    s.i32_const(0).local_set(I);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(KEYS)
+        .local_get(I)
+        .array_get(T_KEYS)
+        .ref_as_non_null()
+        .call(hash)
+        .local_get(CAP)
+        .i32_const(1)
+        .i32_sub()
+        .i32_and()
+        .local_set(J);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(IDX).local_get(J).array_get(T_I32S).i32_eqz().br_if(1);
+    s.local_get(J)
+        .i32_const(1)
+        .i32_add()
+        .local_get(CAP)
+        .i32_const(1)
+        .i32_sub()
+        .i32_and()
+        .local_set(J);
+    s.br(0).end().end();
+    s.local_get(IDX)
+        .local_get(J)
+        .local_get(I)
+        .i32_const(1)
+        .i32_add()
+        .array_set(T_I32S);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    runtime::count(&mut s, on, "learn.layout");
+    s.local_get(F);
+    s.local_get(IDX);
+    s.local_get(KEYS);
+    s.local_get(N).array_new_default(T_BYTES);
+    s.array_new_fixed(T_VALS, 3);
+    s.struct_set(T_FUNCTION, F_LEARN);
+    s.local_get(F).i32_const(learned).struct_set(T_FUNCTION, F_CONSTRUCT);
+    s.return_();
+    s.end();
+    runtime::count(&mut s, on, "learn.none");
+    s.local_get(F).ref_null(wasm_encoder::RefType::EQREF.heap_type).struct_set(T_FUNCTION, F_LEARN);
+    s.local_get(F).i32_const(ordinary).struct_set(T_FUNCTION, F_CONSTRUCT);
     s.end();
     f
 }

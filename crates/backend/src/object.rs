@@ -121,7 +121,7 @@ pub fn watch_fire(s: &mut InstructionSink, attrs: impl FnOnce(&mut InstructionSi
 pub const PRIVATE: i32 = 16;
 
 /// Objects with more entries than this get a hash index.
-const SMALL: i32 = 8;
+pub const SMALL: i32 = 8;
 
 /// Built-in methods (sentinels) of each prototype, besides `constructor`.
 fn methods(b: Builtin) -> &'static [&'static str] {
@@ -658,7 +658,7 @@ impl Helper {
             Helper::LookupNamed => (vec![on, s, I32], vec![v]),
             Helper::GetNamed => (vec![v, s, I32, I32], vec![v]),
             Helper::IcStore => (vec![I32, I32], vec![]),
-            Helper::SetIcStore => (vec![I32, rt(true, T_OBJECT), I32], vec![]),
+            Helper::SetIcStore => (vec![I32, rt(true, T_OBJECT), jsval()], vec![]),
             Helper::MarkChain => (vec![rt(true, T_OBJECT)], vec![]),
             Helper::GetLength => (vec![v], vec![v]),
             Helper::GetNum => (vec![v, v], vec![ValType::F64]),
@@ -1060,11 +1060,17 @@ fn set_named(cx: &mut dyn Cx) -> Function {
     const E: u32 = 7;
     const IC: u32 = 8;
     const G: u32 = 9;
+    const T: u32 = 10;
+    const VS: u32 = 11;
+    const HO: u32 = 12;
     let mut f = Function::new([
         (1, rt(true, T_OBJECT)),
         (1, ValType::I32),
         (1, rt(true, T_VALS)),
         (1, rt(true, T_I32S)),
+        (1, ValType::Ref(wasm_encoder::RefType::EQREF)),
+        (1, rt(true, T_VALS)),
+        (1, rt(true, runtime::T_PLAIN)),
     ]);
     let mut s = f.instructions();
     // Not an object: the generic `set` (T93: one test-and-cast chain, as in `get_named`).
@@ -1128,42 +1134,10 @@ fn set_named(cx: &mut dyn Cx) -> Function {
     }
     s.else_();
     {
-        // A new property: the site's prototype, still without `k` on its chain (T90).
-        s.block(BlockType::Empty);
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_CLASS)
-            .i32_const(NO_EXTEND)
-            .i32_and()
-            .br_if(0);
-        s.global_get(runtime::G_SET_IC).local_tee(IC).ref_is_null().br_if(0);
-        s.local_get(SITE)
-            .i32_const(1)
-            .i32_shl()
-            .local_tee(E)
-            .local_get(IC)
-            .array_len()
-            .i32_ge_u()
-            .br_if(0);
-        // The tag (an i31, null when unfilled), then the prototype.
-        s.local_get(IC)
-            .local_get(E)
-            .i32_const(1)
-            .i32_add()
-            .array_get(T_VALS)
-            .global_get(runtime::G_EPOCH)
-            .ref_i31()
-            .ref_eq()
-            .i32_eqz()
-            .br_if(0);
-        s.local_get(IC)
-            .local_get(E)
-            .array_get(T_VALS)
-            .local_get(O)
-            .struct_get(T_OBJECT, F_PROTO)
-            .ref_eq()
-            .i32_eqz()
-            .br_if(0);
-        runtime::count(&mut s, on, "set_named.add_cached");
+        // A new property: the site's prototype, its chain still without `k` or with `k` a writable data
+        // property (T90, T128).
+        add_cached(&mut s, on, "set_named", O, K, SITE, &AddLocals { ic: IC, e: E, t: T, vs: VS, ho: HO });
+        s.if_(BlockType::Empty);
         s.local_get(O)
             .ref_as_non_null()
             .local_get(K)
@@ -1225,11 +1199,17 @@ fn layout_set(cx: &mut dyn Cx) -> Function {
     const N: u32 = 9;
     const IC: u32 = 10;
     const E: u32 = 11;
+    const T: u32 = 12;
+    const VS: u32 = 13;
+    const HO: u32 = 14;
     let mut f = Function::new([
         (1, rt(true, T_OBJECT)),
         (1, ValType::I32),
         (1, rt(true, T_VALS)),
         (1, ValType::I32),
+        (1, ValType::Ref(wasm_encoder::RefType::EQREF)),
+        (1, rt(true, T_VALS)),
+        (1, rt(true, runtime::T_PLAIN)),
     ]);
     let mut s = f.instructions();
     s.block(BlockType::Empty);
@@ -1243,39 +1223,9 @@ fn layout_set(cx: &mut dyn Cx) -> Function {
     s.if_(BlockType::Empty);
     {
         // The next key of the layout: absent (the layout's keys differ). Extensible, and the site's
-        // prototype still without `k` on its chain (T90, as `set_named`).
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_CLASS)
-            .i32_const(NO_EXTEND)
-            .i32_and()
-            .br_if(1);
-        s.global_get(runtime::G_SET_IC).local_tee(IC).ref_is_null().br_if(1);
-        s.local_get(SITE)
-            .i32_const(1)
-            .i32_shl()
-            .local_tee(E)
-            .local_get(IC)
-            .array_len()
-            .i32_ge_u()
-            .br_if(1);
-        s.local_get(IC)
-            .local_get(E)
-            .i32_const(1)
-            .i32_add()
-            .array_get(T_VALS)
-            .global_get(runtime::G_EPOCH)
-            .ref_i31()
-            .ref_eq()
-            .i32_eqz()
-            .br_if(1);
-        s.local_get(IC)
-            .local_get(E)
-            .array_get(T_VALS)
-            .local_get(O)
-            .struct_get(T_OBJECT, F_PROTO)
-            .ref_eq()
-            .i32_eqz()
-            .br_if(1);
+        // prototype's chain still without `k` or with a writable data `k` (T90, T128, as `set_named`).
+        add_cached(&mut s, on, "layout_set", O, K, SITE, &AddLocals { ic: IC, e: E, t: T, vs: VS, ho: HO });
+        s.i32_eqz().br_if(1);
         layout_changed(&mut s, O);
         runtime::count(&mut s, on, "layout_set.add");
         // The arrays have the layout's size (a `grow` drops the shared index); the keys and attributes are the
@@ -2002,7 +1952,7 @@ fn get_length(cx: &mut dyn Cx) -> Function {
     f
 }
 
-/// `set_ic_store(site, proto, tag)` (see [`Helper::SetIcStore`]): `G_SET_IC` grown (doubling, at least
+/// `set_ic_store(site, proto, tag)` (see [`Helper::SetIcStore`], the tag as [`add_cached`] reads it): `G_SET_IC` grown (doubling, at least
 /// 16 entries) when needed.
 fn set_ic_store() -> Function {
     const SITE: u32 = 0;
@@ -2052,7 +2002,6 @@ fn set_ic_store() -> Function {
         .i32_const(1)
         .i32_add()
         .local_get(TAG)
-        .ref_i31()
         .array_set(T_VALS);
     s.end();
     f
@@ -2075,6 +2024,100 @@ fn mark_chain() -> Function {
     s.br(0).end().end();
     s.end();
     f
+}
+
+/// The locals [`add_cached`] uses: `ic` a `(ref null $vals)`, `e` an `i32`, `t` an `eqref`, `vs` a
+/// `(ref null $vals)`, `ho` a `(ref null $plain)`.
+pub struct AddLocals {
+    pub ic: u32,
+    pub e: u32,
+    pub t: u32,
+    pub vs: u32,
+    pub ho: u32,
+}
+
+/// T90/T128: pushes 1 when write site `site` may add the absent own key `k` (local, a key string) to the
+/// object in local `o` (a `(ref null $object)`) without searching its prototype chain: `o` is extensible and
+/// its prototype is the one the site remembers at the current `G_EPOCH`, whose chain then had either no `k`
+/// (the tag is the epoch as an `i31`) or `k` first as a writable data property of a plain object (T128: the tag
+/// is `[epoch, holder, entry]`, raytrace's defaults on prototypes; the holder's entry is checked again, so a
+/// delete or an attribute change there misses). Every object on the chain is flagged ([`IS_PROTO`]): a key or
+/// prototype change on any of them bumps the epoch.
+pub fn add_cached(s: &mut InstructionSink, on: bool, counter: &str, o: u32, k: u32, site: u32, l: &AddLocals) {
+    s.block(BlockType::Result(ValType::I32));
+    s.block(BlockType::Empty);
+    s.local_get(o)
+        .struct_get(T_OBJECT, F_CLASS)
+        .i32_const(NO_EXTEND)
+        .i32_and()
+        .br_if(0);
+    s.global_get(runtime::G_SET_IC).local_tee(l.ic).ref_is_null().br_if(0);
+    s.local_get(site)
+        .i32_const(1)
+        .i32_shl()
+        .local_tee(l.e)
+        .local_get(l.ic)
+        .array_len()
+        .i32_ge_u()
+        .br_if(0);
+    s.local_get(l.ic)
+        .local_get(l.e)
+        .array_get(T_VALS)
+        .local_get(o)
+        .struct_get(T_OBJECT, F_PROTO)
+        .ref_eq()
+        .i32_eqz()
+        .br_if(0);
+    // The tag (an i31, null when unfilled).
+    s.local_get(l.ic)
+        .local_get(l.e)
+        .i32_const(1)
+        .i32_add()
+        .array_get(T_VALS)
+        .local_tee(l.t)
+        .global_get(runtime::G_EPOCH)
+        .ref_i31()
+        .ref_eq();
+    s.if_(BlockType::Empty);
+    runtime::count(s, on, &format!("{counter}.add_cached"));
+    s.i32_const(1).br(2);
+    s.end();
+    s.local_get(l.t).ref_test_non_null(HeapType::Concrete(T_VALS)).i32_eqz().br_if(0);
+    s.local_get(l.t).ref_cast_non_null(HeapType::Concrete(T_VALS));
+    s.local_tee(l.vs).i32_const(0).array_get(T_VALS);
+    s.global_get(runtime::G_EPOCH).ref_i31().ref_eq().i32_eqz().br_if(0);
+    s.local_get(l.vs)
+        .i32_const(1)
+        .array_get(T_VALS)
+        .ref_cast_non_null(HeapType::Concrete(runtime::T_PLAIN))
+        .local_set(l.ho);
+    s.local_get(l.vs)
+        .i32_const(2)
+        .array_get(T_VALS)
+        .ref_cast_non_null(HeapType::I31)
+        .i31_get_u()
+        .local_tee(l.e);
+    s.local_get(l.ho).struct_get(T_OBJECT, F_COUNT).i32_ge_u().br_if(0);
+    s.local_get(l.ho)
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(l.e)
+        .array_get(T_KEYS)
+        .local_get(k)
+        .ref_eq()
+        .i32_eqz()
+        .br_if(0);
+    s.local_get(l.ho)
+        .struct_get(T_OBJECT, F_ATTRS)
+        .local_get(l.e)
+        .array_get_u(T_BYTES)
+        .i32_const(ACCESSOR | READONLY)
+        .i32_and()
+        .br_if(0);
+    runtime::count(s, on, &format!("{counter}.add_cached_proto"));
+    s.i32_const(1).br(1);
+    s.end();
+    s.i32_const(0);
+    s.end();
 }
 
 /// The object in local `o` (a `$object` ref) gets a new key or prototype: bump `G_EPOCH` if a write
@@ -2285,6 +2328,34 @@ fn define(cx: &mut dyn Cx, named: bool) -> Function {
     let own = h(cx, Helper::OwnShape);
     let mut f = Function::new([(3, ValType::I32), (1, rt(true, T_I32S))]);
     let mut s = f.instructions();
+    // T128: the layout's next key, with the default attributes: stored at `count`, the layout and its shared
+    // keys/attributes kept (as `layout_set`'s add; objects with a learned layout add their keys here).
+    s.block(BlockType::Empty);
+    s.local_get(O).struct_get(T_OBJECT, F_INDEX).ref_is_null().br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_INDEX)
+        .ref_as_non_null()
+        .array_len()
+        .i32_const(SHARED_INDEX)
+        .i32_ge_u()
+        .br_if(0);
+    s.local_get(A).br_if(0);
+    s.local_get(O).struct_get(T_OBJECT, F_COUNT).local_tee(e);
+    s.local_get(O).struct_get(T_OBJECT, F_KEYS).array_len().i32_ge_u().br_if(0);
+    s.local_get(O)
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(e)
+        .array_get(T_KEYS)
+        .local_get(K)
+        .ref_eq()
+        .i32_eqz()
+        .br_if(0);
+    layout_changed(&mut s, O);
+    runtime::count(&mut s, on, "define.layout_next");
+    s.local_get(O).struct_get(T_OBJECT, F_VALS).local_get(e).local_get(V).array_set(T_VALS);
+    s.local_get(O).local_get(e).i32_const(1).i32_add().struct_set(T_OBJECT, F_COUNT);
+    s.return_();
+    s.end();
     // T117: a layout's shared keys/attributes: the object's own copies first; a full object (an add past its
     // layout's keys, e.g. a key set after the constructor) gets them from `grow` instead, which copies anyway.
     s.local_get(O).struct_get(T_OBJECT, F_INDEX).ref_is_null().i32_eqz();
@@ -3092,6 +3163,7 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
         s.i32_const(-1);
         s.i32_const(func::KIND_FUNCTION);
         s.ref_null(wasm_encoder::HeapType::Concrete(T_STRING));
+        s.ref_null(wasm_encoder::RefType::EQREF.heap_type);
         s.struct_new(runtime::T_FUNCTION);
     } else {
         s.call(alloc);

@@ -208,6 +208,21 @@ entry.js ──frontend──▶ AST + scopes ──lower──▶ IR ──back
   any write to an object's keys or attributes (`define`, which grows a full object directly, `remove`,
   `watch_mark`, `define_property`, `integrity`); index hits need `e < count`. earley-boyer −22.7%, binarytrees
   −5.1%; splay +65% from wasmtime's grow-or-collect rule, F304.)
+  (T128: **layouts learned per function object**, V8's initial map with in-object slack tracking and JSC's
+  `ObjectAllocationProfile`: for fields that another function writes (Prototype.js `this.initialize.apply(this,
+  arguments)`, where one closure body builds every class; `X.superConstructor.call(this, …)`), nothing is followed
+  at build time. An ordinary function without a build-time layout starts with `construct` = `construct_learning`:
+  the first object is kept in `$function.learn`, and the 8th construction (`LEARN_AFTER`, V8: 7) takes the layout
+  from that object's keys then, so fields added after the constructor count: a plain object with 1–8 live keys,
+  default attributes, no own index → `[index, keys, attrs]` built as `layout_index` does at build time, and
+  `construct` becomes `construct_learned` (allocates with it); else `construct_ordinary` (unchanged code, no test
+  left on `new`: a per-`new` test cost binarytrees +1.8% instructions). `define` stores the layout's next key at
+  `count` without unsharing (`define.layout_next`, as `layout_set`'s add), so generic adds keep the layout. **Adds
+  over prototype defaults** (raytrace: `Vector.prototype = { x: 0.0, … }`): T90's tag is either the epoch (no `k`
+  on the chain) or `[epoch, holder, entry]` when the walk found `k` first as a writable data property of a
+  `$plain` holder; a hit re-checks that entry (key, `< count`, no `ACCESSOR | READONLY`), so the deletes and
+  attribute changes T90 didn't need to see miss (`object::add_cached`, shared by `set_named` and `layout_set`).
+  raytrace −3.7%, deltablue −2.2%, richards −2.4% (laptop); reads of learned layouts aren't inline yet (F441).)
   (T92: **object tests without `is_subtype`**. `$object` isn't final, so wasmtime compiles `ref.test`/`ref.cast
   (ref $object)` inline only for an exact `$object` and calls its `is_subtype` runtime function for every other
   object (a `Map`, array, function…). `runtime::object_or` tests and casts in one chain: abstract `struct`,
