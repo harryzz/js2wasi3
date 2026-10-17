@@ -988,5 +988,12 @@ The rules after T106–T110, where each speed fix made another program slower (`
 - **Equal instructions = placement** (T113): the gate's `instr` column (`perf stat -e instructions:u`) tells a
   slowdown from added work from one from code moving in memory (pidigits +5.3% at +0.01% instructions: its loops
   left the uop cache). Placement isn't fixed by changing the test that moved it.
+- **The gate's numbers** (T129): base and new run in back-to-back pairs, the order swapped every other pair, an even
+  number of runs, both builds under the same path (varied per pair: argv carries it and moved binarytrees' collections,
+  +0.76% instructions from a file name). Programs: minimum times, `instr` the change of minimum instruction counts
+  (counted in every timed run; `~x%` when a build's counts spread). Micros: `scripts/micro-verdict.py`, the median of
+  paired differences and ≥ 5 of 6 pairs agreeing (byte-identical builds: 0 of 93 verdicts on a-03; the laptop's
+  noise still gives up to 18, so laptop micro verdicts are advisory, a-03 decides). A speed task is judged by the
+  geometric mean of the 18 programs (new/base) and by instructions, not by single 2–4% rows of sub-second programs.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

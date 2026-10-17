@@ -17,9 +17,14 @@
 #       `runs` times each; `slower`/`faster` when the minimums differ by more than 2% (noise only adds time, so
 #       the minimum is the measure), else `same`.
 #       Outputs must match node's first run. Details in <outdir>/gate.tsv.
-#       With `perf` (on PATH, or $PERF): one more run of each under `perf stat -e instructions:u`, the `instr`
-#       column: a time change with an instruction change under 0.5% is code placement (the same work, run from
-#       another address; T113: pidigits +5.5% at equal instructions), not work the change added.
+#       Runs alternate the order (odd runs base first, even runs new first; an odd -r is rounded up: T129); run i runs both builds
+#       under names padded by i characters (x.base_i.cwasm, x.next_i.cwasm): argv carries the path, which moves a
+#       GC-heavy program's collections, so the runs sample several layouts, the same for both builds (F440).
+#       With `perf` (on PATH, or $PERF): every timed run is also under `perf stat -e instructions:u`, the `instr`
+#       column (change of the minimum counts): a time change with an instruction change under 0.5% is code placement
+#       (the same work, run from another address; T113: pidigits +5.5% at equal instructions), not work the change
+#       added. `~x%` after it: the counts of one build spread by x% over its runs (GC-heavy programs: the collector's
+#       timing; raytrace ±10%), so that column can't tell work from noise there.
 # Each program is built once (`js2wasi3 build` with the release compiler, `wasmtime compile`; not timed) and then
 # run as `wasmtime run -Sp3 --allow-precompiled x.cwasm`, the same source as `node x.js`; wall time from outside.
 # Outputs (stdout, stderr, exit status of the first run) must be equal bytes, else the row says DIFF.
@@ -97,7 +102,7 @@ if [ -n "$COUNT" ]; then
   printf 'program\tcounter\tn\n' >"$OUT/counts.tsv"
 elif [ -n "$BASE" ]; then
   printf '| program | base min ms | new min ms | change (min) | verdict | instr | output |\n|---|---|---|---|---|---|---|\n'
-  printf 'program\tbase_ms\tnew_ms\tverdict\tsame\n' >"$OUT/gate.tsv"
+  printf 'program\tbase_ms\tnew_ms\tverdict\tsame\tinstr\n' >"$OUT/gate.tsv"
 else
   printf '| program | argument / input | node min (median) s | js2wasi3 min (median) s | ratio (min) | output | .wasm KB |\n'
   printf '|---|---|---|---|---|---|---|\n'
@@ -132,17 +137,37 @@ for name in "$@"; do
       printf '%s\t\t\tidentical\t\n' "$name" >>"$OUT/gate.tsv"; continue
     fi
     (cd "$OUT" && env -u FORCE_COLOR timeout "$TIMEOUT" node "$name.js" $arg <"$stdin" >"$OUT/$name.node.out" 2>&1; echo "exit $?" >>"$OUT/$name.node.out")
-    bt=() wt=() same=SAME
+    # T129 (F440): argv carries the module's path, and the path moves where a GC-heavy program's collections fall
+    # (the same binarytrees build: 58,768M or 59,218M instructions by its file name). Each run i uses its own name,
+    # padded by i characters, the same for both builds (x.base_i.cwasm, x.next_i.cwasm: equal lengths), so the
+    # runs sample several layouts and the minimums compare like with like (Mytkowicz et al., ASPLOS 2009).
+    rm -f "$OUT/$name".*.instr* "$OUT/$name".base_*.cwasm "$OUT/$name".next_*.cwasm
+    bt=() wt=() bi=() wi=() same=SAME
+    # An even number of runs: each build first in as many pairs (T129).
+    [ $((RUNS % 2)) -eq 1 ] && RUNS=$((RUNS + 1))
     for i in $(seq "$RUNS"); do
-      for v in base new; do
-        c=$name.cwasm; [ $v = base ] && c=$name.base.cwasm
+      pad=$(printf '%*s' "$i" '' | tr ' ' _)
+      ln -f "$OUT/$name.base.cwasm" "$OUT/$name.base$pad.cwasm"
+      ln -f "$OUT/$name.cwasm" "$OUT/$name.next$pad.cwasm"
+      # T129: odd runs base first, even runs new first, so neither build always runs second.
+      order="base new"; [ $((i % 2)) -eq 0 ] && order="new base"
+      for v in $order; do
+        c=$name.next$pad.cwasm; [ $v = base ] && c=$name.base$pad.cwasm
+        # T129: every timed run also counts instructions (perf stat's counting mode adds no measurable time), so
+        # the `instr` column is a minimum over the runs like the times (F440).
+        pf=(); [ -n "$PERF" ] && pf=("$PERF" stat -x, -e instructions:u -o "$OUT/$name.$v.instr$i")
         s=$(now_ns)
-        (cd "$OUT" && timeout "$TIMEOUT" wasmtime run "${GC[@]}" -Sp3 --allow-precompiled --dir "$OUT::/" "$c" $arg \
+        (cd "$OUT" && timeout "$TIMEOUT" "${pf[@]}" "$WASMTIME" run "${GC[@]}" -Sp3 --allow-precompiled --dir "$OUT::/" "$c" $arg \
           <"$stdin" >"$OUT/$name.$v.out" 2>&1; echo "exit $?" >>"$OUT/$name.$v.out")
         e=$(now_ns)
         [ $v = base ] && bt+=("$(ms "$s" "$e")") || wt+=("$(ms "$s" "$e")")
+        if [ -n "$PERF" ]; then
+          n=$(grep instructions "$OUT/$name.$v.instr$i" 2>/dev/null | cut -d, -f1)
+          [ $v = base ] && bi+=("${n:-0}") || wi+=("${n:-0}")
+        fi
         cmp -s "$OUT/$name.node.out" "$OUT/$name.$v.out" || same="DIFF ($v)"
       done
+      rm -f "$OUT/$name.base$pad.cwasm" "$OUT/$name.next$pad.cwasm"
     done
     read -r bmin wmin verdict < <(printf '%s\n%s\n' "${bt[*]}" "${wt[*]}" | awk '
       function med(a, n,   t, i, j) { for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
@@ -152,16 +177,17 @@ for name in "$@"; do
             wmin = wmax = w[1]; for (i in w) { if (w[i] < wmin) wmin = w[i]; if (w[i] > wmax) wmax = w[i] }
             v = (wmin > bmin * 1.02) ? "slower" : (wmin < bmin * 0.98) ? "faster" : "same"; print bmin, wmin, v }')
     pct=$(awk -v b="$bmin" -v w="$wmin" 'BEGIN { printf "%+.1f%%", 100 * (w - b) / b }')
+    # instr: the change of the minimum counts; `~` and the larger spread (max/min − 1 of either build) when that
+    # is over 0.5%: the count then moves with the collector, not with the code (raytrace: ±10%, F440).
     ipct=
     if [ -n "$PERF" ]; then
-      for v in base new; do
-        c=$name.cwasm; [ $v = base ] && c=$name.base.cwasm
-        n=$(cd "$OUT" && timeout "$TIMEOUT" "$PERF" stat -x, -e instructions:u -o "$OUT/$name.$v.instr" \
-          "$WASMTIME" run "${GC[@]}" -Sp3 --allow-precompiled --dir "$OUT::/" "$c" $arg <"$stdin" >/dev/null 2>&1;
-          grep instructions "$OUT/$name.$v.instr" | cut -d, -f1)
-        [ $v = base ] && bi=$n || wi=$n
-      done
-      ipct=$(awk -v b="$bi" -v w="$wi" 'BEGIN { if (b > 0 && w > 0) printf "%+.2f%%", 100 * (w - b) / b; else print "?" }')
+      ipct=$(printf '%s\n%s\n' "${bi[*]}" "${wi[*]}" | awk '
+        NR == 1 { nb = split($0, b, " ") } NR == 2 { nw = split($0, w, " ") }
+        END { bmin = bmax = b[1]; for (i in b) { if (b[i] < bmin) bmin = b[i]; if (b[i] > bmax) bmax = b[i] }
+              wmin = wmax = w[1]; for (i in w) { if (w[i] < wmin) wmin = w[i]; if (w[i] > wmax) wmax = w[i] }
+              if (!(bmin > 0 && wmin > 0)) { print "?"; exit }
+              sp = bmax / bmin; if (wmax / wmin > sp) sp = wmax / wmin; sp = 100 * (sp - 1)
+              printf "%+.2f%%", 100 * (wmin - bmin) / bmin; if (sp > 0.5) printf " ~%.1f%%", sp }')
     fi
     printf '| %s%s | %s | %s | %s | %s | %s | %s |\n' "$name" "$mark" "$bmin" "$wmin" "$pct" "$verdict" "$ipct" "$same"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "${bt[*]}" "${wt[*]}" "$verdict" "$same" "$ipct" >>"$OUT/gate.tsv"
