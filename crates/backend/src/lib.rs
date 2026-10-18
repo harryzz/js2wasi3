@@ -1542,6 +1542,11 @@ impl Emitter<'_> {
                     s.array_new_fixed(runtime::T_KEYS, keys.len() as u32);
                     s.global_set(self.layout_keys_global(l as u32));
                 }
+                if self.m.method_sites > 0 {
+                    s.i32_const(self.m.method_sites as i32)
+                        .array_new_default(runtime::T_I32S)
+                        .global_set(runtime::G_MDEAD);
+                }
             }
             s.end();
             funcs.function(ty);
@@ -2976,6 +2981,26 @@ impl Emitter<'_> {
                         s.call(self.helper_index(Helper::ReExec));
                         return Ok(true);
                     }
+                    Intrinsic::MethodCheck { site, code } => {
+                        let (o, key) = (self.scratch_js, self.scratch_val);
+                        s.local_set(key).local_set(o);
+                        s.i32_const(*site as i32).local_get(o);
+                        s.local_get(key).ref_cast_non_null(runtime::string());
+                        let slot = runtime::Cx::code_slot(self, self.func_base + code.0);
+                        s.i32_const(slot);
+                        s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::MethodCheck))));
+                        return Ok(true);
+                    }
+                    Intrinsic::MethodDead(k) => {
+                        s.global_get(runtime::G_MDEAD).ref_as_non_null().i32_const(*k as i32);
+                        s.array_get(runtime::T_I32S);
+                        return Ok(true);
+                    }
+                    Intrinsic::MethodFn(k) => {
+                        s.i32_const(*k as i32);
+                        s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::MethodFn))));
+                        return Ok(true);
+                    }
                     Intrinsic::RandomSeed => {
                         s.call(self.imports.get(host::Import::InsecureRandom))
                             .i32_wrap_i64();
@@ -3055,7 +3080,11 @@ impl Emitter<'_> {
                     _ => {}
                 }
                 let h = match op {
-                    Intrinsic::RegexId(_) | Intrinsic::ReExec => unreachable!("above"),
+                    Intrinsic::RegexId(_)
+                    | Intrinsic::ReExec
+                    | Intrinsic::MethodCheck { .. }
+                    | Intrinsic::MethodDead(_)
+                    | Intrinsic::MethodFn(_) => unreachable!("above"),
                     Intrinsic::JsAdd => H::JsAdd,
                     Intrinsic::ToNumeric => H::Big(bigint::Helper::ToNumeric),
                     Intrinsic::Numeric(n) => H::Big(bigint::Helper::Numeric(*n)),

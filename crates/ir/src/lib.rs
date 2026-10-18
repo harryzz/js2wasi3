@@ -133,6 +133,8 @@ pub struct Module {
     pub gc_reserve_mib: u32,
     /// `build --count` (T112): fast paths count their hits and misses, printed to stderr at exit.
     pub count: bool,
+    /// T132: method-call cache sites ([`Intrinsic::MethodCheck`]); the start function sizes their flags for it.
+    pub method_sites: u32,
     /// T114: regex literals compiled at build time to programs for the runtime's regex interpreter
     /// (`Intrinsic::RegexId`, `Intrinsic::ReExec`; format in `lower/src/regex.rs`); a literal outside the
     /// subset isn't listed and runs in the prelude's VM.
@@ -863,6 +865,13 @@ pub enum Intrinsic {
     /// T114: the program [`Module::regexes`]`[k]` as a string constant, `null` with [`Module::regex_vm`]: the
     /// third argument of `$$RegExpCreate`.
     RegexId(u32),
+    /// T132: is `o[key]` (args: o, key: a string) the function whose code is `code`, by method-call site `site`'s
+    /// cache (refilled from `o`'s prototype chain on a miss)? `Bool`.
+    MethodCheck { site: u32, code: FuncId },
+    /// T132: the function in method-call site `k`'s cache (no args).
+    MethodFn(u32),
+    /// T132: has method-call site `k` given up (its receivers don't share a keys array)? Inline, no call. `Bool`.
+    MethodDead(u32),
     /// T76: write QuoteJSONString of string `s` into string `buf` at `i` (args: buf, i: `i32`, s);
     /// the index after it (`i32`). `buf` must have room for `6 * len + 2` units.
     JsonQuoteInto,
@@ -1489,6 +1498,9 @@ impl Intrinsic {
             Intrinsic::ReAltsFind => (&[JsVal, JsVal, JsVal, I32, I32, JsVal, JsVal, JsVal], Some(I32)),
             Intrinsic::ReExec => (&[JsVal, JsVal, I32, I32, JsVal], Some(I32)),
             Intrinsic::RegexId(_) => (&[], Some(JsVal)),
+            Intrinsic::MethodCheck { .. } => (&[JsVal, JsVal], Some(Bool)),
+            Intrinsic::MethodFn(_) => (&[], Some(JsVal)),
+            Intrinsic::MethodDead(_) => (&[], Some(Bool)),
             Intrinsic::JsonQuoteInto => (&[JsVal, I32, JsVal], Some(I32)),
             Intrinsic::JsonScan => (&[JsVal, I32, I32], Some(I32)),
             Intrinsic::StringLength => (&[JsVal], Some(F64)),
@@ -1647,6 +1659,9 @@ impl Intrinsic {
             Intrinsic::ReAltsFind => "re_alts_find",
             Intrinsic::ReExec => "re_exec",
             Intrinsic::RegexId(_) => "regex_id",
+            Intrinsic::MethodCheck { .. } => "method_check",
+            Intrinsic::MethodFn(_) => "method_fn",
+            Intrinsic::MethodDead(_) => "method_dead",
             Intrinsic::JsonQuoteInto => "json_quote_into",
             Intrinsic::JsonScan => "json_scan",
             Intrinsic::StringLength => "string_length",

@@ -233,8 +233,14 @@ pub const G_TLEN: u32 = G_HASH_VAL + 1;
 pub const G_COUNTS: u32 = G_TLEN + 1;
 /// `(mut (ref null $i32s))` (T114): the regex interpreter's backtrack stack (`regex.rs`), kept between calls.
 pub const G_RE_STACK: u32 = G_COUNTS + 1;
+/// `(mut (ref null $vals))` (T132): per method-call site its cache, a `$vals [keys, proto, holder, slot, holder keys,
+/// key, function, epoch, fills, hit]` (`object::Helper::MethodFill`), grown on demand; null: none filled yet.
+pub const G_MCACHE: u32 = G_RE_STACK + 1;
+/// `(mut (ref null $i32s))` (T132): per method-call site 1 once it has given up (tested inline by
+/// `Intrinsic::MethodDead`); made by the start function, `Module::method_sites` long.
+pub const G_MDEAD: u32 = G_MCACHE + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_RE_STACK + 1;
+pub const GLOBALS: u32 = G_MDEAD + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -606,6 +612,10 @@ impl JsTest for InstructionSink<'_> {
 /// T112: the fast-path events a `build --count` module counts, in `G_COUNTS` order; printed at exit as
 /// `count <name> <n>`.
 pub const COUNTS: &[&str] = &[
+    "method.check",
+    "method.miss",
+    "method.given_up",
+    "method.filled",
     "get_named.guess_hit",
     "get_named.own",
     "get_named.proto_or_absent",
@@ -1303,6 +1313,23 @@ pub fn globals(
         &ConstExpr::ref_null(HeapType::Concrete(T_NUMS)),
     );
     // T114: the regex backtrack stack.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_I32S),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_I32S)),
+    );
+    // T132: the method-call caches and their given-up flags.
+    globals.global(
+        GlobalType {
+            val_type: rt(true, T_VALS),
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::ref_null(HeapType::Concrete(T_VALS)),
+    );
     globals.global(
         GlobalType {
             val_type: rt(true, T_I32S),

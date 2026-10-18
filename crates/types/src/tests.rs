@@ -27,6 +27,18 @@ fn constructor_fields_and_methods() {
 }
 
 #[test]
+fn method_targets() {
+    let src = "function V(x) { this.x = x; }\n\
+               V.prototype.get = function () { return this.x; };\n\
+               var v = new V(1);\n\
+               v.get();";
+    let r = analyze_source(src).unwrap();
+    let m = src.find("v.get").unwrap() as u32;
+    let f = src.find("function () {").unwrap() as u32;
+    assert_eq!(r.methods.get(&(m, m + 5)), Some(&f));
+}
+
+#[test]
 fn replaced_prototype_has_no_default() {
     let src = "function C() { this.a = 1; }\n\
                var o = new C();\n\

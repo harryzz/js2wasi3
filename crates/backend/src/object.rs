@@ -492,6 +492,17 @@ pub enum Helper {
     /// another `length`? If so, flag it (`mark_chain`, so a `length` added later bumps `G_EPOCH`) and cache `p`
     /// with the current `G_EPOCH` in `G_TLEN`.
     TypedLengthFill,
+    /// `(site: i32, o: jsval, k: (ref $string), code: i32) -> i32` (T132): fill site `site`'s cache when `o` (a
+    /// `$plain`) has no `k` in its keys array and `k` on its chain is a data property of a `$plain` holding a `$function` whose code slot is `code`
+    /// (the chain is flagged [`IS_PROTO`]); 0 otherwise.
+    MethodFill,
+    /// `(site: i32) -> jsval` (T132): the function in site `site`'s cache.
+    MethodFn,
+    /// `(site: i32, o: jsval, k: (ref $string), code: i32) -> i32` (T132): is site `site`'s cache (`G_MCACHE[site]`)
+    /// valid for receiver `o`: a `$plain` (exact tests only: a non-final type's test is wasmtime's `is_subtype`
+    /// libcall) with the cached keys array and prototype, `G_EPOCH` unchanged, and the holder's entry still the cached
+    /// key and function? Else [`Helper::MethodFill`]; a site that gave up stays generic.
+    MethodCheck,
     /// `(v) -> jsval`: a RegExp's data; `null` for `RegExp.prototype`; `undefined` otherwise.
     RegExpData,
     /// `(data) -> jsval`: a new Date holding `data` (T26).
@@ -631,6 +642,9 @@ impl Helper {
             Helper::WatchMark => "watch_mark",
             Helper::TypedLengthSnapshot => "typed_length_snapshot",
             Helper::TypedLengthFill => "typed_length_fill",
+            Helper::MethodFill => "method_fill",
+            Helper::MethodFn => "method_fn",
+            Helper::MethodCheck => "method_check",
             Helper::RegExpData => "regexp_data",
             Helper::DateNew => "date_new",
             Helper::ModuleNew => "module_new",
@@ -722,6 +736,9 @@ impl Helper {
             Helper::WatchMark => (vec![o, s, I32], vec![]),
             Helper::TypedLengthSnapshot => (vec![o], vec![]),
             Helper::TypedLengthFill => (vec![on], vec![I32]),
+            Helper::MethodFill => (vec![I32, v, s, I32], vec![I32]),
+            Helper::MethodFn => (vec![I32], vec![v]),
+            Helper::MethodCheck => (vec![I32, v, s, I32], vec![I32]),
             Helper::MakeArguments
             | Helper::RegExpNew
             | Helper::RegExpData
@@ -840,6 +857,9 @@ impl Helper {
             Helper::WatchMark => watch_mark(cx),
             Helper::TypedLengthSnapshot => typed_length_snapshot(cx),
             Helper::TypedLengthFill => typed_length_fill(cx),
+            Helper::MethodFill => method_fill(cx),
+            Helper::MethodFn => method_fn(),
+            Helper::MethodCheck => method_check(cx),
             Helper::RegExpData => regexp_data(cx),
             Helper::DateNew => state_new(cx, CLASS_DATE, Builtin::Date),
             Helper::StackNew(false) => state_new(cx, CLASS_STACK, Builtin::DisposableStack),
@@ -4940,6 +4960,316 @@ fn typed_length_fill(cx: &mut dyn Cx) -> Function {
         .ref_i31()
         .array_set(T_VALS);
     s.i32_const(1);
+    s.end();
+    f
+}
+
+/// The entry of method-call site `SITE` (local 0) in `G_MCACHE` as a `(ref $vals)`, or `ret` (pushed, then
+/// returned) when there is none.
+fn method_entry(s: &mut InstructionSink, c: u32, ret: impl Fn(&mut InstructionSink)) {
+    s.global_get(runtime::G_MCACHE).local_tee(c).ref_is_null();
+    s.if_(BlockType::Empty);
+    ret(s);
+    s.return_();
+    s.end();
+    s.local_get(0).local_get(c).array_len().i32_ge_u();
+    s.if_(BlockType::Empty);
+    ret(s);
+    s.return_();
+    s.end();
+    s.local_get(c).local_get(0).array_get(T_VALS).local_tee(c + 1).ref_is_null();
+    s.if_(BlockType::Empty);
+    ret(s);
+    s.return_();
+    s.end();
+}
+
+/// `$method_check(site, o, k, code) -> i32` (T132), see [`Helper::MethodCheck`].
+fn method_check(cx: &mut dyn Cx) -> Function {
+    let fill = h(cx, Helper::MethodFill);
+    let on = cx.counting();
+    const SITE: u32 = 0;
+    const O: u32 = 1;
+    const C: u32 = 4;
+    const EN: u32 = 5;
+    const OB: u32 = 6;
+    const H: u32 = 7;
+    const SL: u32 = 8;
+    const VS: u32 = 9;
+    let mut f = Function::new([
+        (1, rt(true, T_VALS)),
+        (1, rt(true, T_VALS)),
+        (1, rt(true, T_OBJECT)),
+        (1, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, rt(true, T_VALS)),
+    ]);
+    let mut s = f.instructions();
+    runtime::count(&mut s, on, "method.check");
+    // the entry, or straight to the fill
+    s.block(BlockType::Empty); // $miss
+    s.global_get(runtime::G_MCACHE).local_tee(C).ref_is_null().br_if(0);
+    s.local_get(SITE).local_get(C).ref_as_non_null().array_len().i32_ge_u().br_if(0);
+    s.local_get(C).ref_as_non_null().local_get(SITE).array_get(T_VALS);
+    s.ref_cast_nullable(HeapType::Concrete(T_VALS)).local_tee(EN).ref_is_null().br_if(0);
+    // the receiver: a `$plain` with the cached keys array and prototype, `G_EPOCH` unchanged, and the holder's
+    // entry still the cached key and function
+    s.local_get(O).ref_test_non_null(HeapType::Concrete(runtime::T_PLAIN)).i32_eqz().br_if(0);
+    s.local_get(O).ref_cast_non_null(HeapType::Concrete(runtime::T_PLAIN)).local_set(OB);
+    let field = |s: &mut InstructionSink, k: i32| {
+        s.local_get(EN).ref_as_non_null().i32_const(k).array_get(T_VALS);
+    };
+    let miss_unless_eq = |s: &mut InstructionSink| {
+        s.ref_eq().i32_eqz().br_if(0);
+    };
+    s.local_get(OB).ref_as_non_null().struct_get(T_OBJECT, F_KEYS);
+    field(&mut s, 0);
+    miss_unless_eq(&mut s);
+    s.local_get(OB).ref_as_non_null().struct_get(T_OBJECT, F_PROTO);
+    field(&mut s, 1);
+    miss_unless_eq(&mut s);
+    s.global_get(runtime::G_EPOCH).ref_i31();
+    field(&mut s, 7);
+    miss_unless_eq(&mut s);
+    field(&mut s, 2);
+    s.ref_cast_non_null(HeapType::Concrete(runtime::T_PLAIN)).local_set(H);
+    s.local_get(H).ref_as_non_null().struct_get(T_OBJECT, F_KEYS);
+    field(&mut s, 4);
+    miss_unless_eq(&mut s);
+    field(&mut s, 3);
+    s.ref_cast_non_null(HeapType::I31).i31_get_s().local_set(SL);
+    s.local_get(H)
+        .ref_as_non_null()
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(SL)
+        .array_get(runtime::T_KEYS);
+    field(&mut s, 5);
+    miss_unless_eq(&mut s);
+    s.local_get(H).ref_as_non_null().struct_get(T_OBJECT, F_VALS).local_tee(VS);
+    s.array_len().local_get(SL).i32_le_u().br_if(0);
+    s.local_get(VS).ref_as_non_null().local_get(SL).array_get(T_VALS);
+    field(&mut s, 6);
+    miss_unless_eq(&mut s);
+    // a hit: noted (a given-up site missing twice without a hit in between stops calling here)
+    field(&mut s, 9);
+    s.ref_is_null();
+    s.if_(BlockType::Empty);
+    s.local_get(EN).ref_as_non_null().i32_const(9).i32_const(1).ref_i31().array_set(T_VALS);
+    s.end();
+    s.i32_const(1).return_();
+    s.end();
+    // a miss at a site that gave up: generic; the second in a row without a hit flags the site
+    s.local_get(EN).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    field(&mut s, 8);
+    s.ref_cast_non_null(HeapType::I31).i31_get_s().i32_const(MAX_FILLS).i32_ge_s();
+    s.if_(BlockType::Empty);
+    field(&mut s, 9);
+    s.ref_is_null();
+    s.if_(BlockType::Empty);
+    s.global_get(runtime::G_MDEAD).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(SITE).global_get(runtime::G_MDEAD).ref_as_non_null().array_len().i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.global_get(runtime::G_MDEAD).ref_as_non_null().local_get(SITE).i32_const(1).array_set(runtime::T_I32S);
+    s.end();
+    s.end();
+    s.else_();
+    s.local_get(EN).ref_as_non_null().i32_const(9);
+    s.ref_null(HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Eq });
+    s.array_set(T_VALS);
+    s.end();
+    s.i32_const(0).return_();
+    s.end();
+    s.end();
+    s.local_get(0).local_get(1).local_get(2).local_get(3).call(fill);
+    s.end();
+    f
+}
+
+/// `$method_fn(site) -> jsval` (T132), see [`Helper::MethodFn`].
+fn method_fn() -> Function {
+    const C: u32 = 1;
+    let mut f = Function::new([(1, rt(true, T_VALS)), (1, jsval())]);
+    let mut s = f.instructions();
+    method_entry(&mut s, C, |s| {
+        s.global_get(G_UNDEFINED);
+    });
+    s.local_get(C + 1)
+        .ref_cast_non_null(HeapType::Concrete(T_VALS))
+        .i32_const(6)
+        .array_get(T_VALS);
+    s.end();
+    f
+}
+
+/// T132: refills after which a method-call site stays on the generic path.
+const MAX_FILLS: i32 = 8;
+
+/// `$method_fill(site, o, k, code) -> i32` (T132), see [`Helper::MethodFill`].
+fn method_fill(cx: &mut dyn Cx) -> Function {
+    let str_eq = rh(cx, runtime::Helper::StrEq);
+    let hash = h(cx, Helper::Hash);
+    let holder = h(cx, Helper::Holder);
+    let find = h(cx, Helper::FindOwnNamed);
+    let mark = h(cx, Helper::MarkChain);
+    const SITE: u32 = 0;
+    const O: u32 = 1;
+    const K: u32 = 2;
+    const CODE: u32 = 3;
+    const OB: u32 = 4;
+    const KS: u32 = 5;
+    const I: u32 = 6;
+    const N: u32 = 7;
+    const H: u32 = 8;
+    const EI: u32 = 9;
+    const V: u32 = 10;
+    const C: u32 = 11;
+    const NEW: u32 = 12;
+    const FILLS: u32 = 13;
+    let mut f = Function::new([
+        (1, rt(true, T_OBJECT)),
+        (1, rt(true, runtime::T_KEYS)),
+        (2, ValType::I32),
+        (1, rt(true, T_OBJECT)),
+        (1, ValType::I32),
+        (1, jsval()),
+        (2, rt(true, T_VALS)),
+        (1, ValType::I32),
+    ]);
+    let on = cx.counting();
+    let mut s = f.instructions();
+    runtime::count(&mut s, on, "method.miss");
+    // a site refilled MAX_FILLS times stays generic (its receivers don't share one keys array)
+    s.global_get(runtime::G_MCACHE).local_tee(C).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(SITE).local_get(C).ref_as_non_null().array_len().i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(C).ref_as_non_null().local_get(SITE).array_get(T_VALS).local_tee(V).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(V).ref_cast_non_null(HeapType::Concrete(T_VALS)).i32_const(8).array_get(T_VALS);
+    s.ref_cast_non_null(HeapType::I31).i31_get_s().local_tee(FILLS);
+    s.i32_const(MAX_FILLS).i32_ge_s();
+    s.if_(BlockType::Empty);
+    runtime::count(&mut s, on, "method.given_up");
+    s.i32_const(0).return_();
+    s.end();
+    s.end();
+    s.end();
+    s.end();
+    // $fail: a failed fill counts towards MAX_FILLS too
+    s.block(BlockType::Empty);
+    s.local_get(O).ref_test_non_null(HeapType::Concrete(runtime::T_PLAIN)).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.br(1);
+    s.end();
+    s.local_get(O).ref_cast_non_null(HeapType::Concrete(runtime::T_PLAIN)).local_set(OB);
+    // `k` in none of the keys array's entries (objects sharing it may have more of them)
+    s.local_get(OB).ref_as_non_null().struct_get(T_OBJECT, F_KEYS).local_tee(KS);
+    s.array_len().local_set(N);
+    s.block(BlockType::Empty).loop_(BlockType::Empty);
+    s.local_get(I).local_get(N).i32_ge_u().br_if(1);
+    s.local_get(KS).ref_as_non_null().local_get(I).array_get(runtime::T_KEYS).ref_is_null().i32_eqz();
+    s.if_(BlockType::Empty);
+    s.local_get(KS).ref_as_non_null().local_get(I).array_get(runtime::T_KEYS).ref_as_non_null();
+    s.local_get(K).call(str_eq);
+    s.if_(BlockType::Empty);
+    s.br(4);
+    s.end();
+    s.end();
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.br(0).end().end();
+    // the holder on the chain, a data property holding a function with this code
+    s.local_get(OB).ref_as_non_null().struct_get(T_OBJECT, F_PROTO);
+    s.local_get(K).call(holder).local_tee(H);
+    s.ref_test_non_null(HeapType::Concrete(runtime::T_PLAIN)).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.br(1);
+    s.end();
+    s.local_get(H).ref_as_non_null().local_get(K);
+    s.local_get(K).call(hash);
+    s.call(find).local_tee(EI);
+    s.i32_const(0).i32_lt_s();
+    s.if_(BlockType::Empty);
+    s.br(1);
+    s.end();
+    s.local_get(H)
+        .ref_as_non_null()
+        .struct_get(T_OBJECT, F_VALS)
+        .local_get(EI)
+        .array_get(T_VALS)
+        .local_tee(V);
+    s.ref_test_non_null(HeapType::Concrete(runtime::T_FUNCTION)).i32_eqz();
+    s.if_(BlockType::Empty);
+    s.br(1);
+    s.end();
+    s.local_get(V)
+        .ref_cast_non_null(HeapType::Concrete(runtime::T_FUNCTION))
+        .struct_get(runtime::T_FUNCTION, func::F_CODE)
+        .local_get(CODE)
+        .i32_ne();
+    s.if_(BlockType::Empty);
+    s.br(1);
+    s.end();
+    s.local_get(OB).ref_as_non_null().struct_get(T_OBJECT, F_PROTO).call(mark);
+    let grow = |s: &mut InstructionSink| {
+        // grow G_MCACHE past `site`: max(2 n, site + 1, 16)
+        s.global_get(runtime::G_MCACHE).local_tee(C).ref_is_null();
+        s.if_(BlockType::Result(ValType::I32));
+        s.i32_const(0);
+        s.else_();
+        s.local_get(C).array_len();
+        s.end();
+        s.local_tee(N).local_get(SITE).i32_le_u();
+        s.if_(BlockType::Empty);
+        s.local_get(N).i32_const(1).i32_shl().local_tee(N);
+        s.local_get(SITE).i32_const(1).i32_add();
+        s.local_get(N).local_get(SITE).i32_const(1).i32_add().i32_gt_u();
+        s.select().local_tee(N);
+        s.i32_const(16);
+        s.local_get(N).i32_const(16).i32_gt_u();
+        s.select();
+        s.array_new_default(T_VALS).local_set(NEW);
+        s.local_get(C).ref_is_null().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(NEW).ref_as_non_null().i32_const(0);
+        s.local_get(C).ref_as_non_null().i32_const(0);
+        s.local_get(C).ref_as_non_null().array_len();
+        s.array_copy(T_VALS, T_VALS);
+        s.end();
+        s.local_get(NEW).local_tee(C).global_set(runtime::G_MCACHE);
+        s.end();
+    };
+    grow(&mut s);
+    s.local_get(C).ref_as_non_null().local_get(SITE);
+    s.local_get(OB).ref_as_non_null().struct_get(T_OBJECT, F_KEYS);
+    s.local_get(OB).ref_as_non_null().struct_get(T_OBJECT, F_PROTO);
+    s.local_get(H);
+    s.local_get(EI).ref_i31();
+    s.local_get(H).ref_as_non_null().struct_get(T_OBJECT, F_KEYS);
+    s.local_get(H)
+        .ref_as_non_null()
+        .struct_get(T_OBJECT, F_KEYS)
+        .local_get(EI)
+        .array_get(runtime::T_KEYS);
+    s.local_get(V);
+    s.global_get(runtime::G_EPOCH).ref_i31();
+    s.local_get(FILLS).i32_const(1).i32_add().ref_i31();
+    s.ref_null(HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Eq });
+    s.array_new_fixed(T_VALS, 10);
+    s.array_set(T_VALS);
+    runtime::count(&mut s, on, "method.filled");
+    s.i32_const(1).return_();
+    s.end();
+    // a failure: an entry that matches nothing, with the count
+    grow(&mut s);
+    s.local_get(C).ref_as_non_null().local_get(SITE);
+    s.i32_const(10).array_new_default(T_VALS).local_tee(NEW);
+    s.array_set(T_VALS);
+    s.local_get(NEW).ref_as_non_null().i32_const(8);
+    s.local_get(FILLS).i32_const(1).i32_add().ref_i31();
+    s.array_set(T_VALS);
+    s.i32_const(0);
     s.end();
     f
 }

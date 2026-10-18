@@ -202,6 +202,11 @@ pub fn lower_with(
     let mut facts = Facts { string_to_number: true, ..Facts::default() };
     let mut an = closures::analyze(&program.semantic);
     (an.definite, an.maybe_undefined) = definite::analyze(&program.semantic, &an);
+    // T132: the method-call sites the type analysis (T131) gives one target function (none if it fails).
+    let methods = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        js2wasi3_types::analyze(program.ast, &program.semantic, program.user_end).methods
+    }))
+    .unwrap_or_default();
     loop {
         let mut extra = Vec::new();
         if facts.string_to_number {
@@ -282,6 +287,9 @@ pub fn lower_with(
             lowered: HashSet::new(),
             hidden: HashMap::new(),
             fn_scope: HashMap::new(),
+            methods: methods.clone(),
+            fn_by_span: HashMap::new(),
+            method_sites: 0,
             layouts: HashMap::new(),
             fn_source: HashMap::new(),
             rest_param: HashSet::new(),
@@ -301,6 +309,7 @@ pub fn lower_with(
         return if l.diags.is_empty() {
             l.wrap_exports();
             // Generators become resumable frames (T18).
+            l.module.method_sites = l.method_sites;
             ir::suspend::lower_generators(&mut l.module);
             Ok(l.module)
         } else {
@@ -449,6 +458,13 @@ struct Lowerer<'p, 'a> {
     /// Hidden leading params of each JS function.
     hidden: HashMap<FuncId, Hidden>,
     fn_scope: HashMap<FuncId, ScopeId>,
+    /// T132: `o.m(…)` sites (the member's span) with their one target function (its node's start), from the type
+    /// analysis.
+    methods: HashMap<(u32, u32), u32>,
+    /// T132: each function's id by its node's start.
+    fn_by_span: HashMap<u32, FuncId>,
+    /// T132: method-call cache sites given out so far.
+    method_sites: u32,
     /// T109: constructors' layouts by scope (`None`: none), see [`Self::layout`].
     layouts: HashMap<ScopeId, Option<u32>>,
     /// The source span of each function (T25: `Function.prototype.toString`).
@@ -2516,6 +2532,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             self.module.add_function(func);
             self.hidden.insert(id, hidden);
             self.fn_scope.insert(id, scope);
+            self.fn_by_span.insert(f.span().start, id);
             // `toString` text: a method's from its key (without `static`), an accessor's from
             // `get`/`set`.
             let source = match nodes.parent_kind(node.id()) {
@@ -5349,6 +5366,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ));
         }
         if let Some(m) = callee.as_member_expression()
+            && let MemberExpression::StaticMemberExpression(sm) = m
+            && self.builtin_prototype(m).is_none()
+            && let Some(func) = self.method_target(sm.span, &c.arguments)
+        {
+            return self.guarded_method_call(cx, m, func, c);
+        }
+        if let Some(m) = callee.as_member_expression()
             && !matches!(m, MemberExpression::PrivateFieldExpression(_))
             && self.builtin_prototype(m).is_none()
         {
@@ -5381,6 +5405,85 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 this: Box::new(Expr::undefined()),
                 args,
                 what: self.callee_text(&c.callee),
+            },
+            Call::Value,
+        ))
+    }
+
+    /// T132: the function `o.m(…)` at `span` calls, when the type analysis found exactly one and a direct call of
+    /// it can stand in for the call through the value: a plain function or method (not a generator, async function
+    /// or class), arguments without spreads or function/class expressions (they're lowered twice).
+    fn method_target(&self, span: Span, arguments: &'a [Argument<'a>]) -> Option<FuncId> {
+        let start = *self.methods.get(&(span.start, span.end))?;
+        let func = *self.fn_by_span.get(&start)?;
+        let f = self.module.function(func);
+        if f.flags.is_async || f.flags.is_generator || self.hidden.get(&func)?.new_target {
+            return None;
+        }
+        struct Nested(bool);
+        impl<'a> oxc_ast_visit::Visit<'a> for Nested {
+            fn visit_function(&mut self, _: &Function<'a>, _: oxc_syntax::scope::ScopeFlags) {
+                self.0 = true;
+            }
+            fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'a>) {
+                self.0 = true;
+            }
+            fn visit_class(&mut self, _: &Class<'a>) {
+                self.0 = true;
+            }
+        }
+        let mut n = Nested(false);
+        for a in arguments {
+            match a.as_expression() {
+                Some(e) => oxc_ast_visit::Visit::visit_expression(&mut n, e),
+                None => return None,
+            }
+        }
+        (!n.0).then_some(func)
+    }
+
+    /// T132: `o.m(…)` at a site with one target `func`: if the site's cache says `o`'s `m` is still `func` (or a
+    /// fill finds it so), a direct call of `func` with `this` = `o`; otherwise the call through the value.
+    fn guarded_method_call(
+        &mut self,
+        cx: &mut FnCx,
+        m: &'a MemberExpression<'a>,
+        func: FuncId,
+        c: &'a CallExpression<'a>,
+    ) -> R<(Expr, Call)> {
+        let (obj, key) = self.member(cx, m)?;
+        let t = cx.func.add_local("this", Type::JsVal);
+        let site = self.method_sites;
+        self.method_sites += 1;
+        let code = self.adapter(func);
+        // a site that gave up costs one inline test, no call
+        let hit = Expr::Cond {
+            cond: Box::new(Expr::intrinsic(Intrinsic::MethodDead(site), vec![])),
+            then: Box::new(Expr::bool(false)),
+            els: Box::new(Expr::intrinsic(Intrinsic::MethodCheck { site, code }, vec![Expr::Local(t), key.clone()])),
+            ty: Type::Bool,
+        };
+        let self_obj = self.hidden[&func]
+            .self_
+            .then(|| Expr::intrinsic(Intrinsic::MethodFn(site), vec![]));
+        let (call, kind) = self.direct_call_this(cx, func, self_obj, Some(Expr::Local(t)), &c.arguments)?;
+        let direct = jsval_of(self.call_result(call, kind)?);
+        let args = self.value_args(cx, &c.arguments)?;
+        let generic = Expr::CallRef {
+            callee: Box::new(Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(t), key])),
+            this: Box::new(Expr::Local(t)),
+            args,
+            what: self.callee_text(&c.callee),
+        };
+        Ok((
+            Expr::Seq {
+                body: vec![Stmt::Set(t, obj)],
+                value: Box::new(Expr::Cond {
+                    cond: Box::new(hit),
+                    then: Box::new(direct),
+                    els: Box::new(generic),
+                    ty: Type::JsVal,
+                }),
             },
             Call::Value,
         ))

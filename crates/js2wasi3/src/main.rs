@@ -24,7 +24,12 @@ enum Cmd {
     /// Lower a module to IR and print it.
     Ir { file: String },
     /// T131: the whole-program type analysis; one line per site: offset, kind, operand types.
-    Types { file: String },
+    Types {
+        file: String,
+        /// Analyse the program as the compiler lowers it (prelude appended, modules linked).
+        #[arg(long)]
+        lowered: bool,
+    },
     /// Compile an entry module to a component.
     Build {
         entry: String,
@@ -514,16 +519,24 @@ fn main() -> anyhow::Result<()> {
                 js2wasi3_lower::parse_entry(&alloc, &file, &source, &Default::default(), &mut frontend::Fs)?;
             print!("{}", js2wasi3_lower::lower(&program)?);
         }
-        Cmd::Types { file } => {
+        Cmd::Types { file, lowered } => {
             let source = read(&file)?;
             let t = std::time::Instant::now();
-            let r = js2wasi3_types::analyze_source(&source).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+            let r = if lowered {
+                let program =
+                    js2wasi3_lower::parse_entry(&alloc, &file, &source, &Default::default(), &mut frontend::Fs)?;
+                js2wasi3_types::analyze(program.ast, &program.semantic, program.user_end)
+            } else {
+                js2wasi3_types::analyze_source(&source).map_err(|e| anyhow::anyhow!("{file}: {e}"))?
+            };
             eprintln!(
-                "types: {} sites, {} rounds, {} instances, {} allocations, {} ms",
+                "types: {} sites, {} one-target method sites, {} rounds, {} instances, {} allocations, {} steps, {} ms",
                 r.sites.len(),
+                r.methods.len(),
                 r.rounds,
                 r.instances,
                 r.allocs,
+                r.steps,
                 t.elapsed().as_millis()
             );
             for s in r.sites {

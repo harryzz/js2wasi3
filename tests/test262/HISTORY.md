@@ -3,6 +3,12 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-18: T132 direct guarded method calls (full run)
+
+- Compiler (`main` at e2ab243 + T132, uncommitted at the run): `o.m(…)` sites with one target (type analysis, T131)
+  call it directly when a per-site cache confirms the method. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t132.log`): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-17: T128 learned layouts, adds over prototype defaults (full run)
 
 - Compiler (`main` at 2f0747b + T128, uncommitted at the run): ordinary functions learn an object layout at run

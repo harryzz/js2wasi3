@@ -81,6 +81,11 @@ enum FnNode<'a> {
 }
 
 const ROOT: u32 = u32::MAX;
+/// Objects a stored set holds before it is widened to unknown ([`add_state`]).
+const MAX_OBJECTS: usize = 32;
+/// The work budget: expressions evaluated over all rounds. Past it the analysis gives up (no results), so a big
+/// program (a whole `node_modules` graph) doesn't stall the build; deterministic, unlike a time limit.
+const MAX_STEPS: u64 = 2_000_000;
 /// At most this many per-call-site copies of one function; further call sites share one.
 const MAX_COPIES: u32 = 64;
 
@@ -98,9 +103,14 @@ pub struct Site {
 pub struct Result {
     /// (offset, category) → (operand tags, second operand tags for binary operators)
     pub sites: Vec<Site>,
+    /// `o.m(…)` sites (the member's start, end) that call exactly one function (its node's start) on receivers of
+    /// one group: where a guarded direct call pays.
+    pub methods: HashMap<(u32, u32), u32>,
     pub rounds: u32,
     pub instances: usize,
     pub allocs: usize,
+    /// Expressions evaluated (over [`MAX_STEPS`]: the analysis gave up, no results).
+    pub steps: u64,
 }
 
 struct A<'a, 's> {
@@ -124,6 +134,8 @@ struct A<'a, 's> {
     ret: HashMap<u32, Set>,
     args_pos: HashMap<u32, Vec<Set>>,
     sites: HashMap<(u32, u32, &'static str), (Set, Set)>,
+    /// method-call sites (member span): the functions they call, and whether anything else can be called
+    targets: HashMap<(u32, u32), (BTreeSet<u32>, bool)>,
     /// per-call-site copies made of each function (at most [`MAX_COPIES`])
     copies: HashMap<u32, u32>,
     /// functions whose `prototype` property the program replaces (no default prototype object)
@@ -131,6 +143,8 @@ struct A<'a, 's> {
     /// constructors that always return an object (found by the first run)
     returns_obj: std::collections::HashSet<u32>,
     rounds: u32,
+    /// expressions evaluated so far (the work budget, [`MAX_STEPS`])
+    steps: u64,
     /// variables narrowed by an enclosing `typeof x === "…"` test (innermost last)
     narrow: Vec<((SymbolId, u32), String, bool)>,
     cur: u32,
@@ -151,10 +165,26 @@ fn add(dst: &mut Set, src: &Set, changed: &mut bool) {
     }
 }
 
+/// [`add`] into stored state (variables, properties, elements, `this`, returns), widened: past [`MAX_OBJECTS`]
+/// objects a set holds unknown instead (megamorphic: no fast path would pay, and big sets make the analysis slow).
+fn add_state(dst: &mut Set, src: &Set, changed: &mut bool) {
+    if dst.contains(&AV::Unknown) && src.iter().all(|v| matches!(v, AV::Obj(_)) || dst.contains(v)) {
+        return;
+    }
+    add(dst, src, changed);
+    if dst.iter().filter(|v| matches!(v, AV::Obj(_))).count() > MAX_OBJECTS {
+        dst.retain(|v| !matches!(v, AV::Obj(_)));
+        dst.insert(AV::Unknown);
+    }
+}
+
 pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result {
     // A first run finds the functions whose `prototype` the program replaces; the real run gives only the others
     // their default prototype object (else objects made before the replacement is seen keep it for ever).
     let first = run(program, semantic, user_end, (Default::default(), Default::default()));
+    if first.steps > MAX_STEPS {
+        return Result { sites: Vec::new(), methods: HashMap::new(), rounds: first.rounds, instances: first.insts.len(), allocs: first.allocs.len(), steps: first.steps };
+    }
     let mut replaced = std::collections::HashSet::new();
     for ((o, k), v) in &first.props {
         if k == "prototype" && !v.is_empty() && let Kind::Fn(f) = first.allocs[*o as usize].kind {
@@ -172,6 +202,9 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
     }
     let returns_obj = returns_obj.difference(&returns_other).copied().collect();
     let a = run(program, semantic, user_end, (replaced, returns_obj));
+    if a.steps > MAX_STEPS {
+        return Result { sites: Vec::new(), methods: HashMap::new(), rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps };
+    }
     let mut sites: Vec<_> = a
         .sites
         .iter()
@@ -184,7 +217,14 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
         })
         .collect();
     sites.sort_by_key(|s| (s.offset, s.end, s.cat));
-    Result { sites, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len() }
+    let mut methods = HashMap::new();
+    for (&(start, end), (fns, other)) in &a.targets {
+        let groups = a.sites.get(&(start, end, "method")).map_or(99, |(l, _)| a.groups(l));
+        if !*other && fns.len() == 1 && groups == 1 {
+            methods.insert((start, end), *fns.iter().next().unwrap());
+        }
+    }
+    Result { sites, methods, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps }
 }
 
 fn run<'a, 's>(
@@ -197,6 +237,7 @@ fn run<'a, 's>(
         replaced,
         returns_obj,
         rounds: 0,
+        steps: 0,
         narrow: Vec::new(),
         scoping: semantic.scoping(),
         user_end,
@@ -219,6 +260,7 @@ fn run<'a, 's>(
         args_pos: HashMap::new(),
         sites: HashMap::new(),
         copies: HashMap::new(),
+        targets: HashMap::new(),
         cur: 0,
         changed: false,
     };
@@ -269,7 +311,7 @@ fn run<'a, 's>(
             a.run_inst(i as u32);
             i += 1;
         }
-        if !a.changed || rounds > 200 {
+        if !a.changed || rounds > 200 || a.steps > MAX_STEPS {
             break;
         }
     }
@@ -403,28 +445,14 @@ impl<'a, 's> A<'a, 's> {
         }
     }
 
-    /// What the compiler would tell apart (one struct type each): objects by allocation for literals and
-    /// functions, by prototype set for objects from `new`/`Object.create`, one group for arrays.
+    /// What the compiler would tell apart (one struct type each): objects by where they are written (a literal, a
+    /// function, a function's default prototype) or by their prototypes (objects from `new`/`Object.create`), arrays
+    /// as one group; copies of a function made per call site are not told apart (the code exists once).
     fn groups(&self, s: &Set) -> usize {
         if s.contains(&AV::Unknown) {
             return 99;
         }
-        let mut g: BTreeSet<String> = BTreeSet::new();
-        for v in s {
-            g.insert(match v {
-                AV::Obj(o) => {
-                    let a = &self.allocs[*o as usize];
-                    match &a.kind {
-                        Kind::Arr | Kind::BArr => "array".into(),
-                        Kind::New(Some(n)) if n == "Array" => "array".into(),
-                        Kind::New(None) | Kind::Create => format!("inst{:?}", self.protos.get(o)),
-                        _ => format!("obj{o}"),
-                    }
-                }
-                _ => prim_tag(*v).into(),
-            });
-        }
-        g.len()
+        self.tags(s).len()
     }
 
     fn record(&mut self, span: oxc_span::Span, cat: &'static str, l: &Set, r: Option<&Set>) {
@@ -445,15 +473,15 @@ impl<'a, 's> A<'a, 's> {
     // ---- state helpers ----
     fn union_var(&mut self, k: (SymbolId, u32), v: &Set) {
         let e = self.vars.entry(k).or_default();
-        add(e, v, &mut self.changed);
+        add_state(e, v, &mut self.changed);
     }
     fn union_prop(&mut self, o: u32, k: &str, v: &Set) {
         let e = self.props.entry((o, k.to_string())).or_default();
-        add(e, v, &mut self.changed);
+        add_state(e, v, &mut self.changed);
     }
     fn union_map(map: &mut HashMap<u32, Set>, k: u32, v: &Set, changed: &mut bool) {
         let e = map.entry(k).or_default();
-        add(e, v, changed);
+        add_state(e, v, changed);
     }
 
     fn sym_key(&self, sym: SymbolId) -> (SymbolId, u32) {
@@ -489,6 +517,13 @@ impl<'a, 's> A<'a, 's> {
         if inst.func == ROOT {
             let program = self.program;
             let n = program.body.iter().take_while(|s| s.span().start < self.user_end).count();
+            // the prelude's functions (after the user's code): bound, analysed only when called (a CommonJS entry
+            // is run by one)
+            for st in &program.body[n..] {
+                if matches!(st, Statement::FunctionDeclaration(_)) {
+                    self.stmt(st);
+                }
+            }
             self.stmts(&program.body[..n]);
             return;
         }
@@ -590,6 +625,7 @@ impl<'a, 's> A<'a, 's> {
     }
 
     fn bind_call(&mut self, i: u32, func: u32, this: &Set, args: &[Set], spread: Option<&Set>) {
+        self.steps += 1 + args.len() as u64;
         let saved = self.cur;
         self.cur = i;
         Self::union_map(&mut self.this, i, this, &mut self.changed);
@@ -620,14 +656,14 @@ impl<'a, 's> A<'a, 's> {
             pos.push(Set::new());
         }
         for (n, x) in args.iter().enumerate() {
-            add(&mut pos[n], x, &mut self.changed);
+            add_state(&mut pos[n], x, &mut self.changed);
         }
         if let Some(s) = spread {
             if pos.is_empty() {
                 pos.push(Set::new());
             }
             for p in pos.iter_mut() {
-                add(p, s, &mut self.changed);
+                add_state(p, s, &mut self.changed);
             }
         }
         self.cur = saved;
@@ -1397,6 +1433,7 @@ impl<'a, 's> A<'a, 's> {
 
     // ---- expressions ----
     fn eval(&mut self, e: &Expression<'a>) -> Set {
+        self.steps += 1;
         match e {
             Expression::NumericLiteral(_) => one(AV::Num),
             Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
@@ -1682,6 +1719,21 @@ impl<'a, 's> A<'a, 's> {
                 for r in recv.clone() {
                     let r1 = one(r);
                     let fr = self.read(&r1, name);
+                    if !matches!(r, AV::Null | AV::Undef) {
+                        let t = self.targets.entry((m.span.start, m.span.end)).or_default();
+                        for v in &fr {
+                            match v {
+                                AV::Obj(o) if matches!(self.allocs[*o as usize].kind, Kind::Fn(_)) => {
+                                    let Kind::Fn(f) = self.allocs[*o as usize].kind else { unreachable!() };
+                                    t.0.insert(f);
+                                }
+                                _ => t.1 = true,
+                            }
+                        }
+                        if fr.is_empty() {
+                            t.1 = true;
+                        }
+                    }
                     let x = self.call(site, &fr, &r1, &args, spread.as_ref());
                     add(&mut out, &x, &mut false);
                 }

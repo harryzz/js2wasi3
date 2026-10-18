@@ -409,7 +409,9 @@ version = "0.0.1"
 dependencies = [
  "js2wasi3-frontend",
  "js2wasi3-ir",
+ "js2wasi3-types",
  "oxc_ast",
+ "oxc_ast_visit",
  "oxc_regular_expression",
  "oxc_semantic",
  "oxc_span",

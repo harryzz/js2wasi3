@@ -995,5 +995,11 @@ The rules after T106–T110, where each speed fix made another program slower (`
   paired differences and ≥ 5 of 6 pairs agreeing (byte-identical builds: 0 of 93 verdicts on a-03; the laptop's
   noise still gives up to 18, so laptop micro verdicts are advisory, a-03 decides). A speed task is judged by the
   geometric mean of the 18 programs (new/base) and by instructions, not by single 2–4% rows of sub-second programs.
+- **Guarded direct method calls** (T132): at `o.m(…)` sites where the whole-program type analysis (T131,
+  `crates/types`) finds one target function, a per-site cache (`G_MCACHE`: receiver keys array + prototype, the
+  holder's entry, `G_EPOCH`) lets the call skip the lookup and the argument array (`direct_call_this`); a site that
+  can't be cached (its receivers don't share a keys array) gives up after 8 fills and, missing twice without a hit,
+  is flagged in `G_MDEAD` and costs one inline test. Only exact type tests in such paths (a non-final type's test is
+  wasmtime's `is_subtype` libcall).
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).
