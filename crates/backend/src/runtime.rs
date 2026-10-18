@@ -125,6 +125,51 @@ pub const OBJECT_KINDS: [u32; 11] = [
     T_PLAIN, T_ARRAY, T_FUNCTION, T_MAP, T_PROMISE, T_GENERATOR, T_TIMER, T_MAPITER, T_BUFFER, T_TYPED, T_WRAPPER,
 ];
 
+/// T133: the number of `$object`'s fields (a shape type's own fields follow them).
+pub const OBJECT_FIELDS: u32 = 7;
+
+/// T133: a shape type: a final subtype of `$object` with `n` own fields after `$object`'s, field `i` an `f64` when
+/// bit `i` of `nums` is set (only numbers are ever stored there), else a `jsval`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shape {
+    pub t: u32,
+    pub n: u32,
+    pub nums: u64,
+}
+
+impl Shape {
+    /// Field `i` is an `f64`.
+    pub fn num(&self, i: u32) -> bool {
+        self.nums >> i & 1 == 1
+    }
+}
+
+thread_local! {
+    /// T133: the module being built's shape types: a plain object made by a constructor with a build-time layout
+    /// (`Module::layouts`) is one of them, its entries `0..count` in its own fields while its `vals` is shorter than
+    /// its `count` (`G_NOVALS`). Set by [`set_shape_types`] before any code is emitted.
+    static SHAPES: std::cell::RefCell<Vec<Shape>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// T133: record the shape types of the module being built (see [`SHAPES`]).
+pub fn set_shape_types(shapes: Vec<Shape>) {
+    SHAPES.with(|s| *s.borrow_mut() = shapes);
+}
+
+/// T133: the shape types of the module being built.
+pub fn shape_types() -> Vec<Shape> {
+    SHAPES.with(|s| s.borrow().clone())
+}
+
+/// T133: every final object type: [`OBJECT_KINDS`] with the shape types after `$plain`, `$array` and `$function`
+/// (every program has arrays and functions; raytrace +1.58% → +1.29% instructions vs right after `$plain`).
+pub fn object_kinds() -> Vec<u32> {
+    let mut v = OBJECT_KINDS[..3].to_vec();
+    v.extend(shape_types().into_iter().map(|x| x.t));
+    v.extend_from_slice(&OBJECT_KINDS[3..]);
+    v
+}
+
 /// The exception tag: `(tag (param (ref null eq)))`, the only tag (index 0, not exported).
 pub const TAG: u32 = 0;
 
@@ -239,8 +284,11 @@ pub const G_MCACHE: u32 = G_RE_STACK + 1;
 /// `(mut (ref null $i32s))` (T132): per method-call site 1 once it has given up (tested inline by
 /// `Intrinsic::MethodDead`); made by the start function, `Module::method_sites` long.
 pub const G_MDEAD: u32 = G_MCACHE + 1;
+/// `(ref $vals)` (T133): the empty `vals` of an object whose entries live in its own fields (a shape type,
+/// [`shape_types`]).
+pub const G_NOVALS: u32 = G_MDEAD + 1;
 /// Number of runtime globals before the user globals, without the BigInt ones.
-pub const GLOBALS: u32 = G_MDEAD + 1;
+pub const GLOBALS: u32 = G_NOVALS + 1;
 /// `(mut (ref null $object))` (T40): `BigInt.prototype` and `BigInt` as a value, after the others,
 /// only in a module that can make a BigInt ([`Cx::bigint`]).
 pub const G_BIGINT_PROTO: u32 = GLOBALS;
@@ -557,7 +605,7 @@ impl JsTest for InstructionSink<'_> {
 
     fn cast_object(&mut self) -> &mut Self {
         self.block(BlockType::FunctionType(T_CAST_OBJECT));
-        for t in OBJECT_KINDS {
+        for t in object_kinds() {
             self.br_on_cast(
                 0,
                 RefType::EQREF,
@@ -593,7 +641,7 @@ impl JsTest for InstructionSink<'_> {
         self.br_on_cast_fail(0, RefType::EQREF, any_struct);
         self.br_on_cast(0, any_struct, to(number()));
         self.br_on_cast(0, any_struct, to(oddball()));
-        for t in &OBJECT_KINDS[1..] {
+        for t in &object_kinds()[1..] {
             self.br_on_cast(1, any_struct, to(HeapType::Concrete(*t)));
         }
         self.end();
@@ -725,7 +773,7 @@ pub fn object_or(s: &mut InstructionSink, v: u32, not_object: impl FnOnce(&mut I
     s.local_get(v).ref_test_non_null(oddball());
     s.i32_or().br_if(0);
     s.local_get(v);
-    for t in OBJECT_KINDS {
+    for t in object_kinds() {
         s.br_on_cast(
             1,
             RefType::EQREF,
@@ -773,7 +821,9 @@ pub fn typeof_code(tag: TypeofTag) -> i32 {
 /// Emit the `rec` group. Must be the first entries of the type section. With `bigint` (T40) it
 /// ends with `$bigint`. With `rab` (T47) `$buffer` and `$typed` have the fields of resizable and
 /// detached buffers (see `typed.rs`).
-pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
+///
+/// T133: then the shape types, one per `(field count, f64 fields)` in `shapes` (see [`shape_types`]).
+pub fn types(types: &mut TypeSection, bigint: bool, rab: bool, shapes: &[(u32, u64)]) {
     let sub_of = |inner, is_final, supertype_idx| SubType {
         is_final,
         supertype_idx,
@@ -1065,6 +1115,20 @@ pub fn types(types: &mut TypeSection, bigint: bool, rab: bool) {
             true,
         )))));
     }
+    for &(n, nums) in shapes {
+        let mut fields = object_fields.clone();
+        for i in 0..n {
+            let ty = if nums >> i & 1 == 1 { ValType::F64 } else { jsval() };
+            fields.push(field(StorageType::Val(ty), true));
+        }
+        group.push(sub_of(
+            CompositeInnerType::Struct(StructType {
+                fields: fields.into_boxed_slice(),
+            }),
+            true,
+            Some(T_OBJECT),
+        ));
+    }
     types.ty().rec(group);
 }
 
@@ -1337,6 +1401,18 @@ pub fn globals(
             shared: false,
         },
         &ConstExpr::ref_null(HeapType::Concrete(T_I32S)),
+    );
+    // T133: `G_NOVALS`.
+    globals.global(
+        GlobalType {
+            val_type: rt(false, T_VALS),
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::extended([Instruction::ArrayNewFixed {
+            array_type_index: T_VALS,
+            array_size: 0,
+        }]),
     );
     for _ in 0..extra {
         globals.global(

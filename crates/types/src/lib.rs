@@ -89,6 +89,9 @@ const MAX_STEPS: u64 = 2_000_000;
 /// At most this many per-call-site copies of one function; further call sites share one.
 const MAX_COPIES: u32 = 64;
 
+/// T133: (constructor's node start, key) pairs, see [`Result::num_fields`].
+pub type NumFields = std::collections::HashSet<(u32, String)>;
+
 /// One site: offset, category, per operand the number of groups (what the compiler tells apart) and tags.
 #[derive(Debug, Clone)]
 pub struct Site {
@@ -106,6 +109,11 @@ pub struct Result {
     /// `o.m(…)` sites (the member's start, end) that call exactly one function (its node's start) on receivers of
     /// one group: where a guarded direct call pays.
     pub methods: HashMap<(u32, u32), u32>,
+    /// T133: `o.k` reads and writes (the member's start, end) whose receivers are all objects made by `new F` of one
+    /// function `F` (its node's start): where a guarded read or write of `F`'s object layout pays.
+    pub fields: HashMap<(u32, u32), u32>,
+    /// T133: (constructor's node start, key) of the keys only numbers are ever stored at (on `new F` objects).
+    pub num_fields: NumFields,
     pub rounds: u32,
     pub instances: usize,
     pub allocs: usize,
@@ -183,7 +191,7 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
     // their default prototype object (else objects made before the replacement is seen keep it for ever).
     let first = run(program, semantic, user_end, (Default::default(), Default::default()));
     if first.steps > MAX_STEPS {
-        return Result { sites: Vec::new(), methods: HashMap::new(), rounds: first.rounds, instances: first.insts.len(), allocs: first.allocs.len(), steps: first.steps };
+        return Result { sites: Vec::new(), methods: HashMap::new(), fields: HashMap::new(), num_fields: Default::default(), rounds: first.rounds, instances: first.insts.len(), allocs: first.allocs.len(), steps: first.steps };
     }
     let mut replaced = std::collections::HashSet::new();
     for ((o, k), v) in &first.props {
@@ -203,7 +211,16 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
     let returns_obj = returns_obj.difference(&returns_other).copied().collect();
     let a = run(program, semantic, user_end, (replaced, returns_obj));
     if a.steps > MAX_STEPS {
-        return Result { sites: Vec::new(), methods: HashMap::new(), rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps };
+        return Result {
+            sites: Vec::new(),
+            methods: HashMap::new(),
+            fields: HashMap::new(),
+            num_fields: Default::default(),
+            rounds: a.rounds,
+            instances: a.insts.len(),
+            allocs: a.allocs.len(),
+            steps: a.steps,
+        };
     }
     let mut sites: Vec<_> = a
         .sites
@@ -224,7 +241,8 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
             methods.insert((start, end), *fns.iter().next().unwrap());
         }
     }
-    Result { sites, methods, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps }
+    let (fields, num_fields) = a.fields();
+    Result { sites, methods, fields, num_fields, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps }
 }
 
 fn run<'a, 's>(
@@ -453,6 +471,59 @@ impl<'a, 's> A<'a, 's> {
             return 99;
         }
         self.tags(s).len()
+    }
+
+    /// T133: the constructor (its node's start) whose `new` made object `o`, if `o` is such an object.
+    fn ctor_of(&self, o: u32) -> Option<u32> {
+        if !matches!(self.kind(o), Kind::New(None)) {
+            return None;
+        }
+        match self.kind(self.allocs[o as usize].span) {
+            Kind::Fn(func) => Some(*func),
+            _ => None,
+        }
+    }
+
+    /// T133: [`Result::fields`] and [`Result::num_fields`].
+    fn fields(&self) -> (HashMap<(u32, u32), u32>, NumFields) {
+        let mut fields = HashMap::new();
+        for (&(start, end, cat), (l, _)) in &self.sites {
+            if cat != "get" && cat != "set" {
+                continue;
+            }
+            let mut ctor = None;
+            let ok = !l.is_empty()
+                && l.iter().all(|v| match v {
+                    AV::Obj(o) => match self.ctor_of(*o) {
+                        Some(f) => *ctor.get_or_insert(f) == f,
+                        None => false,
+                    },
+                    _ => false,
+                });
+            if ok && let Some(f) = ctor {
+                fields.insert((start, end), f);
+            }
+        }
+        // per constructor and key: every stored value a number, on every object it made
+        let mut num: HashMap<(u32, String), bool> = HashMap::new();
+        for ((o, k), vals) in &self.props {
+            let Some(f) = self.ctor_of(*o) else { continue };
+            let only_num = !vals.is_empty() && vals.iter().all(|v| matches!(v, AV::Num));
+            let e = num.entry((f, k.clone())).or_insert(true);
+            *e = *e && only_num;
+        }
+        for (o, vals) in &self.anyprop {
+            let Some(f) = self.ctor_of(*o) else { continue };
+            if !vals.iter().all(|v| matches!(v, AV::Num)) {
+                for ((g, _), e) in num.iter_mut() {
+                    if *g == f {
+                        *e = false;
+                    }
+                }
+            }
+        }
+        let num_fields = num.into_iter().filter(|(_, n)| *n).map(|(k, _)| k).collect();
+        (fields, num_fields)
     }
 
     fn record(&mut self, span: oxc_span::Span, cat: &'static str, l: &Set, r: Option<&Set>) {

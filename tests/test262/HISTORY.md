@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-18: T133 objects as structs per shape (full run)
+
+- Compiler (`main` at b935ef8 + T133, uncommitted at the run): objects of constructors with a build-time layout and
+  typed `o.k` sites keep their entries in WasmGC struct fields (`f64` where only numbers are stored); typed sites
+  read/write them behind a guard. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t133.log`, 1,480 s): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-18: T132 direct guarded method calls (full run)
 
 - Compiler (`main` at e2ab243 + T132, uncommitted at the run): `o.m(…)` sites with one target (type analysis, T131)

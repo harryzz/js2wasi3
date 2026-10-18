@@ -105,6 +105,12 @@ pub struct Module {
     /// T109: object layouts, each a constructor's `this.k = …` keys in order (1 to 8 keys): see
     /// [`Intrinsic::CreateThisLayout`] and [`Intrinsic::LayoutSet`].
     pub layouts: Vec<Vec<String>>,
+    /// T133: per layout, bit `i` set when the type analysis says only numbers are ever stored at its key `i` on the
+    /// objects of every constructor with that layout (an `f64` field); missing entries are 0.
+    pub layout_nums: Vec<u64>,
+    /// T133: per layout, whether a constructor with typed `o.k` sites (the type analysis) has it: only those
+    /// layouts' objects are shape objects (each shape type lengthens the object test chains).
+    pub layout_shapes: Vec<bool>,
     /// The command entry point (a `wasi:cli/run` command runs it), for a module without exports.
     /// Takes no params and has no result.
     pub main: Option<FuncId>,
@@ -1101,6 +1107,15 @@ pub enum Intrinsic {
     /// `(o, key: string constant, value)` (T109): an object literal's `key: value` (`DefineProp`), `key` the
     /// layout's key `slot`.
     LayoutDefine { layout: u32, slot: u32 },
+    /// `(o, key: string constant) -> jsval` (T133): `o.key` where the type analysis says `o` is an object made by
+    /// `new` of a constructor with layout `layout`, `key` its key `slot`: the shape object's field when `o` is one
+    /// with that layout and the entry is set, else `GetProp`.
+    ShapeGet { layout: u32, slot: u32 },
+    /// `(o, key: string constant, value)` (T133): `o.key = value` at such a site: into the field, else `SetProp`.
+    ShapeSet { layout: u32, slot: u32 },
+    /// `(o, key: string constant) -> f64` (T133): `o.key += x`'s read at such a site: the number in the shape
+    /// object's field, else the bits [`Intrinsic::F64IsHole`] tests (like [`Intrinsic::ElemNum`]). Runs no JS code.
+    ShapeNum { layout: u32, slot: u32 },
     /// Check a class heritage value (node's TypeErrors): the class prototype's parent.
     ClassHeritage,
     /// args: class, heritage (`undefined`: none), prototype parent (from `ClassHeritage`, or
@@ -1474,14 +1489,14 @@ impl Intrinsic {
             Intrinsic::NewError(ErrorKind::AggregateError | ErrorKind::SuppressedError) => {
                 (&[JsVal, JsVal, JsVal], Some(JsVal))
             }
-            Intrinsic::NewError(_) | Intrinsic::GetProp => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::NewError(_) | Intrinsic::GetProp | Intrinsic::ShapeGet { .. } => (&[JsVal, JsVal], Some(JsVal)),
             Intrinsic::NewObject | Intrinsic::Prototype(_) => (&[], Some(JsVal)),
             Intrinsic::NewObjectSized => (&[I32], Some(JsVal)),
             Intrinsic::CreateThisSized => (&[JsVal, I32], Some(JsVal)),
             Intrinsic::CreateThisLayout(_) => (&[JsVal], Some(JsVal)),
             Intrinsic::LayoutSet { .. } | Intrinsic::LayoutDefine { .. } => (&[JsVal, JsVal, JsVal], None),
             Intrinsic::NewObjectLayout(_) => (&[], Some(JsVal)),
-            Intrinsic::SetProp | Intrinsic::DefineProp => (&[JsVal, JsVal, JsVal], None),
+            Intrinsic::SetProp | Intrinsic::DefineProp | Intrinsic::ShapeSet { .. } => (&[JsVal, JsVal, JsVal], None),
             Intrinsic::DeleteProp | Intrinsic::HasProp | Intrinsic::HasOwn => {
                 (&[JsVal, JsVal], Some(Bool))
             }
@@ -1576,7 +1591,7 @@ impl Intrinsic {
             Intrinsic::DelegateStep => (&[JsVal, I32, JsVal], Some(JsVal)),
             Intrinsic::F64Hi | Intrinsic::F64Lo => (&[F64], Some(I32)),
             Intrinsic::F64FromWords => (&[I32, I32], Some(F64)),
-            Intrinsic::ElemNum => (&[JsVal, JsVal], Some(F64)),
+            Intrinsic::ElemNum | Intrinsic::ShapeNum { .. } => (&[JsVal, JsVal], Some(F64)),
             Intrinsic::F64IsHole => (&[F64], Some(Bool)),
             Intrinsic::NumOrHole => (&[JsVal], Some(F64)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
@@ -1675,6 +1690,8 @@ impl Intrinsic {
             Intrinsic::NewObjectSized => "new_object_sized",
             Intrinsic::GetProp => "get",
             Intrinsic::SetProp => "set",
+            Intrinsic::ShapeGet { .. } => "shape_get",
+            Intrinsic::ShapeSet { .. } => "shape_set",
             Intrinsic::DefineProp => "define",
             Intrinsic::DeleteProp => "delete",
             Intrinsic::HasProp => "has",
@@ -1807,6 +1824,7 @@ impl Intrinsic {
             Intrinsic::F64Lo => "f64_lo",
             Intrinsic::F64FromWords => "f64_from_words",
             Intrinsic::ElemNum => "elem_num",
+            Intrinsic::ShapeNum { .. } => "shape_num",
             Intrinsic::F64IsHole => "f64_is_hole",
             Intrinsic::NumOrHole => "num_or_hole",
             Intrinsic::RandomSeed => "random_seed",
@@ -1889,6 +1907,8 @@ impl Intrinsic {
             self,
             Intrinsic::GetProp
                 | Intrinsic::SetProp
+                | Intrinsic::ShapeGet { .. }
+                | Intrinsic::ShapeSet { .. }
                 | Intrinsic::DeleteProp
                 | Intrinsic::HasProp
                 | Intrinsic::ObjectCreate

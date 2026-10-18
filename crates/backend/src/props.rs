@@ -214,12 +214,9 @@ fn set_attrs(s: &mut InstructionSink, o: u32, e: u32, f: impl FnOnce(&mut Instru
     s.array_set(T_BYTES);
 }
 
-/// Push `o.vals[e]`.
-fn slot(s: &mut InstructionSink, o: u32, e: u32) {
-    s.local_get(o)
-        .struct_get(T_OBJECT, F_VALS)
-        .local_get(e)
-        .array_get(T_VALS);
+/// Push `o.vals[e]` (T133: or the shape object's field).
+fn slot(cx: &mut dyn Cx, s: &mut InstructionSink, o: u32, e: u32) {
+    object::slot_get(cx, s, o, e);
 }
 
 fn value(cx: &mut dyn Cx) -> Function {
@@ -421,7 +418,7 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
         attrs(&mut s, O, e);
         s.local_tee(a).i32_const(ACCESSOR).i32_and();
         s.if_(BlockType::Empty);
-        slot(&mut s, O, e);
+        slot(cx, &mut s, O, e);
         s.local_set(x);
         call_setter(cx, &mut s, x, O, K, V);
         s.return_();
@@ -433,11 +430,9 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
         object::watch_fire(&mut s, |s| {
             s.local_get(a);
         });
-        s.local_get(O)
-            .struct_get(T_OBJECT, F_VALS)
-            .local_get(e)
-            .local_get(V)
-            .array_set(T_VALS);
+        object::slot_set(cx, &mut s, O, e, |s| {
+            s.local_get(V);
+        });
         s.return_();
     }
     s.end();
@@ -520,11 +515,8 @@ fn set(cx: &mut dyn Cx, named: bool) -> Function {
             .local_tee(a);
         s.i32_const(ACCESSOR).i32_and();
         s.if_(BlockType::Empty);
-        s.local_get(p)
-            .ref_as_non_null()
-            .struct_get(T_OBJECT, F_VALS)
-            .local_get(e)
-            .array_get(T_VALS)
+        object::slot_get(cx, &mut s, p, e);
+        s
             .local_set(x);
         call_setter(cx, &mut s, x, O, K, V);
         s.return_();
@@ -600,11 +592,8 @@ fn ctor_name(cx: &mut dyn Cx) -> Function {
         .local_tee(E);
     s.i32_const(0).i32_ge_s();
     s.if_(BlockType::Empty);
-    s.local_get(O)
-        .ref_as_non_null()
-        .struct_get(T_OBJECT, F_VALS)
-        .local_get(E)
-        .array_get(T_VALS)
+    object::slot_get(cx, &mut s, O, E);
+    s
         .local_tee(C);
     s.ref_test_non_null(func::function());
     s.if_(BlockType::Empty);
@@ -791,11 +780,8 @@ fn define_accessor(cx: &mut dyn Cx) -> Function {
         .i32_const(ACCESSOR)
         .i32_and();
     s.if_(BlockType::Empty);
-    s.local_get(O)
-        .ref_as_non_null()
-        .struct_get(T_OBJECT, F_VALS)
-        .local_get(E)
-        .array_get(T_VALS)
+    object::slot_get(cx, &mut s, O, E);
+    s
         .ref_cast_non_null(accessor())
         .local_set(X);
     s.end();
@@ -1546,11 +1532,8 @@ fn get_own_property_descriptor(cx: &mut dyn Cx) -> Function {
         .local_get(E)
         .array_get_u(T_BYTES)
         .local_set(A);
-    s.local_get(O)
-        .ref_as_non_null()
-        .struct_get(T_OBJECT, F_VALS)
-        .local_get(E)
-        .array_get(T_VALS)
+    object::slot_get(cx, &mut s, O, E);
+    s
         .call(oh(cx, object::Helper::CellOut))
         .local_set(X);
     s.end();
@@ -1865,7 +1848,8 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
     let msg: u32 = if write { 3 } else { 2 };
     let e: u32 = msg + 1;
     let g: u32 = e + 1;
-    let mut f = Function::new([(1, ValType::I32), (1, jsval())]);
+    let ob: u32 = g + 1;
+    let mut f = Function::new([(1, ValType::I32), (1, jsval()), (1, rt(true, T_OBJECT))]);
     let mut s = f.instructions();
     if !write {
         s.local_get(O).call(is_nullish);
@@ -1896,10 +1880,9 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
         .i32_and();
     s.if_(BlockType::Empty);
     as_obj(&mut s, O);
-    s.struct_get(T_OBJECT, F_VALS)
-        .local_get(e)
-        .array_get(T_VALS)
-        .ref_cast_non_null(accessor())
+    s.local_set(ob);
+    object::slot_get(cx, &mut s, ob, e);
+    s.ref_cast_non_null(accessor())
         .struct_get(T_ACCESSOR, if write { 1 } else { 0 })
         .local_tee(g);
     s.global_get(G_UNDEFINED).ref_eq();
@@ -1935,14 +1918,13 @@ fn private_access(cx: &mut dyn Cx, write: bool) -> Function {
         s.call(throw);
         s.end();
         as_obj(&mut s, O);
-        s.struct_get(T_OBJECT, F_VALS)
-            .local_get(e)
-            .local_get(v)
-            .array_set(T_VALS);
+        s.local_set(ob);
+        object::slot_set(cx, &mut s, ob, e, |s| {
+            s.local_get(v);
+        });
     } else {
-        s.struct_get(T_OBJECT, F_VALS)
-            .local_get(e)
-            .array_get(T_VALS);
+        s.local_set(ob);
+        object::slot_get(cx, &mut s, ob, e);
     }
     s.end();
     f
@@ -2066,11 +2048,8 @@ fn super_set(cx: &mut dyn Cx) -> Function {
             .local_tee(A);
         s.i32_const(ACCESSOR).i32_and();
         s.if_(BlockType::Empty);
-        s.local_get(P)
-            .ref_as_non_null()
-            .struct_get(T_OBJECT, F_VALS)
-            .local_get(E)
-            .array_get(T_VALS)
+        object::slot_get(cx, &mut s, P, E);
+        s
             .local_set(X);
         call_setter_on(cx, &mut s, X, O, K, V);
         s.return_();

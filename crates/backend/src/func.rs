@@ -629,7 +629,8 @@ fn create_this(cx: &mut dyn Cx, sized: bool) -> Function {
 /// index, keys and attributes (T109, T117).
 fn create_this_layout(cx: &mut dyn Cx) -> Function {
     let fn_prototype = fh(cx, Helper::FnPrototype);
-    let alloc = oh(cx, object::Helper::AllocLayout);
+    // T133: an object of the layout's shape type.
+    let alloc = oh(cx, object::Helper::AllocShape);
     let obj_proto = oh(cx, object::Helper::Proto(Builtin::Object));
     const NT: u32 = 0;
     const P: u32 = 5;

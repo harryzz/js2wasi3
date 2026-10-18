@@ -136,9 +136,33 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         || command.is_some()
         || !module.imports.is_empty();
     let mut types = TypeSection::new();
+    // T133: the field counts and `f64` fields of the layouts constructors make (`CreateThisLayout`): one shape type
+    // each.
+    let mut shape_ns: Vec<(u32, u64)> = Vec::new();
     if js {
-        runtime::types(&mut types, module.bigint, module.rab);
+        for f in &module.functions {
+            visit_exprs(&f.body, &mut |x| {
+                if let Expr::Intrinsic { op: Intrinsic::CreateThisLayout(l), .. } = x
+                    && module.layout_shapes.get(*l as usize).copied().unwrap_or(false)
+                {
+                    let sig = layout_sig(module, *l);
+                    if !shape_ns.contains(&sig) {
+                        shape_ns.push(sig);
+                    }
+                }
+            });
+        }
+        shape_ns.sort_unstable();
+        runtime::types(&mut types, module.bigint, module.rab, &shape_ns);
     }
+    let shapes_base = runtime::TYPES + module.bigint as u32;
+    runtime::set_shape_types(
+        shape_ns
+            .iter()
+            .enumerate()
+            .map(|(i, &(n, nums))| runtime::Shape { t: shapes_base + i as u32, n, nums })
+            .collect(),
+    );
     let n = module.functions.len() as u32;
     // Imported functions come first in the function index space.
     let (mut random, mut clock, mut env, mut exits) = (false, false, [false; 3], false);
@@ -227,7 +251,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         });
     }
     let type_base = if js {
-        runtime::TYPES + module.bigint as u32
+        runtime::TYPES + module.bigint as u32 + shape_ns.len() as u32
     } else {
         0
     };
@@ -250,6 +274,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         scratch_vals: 0,
         scratch_r: 0,
         scratch_arr: 0,
+        scratch_shape: 0,
         scratch_x: 0,
         layout_slots,
         m: module,
@@ -1023,6 +1048,11 @@ enum Frame {
 
 /// T112: count a T110 inline site's miss (`build --count`): `o` is null when the receiver wasn't an `$object`
 /// (it's reset before the cast), else one of its subtypes or a plain object whose slots didn't match.
+/// T133: layout `l`'s shape signature: its key count and its `f64` fields.
+fn layout_sig(m: &ir::Module, l: u32) -> (u32, u64) {
+    (m.layouts[l as usize].len() as u32, m.layout_nums.get(l as usize).copied().unwrap_or(0))
+}
+
 fn count_miss(s: &mut wasm_encoder::InstructionSink, on: bool, o: u32, site: &str) {
     if !on {
         return;
@@ -1060,6 +1090,8 @@ struct Emitter<'m> {
     scratch_r: u32,
     /// T118: a `(ref null $array)` and a second `f64` local for the inline element writes.
     scratch_arr: u32,
+    /// T133: the first of the shape types' scratch locals (in [`runtime::shape_types`] order).
+    scratch_shape: u32,
     scratch_x: u32,
     /// T110: a key's distinct slots in the module's layouts.
     layout_slots: HashMap<Vec<u16>, Vec<u32>>,
@@ -1441,6 +1473,167 @@ impl Emitter<'_> {
         s.global_get(self.layout_attrs_global(l));
     }
 
+    /// T133: with an object in local `v` on no stack, push it as a `(ref $object)` into local `o` when it's a
+    /// `$plain` or a shape object; else branch to label `miss` (counted outside this code) with `v`'s value.
+    fn plain_or_shape(&self, s: &mut wasm_encoder::InstructionSink, v: u32, o: u32, miss: u32, shapes: &[runtime::Shape]) {
+        s.local_get(v);
+        s.block(BlockType::FunctionType(runtime::T_CAST_OBJECT));
+        s.block(BlockType::FunctionType(runtime::T_NOT_OBJECT));
+        for t in std::iter::once(runtime::T_PLAIN).chain(shapes.iter().map(|x| x.t)) {
+            s.br_on_cast(
+                1,
+                wasm_encoder::RefType::EQREF,
+                wasm_encoder::RefType { nullable: false, heap_type: wasm_encoder::HeapType::Concrete(t) },
+            );
+        }
+        s.end();
+        s.br(miss + 1);
+        s.end();
+        s.local_set(o);
+    }
+
+    /// T133: the shape types whose layouts have key `units` at `slot` (any slot when `None`): the only shape objects
+    /// an inline read or write of that key at that slot can hit.
+    fn key_shapes(&self, units: &[u16], slot: Option<u32>) -> Vec<runtime::Shape> {
+        let key = String::from_utf16_lossy(units);
+        let mut v: Vec<runtime::Shape> = Vec::new();
+        for (l, keys) in self.m.layouts.iter().enumerate() {
+            let at = |i: usize| keys.get(i).is_some_and(|k| *k == key);
+            let has = match slot {
+                Some(i) => at(i as usize),
+                None => keys.iter().any(|k| *k == key),
+            };
+            if has && let Some((sh, _)) = self.layout_shape_type(l as u32) && !v.contains(&sh) {
+                v.push(sh);
+            }
+        }
+        v
+    }
+
+    /// T133: push entry `slot` (a constant) of the `$plain` or shape object in local `o` (`(ref null $object)`):
+    /// `vals[slot]`, else (a shape object's live fields) its field, read inline per shape type with that field.
+    fn slot_read(&mut self, s: &mut wasm_encoder::InstructionSink, o: u32, slot: u32, units: &[u16]) {
+        let shapes = self.key_shapes(units, Some(slot));
+        if shapes.is_empty() {
+            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+            s.i32_const(slot as i32).array_get(runtime::T_VALS);
+            return;
+        }
+        s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS).array_len();
+        s.i32_const(slot as i32).i32_gt_u();
+        s.if_(BlockType::Result(runtime::jsval()));
+        s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+        s.i32_const(slot as i32).array_get(runtime::T_VALS);
+        for x in &shapes {
+            s.else_();
+            s.local_get(o).ref_test_nullable(wasm_encoder::HeapType::Concrete(x.t));
+            s.if_(BlockType::Result(runtime::jsval()));
+            s.local_get(o).ref_cast_non_null(wasm_encoder::HeapType::Concrete(x.t));
+            s.struct_get(x.t, runtime::OBJECT_FIELDS + slot);
+            if x.num(slot) {
+                // boxed inline: a small integer needs no allocation
+                s.local_set(self.scratch_f64);
+                runtime::box_inline(s, self.scratch_f64, self.scratch_i32);
+            }
+        }
+        s.else_();
+        s.unreachable();
+        for _ in 0..=shapes.len() {
+            s.end();
+        }
+    }
+
+    /// T133: entry `slot` of the `$plain` or shape object in local `o` set to local `x` (see [`Self::slot_read`]).
+    fn slot_write(&mut self, s: &mut wasm_encoder::InstructionSink, o: u32, slot: u32, x: u32, units: &[u16]) {
+        let field_set = self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::FieldSet)));
+        let shapes = self.key_shapes(units, Some(slot));
+        if shapes.is_empty() {
+            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+            s.i32_const(slot as i32).local_get(x).array_set(runtime::T_VALS);
+            return;
+        }
+        s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS).array_len();
+        s.i32_const(slot as i32).i32_gt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
+        s.i32_const(slot as i32).local_get(x).array_set(runtime::T_VALS);
+        for sh in &shapes {
+            s.else_();
+            s.local_get(o).ref_test_nullable(wasm_encoder::HeapType::Concrete(sh.t));
+            s.if_(BlockType::Empty);
+            if sh.num(slot) {
+                // An `f64` field: a number unboxed inline; anything else through `field_set` (gives up the fields).
+                use wasm_encoder::HeapType as Ht;
+                let field = runtime::OBJECT_FIELDS + slot;
+                s.local_get(x).ref_test_non_null(Ht::I31);
+                s.if_(BlockType::Empty);
+                s.local_get(o).ref_cast_non_null(Ht::Concrete(sh.t));
+                s.local_get(x).ref_cast_non_null(Ht::I31).i31_get_s().f64_convert_i32_s();
+                s.struct_set(sh.t, field);
+                s.else_();
+                s.local_get(x).ref_test_non_null(Ht::Concrete(runtime::T_NUMBER));
+                s.if_(BlockType::Empty);
+                s.local_get(o).ref_cast_non_null(Ht::Concrete(sh.t));
+                s.local_get(x).ref_cast_non_null(Ht::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0);
+                s.struct_set(sh.t, field);
+                s.else_();
+                s.local_get(o).ref_as_non_null().i32_const(slot as i32).local_get(x).call(field_set);
+                s.end();
+                s.end();
+            } else {
+                s.local_get(o).ref_cast_non_null(wasm_encoder::HeapType::Concrete(sh.t));
+                s.local_get(x).struct_set(sh.t, runtime::OBJECT_FIELDS + slot);
+            }
+        }
+        s.else_();
+        s.unreachable();
+        for _ in 0..=shapes.len() {
+            s.end();
+        }
+    }
+
+    /// T133: layout `l`'s shape type and its scratch local, when constructors make shape objects of its size.
+    fn layout_shape_type(&self, l: u32) -> Option<(runtime::Shape, u32)> {
+        if !self.m.layout_shapes.get(l as usize).copied().unwrap_or(false) {
+            return None;
+        }
+        let (n, nums) = layout_sig(self.m, l);
+        let shapes = runtime::shape_types();
+        let i = shapes.iter().position(|x| x.n == n && x.nums == nums)?;
+        Some((shapes[i], self.scratch_shape + i as u32))
+    }
+
+    /// T133: layout `l`'s shape type's index in [`runtime::shape_types`].
+    fn layout_shape_index(&self, l: u32) -> Option<usize> {
+        if !self.m.layout_shapes.get(l as usize).copied().unwrap_or(false) {
+            return None;
+        }
+        let (n, nums) = layout_sig(self.m, l);
+        runtime::shape_types().iter().position(|x| x.n == n && x.nums == nums)
+    }
+
+    /// T133: with the object in local `v` (and a `jsval` block of result type open at depth 0 as the miss
+    /// label, see `ShapeGet`), test that it's a shape object of layout `l` (type `t`, its scratch `ts` set) whose
+    /// entry `slot` is set; on a miss, branch out with `v`.
+    fn shape_guard(&self, s: &mut wasm_encoder::InstructionSink, v: u32, l: u32, slot: u32, t: u32, ts: u32) {
+        // (the type test is exact and inline: shape types are final)
+        s.local_get(v);
+        s.br_on_cast_fail(
+            0,
+            wasm_encoder::RefType::EQREF,
+            wasm_encoder::RefType { nullable: false, heap_type: wasm_encoder::HeapType::Concrete(t) },
+        );
+        s.local_tee(ts);
+        s.struct_get(t, object::F_INDEX).global_get(self.layout_global(l)).ref_eq().i32_eqz();
+        s.if_(BlockType::Empty);
+        s.local_get(v).br(1);
+        s.end();
+        s.local_get(ts).struct_get(t, object::F_COUNT).i32_const(slot as i32).i32_le_u();
+        s.if_(BlockType::Empty);
+        s.local_get(v).br(1);
+        s.end();
+    }
+
     fn const_base(&self) -> u32 {
         self.global_base
             + (self.m.globals.len() + self.shared.len() + 3 * self.m.layouts.len()) as u32
@@ -1618,6 +1811,22 @@ impl Emitter<'_> {
         locals.push((1, runtime::jsval()));
         locals.push((1, runtime::rt(true, runtime::T_ARRAY)));
         locals.push((1, ValType::F64));
+        // T133: one per shape type, in functions with shape paths (`ShapeGet`/`ShapeSet`/`ShapeNum`/`LayoutSet`).
+        let mut shaped = false;
+        visit_exprs(&f.body, &mut |x| {
+            if let Expr::Intrinsic {
+                op: Intrinsic::ShapeGet { .. } | Intrinsic::ShapeSet { .. } | Intrinsic::ShapeNum { .. } | Intrinsic::LayoutSet { .. },
+                ..
+            } = x
+            {
+                shaped = true;
+            }
+        });
+        if shaped {
+            for x in runtime::shape_types() {
+                locals.push((1, runtime::rt(true, x.t)));
+            }
+        }
         self.scratch_f64 = f.locals.len() as u32;
         self.scratch_js = self.scratch_f64 + 1;
         self.scratch_obj = self.scratch_f64 + 2;
@@ -1627,6 +1836,7 @@ impl Emitter<'_> {
         self.scratch_r = self.scratch_f64 + 6;
         self.scratch_arr = self.scratch_f64 + 7;
         self.scratch_x = self.scratch_f64 + 8;
+        self.scratch_shape = self.scratch_f64 + 9;
         let mut func = Function::new(locals);
         let mut frames = Vec::new();
         {
@@ -1894,6 +2104,62 @@ impl Emitter<'_> {
     /// T111: with an object value on the stack (kept in `scratch_js`), push own property `units` of a plain
     /// object at one of its layout slots as an `f64` when it holds a number (a number cell, an `i31`, a
     /// `$number`), else the HOLE NaN ([`Intrinsic::F64IsHole`]). Never runs JS code.
+    /// T133: the `f64` fields key `units` can be in: (shape type, slot) for each layout of a shape with the key.
+    fn num_field_cands(&self, units: &[u16]) -> Vec<(runtime::Shape, u32)> {
+        let key = String::from_utf16_lossy(units);
+        let mut v = Vec::new();
+        for (l, keys) in self.m.layouts.iter().enumerate() {
+            if let Some(j) = keys.iter().position(|k| *k == key)
+                && let Some((sh, _)) = self.layout_shape_type(l as u32)
+                && sh.num(j as u32)
+                && !v.contains(&(sh, j as u32))
+            {
+                v.push((sh, j as u32));
+            }
+        }
+        v
+    }
+
+    /// T133: inside `num_slot_read`/`num_slot_write`'s miss block (a `jsval` block, the done label one level out):
+    /// for an object in local `v` that is a shape object with own key `g` live in an `f64` field, read the field
+    /// (pushed, branch to done) or write the `f64` in local `x` there (branch to done).
+    fn shape_num_slots(&self, s: &mut wasm_encoder::InstructionSink, v: u32, g: u32, units: &[u16], x: Option<u32>) {
+        use wasm_encoder::HeapType as Ht;
+        for (sh, j) in self.num_field_cands(units) {
+            let t = sh.t;
+            let cast = |s: &mut wasm_encoder::InstructionSink| {
+                s.local_get(v).ref_cast_non_null(Ht::Concrete(t));
+            };
+            s.local_get(v).ref_test_non_null(Ht::Concrete(t));
+            s.if_(BlockType::Empty);
+            cast(s);
+            s.struct_get(t, object::F_COUNT).i32_const(j as i32).i32_gt_u();
+            s.if_(BlockType::Empty);
+            cast(s);
+            s.struct_get(t, object::F_KEYS).i32_const(j as i32).array_get(runtime::T_KEYS);
+            s.global_get(g).ref_eq();
+            s.if_(BlockType::Empty);
+            // the fields are live (`vals` shorter than the entry)
+            cast(s);
+            s.struct_get(t, object::F_VALS).array_len().i32_const(j as i32).i32_le_u();
+            s.if_(BlockType::Empty);
+            cast(s);
+            match x {
+                Some(x) => {
+                    s.local_get(x).struct_set(t, runtime::OBJECT_FIELDS + j);
+                }
+                None => {
+                    s.struct_get(t, runtime::OBJECT_FIELDS + j);
+                }
+            }
+            s.br(5);
+            s.end();
+            s.end();
+            s.end();
+            s.end();
+        }
+    }
+
     fn num_slot_read(&mut self, s: &mut wasm_encoder::InstructionSink, units: &[u16]) {
         use wasm_encoder::HeapType as Ht;
         let slots = self.num_slots(units);
@@ -1910,6 +2176,7 @@ impl Emitter<'_> {
         }
         s.block(BlockType::Result(ValType::F64));
         s.block(BlockType::Result(runtime::jsval()));
+        self.shape_num_slots(s, v, g, units, None);
         s.local_get(v);
         s.br_on_cast_fail(
             0,
@@ -1979,6 +2246,7 @@ impl Emitter<'_> {
                 s.ref_null(runtime::object()).local_set(o);
             }
             s.block(BlockType::Result(runtime::jsval()));
+            self.shape_num_slots(s, v, g, units, Some(x));
             s.local_get(v);
             s.br_on_cast_fail(
                 0,
@@ -2343,6 +2611,37 @@ impl Emitter<'_> {
                 from: Type::JsVal,
                 to: Type::F64,
                 arg,
+            } if matches!(&**arg, Expr::Intrinsic { op: Intrinsic::ShapeGet { layout, slot }, args }
+                if matches!(&args[1], Expr::Str(_)) && self.layout_shape_type(*layout).is_some_and(|(sh, _)| sh.num(*slot))) =>
+            {
+                // T133: `+o.k` at an `f64` field: the number straight from the field; else `get_named` and ToNumber.
+                let Expr::Intrinsic { op: Intrinsic::ShapeGet { layout, slot }, args } = &**arg else {
+                    unreachable!()
+                };
+                let Expr::Str(units) = &args[1] else {
+                    unreachable!()
+                };
+                let (sh, ts) = self.layout_shape_type(*layout).expect("checked");
+                self.expr(s, frames, &args[0])?;
+                let v = self.scratch_js;
+                s.local_set(v);
+                s.block(BlockType::Result(ValType::F64));
+                s.block(BlockType::Result(runtime::jsval()));
+                self.shape_guard(s, v, *layout, *slot, sh.t, ts);
+                s.local_get(ts).struct_get(sh.t, runtime::OBJECT_FIELDS + slot).br(1);
+                s.end();
+                s.global_get(runtime::Cx::string(self, units));
+                s.i32_const(object::key_hash(units));
+                s.i32_const(self.ic_sites as i32);
+                self.ic_sites += 1;
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::GetNamed))));
+                s.call(self.helper_index(Helper::Js(runtime::Helper::ToNumber)));
+                s.end();
+            }
+            Expr::Convert {
+                from: Type::JsVal,
+                to: Type::F64,
+                arg,
             } if matches!(&**arg, Expr::Intrinsic { op: Intrinsic::GetProp, args }
                 if matches!(&args[1], Expr::Str(u) if object::named_key(u) && !self.num_slots(u).is_empty())) =>
             {
@@ -2506,6 +2805,29 @@ impl Emitter<'_> {
                     s.call(self.helper_index(Helper::Js(H::Big(h))));
                     return Ok(true);
                 }
+                if let (Intrinsic::ShapeNum { layout, slot }, [obj, _]) = (op, args.as_slice()) {
+                    // T133: an `f64` field's number when `obj` is a shape object of the layout with the entry set;
+                    // else HOLE (the caller then reads with `get`).
+                    self.expr(s, frames, obj)?;
+                    let v = self.scratch_js;
+                    s.local_set(v);
+                    match self.layout_shape_type(*layout) {
+                        Some((sh, ts)) if sh.num(*slot) => {
+                            s.block(BlockType::Result(ValType::F64));
+                            s.block(BlockType::Result(runtime::jsval()));
+                            self.shape_guard(s, v, *layout, *slot, sh.t, ts);
+                            s.local_get(ts).struct_get(sh.t, runtime::OBJECT_FIELDS + slot).br(1);
+                            s.end();
+                            s.drop();
+                            s.i64_const(array::HOLE).f64_reinterpret_i64();
+                            s.end();
+                        }
+                        _ => {
+                            s.i64_const(array::HOLE).f64_reinterpret_i64();
+                        }
+                    }
+                    return Ok(true);
+                }
                 if let (Intrinsic::ElemNum, [obj, Expr::Str(units)]) = (op, args.as_slice()) {
                     // T111: `o.k += x`'s read: a number property of a plain object at a layout slot, else HOLE.
                     self.expr(s, frames, obj)?;
@@ -2517,6 +2839,105 @@ impl Emitter<'_> {
                 {
                     self.elem_get(s, frames, obj, key)?;
                     return Ok(true);
+                }
+                if let (Intrinsic::ShapeGet { layout, slot }, [obj, Expr::Str(units)]) = (op, args.as_slice())
+                    && let Some((sh, ts)) = self.layout_shape_type(*layout)
+                {
+                    // T133: the shape object's field (an `f64` one boxed), else `get_named`.
+                    let t = sh.t;
+                    self.expr(s, frames, obj)?;
+                    let v = self.scratch_js;
+                    s.local_set(v);
+                    s.block(BlockType::Result(runtime::jsval()));
+                    s.block(BlockType::Result(runtime::jsval()));
+                    self.shape_guard(s, v, *layout, *slot, t, ts);
+                    s.local_get(ts).struct_get(t, runtime::OBJECT_FIELDS + slot);
+                    if sh.num(*slot) {
+                        s.call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+                    }
+                    s.br(1);
+                    s.end();
+                    let g = runtime::Cx::string(self, units);
+                    s.global_get(g);
+                    s.i32_const(object::key_hash(units));
+                    s.i32_const(self.ic_sites as i32);
+                    self.ic_sites += 1;
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::GetNamed))));
+                    s.end();
+                    return Ok(true);
+                }
+                if let (Intrinsic::ShapeSet { layout, slot }, [obj, Expr::Str(units), value]) = (op, args.as_slice())
+                    && let Some((sh, ts)) = self.layout_shape_type(*layout)
+                {
+                    // T133: into the shape object's field, else `set_named`. An `f64` field takes a number as is
+                    // (an `f64` value stays unboxed); anything else misses (`set_named` then gives up the fields).
+                    let t = sh.t;
+                    let field = runtime::OBJECT_FIELDS + slot;
+                    let (v, x, xf) = (self.scratch_js, self.scratch_val, self.scratch_f64);
+                    let unboxed = match value {
+                        Expr::Convert { from: Type::F64, to: Type::JsVal, arg } if sh.num(*slot) => Some(&**arg),
+                        _ => None,
+                    };
+                    self.expr(s, frames, obj)?;
+                    match unboxed {
+                        Some(xe) => {
+                            self.expr(s, frames, xe)?;
+                            s.local_set(xf).local_set(v);
+                        }
+                        None => {
+                            self.expr(s, frames, value)?;
+                            s.local_set(x).local_set(v);
+                        }
+                    }
+                    s.block(BlockType::Empty);
+                    s.block(BlockType::Result(runtime::jsval()));
+                    self.shape_guard(s, v, *layout, *slot, t, ts);
+                    if unboxed.is_some() {
+                        s.local_get(ts).local_get(xf).struct_set(t, field).br(1);
+                    } else if sh.num(*slot) {
+                        use wasm_encoder::HeapType as Ht;
+                        s.local_get(x).ref_test_non_null(Ht::I31);
+                        s.if_(BlockType::Empty);
+                        s.local_get(ts).local_get(x).ref_cast_non_null(Ht::I31).i31_get_s().f64_convert_i32_s();
+                        s.struct_set(t, field).br(2);
+                        s.end();
+                        s.local_get(x).ref_test_non_null(Ht::Concrete(runtime::T_NUMBER));
+                        s.if_(BlockType::Empty);
+                        s.local_get(ts);
+                        s.local_get(x).ref_cast_non_null(Ht::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0);
+                        s.struct_set(t, field).br(2);
+                        s.end();
+                        s.local_get(v).br(0);
+                    } else {
+                        s.local_get(ts).local_get(x).struct_set(t, field).br(1);
+                    }
+                    s.end();
+                    let g = runtime::Cx::string(self, units);
+                    s.global_get(g);
+                    if unboxed.is_some() {
+                        s.local_get(xf).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+                    } else {
+                        s.local_get(x);
+                    }
+                    s.i32_const(object::key_hash(units));
+                    s.i32_const(self.set_sites as i32);
+                    self.set_sites += 1;
+                    s.i32_const(self.ic_sites as i32);
+                    self.ic_sites += 1;
+                    s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::SetNamed))));
+                    s.end();
+                    return Ok(false);
+                }
+                if let (Intrinsic::ShapeGet { .. }, [obj, key]) = (op, args.as_slice()) {
+                    // No shape type of the layout's size: the generic read.
+                    let x = Expr::intrinsic(Intrinsic::GetProp, vec![obj.clone(), key.clone()]);
+                    self.expr(s, frames, &x)?;
+                    return Ok(true);
+                }
+                if let (Intrinsic::ShapeSet { .. }, [obj, key, value]) = (op, args.as_slice()) {
+                    let x = Expr::intrinsic(Intrinsic::SetProp, vec![obj.clone(), key.clone(), value.clone()]);
+                    self.expr(s, frames, &x)?;
+                    return Ok(false);
                 }
                 if let (Intrinsic::GetProp, [obj, Expr::Str(units)]) = (op, args.as_slice())
                     && object::named_key(units)
@@ -2536,16 +2957,9 @@ impl Emitter<'_> {
                         }
                         s.block(BlockType::Result(runtime::jsval()));
                         s.block(BlockType::Result(runtime::jsval()));
-                        s.local_get(v);
-                        s.br_on_cast_fail(
-                            0,
-                            wasm_encoder::RefType::EQREF,
-                            wasm_encoder::RefType {
-                                nullable: false,
-                                heap_type: wasm_encoder::HeapType::Concrete(runtime::T_PLAIN),
-                            },
-                        );
-                        s.local_set(o);
+                        // T133: a `$plain` or a shape object.
+                        let shapes = self.key_shapes(units, None);
+                        self.plain_or_shape(s, v, o, 0, &shapes);
                         for &slot in &slots {
                             s.local_get(o).struct_get(runtime::T_OBJECT, object::F_COUNT);
                             s.i32_const(slot as i32).i32_gt_u();
@@ -2554,8 +2968,8 @@ impl Emitter<'_> {
                             s.i32_const(slot as i32).array_get(runtime::T_KEYS);
                             s.global_get(g).ref_eq();
                             s.if_(BlockType::Empty);
-                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
-                            s.i32_const(slot as i32).array_get(runtime::T_VALS).local_tee(r);
+                            self.slot_read(s, o, slot, units);
+                            s.local_tee(r);
                             s.ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_ACCESSOR));
                             s.local_get(r).global_get(runtime::G_BUILTIN).ref_eq();
                             s.i32_or().i32_eqz();
@@ -2630,10 +3044,72 @@ impl Emitter<'_> {
                     (op, args.as_slice())
                 {
                     // T109: as `SetNamed` below, with the layout's index and the key's entry.
-                    self.expr(s, frames, obj)?;
                     let g = runtime::Cx::string(self, units);
-                    s.global_get(g);
-                    self.expr(s, frames, value)?;
+                    let shape = self.layout_shape_type(*layout);
+                    if let Some((sh, ts)) = shape {
+                        // T133: a constructor's add to a shape object, inline: the layout's next entry, the
+                        // object extensible and not a prototype, the site's add cache (T90) says the prototype's
+                        // chain has no `k` at the current epoch; the value into the field (an `f64` field: a
+                        // number). Anything else: `layout_set`.
+                        use wasm_encoder::HeapType as Ht;
+                        let (t, field) = (sh.t, runtime::OBJECT_FIELDS + slot);
+                        let (v, x) = (self.scratch_js, self.scratch_val);
+                        let site = self.set_sites as i32;
+                        self.expr(s, frames, obj)?;
+                        self.expr(s, frames, value)?;
+                        s.local_set(x).local_set(v);
+                        s.block(BlockType::Empty);
+                        s.block(BlockType::Result(runtime::jsval()));
+                        s.local_get(v);
+                        s.br_on_cast_fail(
+                            0,
+                            wasm_encoder::RefType::EQREF,
+                            wasm_encoder::RefType { nullable: false, heap_type: Ht::Concrete(t) },
+                        );
+                        s.local_tee(ts);
+                        let miss = |s: &mut wasm_encoder::InstructionSink| {
+                            s.if_(BlockType::Empty);
+                            s.local_get(v).br(1);
+                            s.end();
+                        };
+                        s.struct_get(t, object::F_INDEX).global_get(self.layout_global(*layout)).ref_eq().i32_eqz();
+                        miss(s);
+                        s.local_get(ts).struct_get(t, object::F_COUNT).i32_const(*slot as i32).i32_ne();
+                        miss(s);
+                        s.local_get(ts).struct_get(t, object::F_CLASS);
+                        s.i32_const(object::NO_EXTEND | object::IS_PROTO).i32_and();
+                        miss(s);
+                        s.i32_const(site).local_get(ts).struct_get(t, object::F_PROTO);
+                        s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::AddOk)))).i32_eqz();
+                        miss(s);
+                        if sh.num(*slot) {
+                            s.local_get(x).ref_test_non_null(Ht::I31);
+                            s.if_(BlockType::Empty);
+                            s.local_get(ts).local_get(x).ref_cast_non_null(Ht::I31).i31_get_s().f64_convert_i32_s();
+                            s.struct_set(t, field);
+                            s.else_();
+                            s.local_get(x).ref_test_non_null(Ht::Concrete(runtime::T_NUMBER)).i32_eqz();
+                            // (inside the `else`: one level deeper than `miss`)
+                            s.if_(BlockType::Empty);
+                            s.local_get(v).br(2);
+                            s.end();
+                            s.local_get(ts);
+                            s.local_get(x).ref_cast_non_null(Ht::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0);
+                            s.struct_set(t, field);
+                            s.end();
+                        } else {
+                            s.local_get(ts).local_get(x).struct_set(t, field);
+                        }
+                        s.local_get(ts).i32_const(*slot as i32 + 1).struct_set(t, object::F_COUNT);
+                        s.br(1);
+                        s.end();
+                        s.global_get(g);
+                        s.local_get(x);
+                    } else {
+                        self.expr(s, frames, obj)?;
+                        s.global_get(g);
+                        self.expr(s, frames, value)?;
+                    }
                     s.i32_const(object::key_hash(units));
                     s.i32_const(self.set_sites as i32);
                     self.set_sites += 1;
@@ -2642,11 +3118,15 @@ impl Emitter<'_> {
                     s.global_get(self.layout_global(*layout));
                     s.i32_const(*slot as i32);
                     s.call(self.helper_index(Helper::Js(H::Obj(object::Helper::LayoutSet))));
+                    if shape.is_some() {
+                        s.end();
+                    }
                     return Ok(false);
                 }
                 if let Intrinsic::CreateThisLayout(l) = op {
                     self.expr(s, frames, &args[0])?;
-                    s.i32_const(self.m.layouts[*l as usize].len() as i32);
+                    // T133: the key count and the layout's shape (`object::shape_arg`).
+                    s.i32_const(object::shape_arg(self.m.layouts[*l as usize].len() as u32, self.layout_shape_index(*l)));
                     s.global_get(self.layout_global(*l));
                     self.layout_shape(s, *l);
                     s.call(self.helper_index(Helper::Js(H::Func(func::Helper::CreateThisLayout))));
@@ -2687,16 +3167,9 @@ impl Emitter<'_> {
                         }
                         s.block(BlockType::Empty);
                         s.block(BlockType::Result(runtime::jsval()));
-                        s.local_get(v);
-                        s.br_on_cast_fail(
-                            0,
-                            wasm_encoder::RefType::EQREF,
-                            wasm_encoder::RefType {
-                                nullable: false,
-                                heap_type: wasm_encoder::HeapType::Concrete(runtime::T_PLAIN),
-                            },
-                        );
-                        s.local_set(o);
+                        // T133: a `$plain` or a shape object.
+                        let shapes = self.key_shapes(units, None);
+                        self.plain_or_shape(s, v, o, 0, &shapes);
                         for &slot in &slots {
                             s.local_get(o).struct_get(runtime::T_OBJECT, object::F_COUNT);
                             s.i32_const(slot as i32).i32_gt_u();
@@ -2710,8 +3183,7 @@ impl Emitter<'_> {
                             s.i32_const(object::ACCESSOR | object::READONLY | object::WATCHED);
                             s.i32_and().i32_eqz();
                             s.if_(BlockType::Empty);
-                            s.local_get(o).struct_get(runtime::T_OBJECT, object::F_VALS);
-                            s.i32_const(slot as i32).local_get(x).array_set(runtime::T_VALS);
+                            self.slot_write(s, o, slot, x, units);
                             runtime::count(s, on, "inline_write.hit");
                             s.br(4);
                             s.end();
@@ -3102,6 +3574,7 @@ impl Emitter<'_> {
                     Intrinsic::StrBufLen => H::StrBufLen,
                     Intrinsic::ReAltsFind => H::ReAltsFind,
                     Intrinsic::ElemNum => H::Obj(object::Helper::ElemNum),
+                    Intrinsic::ShapeNum { .. } => unreachable!("emitted above"),
                     Intrinsic::JsonQuoteInto => H::JsonQuoteInto,
                     Intrinsic::JsonScan => H::JsonScan,
                     Intrinsic::StringLength
@@ -3211,7 +3684,9 @@ impl Emitter<'_> {
                     Intrinsic::CreateThisLayout(_)
                     | Intrinsic::LayoutSet { .. }
                     | Intrinsic::NewObjectLayout(_)
-                    | Intrinsic::LayoutDefine { .. } => {
+                    | Intrinsic::LayoutDefine { .. }
+                    | Intrinsic::ShapeGet { .. }
+                    | Intrinsic::ShapeSet { .. } => {
                         unreachable!("emitted above")
                     }
                     Intrinsic::ClassHeritage => H::Func(func::Helper::ClassHeritage),

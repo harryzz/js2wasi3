@@ -203,10 +203,29 @@ pub fn lower_with(
     let mut an = closures::analyze(&program.semantic);
     (an.definite, an.maybe_undefined) = definite::analyze(&program.semantic, &an);
     // T132: the method-call sites the type analysis (T131) gives one target function (none if it fails).
-    let methods = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        js2wasi3_types::analyze(program.ast, &program.semantic, program.user_end).methods
+    // T133: and the `o.k` sites whose receivers come from one constructor (its node's start).
+    let (methods, fields, num_fields) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let r = js2wasi3_types::analyze(program.ast, &program.semantic, program.user_end);
+        (r.methods, r.fields, r.num_fields)
     }))
     .unwrap_or_default();
+    // T133: each function's scope by its node's start.
+    let mut fn_scopes = HashMap::new();
+    {
+        struct Scopes<'m>(&'m mut HashMap<u32, ScopeId>);
+        impl<'a> oxc_ast_visit::Visit<'a> for Scopes<'_> {
+            fn visit_function(&mut self, f: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+                self.0.insert(f.span.start, f.scope_id());
+                oxc_ast_visit::walk::walk_function(self, f, flags);
+            }
+            // A class's constructor has the class's scope (`this_layout`); the analysis names a class by its node.
+            fn visit_class(&mut self, c: &Class<'a>) {
+                self.0.insert(c.span.start, c.scope_id());
+                oxc_ast_visit::walk::walk_class(self, c);
+            }
+        }
+        oxc_ast_visit::Visit::visit_program(&mut Scopes(&mut fn_scopes), program.ast);
+    }
     loop {
         let mut extra = Vec::new();
         if facts.string_to_number {
@@ -288,6 +307,11 @@ pub fn lower_with(
             hidden: HashMap::new(),
             fn_scope: HashMap::new(),
             methods: methods.clone(),
+            fields: fields.clone(),
+            num_fields: num_fields.clone(),
+            field_ctors: fields.values().copied().collect(),
+            fn_scopes: fn_scopes.clone(),
+            layout_ctors: HashSet::new(),
             fn_by_span: HashMap::new(),
             method_sites: 0,
             layouts: HashMap::new(),
@@ -461,6 +485,17 @@ struct Lowerer<'p, 'a> {
     /// T132: `o.m(…)` sites (the member's span) with their one target function (its node's start), from the type
     /// analysis.
     methods: HashMap<(u32, u32), u32>,
+    /// T133: `o.k` sites (the member's span) whose receivers are all made by `new` of one function (its node's
+    /// start), from the type analysis.
+    fields: HashMap<(u32, u32), u32>,
+    /// T133: each function's scope by its node's start.
+    fn_scopes: HashMap<u32, ScopeId>,
+    /// T133: (constructor's node start, key) of keys only numbers are stored at, from the type analysis.
+    num_fields: std::collections::HashSet<(u32, String)>,
+    /// T133: constructors (node starts) with `o.k` sites the analysis types ([`Self::fields`]'s values).
+    field_ctors: HashSet<u32>,
+    /// T133: layouts some constructor has (their `layout_nums` bits so far).
+    layout_ctors: HashSet<u32>,
     /// T132: each function's id by its node's start.
     fn_by_span: HashMap<u32, FuncId>,
     /// T132: method-call cache sites given out so far.
@@ -3176,6 +3211,28 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             && keys.iter().all(|k| k != "length" && k != "__proto__");
         let l = l.then(|| self.layout_for(keys.clone()));
         self.layouts.insert(scope, l);
+        if let Some(l) = l {
+            // T133: the keys only numbers are stored at, on this constructor's objects and every other's with l.
+            let start = self.fn_scopes.iter().find(|(_, s)| **s == scope).map(|(k, _)| *k);
+            let mut mask = 0u64;
+            for (i, k) in keys.iter().enumerate() {
+                if start.is_some_and(|f| self.num_fields.contains(&(f, k.clone()))) {
+                    mask |= 1 << i;
+                }
+            }
+            let shapes = &mut self.module.layout_shapes;
+            shapes.resize(self.module.layouts.len(), false);
+            if start.is_some_and(|f| self.field_ctors.contains(&f)) {
+                shapes[l as usize] = true;
+            }
+            let nums = &mut self.module.layout_nums;
+            nums.resize(self.module.layouts.len(), 0);
+            if self.layout_ctors.insert(l) {
+                nums[l as usize] = mask;
+            } else {
+                nums[l as usize] &= mask;
+            }
+        }
         l
     }
 
@@ -4770,8 +4827,15 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     return self.chain_member(cx, m);
                 }
                 let (obj, key) = self.member(cx, m)?;
+                // T133: a field of one constructor's objects.
+                let op = match m {
+                    MemberExpression::StaticMemberExpression(sm) => self
+                        .field_slot(sm.span, sm.property.name.as_str())
+                        .map(|(layout, slot)| Intrinsic::ShapeGet { layout, slot }),
+                    _ => None,
+                };
                 Ok(Val::js(
-                    Expr::intrinsic(Intrinsic::GetProp, vec![obj, key]),
+                    Expr::intrinsic(op.unwrap_or(Intrinsic::GetProp), vec![obj, key]),
                     Kind::Any,
                 ))
             }
@@ -5413,6 +5477,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// T132: the function `o.m(…)` at `span` calls, when the type analysis found exactly one and a direct call of
     /// it can stand in for the call through the value: a plain function or method (not a generator, async function
     /// or class), arguments without spreads or function/class expressions (they're lowered twice).
+    /// T133: the layout and slot of key `key` at an `o.k` site whose receivers the type analysis says are all made
+    /// by `new` of one constructor with a layout.
+    fn field_slot(&mut self, span: Span, key: &str) -> Option<(u32, u32)> {
+        let start = *self.fields.get(&(span.start, span.end))?;
+        let scope = *self.fn_scopes.get(&start)?;
+        let l = self.layout(scope)?;
+        let slot = self.module.layouts[l as usize].iter().position(|k| k == key)?;
+        Some((l, slot as u32))
+    }
+
     fn method_target(&self, span: Span, arguments: &'a [Argument<'a>]) -> Option<FuncId> {
         let start = *self.methods.get(&(span.start, span.end))?;
         let func = *self.fn_by_span.get(&start)?;
@@ -7310,6 +7384,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             }
             _ => None,
         };
+        // T133: else a field of one constructor's objects.
+        let layout = layout.or_else(|| match m {
+            MemberExpression::StaticMemberExpression(sm) if !matches!(sm.object, Expression::Super(_)) => self
+                .field_slot(sm.span, sm.property.name.as_str())
+                .map(|(layout, slot)| Intrinsic::ShapeSet { layout, slot }),
+            _ => None,
+        });
         let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
         let tv = cx.func.add_local("value", Type::JsVal);
@@ -7322,10 +7403,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             None => member_set(private, o, k, v),
         };
         let old = (a.operator != AssignmentOperator::Assign).then(|| {
-            Val::js(
-                member_get(&private, Expr::Local(to), key_of.clone()),
-                Kind::Any,
-            )
+            // T133: a field of one constructor's objects: read the same way.
+            let get = match layout {
+                Some(Intrinsic::ShapeSet { layout, slot }) => {
+                    Expr::intrinsic(Intrinsic::ShapeGet { layout, slot }, vec![Expr::Local(to), key_of.clone()])
+                }
+                _ => member_get(&private, Expr::Local(to), key_of.clone()),
+            };
+            Val::js(get, Kind::Any)
         });
         let value = self.combine(cx, a.operator, old, rhs, a.span)?;
         // T107: a number stays an `f64` (the store boxes it, unless the backend stores it unboxed).
@@ -7375,11 +7460,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             .left
             .as_member_expression()
             .expect("checked by the caller");
+        // T133: a field of one constructor's objects: its number read and the store through the shape paths.
+        let field = match m {
+            MemberExpression::StaticMemberExpression(sm) if !matches!(sm.object, Expression::Super(_)) => {
+                self.field_slot(sm.span, sm.property.name.as_str())
+            }
+            _ => None,
+        };
         let (obj, key, private) = self.member_ref(cx, m)?;
         let to = cx.func.add_local("obj", Type::JsVal);
         let mut body = vec![Stmt::Set(to, obj)];
         let key_of = self.key_temp(cx, key, &mut body);
         let rhs = self.expr(cx, &a.right)?;
+        let (num_op, set_op) = match field {
+            Some((layout, slot)) => (Intrinsic::ShapeNum { layout, slot }, Intrinsic::ShapeSet { layout, slot }),
+            None => (Intrinsic::ElemNum, Intrinsic::SetProp),
+        };
         if rhs.ty != Type::F64 || !matches!(private, Member::Plain) {
             let old = Val::js(
                 member_get(&private, Expr::Local(to), key_of.clone()),
@@ -7403,7 +7499,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         };
         body.push(Stmt::Set(
             tf,
-            Expr::intrinsic(Intrinsic::ElemNum, vec![Expr::Local(to), key_of.clone()]),
+            Expr::intrinsic(num_op, vec![Expr::Local(to), key_of.clone()]),
         ));
         body.push(Stmt::If {
             cond: hole(),
@@ -7431,7 +7527,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 ],
             ))],
             els: vec![Stmt::Expr(Expr::intrinsic(
-                Intrinsic::SetProp,
+                set_op,
                 vec![
                     Expr::Local(to),
                     key_of,

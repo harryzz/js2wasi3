@@ -4,6 +4,7 @@
 ;;   new design's direct guarded method calls (receiver is a $plain whose prototype is Vec.prototype, unchanged).
 ;; run_hdr (P4): option (a): a struct per shape that is a subtype of today's $object (so it carries the whole header)
 ;;   with f64 fields; guard = cast + class flags == 0.
+;; run_small (P5): the same with a 2-field header (flags, overflow dictionary) instead of today's 7 fields.
 (module
   (type $keys (array (mut eqref)))
   (type $vals (array (mut eqref)))
@@ -15,6 +16,8 @@
     (field $vals (mut (ref $vals))) (field $attrs (mut (ref $bytes))) (field $count (mut i32)) (field $index (mut (ref null $i32s))))))
   (type $VecH (sub final $object (struct (field $class (mut i32)) (field $proto (mut (ref null $object))) (field $keys (mut (ref $keys)))
     (field $vals (mut (ref $vals))) (field $attrs (mut (ref $bytes))) (field $count (mut i32)) (field $index (mut (ref null $i32s)))
+    (field $x (mut f64)) (field $y (mut f64)) (field $z (mut f64)))))
+  (type $VecS (sub final (struct (field $class (mut i32)) (field $extra (mut (ref null $vals)))
     (field $x (mut f64)) (field $y (mut f64)) (field $z (mut f64)))))
   (type $box (struct (field f64)))
 
@@ -199,6 +202,67 @@
                 local.get $r
                 local.get $b
                 call $hdr_dot
+                br $done)
+              (local.get $b)))))
+        (local.set $i (f64.add (local.get $i) (f64.const 1)))
+        (br $top)))
+    (local.get $s))
+  ;; P5: a struct per shape with probe 2's small header (flags, overflow dictionary), not an $object subtype
+  (func $Small_new (param f64 f64 f64) (result (ref $VecS))
+    (struct.new $VecS (i32.const 0) (ref.null $vals) (local.get 0) (local.get 1) (local.get 2)))
+  (func $small_add (param $this (ref $VecS)) (param $o eqref) (result eqref)
+    (local $p (ref $VecS))
+    (call $generic (local.get $this)
+      (block $slow (result eqref)
+        local.get $o
+        br_on_cast_fail $slow eqref (ref $VecS)
+        local.set $p
+        (drop (br_if $slow (local.get $o) (struct.get $VecS $class (local.get $p))))
+        (return (call $Small_new
+          (f64.add (struct.get $VecS $x (local.get $this)) (struct.get $VecS $x (local.get $p)))
+          (f64.add (struct.get $VecS $y (local.get $this)) (struct.get $VecS $y (local.get $p)))
+          (f64.add (struct.get $VecS $z (local.get $this)) (struct.get $VecS $z (local.get $p))))))))
+  (func $small_dot (param $this (ref $VecS)) (param $o eqref) (result f64)
+    (local $p (ref $VecS))
+    (call $generic_num2 (local.get $this)
+      (block $slow (result eqref)
+        local.get $o
+        br_on_cast_fail $slow eqref (ref $VecS)
+        local.set $p
+        (drop (br_if $slow (local.get $o) (struct.get $VecS $class (local.get $p))))
+        (return (f64.add (f64.add (f64.mul (struct.get $VecS $x (local.get $this)) (struct.get $VecS $x (local.get $p))) (f64.mul (struct.get $VecS $y (local.get $this)) (struct.get $VecS $y (local.get $p)))) (f64.mul (struct.get $VecS $z (local.get $this)) (struct.get $VecS $z (local.get $p))))))))
+  (func (export "run_small") (param $n f64) (result f64)
+    (local $a eqref) (local $b eqref) (local $s f64) (local $i f64) (local $r (ref $VecS))
+    (call $init)
+    (local.set $a (call $Small_new (f64.const 0) (f64.const 0) (f64.const 0)))
+    (block $exit
+      (loop $top
+        (br_if $exit (i32.eqz (f64.lt (local.get $i) (local.get $n))))
+        (local.set $b (call $Small_new (local.get $i) (f64.const 0.5) (f64.const 1)))
+        (local.set $a
+          (block $done (result eqref)
+            (call $generic
+              (block $slow (result eqref)
+                local.get $a
+                br_on_cast_fail $slow eqref (ref $VecS)
+                local.set $r
+                (drop (br_if $slow (local.get $a) (struct.get $VecS $class (local.get $r))))
+                local.get $r
+                local.get $b
+                call $small_add
+                br $done)
+              (local.get $b))))
+        (local.set $s (f64.add (local.get $s)
+          (block $done (result f64)
+            (call $generic_num2
+              (block $slow (result eqref)
+                local.get $a
+                br_on_cast_fail $slow eqref (ref $VecS)
+                local.set $r
+                (drop (br_if $slow (local.get $a) (struct.get $VecS $class (local.get $r))))
+                local.get $r
+                local.get $b
+                call $small_dot
                 br $done)
               (local.get $b)))))
         (local.set $i (f64.add (local.get $i) (f64.const 1)))

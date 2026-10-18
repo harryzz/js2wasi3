@@ -530,9 +530,11 @@ fn main() -> anyhow::Result<()> {
                 js2wasi3_types::analyze_source(&source).map_err(|e| anyhow::anyhow!("{file}: {e}"))?
             };
             eprintln!(
-                "types: {} sites, {} one-target method sites, {} rounds, {} instances, {} allocations, {} steps, {} ms",
+                "types: {} sites, {} one-target method sites, {} one-constructor field sites, {} number-only keys, {} rounds, {} instances, {} allocations, {} steps, {} ms",
                 r.sites.len(),
                 r.methods.len(),
+                r.fields.len(),
+                r.num_fields.len(),
                 r.rounds,
                 r.instances,
                 r.allocs,

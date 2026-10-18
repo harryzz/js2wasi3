@@ -1001,5 +1001,12 @@ The rules after T106–T110, where each speed fix made another program slower (`
   can't be cached (its receivers don't share a keys array) gives up after 8 fills and, missing twice without a hit,
   is flagged in `G_MDEAD` and costs one inline test. Only exact type tests in such paths (a non-final type's test is
   wasmtime's `is_subtype` libcall).
+- **Objects as structs per shape** (T133): objects of constructors with a build-time layout and typed `o.k` sites
+  are a final struct per (field count, `f64` fields) after the 7-field `$object` header; while `vals` is the shared
+  empty `G_NOVALS` (`vals.len < count`) their entries live in the fields, and every runtime access of `vals[e]` goes
+  through `slot_get`/`slot_set`. Typed sites guard on the exact struct type, the layout's shared index and `count`,
+  then `struct.get`/`struct.set`; anything that changes keys or attributes moves the entries into `vals` and drops
+  the shared index, so the guards miss. Shape types are only made where typed sites use them: each one lengthens
+  every generic object test (raytrace +1.29% instructions from two).
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).
