@@ -163,3 +163,7 @@ a number (else a generic object). Results = node's at n = 1, 1001, 3000 and 20M.
 - 2026-10-17: correction section added; typeprobe written (scratchpad), all 18 programs run under node with recording (outputs = node), results above and in `out/typeprobe.md`.
 - 2026-10-17: probe `probes/layout.{js,wat,mjs}` written and run (laptop): proposed design 440 ms on V8 / 606 ms on wasmtime vs today 8,582 / 14,519 ms, node 290 ms.
 - 2026-10-17: probe 2 `probes/layout2.{js,wat}` (header, flags, overflow dictionary, Object.keys, unknown-type constructor argument): V8 545 ms vs node 561 ms; wasmtime 891 ms; today 10,537 / 20,006 ms.
+- 2026-10-18: after T131–T133 (`main` at cb80dae; laptop, `scripts/v8bench.sh -o out/v8bench-t133`,
+  `out/v8bench-t133.md`; a-03 has no jco): our components on V8 **6.43× node** (was 6.84×), on wasmtime 9.58×
+  (was 10.06×). Worst: raytrace 19.2×, fannkuchredux 19.0×, crypto 18.7×, richards 13.9× (was 18.9×), deltablue
+  12.3× (was 16.2×), revcomp 10.5×; nbody 9.9× → 7.0×.
