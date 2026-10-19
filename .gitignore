@@ -3,3 +3,4 @@
 /probes/out
 *.wasm
 /test262
+/temp/
