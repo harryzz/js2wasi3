@@ -6538,8 +6538,10 @@ fn make_arguments(cx: &mut dyn Cx) -> Function {
     const O: u32 = 1;
     const N: u32 = 2;
     const I: u32 = 3;
+    let on = cx.counting();
     let mut f = Function::new([(1, rt(true, T_OBJECT)), (2, ValType::I32)]);
     let mut s = f.instructions();
+    runtime::count(&mut s, on, "make_arguments");
     s.i32_const(CLASS_ARGUMENTS)
         .call(proto)
         .call(alloc)

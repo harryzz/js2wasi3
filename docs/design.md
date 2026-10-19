@@ -1018,5 +1018,9 @@ The rules after T106–T110, where each speed fix made another program slower (`
   loops, else the `elem_num` helper with an `f64` key) with `get` as a call on a miss (`GetElemCall`); a `+`'s
   generic path is one call (`JsAddParts`). Lesson: unboxing a value that is mostly used as a JS value costs
   (splay: dropping the argument's box re-boxed per use; `this.x = x` gained nothing).
+- **`apply` forwarding** (T137): a function whose only uses of `arguments` are `x.apply(y, arguments)` in its own
+  body starts with the `arguments` local HOLE; each such call tests `x.apply` against `Function.prototype.apply`'s
+  code slot (no watchpoint) and on a match calls `x` with a copy of the argument array (`apply_forward`); otherwise
+  it makes the object on first use. Every other read of `arguments` makes it lazily, so semantics never change.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

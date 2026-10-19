@@ -152,6 +152,9 @@ pub enum Helper {
     Apply,
     /// `(f, this, args: jsval (an array-like), what: (ref $string)) -> jsval`: `f(...args)`.
     CallList,
+    /// `(f, this, args: jsval (a function's array of every argument)) -> jsval` (T137): `f.apply(this, arguments)`
+    /// when `f.apply` is the built-in: `f` called with a copy of `args`'s elements, no `arguments` object.
+    ApplyForward,
     /// `(v: jsval) -> (ref $vals)`: CreateListFromArrayLike (`undefined`/`null`: empty).
     ListFromArrayLike,
     /// The code of `Function.prototype.bind` (T25): a bound function ([`KIND_BOUND`]) named
@@ -219,6 +222,7 @@ impl Helper {
             Helper::Call => "Function.prototype.call",
             Helper::Apply => "Function.prototype.apply",
             Helper::CallList => "call_list",
+            Helper::ApplyForward => "apply_forward",
             Helper::ListFromArrayLike => "list_from_array_like",
             Helper::Bind => "Function.prototype.bind",
             Helper::BoundCall => "bound_call",
@@ -288,6 +292,7 @@ impl Helper {
             Helper::SetName => (vec![v, v, v], vec![v]),
             Helper::IsConstructor => (vec![v], vec![ValType::I32]),
             Helper::CallList => (vec![v, v, v, s], vec![v]),
+            Helper::ApplyForward => (vec![v, v, v], vec![v]),
             Helper::ListFromArrayLike => (vec![v], vec![rt(false, T_VALS)]),
         }
     }
@@ -357,6 +362,7 @@ impl Helper {
             Helper::Call => call(cx),
             Helper::Apply => apply(cx),
             Helper::CallList => call_list(cx),
+            Helper::ApplyForward => apply_forward(cx),
             Helper::ListFromArrayLike => list_from_array_like(cx),
             Helper::Bind => bind(cx),
             Helper::BoundCall => bound_call(cx, false),
@@ -1313,6 +1319,34 @@ fn call_list(cx: &mut dyn Cx) -> Function {
     f
 }
 
+/// T137: `apply_forward(f, this, args)`: `args` is a function's own argument array (generic, no holes, never
+/// changed), so its first `length` elements are copied as they are.
+fn apply_forward(cx: &mut dyn Cx) -> Function {
+    let elems = cx.helper(runtime::Helper::Arr(crate::array::Helper::Elems));
+    let call_value = fh(cx, Helper::CallValue);
+    let what = cx.str("Function.prototype.apply was called on a value that");
+    const F: u32 = 0;
+    const THIS: u32 = 1;
+    const ARGS: u32 = 2;
+    const N: u32 = 3;
+    const OUT: u32 = 4;
+    let mut f = Function::new([(1, ValType::I32), (1, rt(true, T_VALS))]);
+    let mut s = f.instructions();
+    s.local_get(ARGS)
+        .ref_cast_non_null(crate::array::array())
+        .struct_get(runtime::T_ARRAY, crate::array::F_LENGTH)
+        .local_tee(N)
+        .array_new_default(T_VALS)
+        .local_set(OUT);
+    s.local_get(OUT).ref_as_non_null().i32_const(0);
+    s.local_get(ARGS).ref_cast_non_null(crate::array::array()).call(elems);
+    s.i32_const(0).local_get(N).array_copy(T_VALS, T_VALS);
+    s.local_get(F).local_get(THIS).local_get(OUT).ref_as_non_null();
+    s.global_get(what).call(call_value);
+    s.end();
+    f
+}
+
 /// Arrays copy their elements (holes: `undefined`); other objects: `length` and indices.
 fn list_from_array_like(cx: &mut dyn Cx) -> Function {
     let is_nullish = cx.helper(runtime::Helper::IsNullish);
@@ -1326,8 +1360,10 @@ fn list_from_array_like(cx: &mut dyn Cx) -> Function {
     const I: u32 = 2;
     const OUT: u32 = 3;
     const E: u32 = 4;
+    let on = cx.counting();
     let mut f = Function::new([(2, ValType::I32), (1, rt(true, T_VALS)), (1, jsval())]);
     let mut s = f.instructions();
+    runtime::count(&mut s, on, "list_from_array_like");
     s.local_get(V).call(is_nullish);
     s.if_(BlockType::Empty);
     s.i32_const(0).array_new_default(T_VALS).return_();

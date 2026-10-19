@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-19: T137 `apply` forwarding of `arguments` (full run)
+
+- Compiler (`main` at 3fb66d4 + T137, uncommitted at the run): `x.apply(y, arguments)` passes the argument list
+  without an `arguments` object when that is the function's only use of it. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t137.log`, 1,862 s, machine loaded by other users): 28,120 pass and 3 timeouts
+  that pass when rerun alone (`out/t262-t137-rerun.log`): **no changes**, 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-19: T134 split number slots (full run)
 
 - Compiler (`main` at 671e315 + T134, uncommitted at the run): locals and parameters the type analysis types as

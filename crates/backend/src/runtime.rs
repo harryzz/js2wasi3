@@ -724,6 +724,9 @@ pub const COUNTS: &[&str] = &[
     "set_num.call",
     "set_num.nums_overwrite",
     "set_num.generic_overwrite",
+    // T137: `arguments` objects built, and argument lists read back from array-likes (`apply`, `Reflect`).
+    "make_arguments",
+    "list_from_array_like",
 ];
 
 /// T112: the index of counter `name` in [`COUNTS`].

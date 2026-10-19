@@ -80,7 +80,7 @@ A call through a value builds an argument array and boxes (~230 ns, F92); `apply
 functions called through the prototype (F90, F100, F177).
 - Costs: raytrace ~20%, arrays/args 4.9% and calls 1.5% on average; Map/Set-heavy code (knucleotide "other
   runtime" 28%).
-- Follow-ups: F46, F84, F90, F92, F100, F177, F229, F69, F117, F73, F374, F442 (T128: `f.apply(this, arguments)` builds an `arguments` dictionary per call, about half of raytrace's remaining grows).
+- Follow-ups: F46, F84, F90, F92, F100, F177, F229, F69, F117, F73, F374, F442 (done in T137: `f.apply(x, arguments)` forwards the argument list, raytrace −44.5%), F472 (`arguments.length`/`[i]`, earley-boyer), F473 (`apply` on arrays, regexp).
 
 ### R5. GC: wasmtime's copying collector copies all live data
 Share of time like node's (~11%), seconds ~13× node's: more allocation and a full copy per collection.

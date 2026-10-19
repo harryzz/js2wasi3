@@ -1304,6 +1304,11 @@ pub enum Intrinsic {
     /// `(args: an array of every argument) -> jsval`: a function's `arguments` object (T25,
     /// unmapped: strict mode).
     MakeArguments,
+    /// `(v) -> bool` (T137): `v` is a function object running `Function.prototype.apply`'s code.
+    IsApply,
+    /// `(f, this, args: an array of every argument) -> jsval` (T137): `f.apply(this, arguments)` without the
+    /// `arguments` object: calls `f` with a copy of `args`'s elements (`f.apply` is the built-in, [`Intrinsic::IsApply`]).
+    ApplyForward,
     /// `(f, key, prefix: a string) -> f`: SetFunctionName at run time (F59, a computed key): `name`
     /// becomes `prefix` + the key (a symbol: `[description]`).
     SetFunctionName,
@@ -1628,6 +1633,8 @@ impl Intrinsic {
             Intrinsic::JsLess { .. } => (&[JsVal, JsVal], Some(Bool)),
             Intrinsic::Trap => (&[], None),
             Intrinsic::MakeArguments => (&[JsVal], Some(JsVal)),
+            Intrinsic::IsApply => (&[JsVal], Some(Bool)),
+            Intrinsic::ApplyForward => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::SetFunctionName => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::BuiltinCtor(_) | Intrinsic::Namespace(_) => (&[], Some(JsVal)),
             Intrinsic::Stream(op) => match op {
@@ -1862,6 +1869,8 @@ impl Intrinsic {
             Intrinsic::JsLess { .. } => "js_less",
             Intrinsic::Trap => "trap",
             Intrinsic::MakeArguments => "make_arguments",
+            Intrinsic::IsApply => "is_apply",
+            Intrinsic::ApplyForward => "apply_forward",
             Intrinsic::SetFunctionName => "set_function_name",
             Intrinsic::BuiltinCtor(_) => "builtin_ctor",
             Intrinsic::Namespace(_) => "namespace",
@@ -1925,6 +1934,7 @@ impl Intrinsic {
             Intrinsic::GetProp
                 | Intrinsic::GetElemCall
                 | Intrinsic::JsAddParts
+                | Intrinsic::ApplyForward
                 | Intrinsic::SetProp
                 | Intrinsic::ShapeGet { .. }
                 | Intrinsic::ShapeSet { .. }

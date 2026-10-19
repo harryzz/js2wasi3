@@ -61,6 +61,9 @@ pub struct Analysis {
     pub uses_this: HashSet<ScopeId>,
     /// Non-arrow functions whose body uses `arguments` (T25; not in nested arrow functions yet).
     pub uses_arguments: HashSet<ScopeId>,
+    /// T137: functions of `uses_arguments` whose every `arguments` is the second argument of an `x.apply(y, arguments)`
+    /// call in the function itself: they make no `arguments` object up front, the call forwards the argument list.
+    pub forward_arguments: HashSet<ScopeId>,
     /// What each function captures, in environment order.
     pub captures: HashMap<ScopeId, Vec<Cap>>,
     /// Variables that live in cells.
@@ -287,6 +290,7 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
 
     // `arguments` (T25): the nearest function's, if it isn't an arrow function. T63: a class's is
     // its constructor's (a field initializer can't name it: a syntax error).
+    let (mut forward, mut other) = (HashSet::new(), HashSet::new());
     for node in nodes.iter() {
         let AstKind::IdentifierReference(r) = node.kind() else {
             continue;
@@ -312,10 +316,16 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
             continue; // the module level: an unknown global
         };
         an.uses_arguments.insert(f);
+        if chain.is_empty() && is_apply_argument(nodes, node.id(), r.span) {
+            forward.insert(f);
+        } else {
+            other.insert(f);
+        }
         for a in chain {
             captures.entry(a).or_default().insert(Cap::Arguments);
         }
     }
+    an.forward_arguments = forward.difference(&other).copied().collect();
 
     // `this`, `super` and `new.target`: arrow functions capture them from the nearest non-arrow
     // function (a `this` param, a home object, a `new.target` param).
@@ -721,4 +731,19 @@ fn declaration_end(semantic: &Semantic, sym: SymbolId) -> u32 {
     let nodes = semantic.nodes();
     let decl = semantic.scoping().symbol_declaration(sym);
     nodes.get_node(decl).span().end
+}
+
+/// T137: is the `arguments` reference `id` (at `span`) the second of exactly two arguments of a call `x.apply(…)`
+/// (no optional chain, no spread)?
+fn is_apply_argument(nodes: &oxc_semantic::AstNodes, id: oxc_syntax::node::NodeId, span: Span) -> bool {
+    let AstKind::CallExpression(c) = nodes.parent_kind(id) else {
+        return false;
+    };
+    let [_, Argument::Identifier(a)] = c.arguments.as_slice() else {
+        return false;
+    };
+    a.span == span
+        && !c.optional
+        && matches!(c.callee.without_parentheses(),
+            Expression::StaticMemberExpression(m) if !m.optional && m.property.name == "apply")
 }

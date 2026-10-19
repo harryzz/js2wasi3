@@ -3741,6 +3741,20 @@ impl Emitter<'_> {
                         s.ref_test_non_null(promise::promise());
                         return Ok(true);
                     }
+                    Intrinsic::IsApply => {
+                        // T137: a function object whose code is `Function.prototype.apply`'s.
+                        let apply = self.helper_index(Helper::Js(runtime::Helper::Func(func::Helper::Apply)));
+                        let slot = runtime::Cx::code_slot(self, apply);
+                        s.local_tee(self.scratch_js).ref_test_non_null(func::function());
+                        s.if_(BlockType::Result(ValType::I32));
+                        s.local_get(self.scratch_js)
+                            .ref_cast_non_null(func::function())
+                            .struct_get(runtime::T_FUNCTION, func::F_CODE)
+                            .i32_const(slot)
+                            .i32_eq();
+                        s.else_().i32_const(0).end();
+                        return Ok(true);
+                    }
                     Intrinsic::Hole => {
                         s.ref_null(wasm_encoder::HeapType::Abstract {
                             shared: false,
@@ -4071,6 +4085,7 @@ impl Emitter<'_> {
                     Intrinsic::Stream(op) => H::Abi(abi::Helper::Stream(*op)),
                     Intrinsic::ImportCancel => H::Abi(abi::Helper::ImportCancel),
                     Intrinsic::MakeArguments => H::Obj(object::Helper::MakeArguments),
+                    Intrinsic::ApplyForward => H::Func(func::Helper::ApplyForward),
                     Intrinsic::SetFunctionName => H::Func(func::Helper::SetName),
                     Intrinsic::BuiltinCtor(b) => H::Func(func::Helper::BuiltinCtor(*b)),
                     Intrinsic::Namespace(ns) => H::Func(func::Helper::Namespace(*ns)),
@@ -4081,7 +4096,7 @@ impl Emitter<'_> {
                     Intrinsic::NewAccessor => H::Prop(props::Helper::NewAccessor),
                     Intrinsic::ToPropertyKey => H::Obj(object::Helper::ToKey),
                     Intrinsic::ObjectDesc => H::Prop(props::Helper::Desc),
-                    Intrinsic::Hole | Intrinsic::IsHole => unreachable!("inline"),
+                    Intrinsic::Hole | Intrinsic::IsHole | Intrinsic::IsApply => unreachable!("inline"),
                     Intrinsic::ResumeMode
                     | Intrinsic::NewGenerator { .. }
                     | Intrinsic::NewAsync { .. }

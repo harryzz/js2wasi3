@@ -702,6 +702,9 @@ struct FnCx {
     home: Option<LocalId>,
     /// The `arguments` object (T25).
     arguments: Option<LocalId>,
+    /// T137: the array of every argument when the `arguments` object is made only if needed (`forward_arguments`):
+    /// `arguments` starts as HOLE.
+    forward_all: Option<LocalId>,
     /// `new.target` (a class constructor's param).
     new_target: Option<LocalId>,
     /// A class constructor: `Some(derived)`.
@@ -740,6 +743,7 @@ impl FnCx {
             values: HashMap::new(),
             home: None,
             arguments: None,
+            forward_all: None,
             new_target: None,
             ctor: None,
             this_checked: false,
@@ -2976,10 +2980,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 );
             }
             let l = cx.func.add_local("arguments", Type::JsVal);
-            prologue.push(Stmt::Set(
-                l,
-                Expr::intrinsic(Intrinsic::MakeArguments, vec![Expr::Local(all)]),
-            ));
+            if self.an.forward_arguments.contains(&scope) {
+                // T137: every `arguments` is `x.apply(y, arguments)`: made there, only if `x.apply` isn't the built-in.
+                prologue.push(Stmt::Set(l, Expr::intrinsic(Intrinsic::Hole, vec![])));
+                cx.forward_all = Some(all);
+            } else {
+                prologue.push(Stmt::Set(
+                    l,
+                    Expr::intrinsic(Intrinsic::MakeArguments, vec![Expr::Local(all)]),
+                ));
+            }
             cx.arguments = Some(l);
         }
         let items = if self.an.uses_arguments.contains(&scope) {
@@ -4315,7 +4325,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                         .symbol_id()
                         .is_none()
                 {
-                    return Ok(Val::js(Expr::Local(l), Kind::Any));
+                    return Ok(Val::js(Self::arguments_object(cx, l), Kind::Any));
                 }
                 if matches!(id.name.as_str(), "globalThis" | "global")
                     && self.prelude.global_object
@@ -5312,6 +5322,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if c.arguments.iter().any(|a| a.is_spread()) {
             return self.spread_call(cx, c);
         }
+        if let Some(all) = cx.forward_all
+            && let Expression::StaticMemberExpression(m) = callee
+            && let [y, Argument::Identifier(a)] = c.arguments.as_slice()
+            && a.name == "arguments"
+            && m.property.name == "apply"
+            && !m.optional
+            && self.scoping.get_reference(a.reference_id()).symbol_id().is_none()
+        {
+            return self.apply_forward(cx, c, m, y, all);
+        }
         if let Expression::StaticMemberExpression(m) = callee
             && !m.optional
             && m.property.name == "nextTick"
@@ -5506,6 +5526,64 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             },
             Call::Value,
         ))
+    }
+
+    /// T137: `f.apply(y, arguments)` in a function that makes its `arguments` object only if needed: `f`, `f.apply`
+    /// and `y` in order; when `f.apply` is the built-in, `f` is called with a copy of the argument array
+    /// (`ApplyForward`), else `f.apply` with `y` and the `arguments` object.
+    fn apply_forward(
+        &mut self,
+        cx: &mut FnCx,
+        c: &'a CallExpression<'a>,
+        m: &'a StaticMemberExpression<'a>,
+        y: &'a Argument<'a>,
+        all: LocalId,
+    ) -> R<(Expr, Call)> {
+        let obj = jsval_of(self.expr(cx, &m.object)?);
+        let Some(y) = y.as_expression() else { unreachable!("no spread") };
+        let y = jsval_of(self.expr(cx, y)?);
+        let (t, f, ty) = (
+            cx.func.add_local("this", Type::JsVal),
+            cx.func.add_local("apply", Type::JsVal),
+            cx.func.add_local("this_arg", Type::JsVal),
+        );
+        let l = cx.arguments.expect("set with forward_all");
+        let body = vec![
+            Stmt::Set(t, obj),
+            Stmt::Set(f, Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(t), Expr::str("apply")])),
+            Stmt::Set(ty, y),
+        ];
+        let value = Expr::Cond {
+            cond: Box::new(Expr::intrinsic(Intrinsic::IsApply, vec![Expr::Local(f)])),
+            then: Box::new(Expr::intrinsic(
+                Intrinsic::ApplyForward,
+                vec![Expr::Local(t), Expr::Local(ty), Expr::Local(all)],
+            )),
+            els: Box::new(Expr::CallRef {
+                callee: Box::new(Expr::Local(f)),
+                this: Box::new(Expr::Local(t)),
+                args: vec![Expr::Local(ty), Self::arguments_object(cx, l)],
+                what: self.callee_text(&c.callee),
+            }),
+            ty: Type::JsVal,
+        };
+        Ok((Expr::Seq { body, value: Box::new(value) }, Call::Value))
+    }
+
+    /// The `arguments` object in local `l`; made from the argument array on first use where it is made only if
+    /// needed (T137, [`FnCx::forward_all`]).
+    fn arguments_object(cx: &FnCx, l: LocalId) -> Expr {
+        let Some(all) = cx.forward_all else {
+            return Expr::Local(l);
+        };
+        Expr::Seq {
+            body: vec![Stmt::If {
+                cond: Expr::intrinsic(Intrinsic::IsHole, vec![Expr::Local(l)]),
+                then: vec![Stmt::Set(l, Expr::intrinsic(Intrinsic::MakeArguments, vec![Expr::Local(all)]))],
+                els: vec![],
+            }],
+            value: Box::new(Expr::Local(l)),
+        }
     }
 
     /// T132: the function `o.m(…)` at `span` calls, when the type analysis found exactly one and a direct call of
