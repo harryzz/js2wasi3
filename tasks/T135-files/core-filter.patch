@@ -1,0 +1,50 @@
+diff --git a/crates/js2wasi3/src/main.rs b/crates/js2wasi3/src/main.rs
+index 361a59c..26daf0f 100644
+--- a/crates/js2wasi3/src/main.rs
++++ b/crates/js2wasi3/src/main.rs
+@@ -586,7 +586,7 @@ fn main() -> anyhow::Result<()> {
+                 for e in &mut ir.exports {
+                     e.name = names[&e.name].clone();
+                 }
+-                let module = js2wasi3_backend::emit(&ir)?;
++                let module = core_filter(js2wasi3_backend::emit(&ir)?)?;
+                 let bytes = if core {
+                     module
+                 } else {
+@@ -653,7 +653,7 @@ fn main() -> anyhow::Result<()> {
+                 for (e, name) in ir.exports.iter_mut().zip(&world.export_names) {
+                     e.name = name.clone();
+                 }
+-                let module = js2wasi3_backend::emit(&ir)?;
++                let module = core_filter(js2wasi3_backend::emit(&ir)?)?;
+                 component::package(&module, &world)?
+             };
+             std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
+@@ -661,3 +661,27 @@ fn main() -> anyhow::Result<()> {
+     }
+     Ok(())
+ }
++
++/// T135 (experiment): with `JS2WASI3_CORE_FILTER` set to a command, the core module goes through it before it is
++/// packaged: the command is run as `<command> <in.wasm> <out.wasm>` (through `sh -c`, so it can be a script with
++/// flags), and `out.wasm` replaces the module (e.g. Binaryen's `wasm-opt`).
++fn core_filter(module: Vec<u8>) -> anyhow::Result<Vec<u8>> {
++    let Ok(cmd) = std::env::var("JS2WASI3_CORE_FILTER") else {
++        return Ok(module);
++    };
++    let dir = std::env::temp_dir().join(format!("js2wasi3-filter-{}", std::process::id()));
++    std::fs::create_dir_all(&dir)?;
++    let (input, output) = (dir.join("in.wasm"), dir.join("out.wasm"));
++    std::fs::write(&input, &module)?;
++    let status = std::process::Command::new("sh")
++        .arg("-c")
++        .arg(format!("{cmd} \"$0\" \"$1\""))
++        .arg(&input)
++        .arg(&output)
++        .status()
++        .with_context(|| format!("running JS2WASI3_CORE_FILTER `{cmd}`"))?;
++    anyhow::ensure!(status.success(), "JS2WASI3_CORE_FILTER `{cmd}` failed: {status}");
++    let bytes = std::fs::read(&output)?;
++    let _ = std::fs::remove_dir_all(&dir);
++    Ok(bytes)
++}

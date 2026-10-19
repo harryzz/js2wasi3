@@ -1,0 +1,1 @@
+--enable-sign-ext --enable-mutable-globals --enable-nontrapping-float-to-int --enable-simd --enable-bulk-memory --enable-bulk-memory-opt --enable-exception-handling --enable-tail-call --enable-reference-types --enable-multivalue --enable-gc --enable-extended-const --enable-multimemory
