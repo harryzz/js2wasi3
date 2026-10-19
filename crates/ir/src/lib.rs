@@ -1235,9 +1235,9 @@ pub enum Intrinsic {
     F64Lo,
     /// The `f64` with these high and low 32 bits.
     F64FromWords,
-    /// `(o, k: jsval) -> f64` (T107): element `k` of an array in number mode, unboxed; for anything else
-    /// (another value, a hole, a generic array) the NaN with the hole's bits ([`Intrinsic::F64IsHole`]).
-    /// Never runs JS code.
+    /// `(o, k: jsval) -> f64` (T107): element `k` of an array in number mode, unboxed (T134: or a number in a
+    /// generic array's store); for anything else (another value, a hole, not an array) the NaN with the hole's
+    /// bits ([`Intrinsic::F64IsHole`]). Never runs JS code.
     ElemNum,
     /// `(x: f64) -> bool` (T107): `x` has the bits [`Intrinsic::ElemNum`] returns for "not an element in
     /// number mode" (no JS number has them).
@@ -1245,6 +1245,17 @@ pub enum Intrinsic {
     /// `(v: jsval) -> f64` (T108): `v`'s value if it's a number (an i31 or a `$number`), else the bits of
     /// [`Intrinsic::F64IsHole`]. Never runs JS code.
     NumOrHole,
+    /// `(o: jsval, f: f64) -> jsval` (T134): a split number slot's value: `o` when it isn't the Wasm null
+    /// ([`Intrinsic::Hole`]), else the number `f`. `f` is always the value's number, or HOLE
+    /// ([`Intrinsic::F64IsHole`]) when it isn't one: the backend reads it unboxed where a number is used. Both
+    /// arguments are locals. Never runs JS code.
+    SplitGet,
+    /// `(o, k) -> jsval` (T134): `o[k]` (`GetProp` with a computed key) as a call of the runtime's `get`, no inline
+    /// path: the miss of an inline unboxed read (`ElemNum`), which already tried the array's elements.
+    GetElemCall,
+    /// `(at: f64, av, bt: f64, bv) -> jsval` (T134): JS `a + b` where each operand is the number `at`, or the value
+    /// `av` when `at` is HOLE ([`Intrinsic::F64IsHole`]): the generic path of an unboxed `+`, as one call.
+    JsAddParts,
     /// 32 random bits from the host (`wasi:random/insecure`, commands only) (`i32`).
     RandomSeed,
     /// Call [`Module::imports`]`[i]` (T20 slice 5) with the arguments in an array (`jsval`):
@@ -1594,6 +1605,9 @@ impl Intrinsic {
             Intrinsic::ElemNum | Intrinsic::ShapeNum { .. } => (&[JsVal, JsVal], Some(F64)),
             Intrinsic::F64IsHole => (&[F64], Some(Bool)),
             Intrinsic::NumOrHole => (&[JsVal], Some(F64)),
+            Intrinsic::SplitGet => (&[JsVal, F64], Some(JsVal)),
+            Intrinsic::GetElemCall => (&[JsVal, JsVal], Some(JsVal)),
+            Intrinsic::JsAddParts => (&[F64, JsVal, F64, JsVal], Some(JsVal)),
             Intrinsic::RandomSeed => (&[], Some(I32)),
             Intrinsic::DateNow => (&[], Some(F64)),
             Intrinsic::Environment(_) => (&[], Some(JsVal)),
@@ -1827,6 +1841,9 @@ impl Intrinsic {
             Intrinsic::ShapeNum { .. } => "shape_num",
             Intrinsic::F64IsHole => "f64_is_hole",
             Intrinsic::NumOrHole => "num_or_hole",
+            Intrinsic::SplitGet => "split_get",
+            Intrinsic::GetElemCall => "get_elem_call",
+            Intrinsic::JsAddParts => "js_add_parts",
             Intrinsic::RandomSeed => "random_seed",
             Intrinsic::DateNow => "date_now",
             Intrinsic::Environment(_) => "environment",
@@ -1906,6 +1923,8 @@ impl Intrinsic {
         matches!(
             self,
             Intrinsic::GetProp
+                | Intrinsic::GetElemCall
+                | Intrinsic::JsAddParts
                 | Intrinsic::SetProp
                 | Intrinsic::ShapeGet { .. }
                 | Intrinsic::ShapeSet { .. }

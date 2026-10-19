@@ -274,6 +274,8 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         scratch_vals: 0,
         scratch_r: 0,
         scratch_arr: 0,
+        scratch_nums: 0,
+        split_miss: false,
         scratch_shape: 0,
         scratch_x: 0,
         layout_slots,
@@ -1073,6 +1075,30 @@ fn count_miss(s: &mut wasm_encoder::InstructionSink, on: bool, o: u32, site: &st
 /// T110: the most slots a constant-key read tries inline (a key at more distinct slots calls `get_named`).
 const LAYOUT_GUESSES: usize = 3;
 
+/// T134: `split == x` (either order) where `split` is a split number slot's read and `x` a boxed `f64` constant or
+/// local: (`split`, `x`'s `f64`).
+fn split_vs_num<'e>(lhs: &'e Expr, rhs: &'e Expr) -> Option<(&'e Expr, &'e Expr)> {
+    let num = |e: &'e Expr| match e {
+        Expr::Convert { from: Type::F64, to: Type::JsVal, arg } if matches!(**arg, Expr::Const(Const::F64(_)) | Expr::Local(_)) => {
+            Some(&**arg)
+        }
+        _ => None,
+    };
+    match (split_args(lhs), split_args(rhs)) {
+        (Some(_), _) => num(rhs).map(|x| (lhs, x)),
+        (_, Some(_)) => num(lhs).map(|x| (rhs, x)),
+        _ => None,
+    }
+}
+
+/// T134: a split number slot's read (`Intrinsic::SplitGet`): its `o` and `f` locals.
+fn split_args(e: &Expr) -> Option<(&Expr, &Expr)> {
+    match e {
+        Expr::Intrinsic { op: Intrinsic::SplitGet, args } => Some((&args[0], &args[1])),
+        _ => None,
+    }
+}
+
 struct Emitter<'m> {
     m: &'m ir::Module,
     /// The command uses `process.exit` or `process`'s at-exit hook (T55).
@@ -1090,6 +1116,10 @@ struct Emitter<'m> {
     scratch_r: u32,
     /// T118: a `(ref null $array)` and a second `f64` local for the inline element writes.
     scratch_arr: u32,
+    /// T134: a `(ref null $nums)` local for the inline unboxed element reads.
+    scratch_nums: u32,
+    /// T134: the inline element access being emitted has a split key ([`Emitter::split_key`]).
+    split_miss: bool,
     /// T133: the first of the shape types' scratch locals (in [`runtime::shape_types`] order).
     scratch_shape: u32,
     scratch_x: u32,
@@ -1811,6 +1841,7 @@ impl Emitter<'_> {
         locals.push((1, runtime::jsval()));
         locals.push((1, runtime::rt(true, runtime::T_ARRAY)));
         locals.push((1, ValType::F64));
+        locals.push((1, runtime::rt(true, runtime::T_NUMS)));
         // T133: one per shape type, in functions with shape paths (`ShapeGet`/`ShapeSet`/`ShapeNum`/`LayoutSet`).
         let mut shaped = false;
         visit_exprs(&f.body, &mut |x| {
@@ -1836,7 +1867,8 @@ impl Emitter<'_> {
         self.scratch_r = self.scratch_f64 + 6;
         self.scratch_arr = self.scratch_f64 + 7;
         self.scratch_x = self.scratch_f64 + 8;
-        self.scratch_shape = self.scratch_f64 + 9;
+        self.scratch_nums = self.scratch_f64 + 9;
+        self.scratch_shape = self.scratch_f64 + 10;
         let mut func = Function::new(locals);
         let mut frames = Vec::new();
         {
@@ -1850,6 +1882,139 @@ impl Emitter<'_> {
             sink.end();
         }
         Ok(func)
+    }
+
+    /// T134: `Intrinsic::ElemNum` with a computed key: element `key` of an array, unboxed, when it is a number in
+    /// the generic store (an `i31`, a `$number`) or in number mode (a hole has HOLE's bits already), else HOLE; the
+    /// key goes to the helper as an `f64` (no box). An `f64` key (`Convert(F64→JsVal)`) is tested as is.
+    fn elem_num(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        frames: &mut Vec<Frame>,
+        obj: &Expr,
+        key: &Expr,
+    ) -> anyhow::Result<()> {
+        self.elem_num_key(s, frames, obj, key)
+    }
+
+    /// [`Self::elem_num`] (in a loop inline, else a call of `elem_num` with the key as an `f64`), leaving the receiver in `scratch_val` and
+    /// the key in `scratch_x` (an `f64` key; a split key's `f`, with its `o` in `scratch_js`) or `scratch_js`
+    /// (else), for a miss.
+    fn elem_num_key(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        frames: &mut Vec<Frame>,
+        obj: &Expr,
+        key: &Expr,
+    ) -> anyhow::Result<()> {
+        use wasm_encoder::HeapType as Ht;
+        let (v, k, x) = (self.scratch_val, self.scratch_js, self.scratch_x);
+        self.expr(s, frames, obj)?;
+        match (key, split_args(key)) {
+            (Expr::Convert { from: Type::F64, to: Type::JsVal, arg }, _) => {
+                self.expr(s, frames, arg)?;
+                s.local_set(x);
+            }
+            (_, Some((so, sf))) => {
+                self.expr(s, frames, so)?;
+                s.local_set(k);
+                self.expr(s, frames, sf)?;
+                s.local_set(x);
+            }
+            _ => {
+                // An `i31` key as an `f64`, anything else NaN (no element).
+                self.expr(s, frames, key)?;
+                s.local_tee(k).ref_test_non_null(Ht::I31);
+                s.if_(BlockType::Result(ValType::F64));
+                s.local_get(k).ref_cast_non_null(Ht::I31).i31_get_s().f64_convert_i32_s();
+                s.else_();
+                s.f64_const(f64::NAN.into());
+                s.end();
+                s.local_set(x);
+            }
+        }
+        s.local_tee(v);
+        if !frames.iter().any(|f| matches!(f, Frame::Continue(_))) {
+            // Outside loops: the helper (code size).
+            s.local_get(x);
+            s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::ElemNum))));
+            return Ok(());
+        }
+        // In a loop: inline, as the helper.
+        let (j, a, n, el, r) = (self.scratch_i32, self.scratch_arr, self.scratch_nums, self.scratch_vals, self.scratch_r);
+        s.drop();
+        s.block(BlockType::Result(ValType::F64));
+        s.block(BlockType::Empty);
+        s.local_get(v).ref_test_non_null(array::array()).i32_eqz().br_if(0);
+        s.local_get(v).ref_cast_non_null(array::array()).local_set(a);
+        s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
+        s.local_get(x).f64_ne().br_if(0);
+        s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_ELEMS).local_tee(el).array_len().i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(el).local_get(j).array_get(runtime::T_VALS).local_tee(r);
+        s.ref_test_non_null(Ht::I31);
+        s.if_(BlockType::Empty);
+        s.local_get(r).ref_cast_non_null(Ht::I31).i31_get_s().f64_convert_i32_s().br(3);
+        s.end();
+        s.local_get(r).ref_test_non_null(Ht::Concrete(runtime::T_NUMBER)).i32_eqz().br_if(1);
+        s.local_get(r).ref_cast_non_null(Ht::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0).br(2);
+        s.end();
+        s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
+        s.local_get(a).struct_get(runtime::T_ARRAY, array::F_NUMS).local_tee(n).ref_is_null().br_if(0);
+        s.local_get(n).local_get(j).array_get(runtime::T_NUMS).br(1);
+        s.end();
+        s.i64_const(array::HOLE).f64_reinterpret_i64();
+        s.end();
+        Ok(())
+    }
+
+    /// T134: a split number slot as an element key (`SplitGet`'s locals `o`, `f`): `o` into `scratch_js` and, for
+    /// the inline paths' `f64` key, `f` into `scratch_f64` (HOLE when it isn't a number: no index, they miss, and
+    /// the miss passes the value, [`Self::split_key_value`]).
+    fn split_key(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        frames: &mut Vec<Frame>,
+        o: &Expr,
+        f: &Expr,
+    ) -> anyhow::Result<()> {
+        self.expr(s, frames, o)?;
+        s.local_set(self.scratch_js);
+        self.expr(s, frames, f)?;
+        s.local_set(self.scratch_f64);
+        Ok(())
+    }
+
+    /// T134: a split key's value for a miss's call ([`Self::split_key`]): the number in `x` boxed while `k` is null,
+    /// else `k`.
+    fn split_key_value(&mut self, s: &mut wasm_encoder::InstructionSink, k: u32, x: u32) {
+        s.local_get(k).ref_is_null();
+        s.if_(BlockType::Result(runtime::jsval()));
+        s.local_get(x).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+        s.else_();
+        s.local_get(k);
+        s.end();
+    }
+
+    /// T134: push a split number slot's value (`Intrinsic::SplitGet`'s locals `o`, `f`) as an `f64`: `f` unless
+    /// it is HOLE, else ToNumber(`o`).
+    fn split_num(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        frames: &mut Vec<Frame>,
+        o: &Expr,
+        f: &Expr,
+    ) -> anyhow::Result<()> {
+        let x = self.scratch_f64;
+        self.expr(s, frames, f)?;
+        s.local_tee(x).i64_reinterpret_f64().i64_const(array::HOLE).i64_eq();
+        s.if_(BlockType::Result(ValType::F64));
+        self.expr(s, frames, o)?;
+        s.call(self.helper_index(Helper::Js(runtime::Helper::ToNumber)));
+        s.else_();
+        s.local_get(x);
+        s.end();
+        Ok(())
     }
 
     /// T115: `obj[key]` with a key that isn't a constant string: an element of an array (`$array`, its element
@@ -1871,17 +2036,21 @@ impl Emitter<'_> {
             Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => Some(&**arg),
             _ => None,
         };
+        let split = split_args(key);
         self.expr(s, frames, obj)?;
-        match num {
-            Some(i) => {
+        match (num, split) {
+            (Some(i), _) => {
                 self.expr(s, frames, i)?;
                 s.local_set(x);
             }
-            None => {
+            (None, Some((so, sf))) => self.split_key(s, frames, so, sf)?,
+            (None, None) => {
                 self.expr(s, frames, key)?;
                 s.local_set(k);
             }
         }
+        let num = num.or(split.map(|(_, f)| f));
+        self.split_miss = split.is_some();
         s.local_set(o);
         // The array misses call `get`; any other receiver calls `get_other`, which skips the `$array` test.
         s.block(BlockType::Result(runtime::jsval()));
@@ -1931,6 +2100,22 @@ impl Emitter<'_> {
         value: &Expr,
         num_value: bool,
     ) -> anyhow::Result<()> {
+        self.elem_set_split(s, frames, obj, key, value, num_value, None)
+    }
+
+    /// [`Self::elem_set`]; `split`: the value is a split number slot's (T134): `value` is its `f64` local
+    /// (`num_value`), `split` its `o` local; when `f` is HOLE the write is `set(obj, key, o)`.
+    #[allow(clippy::too_many_arguments)]
+    fn elem_set_split(
+        &mut self,
+        s: &mut wasm_encoder::InstructionSink,
+        frames: &mut Vec<Frame>,
+        obj: &Expr,
+        key: &Expr,
+        value: &Expr,
+        num_value: bool,
+        split: Option<&Expr>,
+    ) -> anyhow::Result<()> {
         use wasm_encoder::HeapType as Ht;
         let (o, k, j, el, v, kx, a, x) = (
             self.scratch_val,
@@ -1947,16 +2132,45 @@ impl Emitter<'_> {
             Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => Some(&**arg),
             _ => None,
         };
+        let split_key = split_args(key).filter(|_| num_key.is_none());
         self.expr(s, frames, obj)?;
-        self.expr(s, frames, num_key.unwrap_or(key))?;
+        match split_key {
+            Some((so, sf)) => {
+                // The key's locals are set after the value is evaluated (it may write them): its two parts
+                // wait on the stack.
+                self.expr(s, frames, so)?;
+                self.expr(s, frames, sf)?;
+            }
+            None => {
+                self.expr(s, frames, num_key.unwrap_or(key))?;
+            }
+        }
         self.expr(s, frames, value)?;
         s.local_set(if num_value { x } else { v });
-        s.local_set(if num_key.is_some() { kx } else { k });
+        if split_key.is_some() {
+            // `f` (HOLE: no index), then `o`.
+            s.local_set(kx);
+            s.local_set(k);
+        } else {
+            s.local_set(if num_key.is_some() { kx } else { k });
+        }
+        let num_key = num_key.or(split_key.map(|(_, f)| f));
+        self.split_miss = split_key.is_some();
         s.local_set(o);
         // Blocks: done; a miss for `set_generic`; a miss for `set`/`set_num` (an array, an integer key).
         s.block(BlockType::Empty);
         s.block(BlockType::Empty);
         s.block(BlockType::Empty);
+        if let Some(so) = split {
+            // T134: a split value that isn't a number (`f` is HOLE): `set` with its `o`, no inline path.
+            s.local_get(x).i64_reinterpret_f64().i64_const(array::HOLE).i64_eq();
+            s.if_(BlockType::Empty);
+            self.expr(s, frames, so)?;
+            s.local_set(v);
+            self.elem_set_call(s, o, (k, kx, num_key.is_some()), v, object::Helper::Set);
+            s.br(3);
+            s.end();
+        }
         // The key first: a string key misses before the array cast.
         match num_key {
             Some(_) => {
@@ -2085,7 +2299,9 @@ impl Emitter<'_> {
         helper: object::Helper,
     ) {
         s.local_get(o);
-        if num_key {
+        if num_key && self.split_miss {
+            self.split_key_value(s, k, kx);
+        } else if num_key {
             s.local_get(kx).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
         } else {
             s.local_get(k);
@@ -2316,7 +2532,9 @@ impl Emitter<'_> {
     /// T115: `elem_get`'s miss: `helper(obj, key)`, an `f64` key boxed.
     fn elem_get_call(&mut self, s: &mut wasm_encoder::InstructionSink, num: bool, helper: u32) {
         s.local_get(self.scratch_val);
-        if num {
+        if num && self.split_miss {
+            self.split_key_value(s, self.scratch_js, self.scratch_f64);
+        } else if num {
             s.local_get(self.scratch_f64).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
         } else {
             s.local_get(self.scratch_js);
@@ -2520,6 +2738,33 @@ impl Emitter<'_> {
                 }
             },
             Expr::Binary {
+                op: op @ (BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe),
+                ty: Type::JsVal,
+                lhs,
+                rhs,
+            } if split_vs_num(lhs, rhs).is_some() => {
+                // T134: a split number slot against a number (a constant or a local: no effects to order): an
+                // `f64` compare while the slot holds a number (`f` not HOLE), else the generic compare.
+                let (sp, x) = split_vs_num(lhs, rhs).expect("checked");
+                let (so, sf) = split_args(sp).expect("checked");
+                let xl = self.scratch_x;
+                self.expr(s, frames, x)?;
+                s.local_set(xl);
+                self.expr(s, frames, sf)?;
+                s.local_tee(self.scratch_f64).i64_reinterpret_f64().i64_const(array::HOLE).i64_ne();
+                s.if_(BlockType::Result(ValType::I32));
+                s.local_get(self.scratch_f64).local_get(xl).f64_eq();
+                s.else_();
+                self.expr(s, frames, so)?;
+                s.local_get(xl).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+                let h = if matches!(op, BinOp::Eq | BinOp::Ne) { runtime::Helper::StrictEq } else { runtime::Helper::LooseEq };
+                s.call(self.helper_index(Helper::Js(h)));
+                s.end();
+                if matches!(op, BinOp::Ne | BinOp::LooseNe) {
+                    s.i32_eqz();
+                }
+            }
+            Expr::Binary {
                 op: op @ (BinOp::Eq | BinOp::Ne),
                 ty: Type::JsVal,
                 lhs,
@@ -2606,6 +2851,61 @@ impl Emitter<'_> {
                     }
                     other => unreachable!("no binary ops on {other}"),
                 };
+            }
+            Expr::Convert {
+                from: Type::JsVal,
+                to: Type::F64,
+                arg,
+            } if matches!(&**arg, Expr::Intrinsic { op: Intrinsic::SplitGet, .. }) =>
+            {
+                // T134: a split number slot as a number: `f` while `o` is null, else ToNumber(`o`).
+                let Expr::Intrinsic { args, .. } = &**arg else {
+                    unreachable!()
+                };
+                self.split_num(s, frames, &args[0], &args[1])?;
+            }
+            Expr::Convert {
+                from: Type::JsVal,
+                to: Type::F64,
+                arg,
+            } if matches!(&**arg, Expr::Seq { value, .. } if split_args(value).is_some()) =>
+            {
+                // T134: `--x` of a split number slot (its write, then its read) as a number.
+                let Expr::Seq { body, value } = &**arg else {
+                    unreachable!()
+                };
+                for x in body {
+                    self.stmt(s, frames, x)?;
+                }
+                let (so, sf) = split_args(value).expect("checked");
+                self.split_num(s, frames, so, sf)?;
+            }
+            Expr::Convert {
+                from: Type::JsVal,
+                to: Type::F64,
+                arg,
+            } if matches!(&**arg, Expr::Intrinsic { op: Intrinsic::GetProp, args }
+                if split_args(&args[1]).is_some() || matches!(args[1], Expr::Convert { from: Type::F64, to: Type::JsVal, .. })) =>
+            {
+                // T134: `+o[k]` with an `f64` or split key: unboxed from an array in number mode inline; else
+                // `get_num` with the key boxed only then.
+                let Expr::Intrinsic { args, .. } = &**arg else {
+                    unreachable!()
+                };
+                self.elem_num_key(s, frames, &args[0], &args[1])?;
+                let x = self.scratch_f64;
+                s.local_tee(x).i64_reinterpret_f64().i64_const(array::HOLE).i64_eq();
+                s.if_(BlockType::Result(ValType::F64));
+                s.local_get(self.scratch_val);
+                if split_args(&args[1]).is_some() {
+                    self.split_key_value(s, self.scratch_js, self.scratch_x);
+                } else {
+                    s.local_get(self.scratch_x).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+                }
+                s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::GetNum))));
+                s.else_();
+                s.local_get(x);
+                s.end();
             }
             Expr::Convert {
                 from: Type::JsVal,
@@ -2826,6 +3126,47 @@ impl Emitter<'_> {
                             s.i64_const(array::HOLE).f64_reinterpret_i64();
                         }
                     }
+                    return Ok(true);
+                }
+                if let (Intrinsic::ElemNum, [obj, key]) = (op, args.as_slice())
+                    && !matches!(key, Expr::Str(_))
+                {
+                    self.elem_num(s, frames, obj, key)?;
+                    return Ok(true);
+                }
+                if let (Intrinsic::GetElemCall, [obj, key]) = (op, args.as_slice()) {
+                    // T134: `get(obj, key)`, an `f64` key boxed, a split key as its value.
+                    self.expr(s, frames, obj)?;
+                    match (key, split_args(key)) {
+                        (Expr::Convert { from: Type::F64, to: Type::JsVal, arg }, _) => {
+                            self.expr(s, frames, arg)?;
+                            s.call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+                        }
+                        (_, Some((so, sf))) => {
+                            self.expr(s, frames, so)?;
+                            s.local_set(self.scratch_js);
+                            self.expr(s, frames, sf)?;
+                            s.local_set(self.scratch_f64);
+                            self.split_key_value(s, self.scratch_js, self.scratch_f64);
+                        }
+                        _ => {
+                            self.expr(s, frames, key)?;
+                        }
+                    }
+                    s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::Get))));
+                    return Ok(true);
+                }
+                if let (Intrinsic::SplitGet, [o, f]) = (op, args.as_slice()) {
+                    // T134: a split number slot as a JS value: `o`, or the number `f` boxed while `o` is null.
+                    let v = self.scratch_js;
+                    self.expr(s, frames, o)?;
+                    s.local_tee(v).ref_is_null();
+                    s.if_(BlockType::Result(runtime::jsval()));
+                    self.expr(s, frames, f)?;
+                    s.call(self.helper_index(Helper::Js(runtime::Helper::Box)));
+                    s.else_();
+                    s.local_get(v);
+                    s.end();
                     return Ok(true);
                 }
                 if let (Intrinsic::ElemNum, [obj, Expr::Str(units)]) = (op, args.as_slice()) {
@@ -3231,6 +3572,14 @@ impl Emitter<'_> {
                 }
                 if let (Intrinsic::SetProp, [obj, key, value]) = (op, args.as_slice())
                     && !matches!(key, Expr::Str(_))
+                    && let Some((so, sf)) = split_args(value)
+                {
+                    // T134: a split number slot's value: the number path while it's a number.
+                    self.elem_set_split(s, frames, obj, key, sf, true, Some(so))?;
+                    return Ok(false);
+                }
+                if let (Intrinsic::SetProp, [obj, key, value]) = (op, args.as_slice())
+                    && !matches!(key, Expr::Str(_))
                 {
                     self.elem_set(s, frames, obj, key, value, false)?;
                     return Ok(false);
@@ -3558,6 +3907,7 @@ impl Emitter<'_> {
                     | Intrinsic::MethodDead(_)
                     | Intrinsic::MethodFn(_) => unreachable!("above"),
                     Intrinsic::JsAdd => H::JsAdd,
+                    Intrinsic::JsAddParts => H::JsAddParts,
                     Intrinsic::ToNumeric => H::Big(bigint::Helper::ToNumeric),
                     Intrinsic::Numeric(n) => H::Big(bigint::Helper::Numeric(*n)),
                     Intrinsic::BigIntFromNumber => H::Big(bigint::Helper::FromF64),
@@ -3599,6 +3949,8 @@ impl Emitter<'_> {
                     | Intrinsic::F64FromWords
                     | Intrinsic::F64IsHole
                     | Intrinsic::NumOrHole
+                    | Intrinsic::SplitGet
+                    | Intrinsic::GetElemCall
                     | Intrinsic::RandomSeed
                     | Intrinsic::DateNow
                     | Intrinsic::MonotonicNow

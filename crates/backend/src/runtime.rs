@@ -1509,6 +1509,8 @@ pub fn push_number(s: &mut InstructionSink, v: f64) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Helper {
     Box,
+    /// T134: `js_add_parts(at, av, bt, bv)`, `Intrinsic::JsAddParts`.
+    JsAddParts,
     ToNumber,
     ToBoolean,
     IsNumber,
@@ -1584,6 +1586,7 @@ impl Helper {
     pub fn name(self) -> &'static str {
         match self {
             Helper::Box => "box_number",
+            Helper::JsAddParts => "js_add_parts",
             Helper::ToNumber => "to_number",
             Helper::ToBoolean => "to_boolean",
             Helper::IsNumber => "is_number",
@@ -1641,6 +1644,7 @@ impl Helper {
         let s = string_ref();
         match self {
             Helper::Box => (vec![ValType::F64], vec![v]),
+            Helper::JsAddParts => (vec![ValType::F64, v, ValType::F64, v], vec![v]),
             Helper::ToNumber => (vec![v], vec![ValType::F64]),
             Helper::ToBoolean | Helper::IsNumber | Helper::IsNullish | Helper::Typeof => {
                 (vec![v], vec![ValType::I32])
@@ -1697,6 +1701,7 @@ impl Helper {
     pub fn body(self, cx: &mut dyn Cx) -> Function {
         match self {
             Helper::Box => box_number(),
+            Helper::JsAddParts => js_add_parts(cx),
             Helper::ToNumber => to_number(cx),
             Helper::ToBoolean => to_boolean(cx),
             Helper::IsNumber => is_number(),
@@ -1757,6 +1762,26 @@ impl Helper {
 }
 
 /// `$box_number(x: f64) -> jsval`.
+/// `js_add_parts(at, av, bt, bv)` (T134, [`Helper::JsAddParts`]): JS `a + b`, each operand a number `at` or, when
+/// `at` is HOLE, the value `av`.
+fn js_add_parts(cx: &mut dyn Cx) -> Function {
+    let box_ = cx.helper(Helper::Box);
+    let add = cx.helper(Helper::JsAdd);
+    let mut f = Function::new([]);
+    let mut s = f.instructions();
+    for (t, v) in [(0, 1), (2, 3)] {
+        s.local_get(t).i64_reinterpret_f64().i64_const(crate::array::HOLE).i64_eq();
+        s.if_(BlockType::Result(jsval()));
+        s.local_get(v);
+        s.else_();
+        s.local_get(t).call(box_);
+        s.end();
+    }
+    s.call(add);
+    s.end();
+    f
+}
+
 fn box_number() -> Function {
     const X: u32 = 0;
     const I: u32 = 1;

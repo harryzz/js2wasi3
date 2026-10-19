@@ -114,6 +114,9 @@ pub struct Result {
     pub fields: HashMap<(u32, u32), u32>,
     /// T133: (constructor's node start, key) of the keys only numbers are ever stored at (on `new F` objects).
     pub num_fields: NumFields,
+    /// T134: the variables and parameters only numbers are ever stored in (over every copy of their function):
+    /// where a split number slot pays.
+    pub num_vars: std::collections::HashSet<SymbolId>,
     pub rounds: u32,
     pub instances: usize,
     pub allocs: usize,
@@ -191,7 +194,7 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
     // their default prototype object (else objects made before the replacement is seen keep it for ever).
     let first = run(program, semantic, user_end, (Default::default(), Default::default()));
     if first.steps > MAX_STEPS {
-        return Result { sites: Vec::new(), methods: HashMap::new(), fields: HashMap::new(), num_fields: Default::default(), rounds: first.rounds, instances: first.insts.len(), allocs: first.allocs.len(), steps: first.steps };
+        return Result { sites: Vec::new(), methods: HashMap::new(), fields: HashMap::new(), num_fields: Default::default(), num_vars: Default::default(), rounds: first.rounds, instances: first.insts.len(), allocs: first.allocs.len(), steps: first.steps };
     }
     let mut replaced = std::collections::HashSet::new();
     for ((o, k), v) in &first.props {
@@ -216,6 +219,7 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
             methods: HashMap::new(),
             fields: HashMap::new(),
             num_fields: Default::default(),
+            num_vars: Default::default(),
             rounds: a.rounds,
             instances: a.insts.len(),
             allocs: a.allocs.len(),
@@ -242,7 +246,12 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result 
         }
     }
     let (fields, num_fields) = a.fields();
-    Result { sites, methods, fields, num_fields, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps }
+    let mut var_sets: HashMap<SymbolId, Set> = HashMap::new();
+    for ((sym, _), v) in &a.vars {
+        var_sets.entry(*sym).or_default().extend(v.iter().copied());
+    }
+    let num_vars = var_sets.into_iter().filter(|(_, v)| v.len() == 1 && v.contains(&AV::Num)).map(|(s, _)| s).collect();
+    Result { sites, methods, fields, num_fields, num_vars, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps }
 }
 
 fn run<'a, 's>(

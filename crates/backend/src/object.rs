@@ -334,7 +334,7 @@ pub enum Helper {
     GetNum,
     /// `(v, k: jsval, x: f64)` (T107): `v[k] = x`; into an array in number mode without a box.
     SetNum,
-    /// `(v, k: jsval) -> f64` (T107): see `Intrinsic::ElemNum`.
+    /// `(v, x: f64) -> f64` (T107; T134: the key an `f64`): see `Intrinsic::ElemNum`.
     ElemNum,
     /// `(o, k, v: jsval, attrs: i32)`: set an own property (attributes only for a new one).
     Define,
@@ -692,7 +692,7 @@ impl Helper {
             Helper::GetLength => (vec![v], vec![v]),
             Helper::GetNum => (vec![v, v], vec![ValType::F64]),
             Helper::SetNum => (vec![v, v, ValType::F64], vec![]),
-            Helper::ElemNum => (vec![v, v], vec![ValType::F64]),
+            Helper::ElemNum => (vec![v, ValType::F64], vec![ValType::F64]),
             Helper::Define => (vec![o, s, v, I32], vec![]),
             Helper::AppendNamed => (vec![o, s, v, I32, I32], vec![]),
             Helper::DefineNamed => (vec![v, s, v, I32], vec![]),
@@ -1820,23 +1820,42 @@ fn set_num(cx: &mut dyn Cx) -> Function {
 
 /// `elem_num(v, k)` (see [`Helper::ElemNum`]).
 fn elem_num() -> Function {
+    use wasm_encoder::HeapType as Ht;
     const V: u32 = 0;
-    const K: u32 = 1;
+    const X: u32 = 1;
     const A: u32 = 2;
     const N: u32 = 3;
     const J: u32 = 4;
-    let mut f = Function::new([(1, rt(true, T_ARRAY)), (1, rt(true, runtime::T_NUMS)), (1, ValType::I32)]);
+    const EL: u32 = 5;
+    const R: u32 = 6;
+    let mut f = Function::new([
+        (1, rt(true, T_ARRAY)),
+        (1, rt(true, runtime::T_NUMS)),
+        (1, ValType::I32),
+        (1, rt(true, T_VALS)),
+        (1, jsval()),
+    ]);
     let mut s = f.instructions();
     s.block(BlockType::Empty);
     s.local_get(V).ref_test_non_null(array::array()).i32_eqz().br_if(0);
-    s.local_get(K).ref_test_non_null(wasm_encoder::HeapType::I31).i32_eqz().br_if(0);
-    s.local_get(V).ref_cast_non_null(array::array()).local_tee(A);
-    s.struct_get(T_ARRAY, array::F_NUMS).local_set(N);
-    array::is_num_mode(&mut s, N);
-    s.i32_eqz().br_if(0);
-    s.local_get(K).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s().local_tee(J);
-    s.local_get(A).struct_get(T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
-    // A hole has HOLE's bits already.
+    s.local_get(V).ref_cast_non_null(array::array()).local_set(A);
+    // An integer-valued `f64` (HOLE, NaN: no).
+    s.local_get(X).i32_trunc_sat_f64_s().local_tee(J).f64_convert_i32_s();
+    s.local_get(X).f64_ne().br_if(0);
+    // The generic store (first, as `get_num`): an `i31` or a `$number` (null: a hole; an accessor: no).
+    s.local_get(J).local_get(A).struct_get(T_ARRAY, array::F_ELEMS).local_tee(EL).array_len().i32_lt_u();
+    s.if_(BlockType::Empty);
+    s.local_get(EL).local_get(J).array_get(T_VALS).local_tee(R);
+    s.ref_test_non_null(Ht::I31);
+    s.if_(BlockType::Empty);
+    s.local_get(R).ref_cast_non_null(Ht::I31).i31_get_s().f64_convert_i32_s().return_();
+    s.end();
+    s.local_get(R).ref_test_non_null(Ht::Concrete(runtime::T_NUMBER)).i32_eqz().br_if(1);
+    s.local_get(R).ref_cast_non_null(Ht::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0).return_();
+    s.end();
+    // Number mode (a hole has HOLE's bits already).
+    s.local_get(J).local_get(A).struct_get(T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
+    s.local_get(A).struct_get(T_ARRAY, array::F_NUMS).local_tee(N).ref_is_null().br_if(0);
     s.local_get(N).local_get(J).array_get(runtime::T_NUMS).return_();
     s.end();
     s.i64_const(array::HOLE).f64_reinterpret_i64();

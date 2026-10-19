@@ -97,3 +97,18 @@ fn unknown_is_not_typed() {
     let src = "var x = require(\"zlib\").something(); x.y;";
     assert_eq!(site(src, "x.y", "get").0, 99);
 }
+
+#[test]
+fn num_vars() {
+    // T134: `i`, `n` and `l` only ever hold numbers; `s` holds a string too; `p` gets an object.
+    let src = "function f(i, n, p) { var l = 0; var s = 1; while (--n >= 0) { l = l + i++; } s = 'x' + s; return l; }\n\
+               f(0, 5, {});";
+    let alloc = oxc_allocator::Allocator::default();
+    let ret = oxc_parser::Parser::new(&alloc, src, oxc_span::SourceType::cjs()).parse();
+    let sem = oxc_semantic::SemanticBuilder::new().with_build_nodes(true).build(&ret.program);
+    let r = analyze(&ret.program, &sem.semantic, src.len() as u32);
+    let scoping = sem.semantic.scoping();
+    let mut names: Vec<_> = r.num_vars.iter().map(|s| scoping.symbol_name(*s).to_string()).collect();
+    names.sort();
+    assert_eq!(names, ["i", "l", "n"]);
+}

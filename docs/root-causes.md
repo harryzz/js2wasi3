@@ -53,8 +53,11 @@ write and an unbox per use. `docs/performance.md`: numbers 16.3% of js2wasi3's t
   binarytrees −5.1%; splay +65% from wasmtime's grow-or-collect rule (F304), memory 72 vs 87 MB mean.
 - T111 (2026-10-13): nbody fields (F406) in number cells owned by the object (V8's double fields): nbody −20.8%;
   left F423 (cells only at numeric writes of layout keys), F424 (generic reads copy).
-- Left: crypto `am3` parameters/locals (F404, 18.6%),
-  navier-stokes `lin_solve` local (F403), comparisons over elements (F402, ≤ 1.1%), booleans boxed (F14), integer
+- T134 (2026-10-19): split number slots (locals/parameters the type analysis types as numbers keep an `f64`
+  next to their `jsval`): crypto −31.3%, navier-stokes −27.0%, fannkuchredux −20.5%, spectralnorm −13.8% on a-03
+  (F403, F404 fixed); `.wasm` +0.7…+5.2% (F465).
+- Left: booleans (F461), element copies (F462), typed arrays in unboxed reads (F463), call boundaries (F464),
+  comparisons over elements (F402, ≤ 1.1%), booleans boxed (F14), integer
   loops on `f64` (F335), BigInt allocation per op (F188; pidigits 89% BigInt), conservative definite assignment
   (F398), F323, F334.
 - Risk pattern (T107): a number mode adds state checks to the generic path (F400).

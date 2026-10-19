@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-19: T134 split number slots (full run)
+
+- Compiler (`main` at 671e315 + T134, uncommitted at the run): locals and parameters the type analysis types as
+  numbers keep an `f64` next to their `jsval` (null while a number); element reads, `+` and element writes take it
+  unboxed. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t134.log`, 1,490 s): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-18: T133 objects as structs per shape (full run)
 
 - Compiler (`main` at b935ef8 + T133, uncommitted at the run): objects of constructors with a build-time layout and

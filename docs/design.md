@@ -1008,5 +1008,14 @@ The rules after T106–T110, where each speed fix made another program slower (`
   then `struct.get`/`struct.set`; anything that changes keys or attributes moves the entries into `vals` and drops
   the shared index, so the guards miss. Shape types are only made where typed sites use them: each one lengthens
   every generic object test (raytrace +1.29% instructions from two).
+- **Split number slots** (T134): an uncaptured local or simple parameter that the lowering makes `jsval` but the
+  type analysis types as a number (`num_vars`) and that has a numeric use (`numeric_use`) is `Place::Split(o, f)`:
+  `o` is the Wasm null while the value is the number in `f`; else `o` holds the value (a box is kept, so uses as a
+  JS value don't allocate again) and `f` its number or HOLE. Numeric uses test `f`, value uses test `o`; never a
+  deoptimization or a second copy of the function, and a wrong guess only costs the slow path. Element reads under
+  a split store or `+` are `ElemNum` (numbers from number mode and from a generic array's store; inline only in
+  loops, else the `elem_num` helper with an `f64` key) with `get` as a call on a miss (`GetElemCall`); a `+`'s
+  generic path is one call (`JsAddParts`). Lesson: unboxing a value that is mostly used as a JS value costs
+  (splay: dropping the argument's box re-boxed per use; `this.x = x` gained nothing).
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

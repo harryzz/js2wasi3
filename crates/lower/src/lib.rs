@@ -204,9 +204,10 @@ pub fn lower_with(
     (an.definite, an.maybe_undefined) = definite::analyze(&program.semantic, &an);
     // T132: the method-call sites the type analysis (T131) gives one target function (none if it fails).
     // T133: and the `o.k` sites whose receivers come from one constructor (its node's start).
-    let (methods, fields, num_fields) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // T134: and the variables only numbers are stored in.
+    let (methods, fields, num_fields, num_vars) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let r = js2wasi3_types::analyze(program.ast, &program.semantic, program.user_end);
-        (r.methods, r.fields, r.num_fields)
+        (r.methods, r.fields, r.num_fields, r.num_vars)
     }))
     .unwrap_or_default();
     // T133: each function's scope by its node's start.
@@ -309,6 +310,7 @@ pub fn lower_with(
             methods: methods.clone(),
             fields: fields.clone(),
             num_fields: num_fields.clone(),
+            num_vars: num_vars.clone(),
             field_ctors: fields.values().copied().collect(),
             fn_scopes: fn_scopes.clone(),
             layout_ctors: HashSet::new(),
@@ -492,6 +494,8 @@ struct Lowerer<'p, 'a> {
     fn_scopes: HashMap<u32, ScopeId>,
     /// T133: (constructor's node start, key) of keys only numbers are stored at, from the type analysis.
     num_fields: std::collections::HashSet<(u32, String)>,
+    /// T134: the variables the type analysis sees only numbers stored in ([`Place::Split`]).
+    num_vars: HashSet<SymbolId>,
     /// T133: constructors (node starts) with `o.k` sites the analysis types ([`Self::fields`]'s values).
     field_ctors: HashSet<u32>,
     /// T133: layouts some constructor has (their `layout_nums` bits so far).
@@ -713,6 +717,8 @@ struct FnCx {
     /// The cells of computed class field keys (by the field's start), filled when the class is
     /// evaluated.
     field_keys: HashMap<u32, LocalId>,
+    /// T134: split number slots ([`Place::Split`]): the `f64` local next to the variable's `jsval` local.
+    splits: HashMap<SymbolId, LocalId>,
 }
 
 impl FnCx {
@@ -741,6 +747,7 @@ impl FnCx {
             privates: HashMap::new(),
             priv_cells: HashMap::new(),
             field_keys: HashMap::new(),
+            splits: HashMap::new(),
         }
     }
 
@@ -791,6 +798,14 @@ enum Place {
     Buf(LocalId),
     /// T78: the same for a top-level variable (a global).
     BufGlobal(GlobalId),
+    /// T134: a split number slot: a `jsval` local `o` and an `f64` local `f`. While `o` is the Wasm null
+    /// (`Intrinsic::Hole`) the value is the number in `f`; else it is `o` (any value, a number too: a box kept, so
+    /// uses as a JS value don't allocate again), and `f` is its number or HOLE ([`Intrinsic::F64IsHole`]). Numeric
+    /// uses test `f`, uses as a value test `o`. For an
+    /// uncaptured `jsval` variable the type analysis sees only numbers stored in (`num_vars`): its numbers stay
+    /// unboxed, and anything else still fits. Every access goes through this place (never `Place::Local`), so the
+    /// null never leaks as a value.
+    Split(LocalId, LocalId),
 }
 
 /// A resolved variable: where it lives, its slot, its type and kind.
@@ -2758,11 +2773,22 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     /// first, so a parameter binding the prologue fills (destructuring, rest, defaults) that a `var`
     /// redeclares keeps its value.)
     fn finish(&mut self, mut cx: FnCx, prologue: Vec<Stmt>, stmts: Vec<Stmt>) {
-        let mut body: Vec<Stmt> = cx
-            .var_undefined
+        // T134: a split local's `f` starts as HOLE (its `o` starts as null, or `undefined` just below).
+        let mut splits: Vec<_> = cx
+            .splits
             .iter()
-            .map(|l| Stmt::Set(*l, Expr::undefined()))
+            .filter(|(sym, _)| cx.locals.get(sym).is_some_and(|o| o.0 >= cx.func.params))
+            .map(|(_, f)| *f)
             .collect();
+        splits.sort();
+        let mut body: Vec<Stmt> = splits
+            .into_iter()
+            .map(|f| {
+                let hole = Expr::intrinsic(Intrinsic::Hole, vec![]);
+                Stmt::Set(f, Expr::intrinsic(Intrinsic::NumOrHole, vec![hole]))
+            })
+            .collect();
+        body.extend(cx.var_undefined.iter().map(|l| Stmt::Set(*l, Expr::undefined())));
         body.extend(prologue);
         body.extend(stmts);
         cx.func.body = body;
@@ -2982,6 +3008,14 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     cx.cells.insert(sym, (cell, false));
                 } else {
                     cx.locals.insert(sym, param);
+                    let ty = cx.func.local(param).ty;
+                    if self.split_ok(cx, sym, ty) {
+                        // T134: the argument's number unboxed at entry; the parameter itself is the `o` local and
+                        // keeps the argument (uses as a JS value don't box again).
+                        let f = cx.func.add_local(format!("{}.num", b.name), Type::F64);
+                        cx.splits.insert(sym, f);
+                        prologue.push(Stmt::Set(f, Expr::intrinsic(Intrinsic::NumOrHole, vec![Expr::Local(param)])));
+                    }
                 }
             }
         }
@@ -7357,6 +7391,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         if matches!(key, Expr::Str(_)) {
             return key;
         }
+        if let Expr::Convert { from: Type::F64, to: Type::JsVal, arg } = &key
+            && !matches!(**arg, Expr::Const(_))
+        {
+            let Expr::Convert { arg, .. } = key else { unreachable!() };
+            // T134: an `f64` key stays unboxed (the backend's element paths take it as is, boxing only for a call);
+            // a constant is boxed for free (and a typed array's miss would box it on every access).
+            let tk = cx.func.add_local("key", Type::F64);
+            body.push(Stmt::Set(tk, *arg));
+            return Expr::convert(Type::F64, Type::JsVal, Expr::Local(tk));
+        }
         let tk = cx.func.add_local("key", Type::JsVal);
         body.push(Stmt::Set(tk, key));
         Expr::Local(tk)
@@ -7592,7 +7636,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
     }
 
     /// One operand of [`Self::num_sum`], evaluated into `out`.
-    fn sum_operand(&mut self, cx: &mut FnCx, e: Expr, out: &mut Vec<Stmt>) -> SumOperand {
+    fn sum_operand(&self, cx: &mut FnCx, e: Expr, out: &mut Vec<Stmt>) -> SumOperand {
         let t = cx.func.add_local("num", Type::F64);
         match e {
             Expr::Intrinsic {
@@ -7627,9 +7671,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 out.push(Stmt::If {
                     cond,
                     then: vec![
+                        // T134: one call (the operands' boxing in the helper).
                         Stmt::Set(
                             v,
-                            Expr::intrinsic(Intrinsic::JsAdd, vec![a.jsval(), b.jsval()]),
+                            Expr::intrinsic(
+                                Intrinsic::JsAddParts,
+                                vec![Expr::Local(a.t), a.value(), Expr::Local(b.t), b.value()],
+                            ),
                         ),
                         Stmt::Set(t, Expr::intrinsic(Intrinsic::NumOrHole, vec![Expr::Local(v)])),
                     ],
@@ -7644,21 +7692,35 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let k = args.pop().expect("two operands");
                 let o = args.pop().expect("two operands");
                 let to = cx.func.add_local("obj", Type::JsVal);
-                let tk = cx.func.add_local("key", Type::JsVal);
                 let v = cx.func.add_local("elem", Type::JsVal);
                 out.push(Stmt::Set(to, o));
-                out.push(Stmt::Set(tk, k));
+                // T134: an `f64` key stays unboxed (boxed only if `get` needs it).
+                let key = match k {
+                    Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => {
+                        let tk = cx.func.add_local("key", Type::F64);
+                        out.push(Stmt::Set(tk, *arg));
+                        Expr::convert(Type::F64, Type::JsVal, Expr::Local(tk))
+                    }
+                    // A split number slot (two locals, read right away by `ElemNum` and `get`).
+                    k @ Expr::Intrinsic { op: Intrinsic::SplitGet, .. } => k,
+                    k => {
+                        let tk = cx.func.add_local("key", Type::JsVal);
+                        out.push(Stmt::Set(tk, k));
+                        Expr::Local(tk)
+                    }
+                };
                 // `ElemNum` runs no JS code: after "not one", `get` is the one observable read.
                 out.push(Stmt::Set(
                     t,
-                    Expr::intrinsic(Intrinsic::ElemNum, vec![Expr::Local(to), Expr::Local(tk)]),
+                    Expr::intrinsic(Intrinsic::ElemNum, vec![Expr::Local(to), key.clone()]),
                 ));
                 out.push(Stmt::If {
                     cond: f64_is_hole(t),
                     then: vec![
+                        // T134: `get` as a call (no second inline try of the elements).
                         Stmt::Set(
                             v,
-                            Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(to), Expr::Local(tk)]),
+                            Expr::intrinsic(Intrinsic::GetElemCall, vec![Expr::Local(to), key]),
                         ),
                         Stmt::Set(t, Expr::intrinsic(Intrinsic::NumOrHole, vec![Expr::Local(v)])),
                     ],
@@ -7673,6 +7735,18 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             } => {
                 out.push(Stmt::Set(t, *arg));
                 SumOperand { t, v: None }
+            }
+            Expr::Intrinsic {
+                op: Intrinsic::SplitGet,
+                mut args,
+            } => {
+                // T134: a split number slot: its number (HOLE if it holds another value, then in `o`), both
+                // copied (a later operand may write them).
+                let (Some(f), Some(o)) = (args.pop(), args.pop()) else { unreachable!("two locals") };
+                let v = cx.func.add_local("operand", Type::JsVal);
+                out.push(Stmt::Set(v, o));
+                out.push(Stmt::Set(t, f));
+                SumOperand { t, v: Some(v) }
             }
             e => {
                 let v = cx.func.add_local("operand", Type::JsVal);
@@ -8130,6 +8204,8 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             // f64 slots are `Num` or `Bottom`, matching their type.
             let kind = self.slot_kind(Slot::Var(sym));
             let place = match place {
+                // T134 (`split_ok` made sure there's no guard).
+                Place::Local(l) if let Some(&f) = cx.splits.get(&sym) => Place::Split(l, f),
                 _ if ty != Type::JsVal || kind != Kind::Str || !self.an.appended.contains(&sym) => place,
                 Place::Local(l) => Place::Buf(l),
                 Place::Global(g) => Place::BufGlobal(g),
@@ -8435,6 +8511,7 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             return out;
         }
         match var.guard {
+            None if let Place::Split(o, f) = var.place => self.split_store(cx, o, f, value),
             None => vec![set(var.place, var.ty, value)],
             Some((g, sym, at)) => {
                 let tmp = cx.func.add_local("tmp", var.ty);
@@ -8549,6 +8626,9 @@ impl<'p, 'a> Lowerer<'p, 'a> {
         }
         if !self.an.captured.contains(&sym) {
             let local = self.local_for(cx, sym, ty);
+            if let Some(&f) = cx.splits.get(&sym) {
+                return self.split_store(cx, local, f, v);
+            }
             return vec![Stmt::Set(local, v)];
         }
         match cx.cells.get(&sym) {
@@ -8578,7 +8658,103 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             None => {
                 let l = cx.func.add_local(self.scoping.symbol_name(sym), ty);
                 cx.locals.insert(sym, l);
+                if self.split_ok(cx, sym, ty) {
+                    let f = cx.func.add_local(format!("{}.num", self.scoping.symbol_name(sym)), Type::F64);
+                    cx.splits.insert(sym, f);
+                }
                 l
+            }
+        }
+    }
+
+    /// T134: does uncaptured variable `sym` (IR type `ty`) get a split number slot ([`Place::Split`])? A `jsval`
+    /// of kind `Any` the type analysis sees only numbers stored in, without TDZ checks, in a function that isn't
+    /// `main` (top-level code may become async), a generator or async.
+    fn split_ok(&self, cx: &FnCx, sym: SymbolId, ty: Type) -> bool {
+        ty == Type::JsVal
+            && self.slot_kind(Slot::Var(sym)) == Kind::Any
+            && self.num_vars.contains(&sym)
+            && self.numeric_use(sym)
+            && !self.an.captured.contains(&sym)
+            && !self.globals.contains_key(&sym)
+            && !self.tdz_flags.contains_key(&sym)
+            && !cx.func.flags.is_generator
+            && !cx.func.flags.is_async
+            && !self.is_top_code(cx.id)
+    }
+
+    /// T134: is some read of `sym` a numeric use (an arithmetic, bitwise or comparison operand, `-x`/`+x`/`~x`,
+    /// `x++`, `x op= …`, an element key, the value of an element write)? A variable only stored and passed on (a constructor's `this.x = x`) gains
+    /// nothing from a split slot, only its tests.
+    fn numeric_use(&self, sym: SymbolId) -> bool {
+        use oxc_syntax::operator::{AssignmentOperator as A, BinaryOperator as B, UnaryOperator as U};
+        let nodes = self.p.semantic.nodes();
+        self.scoping.get_resolved_references(sym).any(|r| {
+            let mut id = r.node_id();
+            let mut span = nodes.get_node(id).span();
+            loop {
+                let parent = nodes.parent_id(id);
+                match nodes.get_node(parent).kind() {
+                    AstKind::ParenthesizedExpression(_) => {
+                        id = parent;
+                        span = nodes.get_node(id).span();
+                    }
+                    AstKind::BinaryExpression(b) => return !matches!(b.operator, B::In | B::Instanceof),
+                    AstKind::UnaryExpression(u) => {
+                        return matches!(u.operator, U::UnaryNegation | U::UnaryPlus | U::BitwiseNot);
+                    }
+                    AstKind::UpdateExpression(_) => return true,
+                    // `x op= …`; `a[k] = x` (an array in number mode takes the number unboxed).
+                    AstKind::AssignmentExpression(a) => {
+                        return a.operator != A::Assign
+                            || (a.right.span() == span
+                                && matches!(a.left, AssignmentTarget::ComputedMemberExpression(_)));
+                    }
+                    AstKind::ComputedMemberExpression(m) => return m.expression.span() == span,
+                    _ => return false,
+                }
+            }
+        })
+    }
+
+    /// T134: store `v` (a `jsval`) into split number slot `o`/`f` ([`Place::Split`]): a computed number goes
+    /// into `f` alone (`o` null); any other value into `o`, its number (or HOLE) into `f`. A boxed `f64` is stored
+    /// as is, another split slot copied, a `+` tree or element read taken unboxed where it is a number
+    /// ([`Self::sum_operand`], T108's).
+    fn split_store(&self, cx: &mut FnCx, o: LocalId, f: LocalId, v: Expr) -> Vec<Stmt> {
+        let hole = || Expr::intrinsic(Intrinsic::Hole, vec![]);
+        let unboxed = match &v {
+            Expr::Intrinsic { op: Intrinsic::JsAdd, .. } => true,
+            Expr::Intrinsic { op: Intrinsic::GetProp, args } => !matches!(args[1], Expr::Str(_)),
+            _ => false,
+        };
+        match v {
+            Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => vec![Stmt::Set(f, *arg), Stmt::Set(o, hole())],
+            Expr::Intrinsic { op: Intrinsic::SplitGet, mut args } => {
+                let (Some(f2), Some(o2)) = (args.pop(), args.pop()) else { unreachable!("two locals") };
+                vec![Stmt::Set(f, f2), Stmt::Set(o, o2)]
+            }
+            v if !unboxed => vec![
+                Stmt::Set(o, v),
+                Stmt::Set(f, Expr::intrinsic(Intrinsic::NumOrHole, vec![Expr::Local(o)])),
+            ],
+            v => {
+                let mut out = vec![];
+                let x = self.sum_operand(cx, v, &mut out);
+                out.push(Stmt::Set(f, Expr::Local(x.t)));
+                out.push(Stmt::Set(
+                    o,
+                    match x.v {
+                        None => hole(),
+                        Some(jv) => Expr::Cond {
+                            cond: Box::new(f64_is_hole(x.t)),
+                            then: Box::new(Expr::Local(jv)),
+                            els: Box::new(hole()),
+                            ty: Type::JsVal,
+                        },
+                    },
+                ));
+                out
             }
         }
     }
@@ -8745,19 +8921,11 @@ struct SumOperand {
 }
 
 impl SumOperand {
-    /// The operand as a JS value (a number is boxed: only on the generic path).
-    fn jsval(&self) -> Expr {
-        let boxed = Expr::convert(Type::F64, Type::JsVal, Expr::Local(self.t));
-        match self.v {
-            None => boxed,
-            Some(v) => Expr::Cond {
-                cond: Box::new(f64_is_hole(self.t)),
-                then: Box::new(Expr::Local(v)),
-                els: Box::new(boxed),
-                ty: Type::JsVal,
-            },
-        }
+    /// T134: the value when `t` is HOLE (for `Intrinsic::JsAddParts`; a number operand has none: the null).
+    fn value(&self) -> Expr {
+        self.v.map_or_else(|| Expr::intrinsic(Intrinsic::Hole, vec![]), Expr::Local)
     }
+
 }
 
 fn f64_is_hole(t: LocalId) -> Expr {
@@ -9066,6 +9234,7 @@ fn read(p: Place, ty: Type) -> Expr {
         Place::Cell(l) => Expr::intrinsic(Intrinsic::CellGet(ty), vec![Expr::Local(l)]),
         Place::Buf(l) => Expr::intrinsic(Intrinsic::StrBufGet, vec![Expr::Local(l)]),
         Place::BufGlobal(g) => Expr::intrinsic(Intrinsic::StrBufGet, vec![Expr::Global(g)]),
+        Place::Split(o, f) => Expr::intrinsic(Intrinsic::SplitGet, vec![Expr::Local(o), Expr::Local(f)]),
     }
 }
 
@@ -9079,6 +9248,7 @@ fn set(p: Place, ty: Type, e: Expr) -> Stmt {
         )),
         Place::Buf(l) => Stmt::Set(l, buf_append(&Expr::Local(l), &e).unwrap_or(e)),
         Place::BufGlobal(g) => Stmt::SetGlobal(g, buf_append(&Expr::Global(g), &e).unwrap_or(e)),
+        Place::Split(..) => unreachable!("written by Lowerer::split_store"),
     }
 }
 
