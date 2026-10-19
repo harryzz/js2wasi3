@@ -27,7 +27,7 @@ deltablue 12.3×; geomean 6.43×.
   (types known at build time → direct; else a guard on the arguments), the result type, recursion, and the size
   cost stated up front (typed versions duplicate code).
 - [x] Step 2, build; fixtures with typed and generic callers of one function, a non-number reaching a typed site.
-- [x] Gate on a-03 (ask), test262 (ask). `scripts/v8bench.sh` for the gap to node: not run (F466).
+- [x] Gate on a-03 (ask), test262 (ask), `scripts/v8bench.sh` for the gap to node (a-03, after the commit).
 
 ## Notes / Result
 - **Re-plan.** Step 0 (wasmtime `perf`) showed boxing at calls/returns isn't the cost: fannkuchredux's hot function
@@ -60,8 +60,8 @@ deltablue 12.3×; geomean 6.43×.
   counts), `scripts/diff.sh`, `scripts/gate.sh -o out/gate-t134-v2 671e315` (a-03), `node scripts/test262.mjs
   subset` (a-03).
 - **Not done (follow-ups):** booleans (F461), element-to-element copies (F462), typed arrays in the unboxed reads
-  (F463), typed parameters/results at calls, the original T134 idea (F464), the size of hole tests (F465), the V8
-  gap (F466).
+  (F463), typed parameters/results at calls, the original T134 idea (F464), the size of hole tests (F465). The V8
+  gap (F466) was measured after the commit: 5.19× node (see Progress).
 - **Next smallest step:** F462 (fannkuchredux: `perm[i] = perm1[i]` still boxes through `get`, ~6% of its time).
 
 ## Progress
@@ -148,3 +148,8 @@ deltablue 12.3×; geomean 6.43×.
   −13.8%, mandelbrot −12.8%, fasta −6.1%); outputs = node; micros: 1 slower (`typeof o [array]` +1.5 ns) at equal
   instructions (object-kinds micro 158.6177G both, laptop: placement), 5 faster. test262 on a-03 next.
 - 2026-10-19: test262 on a-03 (`out/t262-t134.log`, 1,490 s): no changes since the baseline (28,123). Task done: Notes / Result, tasks/README.md (status, F403/F404 ticked, F461–F466), design.md, root-causes.md, test262 HISTORY.md, CLAUDE.md.
+- 2026-10-19: committed (93e893f; user). `scripts/v8bench.sh` on a-03 (user; `out/v8bench-t134-a03.md`,
+  `out/v8bench-t134/v8bench.tsv`): our components on node's V8 run at **5.19× node** (geomean of the 18 V8 run
+  times / node), on wasmtime 7.69×; T133's 6.43× / 9.58× were measured on the laptop, so the machines differ.
+  Worst now raytrace 16.0×, fannkuchredux 15.7×, richards 11.1×, deltablue 10.8×, crypto 10.4× (was 18.7×),
+  revcomp 9.7×; best pidigits 1.1×, mandelbrot 1.8×. All outputs SAME. F466 closed.
