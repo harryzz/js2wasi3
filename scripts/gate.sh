@@ -47,6 +47,11 @@ echo "base: $REF ($(git -C "$ROOT" rev-parse --short "$rev")); new: the working 
 
 echo; echo "## Programs"; echo
 "$ROOT/scripts/bench.sh" -r "$RUNS" -b "$BASE" -o "$OUT/programs" "$@"
+# The geomean of new/base minimum times over the programs that ran (identical `.wasm`: 1); gate.tsv lists every run.
+awk -F'\t' 'NR > 1 { n++; if ($2 == "") next; split($2, b, " "); split($3, w, " "); mb = b[1]; mw = w[1];
+  for (i in b) if (b[i] + 0 < mb + 0) mb = b[i]; for (i in w) if (w[i] + 0 < mw + 0) mw = w[i]; l += log(mw / mb) }
+  END { if (n) printf "\nGeomean of the %d programs (new/base, minimum times; identical = 1): %.4f\n", n, exp(l / n) }' \
+  "$OUT/programs/gate.tsv"
 
 echo; echo "## Micro-benchmarks (ns per operation; $RUNS pairs, verdicts by scripts/micro-verdict.py)"; echo
 NEW=$ROOT/target/release/js2wasi3

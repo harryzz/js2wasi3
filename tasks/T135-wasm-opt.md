@@ -18,7 +18,7 @@ experiment first: if it pays, decide how to use it (a build step, or the passes 
 
 ## Notes / Result
 - **Dropped** (user, 2026-10-19). `wasm-opt -O3` on our core module (laptop, the 18 programs, outputs = node):
-  `.wasm` −18…−26% (mean −23.3%), but time geomean **1.21** (worse): fannkuchredux −23.3%, spectralnorm −26.7%,
+  `.wasm` −18…−26% (mean −23.3%), but time geomean **1.25** (worse; minimum times, first written 1.21 from first runs): fannkuchredux −23.3%, spectralnorm −26.7%,
   knucleotide −12.5%, crypto −5.1% faster; nbody +227%, pidigits +147%, earley-boyer +121%, raytrace +67%,
   mandelbrot +51%, fasta +30%, binarytrees/regexp/deltablue/splay +14…18% slower (`out/wasm-opt-t135-laptop.md`).
   The slow ones collect far more often (nbody: ~19% collector, ~30% wasmtime's type registry walking the globals at
@@ -37,7 +37,7 @@ experiment first: if it pays, decide how to use it (a build step, or the passes 
 - 2026-10-19: started (user: "add follow-ups and try wasm-opt", after the V8 blog posts). F467–F469 added.
 - 2026-10-19: `build` hook `JS2WASI3_CORE_FILTER=<command>` (the core module through `<command> in out` before packaging; experiment only). wasm-opt 133 with `-all` emits proposals wasmtime 49 rejects (compact imports, exact types from custom descriptors): explicit `--enable-*` list (sign-ext, mutable-globals, nontrapping-float-to-int, simd, bulk-memory(-opt), exception-handling, tail-call, reference-types, multivalue, gc, extended-const, multimemory). crypto (laptop): `-O3` instructions 31.22G → 29.87G (−4.3%), `.wasm` 594,683 → 460,843 (−22.5%), output same; `-O3 --closed-world` the same, `--gufa` the same, `--converge` −4.9%; `-O4` fails (Flatten: unsupported BrOn). Running the 18 with `-O3`.
 - 2026-10-19: the 18 with `-O3` vs the same compiler without the filter (laptop, `scripts/bench.sh -r 2`,
-  `out/wasm-opt-t135-laptop.md`; outputs all = node): `.wasm` **−18…−26%** (mean −23.3%) but geomean **1.21**
+  `out/wasm-opt-t135-laptop.md`; outputs all = node): `.wasm` **−18…−26%** (mean −23.3%) but geomean **1.25** (minimum times; first written 1.21)
   (worse). Instructions: fannkuchredux −23.5%, spectralnorm −11.2%, knucleotide −6.3%, regexredux −4.8%, crypto
   −4.4%; nbody +100.8%, earley-boyer +100.2%, pidigits +89.1%, mandelbrot +47.0%, raytrace +44.8%, fasta +21.5%,
   deltablue/splay/regexp +10…11%, binarytrees +4.7%.

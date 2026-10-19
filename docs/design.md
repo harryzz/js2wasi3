@@ -994,7 +994,8 @@ The rules after T106–T110, where each speed fix made another program slower (`
   (counted in every timed run; `~x%` when a build's counts spread). Micros: `scripts/micro-verdict.py`, the median of
   paired differences and ≥ 5 of 6 pairs agreeing (byte-identical builds: 0 of 93 verdicts on a-03; the laptop's
   noise still gives up to 18, so laptop micro verdicts are advisory, a-03 decides). A speed task is judged by the
-  geometric mean of the 18 programs (new/base) and by instructions, not by single 2–4% rows of sub-second programs.
+  geometric mean of the 18 programs (new/base of the **minimum** times; `scripts/gate.sh` prints it, `gate.tsv` lists
+  every run) and by instructions, not by single 2–4% rows of sub-second programs.
 - **Guarded direct method calls** (T132): at `o.m(…)` sites where the whole-program type analysis (T131,
   `crates/types`) finds one target function, a per-site cache (`G_MCACHE`: receiver keys array + prototype, the
   holder's entry, `G_EPOCH`) lets the call skip the lookup and the argument array (`direct_call_this`); a site that

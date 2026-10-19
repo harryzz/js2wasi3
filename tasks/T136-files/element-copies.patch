@@ -1,0 +1,441 @@
+diff --git a/crates/backend/src/lib.rs b/crates/backend/src/lib.rs
+index c89ffbf..2f1bccc 100644
+--- a/crates/backend/src/lib.rs
++++ b/crates/backend/src/lib.rs
+@@ -1091,6 +1091,31 @@ fn split_vs_num<'e>(lhs: &'e Expr, rhs: &'e Expr) -> Option<(&'e Expr, &'e Expr)
+     }
+ }
+ 
++/// T136: an operand that can be evaluated twice: a local, a constant, a boxed or split local.
++fn pure_operand(e: &Expr) -> bool {
++    match e {
++        Expr::Local(_) | Expr::Const(_) | Expr::Str(_) => true,
++        Expr::Convert { from: Type::F64, to: Type::JsVal, arg } => matches!(**arg, Expr::Local(_) | Expr::Const(_)),
++        _ => split_args(e).is_some(),
++    }
++}
++
++/// `Intrinsic::NumOrHole` on the `jsval` on the stack (kept in local `v`): its number (an `i31` or a `$number`),
++/// else HOLE.
++fn num_or_hole(s: &mut InstructionSink, v: u32) {
++    s.local_tee(v).ref_test_non_null(wasm_encoder::HeapType::I31);
++    s.if_(BlockType::Result(ValType::F64));
++    s.local_get(v).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s().f64_convert_i32_s();
++    s.else_();
++    s.local_get(v).ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER));
++    s.if_(BlockType::Result(ValType::F64));
++    s.local_get(v).ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER)).struct_get(runtime::T_NUMBER, 0);
++    s.else_();
++    s.i64_const(array::HOLE).f64_reinterpret_i64();
++    s.end();
++    s.end();
++}
++
+ /// T134: a split number slot's read (`Intrinsic::SplitGet`): its `o` and `f` locals.
+ fn split_args(e: &Expr) -> Option<(&Expr, &Expr)> {
+     match e {
+@@ -1968,6 +1993,105 @@ impl Emitter<'_> {
+         Ok(())
+     }
+ 
++    /// T136: `Intrinsic::ElemCopy` `dst[dkey] = obj[key]`, inline: the read (as `get`'s array fast paths) goes
++    /// straight to a write path: an element of the generic store as it is (`v`, `t` HOLE) through the generic write;
++    /// one in number mode (`v` null, `t` the number) through the number write; a hole or anything else `get`, then
++    /// the generic write. Each write is `elem_set`'s inline path (`dst`, `dkey` are evaluated in each).
++    fn elem_copy(
++        &mut self,
++        s: &mut wasm_encoder::InstructionSink,
++        frames: &mut Vec<Frame>,
++        (dst, dkey): (&Expr, &Expr),
++        (obj, key): (&Expr, &Expr),
++        (v, t): (u32, u32),
++    ) -> anyhow::Result<()> {
++        use wasm_encoder::HeapType as Ht;
++        let (o, k, x, j, a, n, el, r) = (
++            self.scratch_val,
++            self.scratch_js,
++            self.scratch_x,
++            self.scratch_i32,
++            self.scratch_arr,
++            self.scratch_nums,
++            self.scratch_vals,
++            self.scratch_r,
++        );
++        let num_key = matches!(key, Expr::Convert { from: Type::F64, to: Type::JsVal, .. }) || split_args(key).is_some();
++        self.expr(s, frames, obj)?;
++        match (key, split_args(key)) {
++            (Expr::Convert { from: Type::F64, to: Type::JsVal, arg }, _) => {
++                self.expr(s, frames, arg)?;
++                s.local_set(x);
++            }
++            (_, Some((so, sf))) => {
++                self.expr(s, frames, so)?;
++                s.local_set(k);
++                self.expr(s, frames, sf)?;
++                s.local_set(x);
++            }
++            _ => {
++                self.expr(s, frames, key)?;
++                s.local_set(k);
++            }
++        }
++        s.local_set(o);
++        let (vx, tx) = (Expr::Local(ir::LocalId(v)), Expr::Local(ir::LocalId(t)));
++        s.block(BlockType::Empty);
++        s.block(BlockType::Empty);
++        frames.extend([Frame::Anon, Frame::Anon]);
++        s.local_get(o).ref_test_non_null(array::array()).i32_eqz().br_if(0);
++        s.local_get(o).ref_cast_non_null(array::array()).local_set(a);
++        if num_key {
++            s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
++            s.local_get(x).f64_ne().br_if(0);
++        } else {
++            s.local_get(k).ref_test_non_null(Ht::I31).i32_eqz().br_if(0);
++            s.local_get(k).ref_cast_non_null(Ht::I31).i31_get_s().local_set(j);
++        }
++        // The generic store: a data value as it is (null: a hole; an accessor: `get`).
++        s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_ELEMS).local_tee(el).array_len().i32_lt_u();
++        s.if_(BlockType::Empty);
++        s.local_get(el).local_get(j).array_get(runtime::T_VALS).local_tee(r);
++        s.ref_is_null().br_if(1);
++        s.local_get(r).ref_test_non_null(Ht::Concrete(runtime::T_ACCESSOR)).br_if(1);
++        s.local_get(r).local_set(v);
++        s.i64_const(array::HOLE).f64_reinterpret_i64().local_set(t);
++        frames.push(Frame::Anon);
++        self.elem_set(s, frames, dst, dkey, &vx, false)?;
++        frames.pop();
++        s.br(2);
++        s.end();
++        // Number mode (a hole has HOLE's bits: `get`).
++        s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(0);
++        s.local_get(a).struct_get(runtime::T_ARRAY, array::F_NUMS).local_tee(n).ref_is_null().br_if(0);
++        s.local_get(n).local_get(j).array_get(runtime::T_NUMS).local_tee(self.scratch_f64);
++        s.i64_reinterpret_f64().i64_const(array::HOLE).i64_eq().br_if(0);
++        s.ref_null(Ht::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Eq }).local_set(v);
++        s.local_get(self.scratch_f64).local_set(t);
++        self.elem_set(s, frames, dst, dkey, &tx, true)?;
++        s.br(1);
++        s.end();
++        // Anything else: `get`.
++        s.local_get(o);
++        if split_args(key).is_some() {
++            self.split_key_value(s, k, x);
++        } else if num_key {
++            s.local_get(x).call(self.helper_index(Helper::Js(runtime::Helper::Box)));
++        } else {
++            s.local_get(k);
++        }
++        s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::Get))));
++        s.local_tee(v);
++        num_or_hole(s, self.scratch_js);
++        s.local_set(t);
++        frames.truncate(frames.len() - 2);
++        frames.push(Frame::Anon);
++        self.elem_set(s, frames, dst, dkey, &vx, false)?;
++        frames.pop();
++        s.end();
++        Ok(())
++    }
++
+     /// T134: a split number slot as an element key (`SplitGet`'s locals `o`, `f`): `o` into `scratch_js` and, for
+     /// the inline paths' `f64` key, `f` into `scratch_f64` (HOLE when it isn't a number: no index, they miss, and
+     /// the miss passes the value, [`Self::split_key_value`]).
+@@ -2556,6 +2680,15 @@ impl Emitter<'_> {
+         st: &Stmt,
+     ) -> anyhow::Result<()> {
+         match st {
++            Stmt::Expr(Expr::Seq { body, value })
++                if matches!(&**value, Expr::Local(_) | Expr::Const(_))
++                    || split_args(value).is_some() =>
++            {
++                // A dropped sequence's value with no effects isn't computed (T136: a split slot's value would box).
++                for x in body {
++                    self.stmt(s, frames, x)?;
++                }
++            }
+             Stmt::Expr(e) => {
+                 let has_value = self.expr(s, frames, e)?;
+                 if has_value {
+@@ -3134,6 +3267,10 @@ impl Emitter<'_> {
+                     self.elem_num(s, frames, obj, key)?;
+                     return Ok(true);
+                 }
++                if let (Intrinsic::ElemCopy, [dst, dkey, obj, key, Expr::Local(v), Expr::Local(t)]) = (op, args.as_slice()) {
++                    self.elem_copy(s, frames, (dst, dkey), (obj, key), (v.0, t.0))?;
++                    return Ok(false);
++                }
+                 if let (Intrinsic::GetElemCall, [obj, key]) = (op, args.as_slice()) {
+                     // T134: `get(obj, key)`, an `f64` key boxed, a split key as its value.
+                     self.expr(s, frames, obj)?;
+@@ -3570,6 +3707,24 @@ impl Emitter<'_> {
+                     self.elem_set(s, frames, obj, key, x, true)?;
+                     return Ok(false);
+                 }
++                if let (Intrinsic::SetProp, [obj, key, value]) = (op, args.as_slice())
++                    && !matches!(key, Expr::Str(_))
++                    && let Some((so, sf)) = split_args(value)
++                    && pure_operand(obj)
++                    && pure_operand(key)
++                {
++                    // T136: `o` null: the number path; else the generic path with `o` (an element kept as it was).
++                    self.expr(s, frames, so)?;
++                    s.ref_is_null();
++                    s.if_(BlockType::Empty);
++                    frames.push(Frame::Anon);
++                    self.elem_set(s, frames, obj, key, sf, true)?;
++                    s.else_();
++                    self.elem_set(s, frames, obj, key, so, false)?;
++                    frames.pop();
++                    s.end();
++                    return Ok(false);
++                }
+                 if let (Intrinsic::SetProp, [obj, key, value]) = (op, args.as_slice())
+                     && !matches!(key, Expr::Str(_))
+                     && let Some((so, sf)) = split_args(value)
+@@ -3757,24 +3912,7 @@ impl Emitter<'_> {
+                         return Ok(true);
+                     }
+                     Intrinsic::NumOrHole => {
+-                        let v = self.scratch_js;
+-                        s.local_tee(v).ref_test_non_null(wasm_encoder::HeapType::I31);
+-                        s.if_(BlockType::Result(ValType::F64));
+-                        s.local_get(v)
+-                            .ref_cast_non_null(wasm_encoder::HeapType::I31)
+-                            .i31_get_s()
+-                            .f64_convert_i32_s();
+-                        s.else_();
+-                        s.local_get(v)
+-                            .ref_test_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER));
+-                        s.if_(BlockType::Result(ValType::F64));
+-                        s.local_get(v)
+-                            .ref_cast_non_null(wasm_encoder::HeapType::Concrete(runtime::T_NUMBER))
+-                            .struct_get(runtime::T_NUMBER, 0);
+-                        s.else_();
+-                        s.i64_const(array::HOLE).f64_reinterpret_i64();
+-                        s.end();
+-                        s.end();
++                        num_or_hole(s, self.scratch_js);
+                         return Ok(true);
+                     }
+                     Intrinsic::F64Hi => {
+@@ -3951,6 +4089,7 @@ impl Emitter<'_> {
+                     | Intrinsic::NumOrHole
+                     | Intrinsic::SplitGet
+                     | Intrinsic::GetElemCall
++                    | Intrinsic::ElemCopy
+                     | Intrinsic::RandomSeed
+                     | Intrinsic::DateNow
+                     | Intrinsic::MonotonicNow
+diff --git a/crates/ir/src/lib.rs b/crates/ir/src/lib.rs
+index 0051713..37cf069 100644
+--- a/crates/ir/src/lib.rs
++++ b/crates/ir/src/lib.rs
+@@ -1246,8 +1246,9 @@ pub enum Intrinsic {
+     /// [`Intrinsic::F64IsHole`]. Never runs JS code.
+     NumOrHole,
+     /// `(o: jsval, f: f64) -> jsval` (T134): a split number slot's value: `o` when it isn't the Wasm null
+-    /// ([`Intrinsic::Hole`]), else the number `f`. `f` is always the value's number, or HOLE
+-    /// ([`Intrinsic::F64IsHole`]) when it isn't one: the backend reads it unboxed where a number is used. Both
++    /// ([`Intrinsic::Hole`]), else the number `f`. While `o` isn't null, `f` is its number or HOLE
++    /// ([`Intrinsic::F64IsHole`]; HOLE also for a number in `o`, then read through `o`): the backend reads `f`
++    /// unboxed where a number is used. Both
+     /// arguments are locals. Never runs JS code.
+     SplitGet,
+     /// `(o, k) -> jsval` (T134): `o[k]` (`GetProp` with a computed key) as a call of the runtime's `get`, no inline
+@@ -1256,6 +1257,12 @@ pub enum Intrinsic {
+     /// `(at: f64, av, bt: f64, bv) -> jsval` (T134): JS `a + b` where each operand is the number `at`, or the value
+     /// `av` when `at` is HOLE ([`Intrinsic::F64IsHole`]): the generic path of an unboxed `+`, as one call.
+     JsAddParts,
++    /// `(a, i, b, j, v: a jsval local, t: an f64 local)` (T136): `a[i] = b[j]` (computed keys; `a`, `i` evaluated
++    /// twice: locals or constants) without boxing: an element of `b` in number mode is written with the number path,
++    /// one of a generic array's store as it is, anything else read with `get` (holes, non-arrays). `v`/`t` get the
++    /// value as a split slot's two parts ([`Intrinsic::SplitGet`]): the number with `v` null, or the value in `v`
++    /// with HOLE. No result. Not in generators (its locals aren't saved).
++    ElemCopy,
+     /// 32 random bits from the host (`wasi:random/insecure`, commands only) (`i32`).
+     RandomSeed,
+     /// Call [`Module::imports`]`[i]` (T20 slice 5) with the arguments in an array (`jsval`):
+@@ -1608,6 +1615,7 @@ impl Intrinsic {
+             Intrinsic::SplitGet => (&[JsVal, F64], Some(JsVal)),
+             Intrinsic::GetElemCall => (&[JsVal, JsVal], Some(JsVal)),
+             Intrinsic::JsAddParts => (&[F64, JsVal, F64, JsVal], Some(JsVal)),
++            Intrinsic::ElemCopy => (&[JsVal, JsVal, JsVal, JsVal, JsVal, F64], None),
+             Intrinsic::RandomSeed => (&[], Some(I32)),
+             Intrinsic::DateNow => (&[], Some(F64)),
+             Intrinsic::Environment(_) => (&[], Some(JsVal)),
+@@ -1844,6 +1852,7 @@ impl Intrinsic {
+             Intrinsic::SplitGet => "split_get",
+             Intrinsic::GetElemCall => "get_elem_call",
+             Intrinsic::JsAddParts => "js_add_parts",
++            Intrinsic::ElemCopy => "elem_copy",
+             Intrinsic::RandomSeed => "random_seed",
+             Intrinsic::DateNow => "date_now",
+             Intrinsic::Environment(_) => "environment",
+@@ -1925,6 +1934,7 @@ impl Intrinsic {
+             Intrinsic::GetProp
+                 | Intrinsic::GetElemCall
+                 | Intrinsic::JsAddParts
++                | Intrinsic::ElemCopy
+                 | Intrinsic::SetProp
+                 | Intrinsic::ShapeGet { .. }
+                 | Intrinsic::ShapeSet { .. }
+diff --git a/crates/lower/src/lib.rs b/crates/lower/src/lib.rs
+index c7fdd46..861102c 100644
+--- a/crates/lower/src/lib.rs
++++ b/crates/lower/src/lib.rs
+@@ -205,9 +205,10 @@ pub fn lower_with(
+     // T132: the method-call sites the type analysis (T131) gives one target function (none if it fails).
+     // T133: and the `o.k` sites whose receivers come from one constructor (its node's start).
+     // T134: and the variables only numbers are stored in.
+-    let (methods, fields, num_fields, num_vars) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++    // T136: and the element reads that only give numbers.
++    let (methods, fields, num_fields, num_vars, num_elems) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+         let r = js2wasi3_types::analyze(program.ast, &program.semantic, program.user_end);
+-        (r.methods, r.fields, r.num_fields, r.num_vars)
++        (r.methods, r.fields, r.num_fields, r.num_vars, r.num_elems)
+     }))
+     .unwrap_or_default();
+     // T133: each function's scope by its node's start.
+@@ -311,6 +312,7 @@ pub fn lower_with(
+             fields: fields.clone(),
+             num_fields: num_fields.clone(),
+             num_vars: num_vars.clone(),
++            num_elems: num_elems.clone(),
+             field_ctors: fields.values().copied().collect(),
+             fn_scopes: fn_scopes.clone(),
+             layout_ctors: HashSet::new(),
+@@ -496,6 +498,8 @@ struct Lowerer<'p, 'a> {
+     num_fields: std::collections::HashSet<(u32, String)>,
+     /// T134: the variables the type analysis sees only numbers stored in ([`Place::Split`]).
+     num_vars: HashSet<SymbolId>,
++    /// T136: the computed element reads (span start, end) the type analysis sees giving only numbers.
++    num_elems: HashSet<(u32, u32)>,
+     /// T133: constructors (node starts) with `o.k` sites the analysis types ([`Self::fields`]'s values).
+     field_ctors: HashSet<u32>,
+     /// T133: layouts some constructor has (their `layout_nums` bits so far).
+@@ -7456,6 +7460,28 @@ impl<'p, 'a> Lowerer<'p, 'a> {
+             };
+             Val::js(get, Kind::Any)
+         });
++        // T136: `a[i] = b[j]` where `b[j]` gives only numbers (type analysis): one `ElemCopy` (each read path goes
++        // to its own write path, so a number is never boxed); the value as a split slot's two parts.
++        if let Expression::ComputedMemberExpression(src) = &a.right
++            && a.operator == AssignmentOperator::Assign
++            && layout.is_none()
++            && matches!(private, Member::Plain)
++            && !matches!(key_of, Expr::Str(_))
++            && !cx.func.flags.is_generator
++            && !cx.func.flags.is_async
++            && self.num_elems.contains(&(src.span.start, src.span.end))
++            && let Expr::Intrinsic { op: Intrinsic::GetProp, args } = &rhs.e
++            && !matches!(args[1], Expr::Str(_))
++        {
++            let Expr::Intrinsic { args, .. } = rhs.e else { unreachable!() };
++            let (v, t) = (cx.func.add_local("elem", Type::JsVal), cx.func.add_local("num", Type::F64));
++            let mut all = vec![Expr::Local(to), key_of];
++            all.extend(args);
++            all.extend([Expr::Local(v), Expr::Local(t)]);
++            body.push(Stmt::Expr(Expr::intrinsic(Intrinsic::ElemCopy, all)));
++            let split = Expr::intrinsic(Intrinsic::SplitGet, vec![Expr::Local(v), Expr::Local(t)]);
++            return Ok(Val::js(Expr::Seq { body, value: Box::new(split) }, Kind::Any));
++        }
+         let value = self.combine(cx, a.operator, old, rhs, a.span)?;
+         // T107: a number stays an `f64` (the store boxes it, unless the backend stores it unboxed).
+         if value.ty == Type::F64 {
+diff --git a/crates/types/src/lib.rs b/crates/types/src/lib.rs
+index 631b062..84fbbe0 100644
+--- a/crates/types/src/lib.rs
++++ b/crates/types/src/lib.rs
+@@ -117,6 +117,8 @@ pub struct Result {
+     /// T134: the variables and parameters only numbers are ever stored in (over every copy of their function):
+     /// where a split number slot pays.
+     pub num_vars: std::collections::HashSet<SymbolId>,
++    /// T136: the computed element reads `o[k]` (span start, end) that only ever give numbers.
++    pub num_elems: std::collections::HashSet<(u32, u32)>,
+     pub rounds: u32,
+     pub instances: usize,
+     pub allocs: usize,
+@@ -145,6 +147,8 @@ struct A<'a, 's> {
+     ret: HashMap<u32, Set>,
+     args_pos: HashMap<u32, Vec<Set>>,
+     sites: HashMap<(u32, u32, &'static str), (Set, Set)>,
++    /// T136: the values each computed element read (span start, end) gives.
++    elem_vals: HashMap<(u32, u32), Set>,
+     /// method-call sites (member span): the functions they call, and whether anything else can be called
+     targets: HashMap<(u32, u32), (BTreeSet<u32>, bool)>,
+     /// per-call-site copies made of each function (at most [`MAX_COPIES`])
+@@ -194,7 +198,7 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result
+     // their default prototype object (else objects made before the replacement is seen keep it for ever).
+     let first = run(program, semantic, user_end, (Default::default(), Default::default()));
+     if first.steps > MAX_STEPS {
+-        return Result { sites: Vec::new(), methods: HashMap::new(), fields: HashMap::new(), num_fields: Default::default(), num_vars: Default::default(), rounds: first.rounds, instances: first.insts.len(), allocs: first.allocs.len(), steps: first.steps };
++        return Result { sites: Vec::new(), methods: HashMap::new(), fields: HashMap::new(), num_fields: Default::default(), num_vars: Default::default(), num_elems: Default::default(), rounds: first.rounds, instances: first.insts.len(), allocs: first.allocs.len(), steps: first.steps };
+     }
+     let mut replaced = std::collections::HashSet::new();
+     for ((o, k), v) in &first.props {
+@@ -220,6 +224,7 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result
+             fields: HashMap::new(),
+             num_fields: Default::default(),
+             num_vars: Default::default(),
++            num_elems: Default::default(),
+             rounds: a.rounds,
+             instances: a.insts.len(),
+             allocs: a.allocs.len(),
+@@ -251,7 +256,13 @@ pub fn analyze(program: &Program, semantic: &Semantic, user_end: u32) -> Result
+         var_sets.entry(*sym).or_default().extend(v.iter().copied());
+     }
+     let num_vars = var_sets.into_iter().filter(|(_, v)| v.len() == 1 && v.contains(&AV::Num)).map(|(s, _)| s).collect();
+-    Result { sites, methods, fields, num_fields, num_vars, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps }
++    let num_elems = a
++        .elem_vals
++        .iter()
++        .filter(|(_, v)| v.len() == 1 && v.contains(&AV::Num))
++        .map(|(k, _)| *k)
++        .collect();
++    Result { sites, methods, fields, num_fields, num_vars, num_elems, rounds: a.rounds, instances: a.insts.len(), allocs: a.allocs.len(), steps: a.steps }
+ }
+ 
+ fn run<'a, 's>(
+@@ -286,6 +297,7 @@ fn run<'a, 's>(
+         ret: HashMap::new(),
+         args_pos: HashMap::new(),
+         sites: HashMap::new(),
++        elem_vals: HashMap::new(),
+         copies: HashMap::new(),
+         targets: HashMap::new(),
+         cur: 0,
+@@ -1703,7 +1715,12 @@ impl<'a, 's> A<'a, 's> {
+                 self.record(m.span, "eget", &o, None);
+                 self.record(m.span, "egetkey", &k, None);
+                 let name = static_key(&m.expression);
+-                self.read_computed(&o, &k, name.as_deref())
++                let v = self.read_computed(&o, &k, name.as_deref());
++                if m.span.start < self.user_end {
++                    let mut changed = false;
++                    add(self.elem_vals.entry((m.span.start, m.span.end)).or_default(), &v, &mut changed);
++                }
++                v
+             }
+             Expression::CallExpression(c) => self.call_expr(c),
+             Expression::NewExpression(n) => {
+diff --git a/crates/types/src/tests.rs b/crates/types/src/tests.rs
+index f95892e..751770e 100644
+--- a/crates/types/src/tests.rs
++++ b/crates/types/src/tests.rs
+@@ -112,3 +112,16 @@ fn num_vars() {
+     names.sort();
+     assert_eq!(names, ["i", "l", "n"]);
+ }
++
++#[test]
++fn num_elems() {
++    // T136: `a[i]` gives only numbers; `o[i]` an object too.
++    let src = "var a = [1, 2.5]; var o = [{}, 1]; var i = 0;\nvar x = a[i]; var y = o[i];";
++    let r = analyze_source(src).unwrap();
++    let span = |needle: &str| {
++        let s = src.find(needle).unwrap() as u32;
++        (s, s + needle.len() as u32)
++    };
++    assert!(r.num_elems.contains(&span("a[i]")));
++    assert!(!r.num_elems.contains(&span("o[i]")));
++}

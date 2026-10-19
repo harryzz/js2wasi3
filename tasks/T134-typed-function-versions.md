@@ -45,7 +45,7 @@ deltablue 12.3×; geomean 6.43×.
   and from a generic array's store (`i31`/`$number`), inline in loops, else `elem_num` with an `f64` key; `+o[k]`
   with an `f64`/split key the same; `key_temp` keeps non-constant `f64` keys unboxed. Always correct: anything
   the analysis gets wrong still fits in `o` (fixture `tests/fixtures/arrays/split-slots.js`).
-- **Result** (a-03 gate vs 671e315, `out/gate-t134-v2-a03.log`): geomean of the 18 programs **0.9117**; crypto
+- **Result** (a-03 gate vs 671e315, `out/gate-t134-v2-a03.log`): geomean of the 18 programs **0.9327** (minimum times; first reported as 0.9117, a ratio of first runs: corrected 2026-10-19); crypto
   −31.3% (instructions −38.5%), navier-stokes −27.0% (−29.5%), fannkuchredux −20.5% (−24.8%), spectralnorm −13.8%
   (−23.5%), mandelbrot −12.8% (−1.5%), fasta −6.1% (−7.8%); nothing slower (deltablue +0.3% at +0.08%
   instructions). `.wasm` +0.7…+5.2% (crypto +5.17%, navier-stokes +3.07%; mean ~1.6%). Micros: 1 slower
@@ -110,7 +110,7 @@ deltablue 12.3×; geomean 6.43×.
   `.wasm` fannkuchredux +2.1%, crypto +7.0% (size to look at before the gate). Next: fixtures, size, the 18.
 - 2026-10-19: fixtures: `scripts/diff.sh -j 8` all 275 pass (commonjs/ws timed out once under load, passes alone); new fixture `tests/fixtures/arrays/split-slots.js` (holes, missing arguments, past-the-end arguments reaching split slots, split keys/values, `==` against numbers, -0/NaN) passes.
 - 2026-10-19: laptop run of the 18 vs 671e315 (`scripts/bench.sh -r 2 -b <base>`, `out/gate-t134-laptop.md`; laptop
-  times advisory): geomean 0.9007; instructions: crypto −37.9%, navier-stokes −27.5%, fannkuchredux −24.9%,
+  times advisory): geomean 0.9369 (minimum times; first written 0.9007 from first runs); instructions: crypto −37.9%, navier-stokes −27.5%, fannkuchredux −24.9%,
   spectralnorm −23.6%, fasta −7.2%, nbody −1.3%; **splay +3.78%, raytrace +1.79%, deltablue +1.04%** (added work,
   to find before the a-03 gate); binarytrees +15.1% time at −0.00% instructions (laptop GC noise/placement).
   `.wasm` +0.9…+6.7% (crypto +6.7%, navier-stokes +5.5%; mean ~2.3%). All outputs as node.
@@ -129,13 +129,13 @@ deltablue 12.3×; geomean 6.43×.
   +3.34% / −29.5%, fannkuchredux +1.85% / −24.8%, spectralnorm +1.80% / −23.6%.
 - 2026-10-19: mandelbrot +3.24% instructions: `key_temp` kept a constant key (`byte_acc[0] <<= 1`, a typed array)
   as an `f64`, boxed by a call on every typed-array miss; constants stay boxed now (mandelbrot −1.5%).
-- 2026-10-19: laptop run of the 18 vs 671e315 (`out/gate-t134-laptop.md`, replaced): geomean 0.8758 (advisory);
+- 2026-10-19: laptop run of the 18 vs 671e315 (`out/gate-t134-laptop.md`, replaced): geomean 0.9201 (advisory; minimum times, first written 0.8758 from first runs);
   instructions crypto −38.47%, navier-stokes −29.49%, fannkuchredux −24.84%, spectralnorm −23.55%, fasta −7.79%,
   mandelbrot −1.50%, nbody −1.14%, splay −0.52%; raytrace +0.48%, deltablue +0.24%, revcomp +0.18%, the rest
   ±0.1%. `.wasm` +0.69…+5.33%, mean +1.72%. Fixtures: all pass (http-server timed out once under `-j 4`,
   passes alone). Next: the a-03 gate (asked the user).
 - 2026-10-19: user: run the a-03 gate, then test262 if it passes. Synced; `scripts/gate.sh -o out/gate-t134 671e315` started on a-03.
-- 2026-10-19: a-03 gate vs 671e315 (`out/gate-t134-a03.log`, `out/gate-t134/`): geomean **0.9135**, no program
+- 2026-10-19: a-03 gate vs 671e315 (`out/gate-t134-a03.log`, `out/gate-t134/`): geomean **0.9333** (minimum times; first written 0.9135 from first runs), no program
   slower (crypto −31.8%, navier-stokes −27.0%, fannkuchredux −19.6%, spectralnorm −14.4%, mandelbrot −11.0%, fasta
   −5.3%), outputs = node; micros: 10 slower (property-paths: `new P` +4.2 ns, write hit +1.8 ns, …). Cause: `P`'s
   parameters were split though only stored (`this.x = x`): entry unboxing and split reads for nothing (+0.21%
@@ -144,7 +144,7 @@ deltablue 12.3×; geomean 6.43×.
   write). After (laptop): micro instructions = base exactly; raytrace −0.26%, deltablue +0.08%, the gains the same.
 - 2026-10-19: fixtures all pass (fetch timed out once under `-j 4`, passes alone). Re-running the a-03 gate.
 - 2026-10-19: a-03 gate vs 671e315 after the `numeric_use` fix (`out/gate-t134-v2-a03.log`, `out/gate-t134-v2/`):
-  geomean **0.9117**, no program slower (crypto −31.3%, navier-stokes −27.0%, fannkuchredux −20.5%, spectralnorm
+  geomean **0.9327** (minimum times; first written 0.9117 from first runs), no program slower (crypto −31.3%, navier-stokes −27.0%, fannkuchredux −20.5%, spectralnorm
   −13.8%, mandelbrot −12.8%, fasta −6.1%); outputs = node; micros: 1 slower (`typeof o [array]` +1.5 ns) at equal
   instructions (object-kinds micro 158.6177G both, laptop: placement), 5 faster. test262 on a-03 next.
 - 2026-10-19: test262 on a-03 (`out/t262-t134.log`, 1,490 s): no changes since the baseline (28,123). Task done: Notes / Result, tasks/README.md (status, F403/F404 ticked, F461–F466), design.md, root-causes.md, test262 HISTORY.md, CLAUDE.md.
