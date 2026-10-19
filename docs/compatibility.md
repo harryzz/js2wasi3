@@ -75,12 +75,12 @@ can still differ from node in details. Language conformance is the test262 secti
 
 ## Language (test262)
 
-test262 subset, `tests/test262/baseline.json` of 2026-10-10: **28105 of 28984** tests run pass (97.0%), 2477 skipped. History: [tests/test262/HISTORY.md](../tests/test262/HISTORY.md); keywords: [docs/keywords.md](keywords.md).
+test262 subset, `tests/test262/baseline.json` of 2026-10-16: **28123 of 28984** tests run pass (97.0%), 2477 skipped. History: [tests/test262/HISTORY.md](../tests/test262/HISTORY.md); keywords: [docs/keywords.md](keywords.md).
 
 | Directory | Pass | Run | Pass % |
 |---|---|---|---|
 | annexB | 33 | 35 | 94.3% |
-| built-ins/Array | 2922 | 3030 | 96.4% |
+| built-ins/Array | 2926 | 3030 | 96.6% |
 | built-ins/AsyncDisposableStack | 101 | 103 | 98.1% |
 | built-ins/BigInt | 75 | 76 | 98.7% |
 | built-ins/Date | 579 | 583 | 99.3% |
@@ -94,9 +94,9 @@ test262 subset, `tests/test262/baseline.json` of 2026-10-10: **28105 of 28984** 
 | built-ins/JSON | 119 | 162 | 73.5% |
 | built-ins/Map | 158 | 169 | 93.5% |
 | built-ins/Math | 311 | 317 | 98.1% |
-| built-ins/Promise | 616 | 639 | 96.4% |
+| built-ins/Promise | 620 | 639 | 97.0% |
 | built-ins/Reflect | 142 | 153 | 92.8% |
-| built-ins/RegExp | 1722 | 1864 | 92.4% |
+| built-ins/RegExp | 1724 | 1864 | 92.5% |
 | built-ins/Set | 356 | 381 | 93.4% |
 | built-ins/String | 1206 | 1217 | 99.1% |
 | built-ins/SuppressedError | 17 | 21 | 81.0% |
@@ -105,36 +105,36 @@ test262 subset, `tests/test262/baseline.json` of 2026-10-10: **28105 of 28984** 
 | built-ins/WeakSet | 83 | 84 | 98.8% |
 | language/eval-code | 94 | 126 | 74.6% |
 | language/export | 3 | 3 | 100.0% |
-| language/expressions | 9857 | 10074 | 97.8% |
+| language/expressions | 9860 | 10074 | 97.9% |
 | language/global-code | 17 | 24 | 70.8% |
 | language/import | 16 | 16 | 100.0% |
 | language/module-code | 577 | 593 | 97.3% |
-| language/statements | 8651 | 8830 | 98.0% |
+| language/statements | 8656 | 8830 | 98.0% |
 
 ## Benchmarks
 
-`scripts/bench.sh` on 2026-10-16 at f9d6de0 on a Xeon Gold 6240 server (72 threads, WSL2), wasmtime 49.0.3, node v24.21.0; scripts/bench.sh (default flags: 16 MiB GC heap reserved at start), minimum of the runs. Programs: [tests/bench](../tests/bench/README.md).
+`scripts/bench.sh` on 2026-10-19 at 4fa8560 on a Xeon Gold 6240 server (72 threads, WSL2), wasmtime 49.0.3, node v24.21.0; scripts/bench.sh (default flags: 16 MiB GC heap reserved at start), minimum of the runs. Programs: [tests/bench](../tests/bench/README.md).
 
 | Program | Input | node | js2wasi3 | × node | Output = node |
 |---|---|---|---|---|---|
-| binarytrees | 16 | 0.37 s | 5.91 s | 15.8 | yes |
-| fannkuchredux | 10 | 0.39 s | 4.86 s | 12.5 | yes |
-| fasta | 250000 | 0.26 s | 0.84 s | 3.3 | yes |
-| knucleotide | 250000 | 1.21 s | 5.33 s | 4.4 | yes |
-| mandelbrot | 1000 | 0.19 s | 0.27 s | 1.4 | yes |
-| nbody | 500000 | 0.15 s | 2.19 s | 14.7 | yes |
-| pidigits | 2000 | 0.35 s | 1.05 s | 3.0 | yes |
-| regexredux | 500000 | 0.44 s | 1.97 s | 4.5 | yes |
-| revcomp | 250000 | 0.09 s | 0.52 s | 5.9 | yes |
-| spectralnorm | 500 | 0.12 s | 0.39 s | 3.4 | yes |
-| octane-richards | fixed 0.05 | 0.12 s | 2.77 s | 23.9 | yes |
-| octane-deltablue | fixed 0.05 | 0.14 s | 3.24 s | 22.5 | yes |
-| octane-raytrace | fixed 0.05 | 0.22 s | 7.12 s | 31.8 | yes |
-| octane-navier-stokes | fixed 0.05 | 0.20 s | 1.49 s | 7.5 | yes |
-| octane-crypto | fixed 0.05 | 0.26 s | 4.70 s | 18.4 | yes |
-| octane-splay | fixed 0.05 | 0.22 s | 4.29 s | 19.4 | yes |
-| octane-earley-boyer | fixed 0.05 | 0.50 s | 4.89 s | 9.8 | yes |
-| octane-regexp | fixed 0.05 | 0.40 s | 4.43 s | 11.0 | yes |
+| binarytrees | 16 | 0.38 s | 5.86 s | 15.5 | yes |
+| fannkuchredux | 10 | 0.40 s | 3.83 s | 9.6 | yes |
+| fasta | 250000 | 0.24 s | 0.81 s | 3.4 | yes |
+| knucleotide | 250000 | 1.27 s | 5.32 s | 4.2 | yes |
+| mandelbrot | 1000 | 0.18 s | 0.24 s | 1.3 | yes |
+| nbody | 500000 | 0.15 s | 1.13 s | 7.6 | yes |
+| pidigits | 2000 | 0.34 s | 1.00 s | 2.9 | yes |
+| regexredux | 500000 | 0.47 s | 1.99 s | 4.3 | yes |
+| revcomp | 250000 | 0.10 s | 0.53 s | 5.2 | yes |
+| spectralnorm | 500 | 0.12 s | 0.32 s | 2.6 | yes |
+| octane-richards | fixed 0.05 | 0.12 s | 2.14 s | 17.7 | yes |
+| octane-deltablue | fixed 0.05 | 0.13 s | 2.48 s | 18.8 | yes |
+| octane-raytrace | fixed 0.05 | 0.22 s | 6.76 s | 30.4 | yes |
+| octane-navier-stokes | fixed 0.05 | 0.21 s | 1.10 s | 5.3 | yes |
+| octane-crypto | fixed 0.05 | 0.25 s | 3.37 s | 13.4 | yes |
+| octane-splay | fixed 0.05 | 0.22 s | 4.28 s | 19.3 | yes |
+| octane-earley-boyer | fixed 0.05 | 0.51 s | 4.81 s | 9.4 | yes |
+| octane-regexp | fixed 0.05 | 0.40 s | 4.37 s | 11.0 | yes |
 
 ## APIs
 
@@ -3060,8 +3060,8 @@ test262 subset, `tests/test262/baseline.json` of 2026-10-10: **28105 of 28984** 
 | `util.getSystemErrorMessage(err)` | method | present | probe: present, no fixture names it |  |
 | `util.setTraceSigInt(enable)` | method | present | probe: present, no fixture names it |  |
 | `util.inherits(constructor, superConstructor)` | method | supported | test-backed (`tests/fixtures/commonjs/builtins/emitter.js`) |  |
-| `util.inspect(object[, options])` | method | supported | test-backed (`tests/fixtures/node/buffer-edges.js`) |  |
-| `util.inspect(object[, showHidden[, depth[, colors]]])` | method | supported | test-backed (`tests/fixtures/node/buffer-edges.js`) |  |
+| `util.inspect(object[, options])` | method | supported | test-backed (`tests/fixtures/classes/builtin-subclass.js`) |  |
+| `util.inspect(object[, showHidden[, depth[, colors]]])` | method | supported | test-backed (`tests/fixtures/classes/builtin-subclass.js`) |  |
 | `custom` | property | not probed | not reachable by name in node |  |
 | `util.inspect.defaultOptions` | property | present | probe: present, no fixture names it |  |
 | `util.isDeepStrictEqual(val1, val2[, options])` | method | supported | test-backed (`tests/fixtures/node/util.js`) |  |
@@ -3146,7 +3146,7 @@ test262 subset, `tests/test262/baseline.json` of 2026-10-10: **28105 of 28984** 
 | `textEncoder.encodeInto(src, dest)` | method | missing | probe: absent in js2wasi3 |  |
 | `encoding` | property | missing | probe: absent in js2wasi3 |  |
 | `util._extend(target, source)` | method | present | probe: present, no fixture names it |  |
-| `util.isArray(object)` | method | supported | test-backed (`tests/fixtures/node/util.js`) |  |
+| `util.isArray(object)` | method | supported | test-backed (`tests/fixtures/classes/builtin-subclass.js`) |  |
 
 </details>
 
