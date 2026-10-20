@@ -148,6 +148,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T139](T139-inline-box-split.md) | a split number slot read as a JS value boxes inline instead of calling `box_number` (F474) | dropped (measured on the laptop) | |
 | [T140](T140-int-locals-probe.md) | probe: what integer locals and cheaper array access could gain on fannkuchredux (F475, F476; no compiler change) | done | |
 | [T141](T141-typed-array-locals.md) | a local that always holds one array literal keeps its receiver typed: no type test/cast per element access (F476) | done | |
+| [T142](T142-integer-locals.md) | integer locals: keep integer-valued variables and their array element values out of `f64` conversions (F475) | in progress | |
 | [T89](T89-call-paths.md) | function calls without wasmtime libcalls (F350), `F.prototype` directly (F369) | done | T88 |
 | [T88](T88-earley-boyer-miscompile.md) | EarleyBoyer's wrong result (F333): `var` redeclaring a parameter | done | — |
 | [T87](T87-crash-traps.md) | Wasm traps in test262 (36 crashes) | done | — |

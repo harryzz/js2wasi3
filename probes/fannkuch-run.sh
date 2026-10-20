@@ -4,7 +4,7 @@
 set -u
 cd "$(dirname "$0")/.."; N=${1:-10}; RUNS=${2:-5}
 python3 probes/fannkuch-gen.py >/dev/null; mkdir -p probes/out
-for m in 0 1 2 3; do
+for m in 0 1 2 3 4 5 6; do
   wasm-tools parse probes/fannkuch-m$m.wat -o probes/out/fannkuch-m$m.wasm || exit 1
   # precompile once so the time is the run (as the benchmarks' .cwasm)
   wasmtime compile -W gc=y,function-references=y probes/out/fannkuch-m$m.wasm -o probes/out/fannkuch-m$m.cwasm || exit 1

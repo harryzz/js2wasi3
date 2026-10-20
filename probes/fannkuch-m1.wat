@@ -20,7 +20,7 @@
 (local $checksum i32)
 (local $p0 i32)
 (local $t i32)
-(local $more i32) (local $ga (ref null $arr)) (local $sa (ref null $arr)) (local $gv (ref null $vals)) (local $gi (ref null $ints)) (local $ge eqref) (local $sv eqref) (local $gk i32) (local $sk i32) (local $si i32) (local $gf f64) (local $sf f64) (local $gx f64) (local $t64 i64)
+(local $more i32) (local $ga (ref null $arr)) (local $sa (ref null $arr)) (local $gv (ref null $vals)) (local $gi (ref null $ints)) (local $ge eqref) (local $sv eqref) (local $gk i32) (local $sk i32) (local $si i32) (local $gf f64) (local $sf f64) (local $gx f64) (local $t64 i64) (local $bf f64) (local $bi i32)
 (local.set $perm1 (call $mk (local.get $n)))
 (local.set $perm (call $mk (local.get $n)))
 (local.set $count (call $mk (local.get $n)))

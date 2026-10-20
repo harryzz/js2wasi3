@@ -6,8 +6,12 @@ Usage: python3 probes/fannkuch-gen.py   (writes probes/fannkuch-m{0,1,2}.wat; bu
  M1: `i32` counters (checked arithmetic), the same generic store and tests, the value written as an inline `i31`.
  M2: M1 plus the receiver typed once (no per-access test/cast) and an `i32` element store: a read is a null test and
      a bounds test, a write is the flags test, the null test and the bounds test.
- M3: M1 plus only the receiver typed once (the generic `i31` store and the write's tests kept)."""
+ M3: M1 plus only the receiver typed once (the generic `i31` store and the write's tests kept).
+ M4: M0 plus the receiver typed once: what the compiler is after T141.
+ M5: M4 plus keys known to be integer-valued `f64`s: `trunc_sat` alone, no `convert`/`ne` check.
+ M6: M5 plus the written number boxed inline (an `i31` when it fits) instead of calling `box_number`."""
 import sys
+F64_MODELS = (0, 4, 5, 6)
 HOLE = 9219994337134247937  # the NaN our f64 slots use for "not a number"
 
 TYPES = """
@@ -21,8 +25,10 @@ TYPES = """
 class Gen:
     def __init__(s, model):
         s.m = model; s.n = 0; s.out = []
-        s.f64 = model == 0
-        s.typed = model in (2, 3)
+        s.f64 = model in F64_MODELS
+        s.typed = model in (2, 3, 4, 5, 6)
+        s.knownint = model in (5, 6)
+        s.inbox = model == 6
         s.T = 'f64' if s.f64 else 'i32'
     def id(s):
         s.n += 1; return s.n
@@ -62,8 +68,13 @@ class Gen:
                     f" (if (ref.is_null (local.get $gi)) (then (unreachable)))"
                     f" (if (i32.ge_u (local.get $gk) (array.len (local.get $gi))) (then (unreachable)))"
                     f" (array.get $ints (local.get $gi) (local.get $gk)))")
-        key = (f"(local.set $gf {idx}) (local.set $gk (i32.trunc_sat_f64_s (local.get $gf)))"
-               f" (br_if $miss{i} (f64.ne (f64.convert_i32_s (local.get $gk)) (local.get $gf)))") if s.f64 else f"(local.set $gk {idx})"
+        if s.f64 and s.knownint:
+            key = f"(local.set $gk (i32.trunc_sat_f64_s {idx}))"
+        elif s.f64:
+            key = (f"(local.set $gf {idx}) (local.set $gk (i32.trunc_sat_f64_s (local.get $gf)))"
+                   f" (br_if $miss{i} (f64.ne (f64.convert_i32_s (local.get $gk)) (local.get $gf)))")
+        else:
+            key = f"(local.set $gk {idx})"
         val = ("(f64.convert_i32_s (i31.get_s (ref.cast (ref i31) (local.get $ge))))" if s.f64
                else "(i31.get_s (ref.cast (ref i31) (local.get $ge)))")
         recv = (f" (br_if $miss{i} (i32.eqz (ref.test (ref $arr) {A})))"
@@ -92,9 +103,19 @@ class Gen:
                 f" (array.set $ints (local.get $gi) (local.get $sk) (local.get $si))")
             return
         if s.f64:
-            s.w(f"(local.set $sv (call $box {val})) (local.set $sf {idx})")
-            key = (f"(local.set $sk (i32.trunc_sat_f64_s (local.get $sf)))"
-                   f" (br_if $miss{i} (f64.ne (f64.convert_i32_s (local.get $sk)) (local.get $sf)))")
+            if s.inbox:
+                s.w(f"(local.set $bf {val}) (local.set $bi (i32.trunc_sat_f64_s (local.get $bf)))"
+                    f" (local.set $sv (if (result eqref) (i32.and (f64.eq (f64.convert_i32_s (local.get $bi)) (local.get $bf))"
+                    f" (i32.lt_u (i32.add (local.get $bi) (i32.const 0x40000000)) (i32.const 0x80000000)))"
+                    f" (then (ref.i31 (local.get $bi))) (else (struct.new $num (local.get $bf)))))")
+            else:
+                s.w(f"(local.set $sv (call $box {val}))")
+            s.w(f"(local.set $sf {idx})")
+            if s.knownint:
+                key = "(local.set $sk (i32.trunc_sat_f64_s (local.get $sf)))"
+            else:
+                key = (f"(local.set $sk (i32.trunc_sat_f64_s (local.get $sf)))"
+                       f" (br_if $miss{i} (f64.ne (f64.convert_i32_s (local.get $sk)) (local.get $sf)))")
         else:
             s.w(f"(local.set $si {val}) (local.set $sk {idx})")
             s.w(f"(if (i32.ge_u (i32.add (local.get $si) (i32.const 0x40000000)) (i32.const 0x80000000)) (then (unreachable)))"
@@ -115,14 +136,14 @@ class Gen:
 
 def program(m):
     g = Gen(m); T = g.T; L = g.L; c = g.c
-    arrt = "(ref null $arr)" if m in (2, 3) else "eqref"
+    arrt = "(ref null $arr)" if m in (2, 3, 4, 5, 6) else "eqref"
     g.w(f"(func $fannkuch (param $n {T}) (result {T} {T})")
     g.w(f"(local $perm1 {arrt}) (local $perm {arrt}) (local $count {arrt})")
     for v in "ijkrf flips nperm checksum p0 t".replace("ijkrf", "i j k r f").split():
         g.w(f"(local ${v} {T})")
     g.w("(local $more i32) (local $ga (ref null $arr)) (local $sa (ref null $arr)) (local $gv (ref null $vals))"
         " (local $gi (ref null $ints)) (local $ge eqref) (local $sv eqref) (local $gk i32) (local $sk i32) (local $si i32)"
-        " (local $gf f64) (local $sf f64) (local $gx f64) (local $t64 i64)")
+        " (local $gf f64) (local $sf f64) (local $gx f64) (local $t64 i64) (local $bf f64) (local $bi i32)")
     nn = "(i32.trunc_sat_f64_s (local.get $n))" if g.f64 else "(local.get $n)"
     for a in ("perm1", "perm", "count"):
         g.w(f"(local.set ${a} (call $mk {nn}))")
@@ -175,7 +196,7 @@ def module(m):
     (local.set $i (i32.trunc_sat_f64_s (local.get 0)))
     (if (result eqref) (i32.and (f64.eq (f64.convert_i32_s (local.get $i)) (local.get 0))
           (i32.and (i32.ge_s (local.get $i) (i32.const -1073741824)) (i32.lt_s (local.get $i) (i32.const 1073741824))))
-      (then (ref.i31 (local.get $i))) (else (struct.new $num (local.get 0)))))""" if m == 0 else ""
+      (then (ref.i31 (local.get $i))) (else (struct.new $num (local.get 0)))))""" if m in F64_MODELS else ""
     # struct.new args order: flags vals len f9 nums f11 ints
     if m != 2:
         mk = (f"(func $mk (param $n i32) (result (ref $arr)) (struct.new $arr (i32.const 0) {fill} (local.get $n)"
@@ -185,11 +206,11 @@ def module(m):
               f" (ref.null eq) (ref.null eq) (i32.const 0) {fill}))")
     run = ("(func (export \"run\") (param $n i32) (result i32 i32) (local $a i32) (local $b i32)"
            + (" (call $fannkuch (f64.convert_i32_s (local.get $n))) (local.set $b (i32.trunc_sat_f64_s)) (local.set $a (i32.trunc_sat_f64_s))"
-              if m == 0 else " (call $fannkuch (local.get $n)) (local.set $b) (local.set $a)")
+              if m in F64_MODELS else " (call $fannkuch (local.get $n)) (local.set $b) (local.set $a)")
            + " (local.get $a) (local.get $b))")
     return f"(module\n(rec{TYPES})\n{box}\n{mk}\n{program(m)}\n{run}\n)\n".replace("(rec\n", "(rec\n")
 
 if __name__ == "__main__":
-    for m in range(4):
+    for m in range(7):
         open(f"probes/fannkuch-m{m}.wat", "w").write(module(m))
         print(f"probes/fannkuch-m{m}.wat")
