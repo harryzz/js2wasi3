@@ -3,6 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-20: T141 typed array locals (full run)
+
+- Compiler (`main` at f0b5416 + T141, uncommitted at the run): a local that only holds array literals (and copies of
+  them) is a typed `(ref null $array)` Wasm local; element reads and writes on it skip the type test and cast.
+  Runner: unchanged.
+- Full run on `a-03` (`out/t262-t141.log`, 1,586 s): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-19: T137 `apply` forwarding of `arguments` (full run)
 
 - Compiler (`main` at 3fb66d4 + T137, uncommitted at the run): `x.apply(y, arguments)` passes the argument list

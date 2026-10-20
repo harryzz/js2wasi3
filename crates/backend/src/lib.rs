@@ -59,7 +59,7 @@ mod typed;
 mod wit;
 mod wrapper;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, bail};
 use js2wasi3_ir::{
@@ -266,6 +266,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
         }
     }
     let mut e = Emitter {
+        array_locals: HashSet::new(),
         scratch_f64: 0,
         scratch_js: 0,
         scratch_obj: 0,
@@ -855,6 +856,82 @@ fn uses_jsval(m: &ir::Module) -> bool {
         })
 }
 
+/// T141: the locals of `f` that only ever hold arrays: not parameters, every write an `Expr::Array`, HOLE (null) or
+/// a read of another such local (the lowering's temporaries for `a[i] = v`), at least one not HOLE, never a catch
+/// variable. Their Wasm type is `(ref null $array)`: element accesses on them skip the type test and cast.
+fn array_locals(f: &ir::Function) -> HashSet<u32> {
+    // Per local: the locals whose reads it is written with, and whether anything else writes it.
+    #[derive(Default)]
+    struct W {
+        arrays: u32,
+        from: Vec<u32>,
+        other: bool,
+    }
+    fn note(w: &mut HashMap<u32, W>, l: ir::LocalId, e: &Expr) {
+        let c = w.entry(l.0).or_default();
+        match e {
+            Expr::Array(_) => c.arrays += 1,
+            Expr::Local(x) => c.from.push(x.0),
+            Expr::Intrinsic { op: Intrinsic::Hole, .. } => {}
+            _ => c.other = true,
+        }
+    }
+    fn scan(list: &[Stmt], w: &mut HashMap<u32, W>) {
+        for st in list {
+            match st {
+                Stmt::Set(l, e) => note(w, *l, e),
+                Stmt::Block { body, .. } | Stmt::Loop { body, .. } => scan(body, w),
+                Stmt::If { then, els, .. } => {
+                    scan(then, w);
+                    scan(els, w);
+                }
+                Stmt::Try { body, catch_local, catch_body } => {
+                    if let Some(l) = catch_local {
+                        w.entry(l.0).or_default().other = true;
+                    }
+                    scan(body, w);
+                    scan(catch_body, w);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut w: HashMap<u32, W> = HashMap::new();
+    scan(&f.body, &mut w);
+    visit_exprs(&f.body, &mut |e| match e {
+        Expr::Seq { body, .. } => scan(body, &mut w),
+        Expr::Tee(l, v) => note(&mut w, *l, v),
+        _ => {}
+    });
+    let mut set: HashSet<u32> = w
+        .iter()
+        .filter(|(l, c)| {
+            **l >= f.params && !c.other && (c.arrays > 0 || !c.from.is_empty()) && f.locals[**l as usize].ty == Type::JsVal
+        })
+        .map(|(l, _)| *l)
+        .collect();
+    // A local copied from one that is not such a local is not one either.
+    loop {
+        let drop: Vec<u32> = set.iter().copied().filter(|l| w[l].from.iter().any(|x| !set.contains(x))).collect();
+        if drop.is_empty() {
+            break;
+        }
+        for l in drop {
+            set.remove(&l);
+        }
+    }
+    // Only copies of each other, never an array (a cycle of aliases): not worth a typed local.
+    let mut real: HashSet<u32> = set.iter().copied().filter(|l| w[l].arrays > 0).collect();
+    loop {
+        let more: Vec<u32> = set.iter().copied().filter(|l| !real.contains(l) && w[l].from.iter().any(|x| real.contains(x))).collect();
+        if more.is_empty() {
+            break;
+        }
+        real.extend(more);
+    }
+    real
+}
+
 // ---- unsupported IR ------------------------------------------------------------------------
 
 fn check_supported(m: &ir::Module) -> anyhow::Result<()> {
@@ -1107,6 +1184,8 @@ struct Emitter<'m> {
     scratch_f64: u32,
     /// A `jsval` local for inline sequences (T75).
     scratch_js: u32,
+    /// T141: the current function's locals that hold only one array literal (their Wasm type is `(ref null $array)`).
+    array_locals: HashSet<u32>,
     /// T110: a `(ref null $object)` and a second `jsval` local for the inline layout reads.
     scratch_obj: u32,
     scratch_val: u32,
@@ -1828,9 +1907,17 @@ impl Emitter<'_> {
     }
 
     fn function(&mut self, f: &ir::Function) -> anyhow::Result<Function> {
+        self.array_locals = array_locals(f);
         let mut locals: Vec<(u32, ValType)> = f.locals[f.params as usize..]
             .iter()
-            .map(|l| (1, val_type(l.ty)))
+            .enumerate()
+            .map(|(i, l)| {
+                if self.array_locals.contains(&(f.params + i as u32)) {
+                    (1, runtime::rt(true, runtime::T_ARRAY))
+                } else {
+                    (1, val_type(l.ty))
+                }
+            })
             .collect();
         locals.push((1, ValType::F64));
         locals.push((1, runtime::jsval()));
@@ -1909,6 +1996,7 @@ impl Emitter<'_> {
     ) -> anyhow::Result<()> {
         use wasm_encoder::HeapType as Ht;
         let (v, k, x) = (self.scratch_val, self.scratch_js, self.scratch_x);
+        let typed = self.typed_recv(obj, &[key]);
         self.expr(s, frames, obj)?;
         match (key, split_args(key)) {
             (Expr::Convert { from: Type::F64, to: Type::JsVal, arg }, _) => {
@@ -1945,8 +2033,16 @@ impl Emitter<'_> {
         s.drop();
         s.block(BlockType::Result(ValType::F64));
         s.block(BlockType::Empty);
-        s.local_get(v).ref_test_non_null(array::array()).i32_eqz().br_if(0);
-        s.local_get(v).ref_cast_non_null(array::array()).local_set(a);
+        match typed {
+            Some(l) => {
+                s.local_get(l).ref_is_null().br_if(0);
+                s.local_get(l).local_set(a);
+            }
+            None => {
+                s.local_get(v).ref_test_non_null(array::array()).i32_eqz().br_if(0);
+                s.local_get(v).ref_cast_non_null(array::array()).local_set(a);
+            }
+        }
         s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
         s.local_get(x).f64_ne().br_if(0);
         s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_ELEMS).local_tee(el).array_len().i32_lt_u();
@@ -2017,6 +2113,42 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// T141: `e` is a read of a local typed `(ref null $array)` ([`array_locals`]).
+    fn is_array_read(&self, e: &Expr) -> bool {
+        matches!(e, Expr::Local(x) if self.array_locals.contains(&x.0))
+    }
+
+    /// T141: `obj` is a bare read of a local that only holds arrays ([`array_locals`]) and the other
+    /// operands run no `Seq`/`Tee` (nothing writes it between reading it and using it): its Wasm local, typed
+    /// `(ref null $array)`, replaces the receiver's type test and cast.
+    fn typed_recv(&self, obj: &Expr, others: &[&Expr]) -> Option<u32> {
+        let Expr::Local(l) = obj else { return None };
+        let l = &l.clone();
+        if !self.array_locals.contains(&l.0) {
+            return None;
+        }
+        fn sets(list: &[Stmt], l: ir::LocalId) -> bool {
+            list.iter().any(|st| match st {
+                Stmt::Set(x, _) => *x == l,
+                Stmt::Block { body, .. } | Stmt::Loop { body, .. } => sets(body, l),
+                Stmt::If { then, els, .. } => sets(then, l) || sets(els, l),
+                Stmt::Try { body, catch_local, catch_body } => {
+                    *catch_local == Some(l) || sets(body, l) || sets(catch_body, l)
+                }
+                _ => false,
+            })
+        }
+        let mut plain = true;
+        for e in others {
+            visit_exprs(&[Stmt::Expr((*e).clone())], &mut |x| match x {
+                Expr::Tee(t, _) if t == l => plain = false,
+                Expr::Seq { body, .. } if sets(body, *l) => plain = false,
+                _ => {}
+            });
+        }
+        plain.then_some(l.0)
+    }
+
     /// T115: `obj[key]` with a key that isn't a constant string: an element of an array (`$array`, its element
     /// store, a data value) read inline, as the `get` helper's first fast path; anything else calls `get`. An
     /// `f64` key (a typed index, `a[i]`) is tested as is and boxed only for the call.
@@ -2037,6 +2169,7 @@ impl Emitter<'_> {
             _ => None,
         };
         let split = split_args(key);
+        let typed = self.typed_recv(obj, &[key]);
         self.expr(s, frames, obj)?;
         match (num, split) {
             (Some(i), _) => {
@@ -2056,7 +2189,10 @@ impl Emitter<'_> {
         s.block(BlockType::Result(runtime::jsval()));
         s.block(BlockType::Empty);
         s.block(BlockType::Empty);
-        s.local_get(o).ref_test_non_null(array::array()).i32_eqz().br_if(0);
+        match typed {
+            Some(l) => s.local_get(l).ref_is_null().br_if(0),
+            None => s.local_get(o).ref_test_non_null(array::array()).i32_eqz().br_if(0),
+        };
         match num {
             Some(_) => {
                 // An integer-valued f64 (-0 is index 0, as ToPropertyKey says).
@@ -2070,7 +2206,11 @@ impl Emitter<'_> {
         }
         // Inside the element store (negative: no), a data value (null: a hole or past `length`).
         s.local_get(j);
-        s.local_get(o).ref_cast_non_null(array::array()).struct_get(runtime::T_ARRAY, array::F_ELEMS);
+        match typed {
+            Some(l) => s.local_get(l),
+            None => s.local_get(o).ref_cast_non_null(array::array()),
+        };
+        s.struct_get(runtime::T_ARRAY, array::F_ELEMS);
         s.local_tee(el).array_len().i32_ge_u().br_if(1);
         s.local_get(el).local_get(j).array_get(runtime::T_VALS).local_tee(r);
         s.ref_is_null().br_if(1);
@@ -2133,6 +2273,11 @@ impl Emitter<'_> {
             _ => None,
         };
         let split_key = split_args(key).filter(|_| num_key.is_none());
+        let typed = {
+            let mut others = vec![key, value];
+            others.extend(split);
+            self.typed_recv(obj, &others)
+        };
         self.expr(s, frames, obj)?;
         match split_key {
             Some((so, sf)) => {
@@ -2184,13 +2329,25 @@ impl Emitter<'_> {
             }
         }
         s.block(BlockType::Result(runtime::jsval()));
-        s.local_get(o);
-        s.br_on_cast_fail(
-            0,
-            wasm_encoder::RefType::EQREF,
-            wasm_encoder::RefType { nullable: false, heap_type: array::array() },
-        );
-        s.local_set(a);
+        match typed {
+            Some(l) => {
+                // T141: the receiver's local is typed; null (not yet initialized) is the miss.
+                s.local_get(l).ref_is_null();
+                s.if_(BlockType::Empty);
+                s.local_get(o).br(1);
+                s.end();
+                s.local_get(l).local_set(a);
+            }
+            None => {
+                s.local_get(o);
+                s.br_on_cast_fail(
+                    0,
+                    wasm_encoder::RefType::EQREF,
+                    wasm_encoder::RefType { nullable: false, heap_type: array::array() },
+                );
+                s.local_set(a);
+            }
+        }
         // Below `length` (negative: no).
         s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_LENGTH).i32_ge_u().br_if(1);
         if num_value {
@@ -2564,6 +2721,9 @@ impl Emitter<'_> {
             }
             Stmt::Set(l, e) => {
                 self.expr(s, frames, e)?;
+                if self.array_locals.contains(&l.0) && !self.is_array_read(e) {
+                    s.ref_cast_nullable(array::array());
+                }
                 s.local_set(l.0);
             }
             Stmt::SetGlobal(g, e) => {
@@ -2706,6 +2866,9 @@ impl Emitter<'_> {
             }
             Expr::Tee(l, v) => {
                 self.expr(s, frames, v)?;
+                if self.array_locals.contains(&l.0) && !self.is_array_read(v) {
+                    s.ref_cast_nullable(array::array());
+                }
                 s.local_tee(l.0);
             }
             Expr::Unary { op, arg, .. } => match op {

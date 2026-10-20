@@ -1022,5 +1022,10 @@ The rules after T106–T110, where each speed fix made another program slower (`
   body starts with the `arguments` local HOLE; each such call tests `x.apply` against `Function.prototype.apply`'s
   code slot (no watchpoint) and on a match calls `x` with a copy of the argument array (`apply_forward`); otherwise
   it makes the object on first use. Every other read of `arguments` makes it lazily, so semantics never change.
+- **Typed array locals** (T141): a `jsval` local whose every write is an array literal, HOLE or a copy of another such
+  local (the lowering copies the receiver into a temporary for `a[i] = v`) is declared `(ref null $array)` in Wasm and
+  cast once at each write; inline element reads and writes on a bare read of it skip the `ref.test`/`ref.cast` (a null
+  test stays: null is not yet initialized) when no operand of the access writes that local. Probe (T140,
+  `probes/fannkuch-*`): the receiver typed once is the largest single step after `i32` counters.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).
