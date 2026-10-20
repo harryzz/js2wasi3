@@ -41,6 +41,11 @@ programs of `tests/bench`, micro-benchmarks).**
   stdout, stderr and exit status (default: all of `tests/fixtures`; `x.skip` skips `x.js` with a reason).
   Run it on the fixtures you touch; a new command fixture needs no expected-output file (node is the oracle).
   See "Testing" in `docs/design.md`.
+- Subagents (Haiku 5.5, `.claude/agents/`): use `grep` to find call sites and `search` to map unfamiliar parts of
+  the repo when the answer needs many files and only the conclusion matters; use `audit` to run fixtures
+  (`scripts/diff.sh`, `wasm-tools validate`, a wasmtime smoke run) on committed code. Read the code being
+  changed in the main session. Long runs (test262, `scripts/gate.sh`, anything on a-03) stay in the main
+  session and still need a yes first.
 
 ## Layout
 - `crates/frontend`: oxc parse + semantic
