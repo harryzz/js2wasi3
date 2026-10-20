@@ -4,3 +4,4 @@
 *.wasm
 /test262
 /temp/
+/.claude/
