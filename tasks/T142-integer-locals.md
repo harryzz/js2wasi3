@@ -42,3 +42,16 @@ of it without a deoptimizing second version of the function.
 - 2026-10-20: **correction of T139's conclusion.** T139 was judged on instructions (fannkuchredux −3.0%) and dropped
   without an a-03 gate; the probe says the `box_number` call costs far more time than its instructions (M5 → M6
   −20% of the time). T139's patch (`tasks/T139-files/split-get-inline-box.patch`) is not measured on a-03: to do first.
+- 2026-10-20: user: yes. Pushed 40f0052. T139's patch applied to the working tree; `scripts/gate.sh -o out/gate-t142a 40f0052` started on a-03 (`~/gate-t142a.log`) to measure inline boxing on top of T141.
+- 2026-10-20: a-03 gate of T139's patch on top of T141 (base 40f0052; `out/gate-t142a-a03.log`, `out/gate-t142a/gate.tsv`):
+  geomean **0.9904** (minimum times); fannkuchredux 3,280 → 3,193 ms (**−2.7%**, instructions −3.77%); crypto −3.4%
+  (instructions −1.28%); mandelbrot −3.3% and pidigits −3.2% at 0.00% instructions (placement); navier-stokes
+  instructions −0.92% (time −0.6%); the other 12 within ±1.7%; `.wasm` +0.01…+0.93% (crypto +0.93%, navier-stokes
+  +0.40%, splay +0.37%, fannkuchredux +0.15%). Micros: 4 "slower" (`instanceof`, `getPrototypeOf` +1.5…2 ns) and 7 "faster"
+  (`v == null` −2 ns): placement, none of those paths changed.
+- 2026-10-20: **the correction above is itself wrong.** Inlining the call removed fannkuchredux's 64.2M `box_number`
+  calls (302 left) and gave −2.7% time, not the probe's −21%: the probe's `$box` call is costlier than the real helper
+  (a model, not a measurement; the same caveat applies to its other steps). T139's original judgement (a small gain, a
+  few percent on two programs) stands; what changes is the cost/benefit on the current base: geomean 0.9904 of which
+  ~0.5–1.0% is placement. Decision for the user: keep the patch or leave T139 dropped.
+- 2026-10-20: user: option 2 (leave T139's patch dropped). Patch reverted from the working tree (still in `tasks/T139-files/`); the gate result is recorded above.
