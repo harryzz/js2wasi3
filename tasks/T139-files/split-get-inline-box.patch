@@ -1,0 +1,15 @@
+diff --git a/crates/backend/src/lib.rs b/crates/backend/src/lib.rs
+index 6d6ea60..f661ff1 100644
+--- a/crates/backend/src/lib.rs
++++ b/crates/backend/src/lib.rs
+@@ -3163,7 +3163,9 @@ impl Emitter<'_> {
+                     s.local_tee(v).ref_is_null();
+                     s.if_(BlockType::Result(runtime::jsval()));
+                     self.expr(s, frames, f)?;
+-                    s.call(self.helper_index(Helper::Js(runtime::Helper::Box)));
++                    // T139: boxed inline (an integer is an `i31`, no call).
++                    s.local_set(self.scratch_f64);
++                    runtime::box_inline(s, self.scratch_f64, self.scratch_i32);
+                     s.else_();
+                     s.local_get(v);
+                     s.end();

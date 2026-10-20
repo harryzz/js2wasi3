@@ -727,6 +727,9 @@ pub const COUNTS: &[&str] = &[
     // T137: `arguments` objects built, and argument lists read back from array-likes (`apply`, `Reflect`).
     "make_arguments",
     "list_from_array_like",
+    // T139: `box_number` calls (the helper, not the inline boxing): small integers and new `$number`s.
+    "box_number.i31",
+    "box_number.new",
 ];
 
 /// T112: the index of counter `name` in [`COUNTS`].
@@ -1703,7 +1706,7 @@ impl Helper {
 
     pub fn body(self, cx: &mut dyn Cx) -> Function {
         match self {
-            Helper::Box => box_number(),
+            Helper::Box => box_number(cx),
             Helper::JsAddParts => js_add_parts(cx),
             Helper::ToNumber => to_number(cx),
             Helper::ToBoolean => to_boolean(cx),
@@ -1785,12 +1788,20 @@ fn js_add_parts(cx: &mut dyn Cx) -> Function {
     f
 }
 
-fn box_number() -> Function {
+fn box_number(cx: &mut dyn Cx) -> Function {
     const X: u32 = 0;
     const I: u32 = 1;
+    let on = cx.counting();
     let mut f = Function::new([(1, ValType::I32)]);
     let mut s = f.instructions();
-    box_inline(&mut s, X, I);
+    fits_i31(&mut s, X, I);
+    s.if_(BlockType::Result(jsval()));
+    count(&mut s, on, "box_number.i31");
+    s.local_get(I).ref_i31();
+    s.else_();
+    count(&mut s, on, "box_number.new");
+    s.local_get(X).struct_new(T_NUMBER);
+    s.end();
     s.end();
     f
 }
