@@ -1,1 +1,1 @@
-module.exports = (code) => new Function("x", code);
+module.exports = (code) => (0, eval)(code);

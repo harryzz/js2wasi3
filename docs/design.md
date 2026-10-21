@@ -865,7 +865,9 @@ properties) or, since T54, a CommonJS module (a function: top-level `this` is `m
   makes that call `throw new SyntaxError(…)` (oxc's message). `eval` calls in S are spliced in further rounds.
   `Function(P…, B)`/`new Function(…)` → `(function anonymous(P\n) {\nB\n})` in place (a new object per
   evaluation, the spec's source text); indirect eval (`(0, eval)(…)`, `globalThis.eval(…)`, `eval?.(…)`) →
-  `(function () { S' }).call(globalThis)`. Both are sloppy in node: only the sloppy `this` is done (a non-strict
+  `(function () { S' }).call(globalThis)`. T148: `Function(x)`/`new Function(x)` with computed code (no spread) is a
+  call that evaluates its arguments and throws an `EvalError` at run time (`Arg::Throw`), so a library's dead fallback
+  (`function-bind`'s) builds; `eval(x)` of computed code stays a build error. Both are sloppy in node: only the sloppy `this` is done (a non-strict
   `Function` body's `this` is the global object for `undefined`/`null`, else ToObject); a name in them that
   resolves to a module binding is a build error (node: only globals, F206). T44: non-strict indirect eval code's
   `var` declarations become assignments (their names are then undeclared, so global-object lookups) and its
@@ -1038,5 +1040,13 @@ The rules after T106–T110, where each speed fix made another program slower (`
   (made then), so the results never change. No watchpoint: `apply`'s identity is tested by its code slot.
 - **Loose equality with `null`/`undefined`** (T145): `x == null`, `x != null`, `x == undefined`, `x != undefined` are two
   identity compares against the `null` and `undefined` singletons (`ref.eq`), no call: `v == null` 28 → 5 ns, richards −17%.
+- **Gaps found by running Express** (T148, `temp/express-demo`): `Object.prototype.__proto__` has a getter
+  (`builtins/object.js`; its setter is still the special case of the property setters, so the descriptor's `set` is
+  `undefined`); ToPrimitive of a function whose source isn't kept (the code never names `toString`, T25) gives
+  `function name() { [native code] }` instead of trapping, so a function works as a property key; `Function(x)` of
+  computed code throws an `EvalError` at run time; `net.Server.listen(port)` without a host binds `::` and a second `0.0.0.0`
+  socket on the same port (a WASI IPv6 socket is IPv6-only, node's is dual-stack); `fs.Stats` keeps the fraction of the
+  `*Ms` times and its Dates round to the nearest millisecond. Express 5.3 builds (25 s, 5.8 MB) and answers requests like
+  node (`examples/express`); its `depd` needs V8's call-site API (`Error.prepareStackTrace`, F296), so it is shimmed.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

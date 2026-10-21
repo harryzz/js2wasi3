@@ -528,8 +528,10 @@ const TYPE_MODE = {
   socket: 0o140755,
 };
 
+// node's: milliseconds with the fraction (`mtimeMs` 1792595949721.7466), the Dates round to the nearest millisecond
+// (T148: Express's `send` builds its ETag from `mtime.getTime()`).
 function ms(t) {
-  return t === undefined ? 0 : t.seconds * 1000 + Math.floor(t.nanoseconds / 1e6);
+  return t === undefined ? 0 : t.seconds * 1000 + t.nanoseconds / 1e6;
 }
 
 class Stats {
@@ -553,16 +555,16 @@ class Stats {
     this.birthtimeMs = ctimeMs;
   }
   get atime() {
-    return new Date(this.atimeMs);
+    return new Date(Math.round(this.atimeMs));
   }
   get mtime() {
-    return new Date(this.mtimeMs);
+    return new Date(Math.round(this.mtimeMs));
   }
   get ctime() {
-    return new Date(this.ctimeMs);
+    return new Date(Math.round(this.ctimeMs));
   }
   get birthtime() {
-    return new Date(this.birthtimeMs);
+    return new Date(Math.round(this.birthtimeMs));
   }
   isFile() {
     return (this.mode & 61440) === 32768;

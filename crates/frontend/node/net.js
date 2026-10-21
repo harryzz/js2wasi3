@@ -474,6 +474,7 @@ class Server extends EventEmitter {
     this._connections = 0;
     this._handle = null;
     this._accepted = null;
+    this._extra = null;
     this._address = null;
     this.allowHalfOpen = options.allowHalfOpen || false;
     this.pauseOnConnect = Boolean(options.pauseOnConnect);
@@ -507,8 +508,11 @@ class Server extends EventEmitter {
     else port = validatePort(port, "options.port");
     const host = options.host;
     if (host === undefined || host === null || host === "") {
-      // node listens on `::` if it can, else on `0.0.0.0`.
-      if (!this._bind("::", 6, port, true)) this._bind("0.0.0.0", 4, port, false);
+      // node listens on `::` if it can, else on `0.0.0.0`. node's `::` socket takes IPv4 clients too; a WASI IPv6 socket
+      // is IPv6-only, so the IPv4 half is a second socket on the same port (T148: `app.listen(3000)` is then reachable
+      // at 127.0.0.1 as well as at ::1).
+      if (this._bind("::", 6, port, true)) this._bindExtra("0.0.0.0", 4, this._address.port);
+      else this._bind("0.0.0.0", 4, port, false);
     } else if (isIP(host)) {
       this._bind(host, isIP(host), port, false);
     } else {
@@ -543,6 +547,22 @@ class Server extends EventEmitter {
     });
     this._accept(accepted);
     return true;
+  }
+
+  // The IPv4 half of a dual-stack listen (best effort: a failure leaves the IPv6 socket alone).
+  _bindExtra(address, family, port) {
+    let h;
+    let accepted;
+    try {
+      h = wasi.create("ipv4");
+      wasi.bind(h, socketAddress(address, port));
+      accepted = wasi.listen(h);
+    } catch {
+      if (h !== undefined) wasi.drop(h);
+      return;
+    }
+    this._extra = { handle: h, accepted };
+    this._accept(accepted);
   }
 
   async _accept(accepted) {
@@ -588,6 +608,13 @@ class Server extends EventEmitter {
       wasi.drop(this._handle);
       this._handle = null;
       this._address = null;
+      if (this._extra) {
+        const extra = this._extra;
+        this._extra = null;
+        extra.accepted.cancel();
+        extra.accepted.return();
+        wasi.drop(extra.handle);
+      }
     }
     this._emitCloseIfDrained();
     return this;

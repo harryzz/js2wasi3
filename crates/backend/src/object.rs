@@ -3470,6 +3470,8 @@ fn proto(cx: &mut dyn Cx, b: Builtin) -> Function {
             continue;
         }
         let getter = (matches!(b, Builtin::Map | Builtin::Set) && key == "size")
+            // T148: `Object.prototype.__proto__` (its setter is the `__proto__` case of the property setters).
+            || (b == Builtin::Object && key == "__proto__")
             || (b == Builtin::Symbol && key == "description")
             || (b == Builtin::TypedArray
                 && ["length", "byteLength", "byteOffset", "buffer"].contains(&key.as_str()))
@@ -6240,6 +6242,33 @@ fn to_primitive(cx: &mut dyn Cx) -> Function {
         s.global_get(tags[1]).return_();
         s.end();
         s.global_get(tags[0]).return_();
+        s.end();
+        // T148: `Function.prototype.toString` before the program names `toString` (no source text kept): a function is
+        // `function name() { [native code] }` rather than a trap (`obj[fn]`, `` `${fn}` ``).
+        s.local_get(KEY).global_get(to_string_key).ref_eq();
+        s.local_get(O).ref_test_non_null(func::function());
+        s.i32_and();
+        s.if_(BlockType::Empty);
+        {
+            let get = h(cx, Helper::Get);
+            let concat = rh(cx, runtime::Helper::Concat);
+            let (open, close, anonymous, name) = (
+                cx.str("function "),
+                cx.str("() { [native code] }"),
+                cx.str("function () { [native code] }"),
+                cx.str("name"),
+            );
+            s.local_get(O).global_get(name).call(get).local_set(T);
+            runtime::is_string(&mut s, T);
+            s.if_(BlockType::Result(string_ref()));
+            s.global_get(open);
+            s.local_get(T).ref_cast_non_null(string()).call(concat);
+            s.global_get(close).call(concat);
+            s.else_();
+            s.global_get(anonymous);
+            s.end();
+            s.return_();
+        }
         s.end();
         s.call(user);
     }

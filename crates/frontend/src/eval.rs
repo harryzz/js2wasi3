@@ -96,6 +96,9 @@ enum Arg {
     Function(String, String),
     /// The argument's source text: a value that isn't a string (`eval(1)`), or `undefined`.
     Value(String),
+    /// T148: `Function(…)` of code known only at run time: the arguments are evaluated, then an `EvalError` is thrown
+    /// (a library's fallback that never runs, such as `function-bind`'s, still builds).
+    Throw(String),
 }
 
 struct Call {
@@ -236,10 +239,22 @@ fn find(p: &Program) -> (Vec<Call>, Vec<(Span, String)>) {
                 .map(|a| a.as_expression().and_then(literal))
                 .collect();
             let Some(mut texts) = texts else {
-                errors.push((
-                    span,
-                    "unsupported: `Function` of code not known at build time".to_string(),
-                ));
+                if args.iter().any(Argument::is_spread) {
+                    errors.push((
+                        span,
+                        "unsupported: `Function` of code not known at build time".to_string(),
+                    ));
+                } else {
+                    calls.push(Call {
+                        span,
+                        arg: Arg::Throw(
+                            "Code generation from strings is not supported (js2wasi3 compiles ahead of time: only code known at build time can be compiled)"
+                                .to_string(),
+                        ),
+                        extra: args.iter().map(GetSpan::span).collect(),
+                        used,
+                    });
+                }
                 continue;
             };
             let body = texts.pop().unwrap_or_default();
@@ -473,6 +488,10 @@ fn generate(
             ),
             Err(message) => (throw_syntax_error(&message), true),
         },
+        Arg::Throw(message) => (
+            format!("((() => {{ throw new EvalError({}); }})())", json_string(message)),
+            true,
+        ),
         Arg::Function(params, body) => {
             match function(alloc, params, body, &format!("{completion}t")) {
                 Ok(f) => (format!("({f})"), false),

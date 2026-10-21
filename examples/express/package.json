@@ -1,0 +1,12 @@
+{
+  "name": "js2wasi3-express-notes-todo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A notes + todo app on Express 5, compiled by js2wasi3 into a WASI 0.3 component",
+  "main": "server.js",
+  "scripts": {
+    "setup": "npm install --ignore-scripts --no-audit --no-fund && sh shims/apply.sh",
+    "start": "node server.js"
+  },
+  "dependencies": { "express": "5.3.0" }
+}

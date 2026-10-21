@@ -3,6 +3,15 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-21: T148 gaps found by running Express (full run)
+
+- Compiler (`main` at e23dbfd-era + T148, uncommitted at the run): the `Object.prototype.__proto__` getter, a function converted to a
+  primitive without source text, `Function(computed)` as a run-time `EvalError`, dual-stack `listen`, `fs.Stats` times. Host: wasmtime 50.0.0.
+- Full run on `a-03` (`out/t262-t148.log`, 1,767 s): **28,123 pass (unchanged), 0 regressions**. Eight tests changed from `unsupported` (a build
+  error) to `fail` (they build now and fail when they run): `Function(computed)` is no longer a build error. Seven are
+  `language/expressions/class/private-*-multiple-evaluations-of-class-function-ctor.js` (`EvalError`: code generated from strings),
+  one is `async-arrow-function/prototype.js` (`%AsyncFunction%`). The baseline file was not updated (they fail either way).
+
 ## 2026-10-21: T146 wasmtime 50.0.0 (full run)
 
 - Compiler: `main` at 661472a (T145 included). Host: **wasmtime 50.0.0** (was 49.0.3). Runner: unchanged.

@@ -312,9 +312,9 @@ fn traps_are_not_caught() {
 }
 
 /// T13: what isn't implemented yet traps instead of giving a wrong value: reading a built-in
-/// method (functions are T14/T21), `console.log` of an error inside an object (no stack: F24), a built-in
-/// `toString` that isn't implemented (`Function.prototype.toString` when the code never names
-/// `toString`: functions then carry no source text, T25).
+/// method (functions are T14/T21), `console.log` of an error inside an object (no stack: F24). (T148: a function
+/// converted to a primitive without the code naming `toString`, which keeps no source text (T25), gives
+/// `function name() { [native code] }`; it used to trap.)
 #[test]
 fn unimplemented_object_features_trap() {
     let dir = out_dir("objtrap");
@@ -328,11 +328,6 @@ fn unimplemented_object_features_trap() {
             "inspect",
             "const o = { e: new Error(\"x\") };\nconsole.log(\"before\");\nconsole.log(o);\n",
             "inspect_object_not_implemented",
-        ),
-        (
-            "user",
-            "const f = function () {};\nconsole.log(\"before\");\nconsole.log(\"\" + f);\n",
-            "user_to_primitive_not_implemented",
         ),
     ] {
         let src_path = dir.join(format!("{name}.js"));
@@ -1150,16 +1145,56 @@ fn commands_import_wasi_interfaces() {
 
 #[test]
 fn errors_of_every_module_are_reported() {
-    // T62: a parse-time error in one module (`new Function` of unknown code) doesn't hide the
+    // T62: a parse-time error in one module (`eval` of unknown code) doesn't hide the
     // others'.
     let out = out_dir("report-all").join("x.wasm");
     let b = build(&fixture("unsupported/report-all/main.cjs"), &out, &["--command"]);
     assert!(!b.status.success());
     let err = String::from_utf8_lossy(&b.stderr);
+    // (T148: `Function` of computed code builds and throws an `EvalError` at run time; `eval` of it is a build error.)
     for want in [
-        "dyn.cjs:1:28: error: unsupported: `Function` of code not known at build time",
+        "dyn.cjs:1:28: error: unsupported: `eval` of code not known at build time",
         "eval.cjs:1:28: error: unsupported: `eval` of code not known at build time",
     ] {
         assert!(err.contains(want), "missing {want:?} in:\n{err}");
     }
+}
+
+#[test]
+fn function_of_computed_code_builds_and_throws_at_run_time() {
+    // T148: `Function(…)` / `new Function(…)` whose code is only known at run time (function-bind's fallback that
+    // node never runs) builds; running it evaluates the arguments, then throws an `EvalError`.
+    let dir = out_dir("function-computed");
+    let src = dir.join("x.js");
+    std::fs::write(
+        &src,
+        "let n = 0;\nconst code = process.argv.length > 99 ? 'return 1' : 'return 2';\n\
+         try { new Function((n++, 'a'), (n++, code)); } catch (e) { console.log(e.name, n); }\n\
+         try { Function(code)(); } catch (e) { console.log(e.name, n); }\n\
+         console.log(new Function('return 7')());\n",
+    )
+    .unwrap();
+    let out = dir.join("x.wasm");
+    let b = build(&src, &out, &["--command"]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let (ok, stdout, stderr) = run_command(&out);
+    assert!(ok, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(String::from_utf8(stdout).unwrap(), "EvalError 2\nEvalError 2\n7\n");
+}
+
+#[test]
+fn function_without_source_text_converts_to_a_native_code_string() {
+    // T148: `"" + f` when the code never names `toString` (functions carry no source then, T25).
+    let dir = out_dir("fn-prim");
+    let src = dir.join("x.js");
+    std::fs::write(&src, "const f = function () {};\nfunction g() {}\nconsole.log(\"\" + f, \"|\", `${g}`, \"|\", Object.keys({ [g]: 1 }));\n").unwrap();
+    let out = dir.join("x.wasm");
+    let b = build(&src, &out, &["--command"]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let (ok, stdout, stderr) = run_command(&out);
+    assert!(ok, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(
+        String::from_utf8(stdout).unwrap(),
+        "function f() { [native code] } | function g() { [native code] } | [ 'function g() { [native code] }' ]\n"
+    );
 }

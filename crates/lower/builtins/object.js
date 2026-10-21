@@ -160,6 +160,15 @@ function $$Object_groupBy(items, callbackfn) {
 
 // ---- Object.prototype --------------------------------------------------------------------
 
+// `Object.prototype.__proto__`'s getter (Annex B, T148): ToObject(this).[[GetPrototypeOf]](). The setter is the
+// special case of the property setters (`set_proto`).
+function $$Object_prototype___proto__() {
+  if (this === undefined || this === null) {
+    throw new TypeError("Cannot convert undefined or null to object");
+  }
+  return Object.getPrototypeOf(this);
+}
+
 // The legacy accessor methods (Annex B).
 function $$Object_prototype___defineGetter__(p, getter) {
   const o = $$toObjectCheck(this);
