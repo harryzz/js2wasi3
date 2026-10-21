@@ -1036,5 +1036,7 @@ The rules after T106–T110, where each speed fix made another program slower (`
   `arguments` local HOLE and makes the object on the first other use. `arguments.length` is the argument array's length;
   `arguments[k]` with an integer `k` below it reads the array (inline element path), any other key reads the object
   (made then), so the results never change. No watchpoint: `apply`'s identity is tested by its code slot.
+- **Loose equality with `null`/`undefined`** (T145): `x == null`, `x != null`, `x == undefined`, `x != undefined` are two
+  identity compares against the `null` and `undefined` singletons (`ref.eq`), no call: `v == null` 28 → 5 ns, richards −17%.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

@@ -5,7 +5,7 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 
 | Tool | Version | Used for |
 |---|---|---|
-| wasmtime | 49.0.3 | the only test host (WASI 0.3 via `-Sp3`; 49.0.3 since 2026-10-16: security/panic fixes in Component Model async, streams, exception tags, recursive types (T122); 49.0.2 since 2026-10-03: GC rooting across `try_call`, F224). 50.0.0-rc.1 measured (T123: pidigits −26.4%, splay −9.1%, binarytrees −7.2%, test262 no changes): pin 50.0.0 when final (F436). 49.0.4 (2026-10-19: wasi-http content-length/trailer checks, aarch64 `br_table`, a stream-type panic, rustls) skipped: user, 2026-10-20, wait for 50 |
+| wasmtime | 50.0.0 | the only test host (WASI 0.3 via `-Sp3`; 50.0.0 since 2026-10-21 (released 2026-10-20; T146; 49.0.3 kept as `wasmtime-49.0.3`); 49.0.3 from 2026-10-16: security/panic fixes in Component Model async, streams, exception tags, recursive types (T122); 49.0.2 since 2026-10-03: GC rooting across `try_call`, F224). 50.0.0-rc.1 was measured in T123 (pidigits −26.4%, splay −9.1%, binarytrees −7.2%, test262 no changes). 49.0.4 (2026-10-19: wasi-http content-length/trailer checks, aarch64 `br_table`, a stream-type panic, rustls) skipped: user, 2026-10-20, wait for 50 |
 | wasm-tools | 1.259.0 | validate, print, `component embed/new/wit` |
 | wasm crates | 0.259.0 | `wasm-encoder`, `wasmparser`, `wit-parser`, `wit-component` (same code as wasm-tools 1.259) |
 | oxc crates | 0.151.0 | JS/TS parser and semantic analysis |
@@ -19,7 +19,7 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 | cldr-json | 48.2.0 | `Intl` locale data (`scripts/gen-intl.mjs`, T77): node 24.21.0's ICU 78.3 carries CLDR 48.2 (48.0.0 differs, e.g. en `Hv`); zone data is probed from node itself (tzdata 2026c) |
 | test262 | `7ab7fafa0003f73fc85c1b95d88094d33f7eb8bd` | conformance subset (`scripts/fetch-test262.sh`, `scripts/test262.mjs`; `main` on 2026-09-27) |
 
-## Wasm feature status on wasmtime 49.0.3 (verified by `probes/run.sh`; same output as on 49.0.2 and 49.0.1)
+## Wasm feature status on wasmtime 50.0.0 (verified by `probes/run.sh`; same output as on 49.0.3, 49.0.2 and 49.0.1)
 
 | Feature | Default? | Notes |
 |---|---|---|

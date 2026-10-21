@@ -779,6 +779,11 @@ enum EqOperand<'a> {
     Num(f64),
 }
 
+/// T145: `null` or `undefined` as a constant operand.
+fn is_nullish_const(e: &Expr) -> bool {
+    matches!(e, Expr::Const(Const::Null | Const::Undefined))
+}
+
 fn eq_const(e: &Expr) -> Option<EqOperand<'_>> {
     Some(match e {
         Expr::Const(Const::Undefined) => EqOperand::Oddball(runtime::G_UNDEFINED),
@@ -3013,6 +3018,22 @@ impl Emitter<'_> {
                 s.call(self.helper_index(Helper::Js(h)));
                 s.end();
                 if matches!(op, BinOp::Ne | BinOp::LooseNe) {
+                    s.i32_eqz();
+                }
+            }
+            Expr::Binary {
+                op: op @ (BinOp::LooseEq | BinOp::LooseNe),
+                ty: Type::JsVal,
+                lhs,
+                rhs,
+            } if is_nullish_const(lhs) || is_nullish_const(rhs) => {
+                // T145: `x == null` / `x == undefined` is "x is null or undefined": two identity compares.
+                let other = if is_nullish_const(rhs) { lhs } else { rhs };
+                self.expr(s, frames, other)?;
+                s.local_tee(self.scratch_js).global_get(runtime::G_NULL).ref_eq();
+                s.local_get(self.scratch_js).global_get(runtime::G_UNDEFINED).ref_eq();
+                s.i32_or();
+                if *op == BinOp::LooseNe {
                     s.i32_eqz();
                 }
             }
