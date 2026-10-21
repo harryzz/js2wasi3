@@ -150,6 +150,7 @@ One task per session. Read `../CLAUDE.md` and `../docs/design.md` first.
 | [T141](T141-typed-array-locals.md) | a local that always holds one array literal keeps its receiver typed: no type test/cast per element access (F476) | done | |
 | [T142](T142-integer-locals.md) | integer locals: keep integer-valued variables out of the array key test (F475; the `i32` locals are not built) | done | |
 | [T143](T143-arguments-reads.md) | `arguments.length` and `arguments[i]` read the argument array, no `arguments` object (F472) | done | |
+| [T144](T144-richards-deltablue-profile.md) | profile richards and deltablue: what costs the time (no code) | done | |
 | [T89](T89-call-paths.md) | function calls without wasmtime libcalls (F350), `F.prototype` directly (F369) | done | T88 |
 | [T88](T88-earley-boyer-miscompile.md) | EarleyBoyer's wrong result (F333): `var` redeclaring a parameter | done | — |
 | [T87](T87-crash-traps.md) | Wasm traps in test262 (36 crashes) | done | — |
@@ -639,4 +640,7 @@ Each open item names where it came from and which task should pick it up. When i
 | F477 | crypto's `am3` (68% of its time) is a prototype method with untyped `this`/parameters: `this.array` is a `get_named` call (13.3M guess hits, `get_named` 11% + `find_own_named` 4%); types for methods assigned on prototypes (with F446) | T138 | later | [ ] |
 | F478 | T141 types only locals written by array literals (and their copies): a receiver known to be an array from a property read (crypto's `var this_array = this.array`) or a parameter still tests and casts per access; needs the type analysis (F446/F477) or a guarded cast once at the read | T141 | with F477 | [ ] |
 | F479 | Element keys that are not integer locals still test `f64` → `i32` → `f64` per access (`perm[k - i]`: `k` is read from an array or a parameter); a key tested once per iteration, or `i32` split slots | T142 | later (count first) | [ ] |
+| F480 | `x == null` / `x != null` call `loose_eq` + `is_nullish` (richards 23% of samples, deltablue 3.7%): inline the two-oddball test (`undefined`, `null`) | T144 | next | [ ] |
+| F481 | `method_check` (T132's guard for a direct method call) costs ~40 ns per call: richards 21.3% + `method_fn` 4.9%, deltablue 14.7% (13.9M / 14.1M checks); a cheaper guard or an inline fast path | T144 | later | [ ] |
+| F482 | Prototype-chain reads on `$plain` objects: deltablue `get_named` 24% + `find_own_named` 17.7% (22.5M guessed hits still call `get_named`, 10.7M prototype-or-absent reads walk the chain); a per-site prototype-hit cache over shapes/layouts (T99 was dropped before them) | T144 | later | [ ] |
 | F191 | Optional embedded engine for what can't compile ahead of time (`eval`, `new Function`, computed `import()` of unknown code), like scriptc's `--dynamic` quickjs-ng "island": QuickJS built for wasm (a second core module or a component composed with `wac`), values copied across the boundary (GC heap ↔ linear memory). Big; decide if it's wanted at all (size ~0.6 MB+, two object models) | T41 handoff (scriptc) | not scheduled | [ ] |
