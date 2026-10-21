@@ -1306,6 +1306,12 @@ pub enum Intrinsic {
     MakeArguments,
     /// `(v) -> bool` (T137): `v` is a function object running `Function.prototype.apply`'s code.
     IsApply,
+    /// `(args: an array of every argument) -> i32` (T143): `arguments.length`, read without the object.
+    ArgsLen,
+    /// `(args, k: f64) -> bool` (T143): `k` is an integer in `0..args.length`: `arguments[k]` is `args[k]`.
+    IsArgIndexF,
+    /// `(args, k: jsval) -> bool` (T143): `k` is an `i31` in `0..args.length`.
+    IsArgIndexJs,
     /// `(f, this, args: an array of every argument) -> jsval` (T137): `f.apply(this, arguments)` without the
     /// `arguments` object: calls `f` with a copy of `args`'s elements (`f.apply` is the built-in, [`Intrinsic::IsApply`]).
     ApplyForward,
@@ -1634,6 +1640,9 @@ impl Intrinsic {
             Intrinsic::Trap => (&[], None),
             Intrinsic::MakeArguments => (&[JsVal], Some(JsVal)),
             Intrinsic::IsApply => (&[JsVal], Some(Bool)),
+            Intrinsic::ArgsLen => (&[JsVal], Some(I32)),
+            Intrinsic::IsArgIndexF => (&[JsVal, F64], Some(Bool)),
+            Intrinsic::IsArgIndexJs => (&[JsVal, JsVal], Some(Bool)),
             Intrinsic::ApplyForward => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::SetFunctionName => (&[JsVal, JsVal, JsVal], Some(JsVal)),
             Intrinsic::BuiltinCtor(_) | Intrinsic::Namespace(_) => (&[], Some(JsVal)),
@@ -1870,6 +1879,9 @@ impl Intrinsic {
             Intrinsic::Trap => "trap",
             Intrinsic::MakeArguments => "make_arguments",
             Intrinsic::IsApply => "is_apply",
+            Intrinsic::ArgsLen => "args_len",
+            Intrinsic::IsArgIndexF => "is_arg_index_f",
+            Intrinsic::IsArgIndexJs => "is_arg_index_js",
             Intrinsic::ApplyForward => "apply_forward",
             Intrinsic::SetFunctionName => "set_function_name",
             Intrinsic::BuiltinCtor(_) => "builtin_ctor",

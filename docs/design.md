@@ -1031,5 +1031,10 @@ The rules after T106–T110, where each speed fix made another program slower (`
   (an integral constant, a copy of such a local, an `i32` converted, or such an expression plus or minus a constant
   of at most 2^31; constant steps keep a counter finite). The inline element paths use `trunc_sat` alone for such a
   key: out of range saturates and misses the bounds test, and the slow path receives the exact `f64`.
+- **`arguments` without the object** (T137, T143): a function whose every use of `arguments` is `x.apply(y, arguments)`,
+  `arguments.length` / `arguments[k]` read as a value, or a `var a = arguments` read only that way, starts with the
+  `arguments` local HOLE and makes the object on the first other use. `arguments.length` is the argument array's length;
+  `arguments[k]` with an integer `k` below it reads the array (inline element path), any other key reads the object
+  (made then), so the results never change. No watchpoint: `apply`'s identity is tested by its code slot.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

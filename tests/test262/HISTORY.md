@@ -3,6 +3,12 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-21: T143 `arguments` reads without the object (full run)
+
+- Compiler (`main` at 5f8688a + T143, uncommitted at the run): `arguments.length`, `arguments[k]` and `var a = arguments`
+  read only that way read the argument array; the `arguments` object is made only for other uses. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t143.log`, 1,533 s): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-21: T142 integer-valued element keys (full run)
 
 - Compiler (`main` at 40dbf8c + T142, uncommitted at the run): element reads and writes whose key is an integer-valued

@@ -61,9 +61,15 @@ pub struct Analysis {
     pub uses_this: HashSet<ScopeId>,
     /// Non-arrow functions whose body uses `arguments` (T25; not in nested arrow functions yet).
     pub uses_arguments: HashSet<ScopeId>,
-    /// T137: functions of `uses_arguments` whose every `arguments` is the second argument of an `x.apply(y, arguments)`
+    /// T137/T143: functions of `uses_arguments` whose every `arguments` is the second argument of an `x.apply(y, arguments)`
+    /// or the object of an `arguments.length` / `arguments[k]` read (T143)
     /// call in the function itself: they make no `arguments` object up front, the call forwards the argument list.
     pub forward_arguments: HashSet<ScopeId>,
+    /// T143: variables initialized with `arguments` (`var a = arguments`) that are only read as `a.length` / `a[k]` in
+    /// their function, and the start offsets of those initializers: in a function of `forward_arguments` the
+    /// variable stands for the object (reads of it take the argument array) and the initializer makes nothing.
+    pub arguments_aliases: HashSet<SymbolId>,
+    pub alias_inits: HashSet<u32>,
     /// What each function captures, in environment order.
     pub captures: HashMap<ScopeId, Vec<Cap>>,
     /// Variables that live in cells.
@@ -316,7 +322,14 @@ pub fn analyze(semantic: &Semantic) -> Analysis {
             continue; // the module level: an unknown global
         };
         an.uses_arguments.insert(f);
-        if chain.is_empty() && is_apply_argument(nodes, node.id(), r.span) {
+        let alias = if chain.is_empty() { arguments_alias(nodes, scoping, &an, node.id(), r.span, f) } else { None };
+        if let Some(sym) = alias {
+            an.arguments_aliases.insert(sym);
+            an.alias_inits.insert(r.span.start);
+            forward.insert(f);
+        } else if chain.is_empty()
+            && (is_apply_argument(nodes, node.id(), r.span) || is_arguments_read(nodes, node.id(), r.span))
+        {
             forward.insert(f);
         } else {
             other.insert(f);
@@ -731,6 +744,88 @@ fn declaration_end(semantic: &Semantic, sym: SymbolId) -> u32 {
     let nodes = semantic.nodes();
     let decl = semantic.scoping().symbol_declaration(sym);
     nodes.get_node(decl).span().end
+}
+
+/// T143: is the `arguments` reference `id` (at `span`) the whole initializer of `var a = arguments` (or `let`/`const`)
+/// whose variable is only ever read as `a.length` / `a[k]` ([`is_arguments_read`]), after the declaration and in the
+/// function `f` itself, never reassigned or redeclared? The variable.
+fn arguments_alias(
+    nodes: &oxc_semantic::AstNodes,
+    scoping: &oxc_semantic::Scoping,
+    an: &Analysis,
+    id: oxc_syntax::node::NodeId,
+    span: Span,
+    f: ScopeId,
+) -> Option<SymbolId> {
+    let AstKind::VariableDeclarator(d) = nodes.parent_kind(id) else {
+        return None;
+    };
+    if !matches!(&d.init, Some(Expression::Identifier(i)) if i.span == span) {
+        return None;
+    }
+    let BindingPattern::BindingIdentifier(b) = &d.id else {
+        return None;
+    };
+    let sym = b.symbol_id.get()?;
+    if !scoping.symbol_redeclarations(sym).is_empty() {
+        return None;
+    }
+    for r in scoping.get_resolved_references(sym) {
+        let n = nodes.get_node(r.node_id());
+        if r.is_write()
+            || !r.is_read()
+            || n.span().start < d.span.end
+            || an.fn_at(scoping, n.scope_id(), n.span().start) != Some(f)
+            || !is_arguments_read(nodes, r.node_id(), n.span())
+        {
+            return None;
+        }
+    }
+    Some(sym)
+}
+
+/// T143: is the `arguments` reference `id` (at `span`) the object of a read of `arguments.length` or `arguments[k]`
+/// used as a value (not assigned, updated, deleted or called as a method: `this` would be the object)?
+fn is_arguments_read(nodes: &oxc_semantic::AstNodes, id: oxc_syntax::node::NodeId, span: Span) -> bool {
+    use oxc_span::GetSpan;
+    let member = nodes.parent_id(id);
+    let mspan = match nodes.get_node(member).kind() {
+        AstKind::StaticMemberExpression(m)
+            if !m.optional
+                && m.property.name == "length"
+                && matches!(&m.object, Expression::Identifier(a) if a.span == span) =>
+        {
+            m.span
+        }
+        AstKind::ComputedMemberExpression(m)
+            if !m.optional && matches!(&m.object, Expression::Identifier(a) if a.span == span) =>
+        {
+            m.span
+        }
+        _ => return false,
+    };
+    match nodes.parent_kind(member) {
+        AstKind::BinaryExpression(_)
+        | AstKind::LogicalExpression(_)
+        | AstKind::ConditionalExpression(_)
+        | AstKind::VariableDeclarator(_)
+        | AstKind::ReturnStatement(_)
+        | AstKind::ExpressionStatement(_)
+        | AstKind::IfStatement(_)
+        | AstKind::WhileStatement(_)
+        | AstKind::DoWhileStatement(_)
+        | AstKind::ForStatement(_)
+        | AstKind::ThrowStatement(_)
+        | AstKind::ArrayExpression(_)
+        | AstKind::SequenceExpression(_)
+        | AstKind::TemplateLiteral(_)
+        | AstKind::AwaitExpression(_) => true,
+        AstKind::UnaryExpression(u) => u.operator != oxc_syntax::operator::UnaryOperator::Delete,
+        AstKind::AssignmentExpression(a) => a.right.span() == mspan,
+        AstKind::CallExpression(c) => c.callee.span() != mspan,
+        AstKind::NewExpression(c) => c.callee.span() != mspan,
+        _ => false,
+    }
 }
 
 /// T137: is the `arguments` reference `id` (at `span`) the second of exactly two arguments of a call `x.apply(…)`

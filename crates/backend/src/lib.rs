@@ -4007,6 +4007,33 @@ impl Emitter<'_> {
                         s.else_().i32_const(0).end();
                         return Ok(true);
                     }
+                    Intrinsic::ArgsLen => {
+                        // T143: the argument array's length.
+                        s.ref_cast_non_null(array::array()).struct_get(runtime::T_ARRAY, array::F_LENGTH);
+                        return Ok(true);
+                    }
+                    Intrinsic::IsArgIndexF => {
+                        // T143: `k` (an `f64`) is an integer below the argument array's length.
+                        let (x, i) = (self.scratch_f64, self.scratch_i32);
+                        s.local_set(x);
+                        s.ref_cast_non_null(array::array()).struct_get(runtime::T_ARRAY, array::F_LENGTH);
+                        s.local_get(x).i32_trunc_sat_f64_s().local_tee(i).i32_gt_u();
+                        s.local_get(i).f64_convert_i32_s().local_get(x).f64_eq().i32_and();
+                        return Ok(true);
+                    }
+                    Intrinsic::IsArgIndexJs => {
+                        // T143: `k` (a `jsval`) is an `i31` below the argument array's length.
+                        let (k, i) = (self.scratch_js, self.scratch_i32);
+                        s.local_set(k);
+                        s.ref_cast_non_null(array::array()).struct_get(runtime::T_ARRAY, array::F_LENGTH).local_set(i);
+                        s.local_get(k).ref_test_non_null(wasm_encoder::HeapType::I31);
+                        s.if_(BlockType::Result(ValType::I32));
+                        s.local_get(i);
+                        s.local_get(k).ref_cast_non_null(wasm_encoder::HeapType::I31).i31_get_s();
+                        s.i32_gt_u();
+                        s.else_().i32_const(0).end();
+                        return Ok(true);
+                    }
                     Intrinsic::Hole => {
                         s.ref_null(wasm_encoder::HeapType::Abstract {
                             shared: false,
@@ -4348,7 +4375,12 @@ impl Emitter<'_> {
                     Intrinsic::NewAccessor => H::Prop(props::Helper::NewAccessor),
                     Intrinsic::ToPropertyKey => H::Obj(object::Helper::ToKey),
                     Intrinsic::ObjectDesc => H::Prop(props::Helper::Desc),
-                    Intrinsic::Hole | Intrinsic::IsHole | Intrinsic::IsApply => unreachable!("inline"),
+                    Intrinsic::Hole
+                    | Intrinsic::IsHole
+                    | Intrinsic::IsApply
+                    | Intrinsic::ArgsLen
+                    | Intrinsic::IsArgIndexF
+                    | Intrinsic::IsArgIndexJs => unreachable!("inline"),
                     Intrinsic::ResumeMode
                     | Intrinsic::NewGenerator { .. }
                     | Intrinsic::NewAsync { .. }

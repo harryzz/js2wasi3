@@ -4318,6 +4318,13 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                     return Err(Unsupported);
                 }
                 if id.name == "arguments"
+                    && cx.forward_all.is_some()
+                    && self.an.alias_inits.contains(&id.span.start)
+                {
+                    // T143: `var a = arguments` whose variable is only read as `a.length` / `a[k]`: nothing is made.
+                    return Ok(Val::js(Expr::undefined(), Kind::Any));
+                }
+                if id.name == "arguments"
                     && let Some(l) = cx.arguments
                     && self
                         .scoping
@@ -4714,6 +4721,17 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 let e = self.prelude_call(builtins::REGEXP_CREATE, vec![src, flags, id]);
                 Ok(Val::js(e, Kind::Any))
             }
+            Expression::StaticMemberExpression(m)
+                if cx.forward_all.is_some()
+                    && m.property.name == "length"
+                    && !m.optional
+                    && self.is_arguments_ident(&m.object) =>
+            {
+                // T143: `arguments.length` is the argument array's length (the object is made only if needed).
+                let all = cx.forward_all.expect("checked");
+                let n = Expr::intrinsic(Intrinsic::ArgsLen, vec![Expr::Local(all)]);
+                Ok(Val::num(Expr::convert(Type::I32, Type::F64, n)))
+            }
             Expression::StaticMemberExpression(m) if m.property.name == "length" && !m.optional => {
                 self.hint_string(cx, &m.object);
                 let obj = self.expr(cx, &m.object)?;
@@ -4869,6 +4887,12 @@ impl<'p, 'a> Lowerer<'p, 'a> {
                 if m.optional() {
                     // oxc wraps optional links in a `ChainExpression`.
                     return self.chain_member(cx, m);
+                }
+                if let Some(all) = cx.forward_all
+                    && let MemberExpression::ComputedMemberExpression(cm) = m
+                    && self.is_arguments_ident(&cm.object)
+                {
+                    return self.arguments_index(cx, all, &cm.expression);
                 }
                 let (obj, key) = self.member(cx, m)?;
                 // T133: a field of one constructor's objects.
@@ -5568,6 +5592,45 @@ impl<'p, 'a> Lowerer<'p, 'a> {
             ty: Type::JsVal,
         };
         Ok((Expr::Seq { body, value: Box::new(value) }, Call::Value))
+    }
+
+    /// T143: is `e` the unresolved identifier `arguments` (not a variable of that name), or a variable that stands for it?
+    fn is_arguments_ident(&self, e: &Expression<'a>) -> bool {
+        let Expression::Identifier(id) = e else { return false };
+        match self.scoping.get_reference(id.reference_id()).symbol_id() {
+            None => id.name == "arguments",
+            // `var a = arguments`, only read as `a.length` / `a[k]` (`forward_all` is set where this is asked).
+            Some(sym) => self.an.arguments_aliases.contains(&sym),
+        }
+    }
+
+    /// T143: `arguments[k]` in a function that makes its `arguments` object only if needed: an integer `k` below
+    /// the argument count reads the argument array, any other key reads the object (made then).
+    fn arguments_index(&mut self, cx: &mut FnCx, all: LocalId, key: &'a Expression<'a>) -> R<Val> {
+        let l = cx.arguments.expect("the arguments local");
+        let key = self.expr(cx, key)?;
+        let (kt, test, k) = if key.ty == Type::F64 {
+            let kt = cx.func.add_local("argkey", Type::F64);
+            let test = Intrinsic::IsArgIndexF;
+            (kt, test, Expr::convert(Type::F64, Type::JsVal, Expr::Local(kt)))
+        } else {
+            let kt = cx.func.add_local("argkey", Type::JsVal);
+            (kt, Intrinsic::IsArgIndexJs, Expr::Local(kt))
+        };
+        let set = Stmt::Set(kt, if key.ty == Type::F64 { key.e } else { jsval_of(key) });
+        let fast = Expr::intrinsic(Intrinsic::GetProp, vec![Expr::Local(all), k.clone()]);
+        let slow = Expr::intrinsic(Intrinsic::GetProp, vec![Self::arguments_object(cx, l), k]);
+        let test = Expr::intrinsic(test, vec![Expr::Local(all), Expr::Local(kt)]);
+        let e = Expr::Seq {
+            body: vec![set],
+            value: Box::new(Expr::Cond {
+                cond: Box::new(test),
+                then: Box::new(fast),
+                els: Box::new(slow),
+                ty: Type::JsVal,
+            }),
+        };
+        Ok(Val::js(e, Kind::Any))
     }
 
     /// The `arguments` object in local `l`; made from the argument array on first use where it is made only if
