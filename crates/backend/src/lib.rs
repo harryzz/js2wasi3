@@ -267,6 +267,7 @@ pub fn emit(module: &ir::Module) -> anyhow::Result<Vec<u8>> {
     }
     let mut e = Emitter {
         array_locals: HashSet::new(),
+        int_locals: HashSet::new(),
         scratch_f64: 0,
         scratch_js: 0,
         scratch_obj: 0,
@@ -932,6 +933,71 @@ fn array_locals(f: &ir::Function) -> HashSet<u32> {
     real
 }
 
+/// T142: is `e` an integer-valued `f64` (no fraction, finite, not NaN) given the locals `ints` are?
+fn is_int_expr(e: &Expr, ints: &HashSet<u32>) -> bool {
+    fn small(e: &Expr) -> bool {
+        matches!(e, Expr::Const(Const::F64(v)) if v.fract() == 0.0 && v.abs() <= 2147483648.0)
+    }
+    match e {
+        Expr::Const(Const::F64(v)) => v.fract() == 0.0 && v.is_finite() && v.abs() <= 9007199254740992.0,
+        Expr::Local(x) => ints.contains(&x.0),
+        Expr::Tee(_, v) => is_int_expr(v, ints),
+        Expr::Convert { from: Type::I32, to: Type::F64, .. } => true,
+        Expr::Binary { op: BinOp::Add | BinOp::Sub, ty: Type::F64, lhs, rhs } => {
+            (small(rhs) && is_int_expr(lhs, ints)) || (small(lhs) && is_int_expr(rhs, ints))
+        }
+        _ => false,
+    }
+}
+
+/// T142: the `f64` locals of `f` (not parameters) that only ever hold integer-valued numbers: every write is an
+/// integer-valued expression ([`is_int_expr`]; a counter stepped by constants stays below 2^53 + steps, so never
+/// infinite). Element accesses with such a key skip the "is it an integer" test: `trunc_sat` alone is the index
+/// (a value out of range saturates and misses the bounds test).
+fn int_locals(f: &ir::Function) -> HashSet<u32> {
+    // Only `f64` locals matter: their writes are cloned (the walker's borrows are short).
+    let is_f64 = |l: u32| l >= f.params && f.locals[l as usize].ty == Type::F64;
+    let mut writes: HashMap<u32, Vec<Expr>> = HashMap::new();
+    fn scan(list: &[Stmt], w: &mut HashMap<u32, Vec<Expr>>, is_f64: &dyn Fn(u32) -> bool) {
+        for st in list {
+            match st {
+                Stmt::Set(l, e) if is_f64(l.0) => w.entry(l.0).or_default().push(e.clone()),
+                Stmt::Block { body, .. } | Stmt::Loop { body, .. } => scan(body, w, is_f64),
+                Stmt::If { then, els, .. } => {
+                    scan(then, w, is_f64);
+                    scan(els, w, is_f64);
+                }
+                Stmt::Try { body, catch_body, .. } => {
+                    scan(body, w, is_f64);
+                    scan(catch_body, w, is_f64);
+                }
+                _ => {}
+            }
+        }
+    }
+    scan(&f.body, &mut writes, &is_f64);
+    visit_exprs(&f.body, &mut |e| match e {
+        Expr::Seq { body, .. } => scan(body, &mut writes, &is_f64),
+        Expr::Tee(l, v) if is_f64(l.0) => writes.entry(l.0).or_default().push((**v).clone()),
+        _ => {}
+    });
+    let mut set: HashSet<u32> = (f.params..f.locals.len() as u32).filter(|l| is_f64(*l)).collect();
+    loop {
+        let bad: Vec<u32> = set
+            .iter()
+            .copied()
+            .filter(|l| writes.get(l).is_some_and(|ws| ws.iter().any(|e| !is_int_expr(e, &set))))
+            .collect();
+        if bad.is_empty() {
+            break;
+        }
+        for l in bad {
+            set.remove(&l);
+        }
+    }
+    set
+}
+
 // ---- unsupported IR ------------------------------------------------------------------------
 
 fn check_supported(m: &ir::Module) -> anyhow::Result<()> {
@@ -1186,6 +1252,8 @@ struct Emitter<'m> {
     scratch_js: u32,
     /// T141: the current function's locals that hold only one array literal (their Wasm type is `(ref null $array)`).
     array_locals: HashSet<u32>,
+    /// T142: the current function's `f64` locals that only hold integer-valued numbers ([`int_locals`]).
+    int_locals: HashSet<u32>,
     /// T110: a `(ref null $object)` and a second `jsval` local for the inline layout reads.
     scratch_obj: u32,
     scratch_val: u32,
@@ -1908,6 +1976,7 @@ impl Emitter<'_> {
 
     fn function(&mut self, f: &ir::Function) -> anyhow::Result<Function> {
         self.array_locals = array_locals(f);
+        self.int_locals = int_locals(f);
         let mut locals: Vec<(u32, ValType)> = f.locals[f.params as usize..]
             .iter()
             .enumerate()
@@ -1997,6 +2066,7 @@ impl Emitter<'_> {
         use wasm_encoder::HeapType as Ht;
         let (v, k, x) = (self.scratch_val, self.scratch_js, self.scratch_x);
         let typed = self.typed_recv(obj, &[key]);
+        let int_key = matches!(key, Expr::Convert { from: Type::F64, to: Type::JsVal, arg } if self.is_int_expr(arg));
         self.expr(s, frames, obj)?;
         match (key, split_args(key)) {
             (Expr::Convert { from: Type::F64, to: Type::JsVal, arg }, _) => {
@@ -2043,8 +2113,12 @@ impl Emitter<'_> {
                 s.local_get(v).ref_cast_non_null(array::array()).local_set(a);
             }
         }
-        s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
-        s.local_get(x).f64_ne().br_if(0);
+        if int_key {
+            s.local_get(x).i32_trunc_sat_f64_s().local_set(j);
+        } else {
+            s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
+            s.local_get(x).f64_ne().br_if(0);
+        }
         s.local_get(j).local_get(a).struct_get(runtime::T_ARRAY, array::F_ELEMS).local_tee(el).array_len().i32_lt_u();
         s.if_(BlockType::Empty);
         s.local_get(el).local_get(j).array_get(runtime::T_VALS).local_tee(r);
@@ -2113,6 +2187,12 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// T142: `e` is an `f64` that is an integer-valued number (no fraction, no NaN, finite): a constant, a local of
+    /// [`int_locals`], an `i32` converted, or one of those plus or minus a small integer constant.
+    fn is_int_expr(&self, e: &Expr) -> bool {
+        is_int_expr(e, &self.int_locals)
+    }
+
     /// T141: `e` is a read of a local typed `(ref null $array)` ([`array_locals`]).
     fn is_array_read(&self, e: &Expr) -> bool {
         matches!(e, Expr::Local(x) if self.array_locals.contains(&x.0))
@@ -2170,6 +2250,7 @@ impl Emitter<'_> {
         };
         let split = split_args(key);
         let typed = self.typed_recv(obj, &[key]);
+        let int_key = num.is_some_and(|a| self.is_int_expr(a));
         self.expr(s, frames, obj)?;
         match (num, split) {
             (Some(i), _) => {
@@ -2194,6 +2275,10 @@ impl Emitter<'_> {
             None => s.local_get(o).ref_test_non_null(array::array()).i32_eqz().br_if(0),
         };
         match num {
+            Some(_) if int_key => {
+                // T142: a known integer-valued f64: no fraction test (out of range saturates and misses below).
+                s.local_get(x).i32_trunc_sat_f64_s().local_set(j);
+            }
             Some(_) => {
                 // An integer-valued f64 (-0 is index 0, as ToPropertyKey says).
                 s.local_get(x).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();
@@ -2273,6 +2358,7 @@ impl Emitter<'_> {
             _ => None,
         };
         let split_key = split_args(key).filter(|_| num_key.is_none());
+        let int_key = num_key.is_some_and(|a| self.is_int_expr(a));
         let typed = {
             let mut others = vec![key, value];
             others.extend(split);
@@ -2318,6 +2404,9 @@ impl Emitter<'_> {
         }
         // The key first: a string key misses before the array cast.
         match num_key {
+            Some(_) if int_key => {
+                s.local_get(kx).i32_trunc_sat_f64_s().local_set(j);
+            }
             Some(_) => {
                 // An integer-valued f64 (-0 is index 0).
                 s.local_get(kx).i32_trunc_sat_f64_s().local_tee(j).f64_convert_i32_s();

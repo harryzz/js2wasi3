@@ -1027,5 +1027,9 @@ The rules after T106–T110, where each speed fix made another program slower (`
   cast once at each write; inline element reads and writes on a bare read of it skip the `ref.test`/`ref.cast` (a null
   test stays: null is not yet initialized) when no operand of the access writes that local. Probe (T140,
   `probes/fannkuch-*`): the receiver typed once is the largest single step after `i32` counters.
+- **Integer-valued keys** (T142): `int_locals` finds `f64` locals whose every write is an integer-valued expression
+  (an integral constant, a copy of such a local, an `i32` converted, or such an expression plus or minus a constant
+  of at most 2^31; constant steps keep a counter finite). The inline element paths use `trunc_sat` alone for such a
+  key: out of range saturates and misses the bounds test, and the slow path receives the exact `f64`.
 - **Only the standard tests and benchmarks** are used for comparisons: the fixtures, test262, the 18 programs,
   the micro-benchmarks (user, 2026-10-12).

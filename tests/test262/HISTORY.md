@@ -3,6 +3,12 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-21: T142 integer-valued element keys (full run)
+
+- Compiler (`main` at 40dbf8c + T142, uncommitted at the run): element reads and writes whose key is an integer-valued
+  `f64` local (or such an expression) skip the integer test. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t142.log`, 1,517 s): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-20: T141 typed array locals (full run)
 
 - Compiler (`main` at f0b5416 + T141, uncommitted at the run): a local that only holds array literals (and copies of
