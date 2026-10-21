@@ -1,0 +1,176 @@
+diff --git a/crates/backend/src/lib.rs b/crates/backend/src/lib.rs
+index ef86361..6c5ee1e 100644
+--- a/crates/backend/src/lib.rs
++++ b/crates/backend/src/lib.rs
+@@ -4116,14 +4116,33 @@ impl Emitter<'_> {
+                         s.call(self.helper_index(Helper::ReExec));
+                         return Ok(true);
+                     }
+-                    Intrinsic::MethodCheck { site, code } => {
++                    Intrinsic::MethodCheck { site, code, layout } => {
+                         let (o, key) = (self.scratch_js, self.scratch_val);
+                         s.local_set(key).local_set(o);
++                        let slot = runtime::Cx::code_slot(self, self.func_base + code.0);
++                        let check = self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::MethodCheck)));
++                        // T147: receivers made by one constructor with a shape type: one exact test here, and the
++                        // helper that skips its chain of type tests; any other receiver takes the generic helper.
++                        let typed = layout.and_then(|l| self.layout_shape_type(l)).map(|(sh, _)| sh.t);
++                        if let Some(t) = typed {
++                            let obj = wasm_encoder::HeapType::Concrete(t);
++                            let check_obj =
++                                self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::MethodCheckObj)));
++                            s.local_get(o).ref_test_non_null(obj);
++                            s.if_(BlockType::Result(ValType::I32));
++                            s.i32_const(*site as i32).local_get(o).ref_cast_non_null(obj);
++                            s.local_get(key).ref_cast_non_null(runtime::string());
++                            s.i32_const(slot);
++                            s.call(check_obj);
++                            s.else_();
++                        }
+                         s.i32_const(*site as i32).local_get(o);
+                         s.local_get(key).ref_cast_non_null(runtime::string());
+-                        let slot = runtime::Cx::code_slot(self, self.func_base + code.0);
+                         s.i32_const(slot);
+-                        s.call(self.helper_index(Helper::Js(runtime::Helper::Obj(object::Helper::MethodCheck))));
++                        s.call(check);
++                        if typed.is_some() {
++                            s.end();
++                        }
+                         return Ok(true);
+                     }
+                     Intrinsic::MethodDead(k) => {
+diff --git a/crates/backend/src/object.rs b/crates/backend/src/object.rs
+index c659aad..5ee1d5a 100644
+--- a/crates/backend/src/object.rs
++++ b/crates/backend/src/object.rs
+@@ -514,6 +514,9 @@ pub enum Helper {
+     /// libcall) with the cached keys array and prototype, `G_EPOCH` unchanged, and the holder's entry still the cached
+     /// key and function? Else [`Helper::MethodFill`]; a site that gave up stays generic.
+     MethodCheck,
++    /// `(site: i32, o: (ref $object), k: (ref $string), code: i32) -> i32` (T147): [`Helper::MethodCheck`] for a receiver
++    /// the call site has already found to be a shape object (the type of the receivers' constructor): no chain of type tests.
++    MethodCheckObj,
+     /// `(v) -> jsval`: a RegExp's data; `null` for `RegExp.prototype`; `undefined` otherwise.
+     RegExpData,
+     /// `(data) -> jsval`: a new Date holding `data` (T26).
+@@ -660,6 +663,7 @@ impl Helper {
+             Helper::MethodFill => "method_fill",
+             Helper::MethodFn => "method_fn",
+             Helper::MethodCheck => "method_check",
++            Helper::MethodCheckObj => "method_check_obj",
+             Helper::RegExpData => "regexp_data",
+             Helper::DateNew => "date_new",
+             Helper::ModuleNew => "module_new",
+@@ -757,6 +761,7 @@ impl Helper {
+             Helper::MethodFill => (vec![I32, v, s, I32], vec![I32]),
+             Helper::MethodFn => (vec![I32], vec![v]),
+             Helper::MethodCheck => (vec![I32, v, s, I32], vec![I32]),
++            Helper::MethodCheckObj => (vec![I32, rt(false, T_OBJECT), s, I32], vec![I32]),
+             Helper::MakeArguments
+             | Helper::RegExpNew
+             | Helper::RegExpData
+@@ -881,7 +886,8 @@ impl Helper {
+             Helper::TypedLengthFill => typed_length_fill(cx),
+             Helper::MethodFill => method_fill(cx),
+             Helper::MethodFn => method_fn(),
+-            Helper::MethodCheck => method_check(cx),
++            Helper::MethodCheck => method_check(cx, false),
++            Helper::MethodCheckObj => method_check(cx, true),
+             Helper::RegExpData => regexp_data(cx),
+             Helper::DateNew => state_new(cx, CLASS_DATE, Builtin::Date),
+             Helper::StackNew(false) => state_new(cx, CLASS_STACK, Builtin::DisposableStack),
+@@ -5336,8 +5342,9 @@ fn method_entry(s: &mut InstructionSink, c: u32, ret: impl Fn(&mut InstructionSi
+     s.end();
+ }
+ 
+-/// `$method_check(site, o, k, code) -> i32` (T132), see [`Helper::MethodCheck`].
+-fn method_check(cx: &mut dyn Cx) -> Function {
++/// `$method_check(site, o, k, code) -> i32` (T132), see [`Helper::MethodCheck`]; `typed`: `o` is already a shape object
++/// ([`Helper::MethodCheckObj`], T147).
++fn method_check(cx: &mut dyn Cx, typed: bool) -> Function {
+     let fill = h(cx, Helper::MethodFill);
+     let field_get = FieldHelpers::of(cx);
+     let on = cx.counting();
+@@ -5357,6 +5364,9 @@ fn method_check(cx: &mut dyn Cx) -> Function {
+     ]);
+     let mut s = f.instructions();
+     runtime::count(&mut s, on, "method.check");
++    if typed {
++        runtime::count(&mut s, on, "method.check_obj");
++    }
+     // the entry, or straight to the fill
+     s.block(BlockType::Empty); // $miss
+     s.global_get(runtime::G_MCACHE).local_tee(C).ref_is_null().br_if(0);
+@@ -5366,7 +5376,9 @@ fn method_check(cx: &mut dyn Cx) -> Function {
+     // the receiver: a `$plain` with the cached keys array and prototype, `G_EPOCH` unchanged, and the holder's
+     // entry still the cached key and function
+     s.local_get(O);
+-    cast_plain_or_shape(&mut s, 0);
++    if !typed {
++        cast_plain_or_shape(&mut s, 0);
++    }
+     s.local_set(OB);
+     let field = |s: &mut InstructionSink, k: i32| {
+         s.local_get(EN).ref_as_non_null().i32_const(k).array_get(T_VALS);
+diff --git a/crates/backend/src/runtime.rs b/crates/backend/src/runtime.rs
+index 7d8c490..9790f97 100644
+--- a/crates/backend/src/runtime.rs
++++ b/crates/backend/src/runtime.rs
+@@ -730,6 +730,8 @@ pub const COUNTS: &[&str] = &[
+     // T139: `box_number` calls (the helper, not the inline boxing): small integers and new `$number`s.
+     "box_number.i31",
+     "box_number.new",
++    // T147: method checks whose call site found the receiver to be the constructor's shape object.
++    "method.check_obj",
+ ];
+ 
+ /// T112: the index of counter `name` in [`COUNTS`].
+diff --git a/crates/ir/src/lib.rs b/crates/ir/src/lib.rs
+index 68aabfc..14a44b6 100644
+--- a/crates/ir/src/lib.rs
++++ b/crates/ir/src/lib.rs
+@@ -873,7 +873,7 @@ pub enum Intrinsic {
+     RegexId(u32),
+     /// T132: is `o[key]` (args: o, key: a string) the function whose code is `code`, by method-call site `site`'s
+     /// cache (refilled from `o`'s prototype chain on a miss)? `Bool`.
+-    MethodCheck { site: u32, code: FuncId },
++    MethodCheck { site: u32, code: FuncId, layout: Option<u32> },
+     /// T132: the function in method-call site `k`'s cache (no args).
+     MethodFn(u32),
+     /// T132: has method-call site `k` given up (its receivers don't share a keys array)? Inline, no call. `Bool`.
+diff --git a/crates/lower/src/lib.rs b/crates/lower/src/lib.rs
+index 38a800e..ccb9e86 100644
+--- a/crates/lower/src/lib.rs
++++ b/crates/lower/src/lib.rs
+@@ -5705,11 +5705,16 @@ impl<'p, 'a> Lowerer<'p, 'a> {
+         let site = self.method_sites;
+         self.method_sites += 1;
+         let code = self.adapter(func);
++        // T147: the layout of the receivers' constructor (the analysis says they are all made by `new` of one function),
++        // so that the guard tests the one shape type
++        let span = m.span();
++        let scope = self.fields.get(&(span.start, span.end)).and_then(|start| self.fn_scopes.get(start)).copied();
++        let layout = scope.and_then(|scope| self.layout(scope)).map(|l| l as u32);
+         // a site that gave up costs one inline test, no call
+         let hit = Expr::Cond {
+             cond: Box::new(Expr::intrinsic(Intrinsic::MethodDead(site), vec![])),
+             then: Box::new(Expr::bool(false)),
+-            els: Box::new(Expr::intrinsic(Intrinsic::MethodCheck { site, code }, vec![Expr::Local(t), key.clone()])),
++            els: Box::new(Expr::intrinsic(Intrinsic::MethodCheck { site, code, layout }, vec![Expr::Local(t), key.clone()])),
+             ty: Type::Bool,
+         };
+         let self_obj = self.hidden[&func]
+diff --git a/crates/types/src/lib.rs b/crates/types/src/lib.rs
+index 631b062..4dbd0f2 100644
+--- a/crates/types/src/lib.rs
++++ b/crates/types/src/lib.rs
+@@ -497,7 +497,8 @@ impl<'a, 's> A<'a, 's> {
+     fn fields(&self) -> (HashMap<(u32, u32), u32>, NumFields) {
+         let mut fields = HashMap::new();
+         for (&(start, end, cat), (l, _)) in &self.sites {
+-            if cat != "get" && cat != "set" {
++            // T147: method-call sites too (the receivers' constructor: the guard tests its shape type)
++            if cat != "get" && cat != "set" && cat != "method" {
+                 continue;
+             }
+             let mut ctor = None;
