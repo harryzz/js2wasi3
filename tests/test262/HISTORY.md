@@ -3,6 +3,11 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
+## 2026-10-21: T146 wasmtime 50.0.0 (full run)
+
+- Compiler: `main` at 661472a (T145 included). Host: **wasmtime 50.0.0** (was 49.0.3). Runner: unchanged.
+- Full run on `a-03` (`out/t262-t146.log`, 1,526 s): **no changes**: 28,123 of 28,984 run pass (97.0%).
+
 ## 2026-10-21: T145 inline `== null` (full run)
 
 - Compiler (`main` at 3a99fbc + T145, uncommitted at the run): `x == null` / `x != null` / `== undefined` / `!= undefined` are two
