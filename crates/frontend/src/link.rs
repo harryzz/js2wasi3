@@ -130,6 +130,9 @@ impl Host for Fs {
 pub struct Options {
     pub command: bool,
     pub include: Vec<String>,
+    /// External libraries (components composed in afterwards) linked even where the program doesn't
+    /// name their functions (`--ext-lib`, T149): `crypto`.
+    pub ext_libs: Vec<String>,
 }
 
 /// Load the modules the entry imports (through `host`) and join them.
@@ -144,6 +147,10 @@ pub fn link(
     options: &Options,
     host: &mut dyn Host,
 ) -> Result<Linked, Diagnostics> {
+    let forced = options.ext_libs.iter().any(|l| l == "crypto");
+    if forced {
+        return link_pass(alloc, entry, source, options, host, true).map(|(l, _)| l);
+    }
     let (linked, wants_helper) = link_pass(alloc, entry, source, options, host, false)?;
     if wants_helper {
         return link_pass(alloc, entry, source, options, host, true).map(|(l, _)| l);
@@ -2673,6 +2680,7 @@ mod tests {
         let options = Options {
             command: false,
             include: include.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         };
         link(&alloc, files[0].0, files[0].1, &options, &mut host)
     }

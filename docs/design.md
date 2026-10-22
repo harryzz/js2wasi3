@@ -545,7 +545,7 @@ at run time, so the program's component is **composed** with the helper at build
 (`wac plug`; a component without the import is left as is; `scripts/diff.sh` does it after each build). `crypto.js` spreads
 `node:internal/crypto_kdf`, which `link::link` replaces by an empty stub unless a module that is not a built-in writes
 `pbkdf2`, `scrypt` or `hkdf` (the graph is linked a second time with the real module): only then does the component
-import the helper, so every other program is byte-identical (a `crypto` user grows 1.5 KB). Arguments are checked in
+import the helper (`build --ext-lib crypto` forces it; the option is the place for future helper components), so every other program is byte-identical (a `crypto` user grows 1.5 KB). Arguments are checked in
 JavaScript with node's errors and messages; the helper only computes. 10^5 iterations of PBKDF2-HMAC-SHA256: ~90 ms in
 the helper, node 69 ms, JavaScript over `createHmac` ~70 s.)
 (T65: `crypto` is a global too, `node:crypto`'s `webcrypto`. **`node:crypto`** is JS: random bytes from

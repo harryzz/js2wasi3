@@ -130,7 +130,7 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   the `crypto` global), `createHash`/`createHmac` (md5, sha1, sha224/256/384/512), AES-128/192/256 in ECB, CBC,
   CTR and CCM (`createCipheriv`/`createDecipheriv`), `timingSafeEqual`; `pbkdf2`, `scrypt` and `hkdf` (T149, md5/sha1/sha2
   digests, with their `Sync` forms) are computed by a small Rust component (RustCrypto) that you compose with the
-  program: `scripts/link-crypto.sh app.wasm` (`build` prints a note when the program needs it). Built-ins that load with node's shape
+  program: `scripts/link-crypto.sh app.wasm` (`build` prints a note when the program needs it; `build --ext-lib crypto` forces the import). Built-ins that load with node's shape
   while their facility is missing (T65): `http` (T71: its server works), `https`, `http2`, `tls`, `dns`, `zlib` (`crc32`
   works), `perf_hooks`, `module` (`createRequire` fails with `MODULE_NOT_FOUND`), and `child_process` (every
   spawn fails with `ENOENT`, as for a missing program; T70: shell commands fail as with a `/bin/sh` that finds no

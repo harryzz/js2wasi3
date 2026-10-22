@@ -30,6 +30,14 @@ the benchmarks Richards, DeltaBlue, RayTrace, NavierStokes, Crypto, Splay, Earle
 the sloppy scripts assign without a declaration. `scripts/bench.sh` runs `prelude.js` + `base.js` + a benchmark +
 `driver.js` as one file, with `Math.random` renamed `__random` (F331).
 
+## crypto/
+
+Node's own `benchmark/crypto/hkdf.js` (v24.21.0, unchanged; its harness `require('../common.js')` is our stand-in
+`common.js`: every config in turn, ns per operation). Run both sides with `scripts/bench-crypto.sh` (the program is
+composed with the crypto helper). node 24.21.0 has no `pbkdf2` or `scrypt` benchmark in `benchmark/crypto`.
+Laptop, 2026-10-22, 72 configs each (hkdf, mean ns/op): sync node 20,375 vs js2wasi3 28,224 (1.39×); async node 13,147
+vs 37,275 (2.84×: each callback waits a `setImmediate` turn, node's thread pool does not).
+
 ## patched/
 
 Minimal changes for what js2wasi3 can't run yet, each a follow-up in `tasks/README.md`; `scripts/bench.sh` uses a

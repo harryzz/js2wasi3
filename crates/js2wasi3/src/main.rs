@@ -55,6 +55,11 @@ enum Cmd {
         /// to the working directory: `*` within a path segment, `**` any directories). Repeatable.
         #[arg(long, value_name = "GLOB")]
         include: Vec<String>,
+        /// Link an external library's component import even where the program doesn't name its
+        /// functions (`crypto`: `pbkdf2`, `scrypt`, `hkdf`; compose it with scripts/link-crypto.sh).
+        /// Repeatable.
+        #[arg(long, value_name = "LIB", value_parser = ["crypto"])]
+        ext_lib: Vec<String>,
         /// What an unhandled promise rejection does, as node's flag: `throw` (the default: the
         /// program fails with the reason) or `none` (ignored; test262 hosts don't fail on them).
         #[arg(long, value_name = "MODE", default_value = "throw", value_parser = ["throw", "none"])]
@@ -554,6 +559,7 @@ fn main() -> anyhow::Result<()> {
             wit,
             command,
             include,
+            ext_lib,
             unhandled_rejections,
             gc_reserve,
             count,
@@ -566,7 +572,7 @@ fn main() -> anyhow::Result<()> {
                 &alloc,
                 &entry,
                 &source,
-                &frontend::Options { command, include },
+                &frontend::Options { command, include, ext_libs: ext_lib },
                 &mut frontend::Fs,
             )?;
             if let Some(wit) = wit {
