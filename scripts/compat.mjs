@@ -288,6 +288,9 @@ function probe() {
     }
     if (drop.size === before) throw new Error(`probe build failed:\n${b.stderr}`);
   }
+  // The probe names `crypto.pbkdf2` & co.: the program imports the crypto helper (T149), composed in here.
+  const linked = spawnSync(path.join(ROOT, "scripts/link-crypto.sh"), [path.join(tmp, "wasm.wasm")], { encoding: "utf8" });
+  if (linked.status !== 0) throw new Error(`probe link failed: ${linked.stderr}`);
   const run = spawnSync("wasmtime", ["run", "-Sp3", path.join(tmp, "wasm.wasm")], { encoding: "utf8", maxBuffer: 1 << 26 });
   if (run.status !== 0) throw new Error(`probe run failed: ${run.stderr}`);
   const wasm = JSON.parse(run.stdout);

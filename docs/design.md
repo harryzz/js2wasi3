@@ -535,6 +535,19 @@ the setters are the basic parser with a state override. IDNA is reduced (ASCII l
 `internal/querystring` are node 24.21.0's lib ported by `tasks/T64-files/port-url.py` (primordials become local
 functions, node's errors local ones). A `[util.inspect.custom]` method's string result is re-indented when nested,
 as node does (`inspect.rs` `Reindent`).)
+(T149: **`pbkdf2`, `scrypt`, `hkdf`** (and their `Sync` forms) are not JavaScript: they call the WIT interface
+`js2wasi3:crypto/primitives@0.1.0` (`crates/component/wit/js2wasi3-crypto-0.1.0.wit`), implemented by the Rust crate
+`crates/crypto-helper` (RustCrypto: `pbkdf2`, `scrypt`, `hkdf`, `hmac`, `md-5`, `sha1`, `sha2`; outside the Cargo workspace,
+built for `wasm32-unknown-unknown` and made a component by `wasm-tools component new`: 87 KB, no imports;
+`scripts/build-crypto-helper.sh`, the result is checked in at `crates/js2wasi3/assets/crypto-helper.wasm`). WASI has no
+crypto interface (`wasi-crypto` is not part of 0.3 and wasmtime removed it), and a stock wasmtime cannot link two components
+at run time, so the program's component is **composed** with the helper at build time: `scripts/link-crypto.sh app.wasm`
+(`wac plug`; a component without the import is left as is; `scripts/diff.sh` does it after each build). `crypto.js` spreads
+`node:internal/crypto_kdf`, which `link::link` replaces by an empty stub unless a module that is not a built-in writes
+`pbkdf2`, `scrypt` or `hkdf` (the graph is linked a second time with the real module): only then does the component
+import the helper, so every other program is byte-identical (a `crypto` user grows 1.5 KB). Arguments are checked in
+JavaScript with node's errors and messages; the helper only computes. 10^5 iterations of PBKDF2-HMAC-SHA256: ~90 ms in
+the helper, node 69 ms, JavaScript over `createHmac` ~70 s.)
 (T65: `crypto` is a global too, `node:crypto`'s `webcrypto`. **`node:crypto`** is JS: random bytes from
 `wasi:random/random` `get-random-bytes` through the ES module `node:internal/wasi_random` (as T59's `wasi_fs`),
 the hashes and AES over typed arrays (32-bit word pairs for SHA-512; AES T-tables built at load), CCM per

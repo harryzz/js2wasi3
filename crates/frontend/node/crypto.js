@@ -989,5 +989,6 @@ module.exports = {
   randomBytes, pseudoRandomBytes: randomBytes, prng: randomBytes, rng: randomBytes,
   randomFill, randomFillSync, randomInt, randomUUID, getRandomValues,
   timingSafeEqual, webcrypto, Crypto,
+  ...require('node:internal/crypto_kdf'),
   constants: {},
 };

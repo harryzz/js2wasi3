@@ -1,0 +1,27 @@
+[package]
+name = "js2wasi3-crypto-helper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+hkdf = "0.13.0"
+hmac = "0.13.0"
+md-5 = "0.11.0"
+pbkdf2 = "0.13.0"
+scrypt = "0.12.0"
+sha1 = "0.11.0"
+sha2 = "0.11.1"
+wit-bindgen = "0.62.0"

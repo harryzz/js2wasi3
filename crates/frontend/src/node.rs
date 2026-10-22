@@ -29,6 +29,11 @@ const MODULES: &[(&str, &str)] = &[
     // `crypto` (T65): random bytes from `wasi:random`, hashes and AES in JS.
     ("crypto", include_str!("../node/crypto.js")),
     ("internal/wasi_random", include_str!("../node/wasi_random.mjs")),
+    // `pbkdf2`, `scrypt`, `hkdf` (T149): the Rust helper component's interface and the functions over
+    // it, linked only when a program names them (`link::link`; else `crypto_kdf_off` is empty).
+    ("internal/crypto_helper", include_str!("../node/crypto_helper.mjs")),
+    ("internal/crypto_kdf", include_str!("../node/crypto_kdf.js")),
+    ("internal/crypto_kdf_off", "module.exports = {};\n"),
     // `net` (T66): TCP over `wasi:sockets`, non-blocking on the event loop; `dns.lookup` uses its
     // name lookup.
     ("net", include_str!("../node/net.js")),
@@ -283,6 +288,7 @@ pub(crate) fn exports(path: &str) -> Option<&'static [&'static str]> {
 pub(crate) fn is_esm(path: &str) -> bool {
     path == "node:internal/wasi_fs"
         || path == "node:internal/wasi_random"
+        || path == "node:internal/crypto_helper"
         || path == "node:internal/wasi_sockets"
         || path == "node:internal/wasi_udp"
         || path == "node:internal/wasi_http"

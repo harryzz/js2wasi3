@@ -133,6 +133,10 @@ pub struct Options {
 }
 
 /// Load the modules the entry imports (through `host`) and join them.
+///
+/// The crypto helper component's interface (T149) is imported only by programs that name one of
+/// its functions: the graph is linked without it first (`node:internal/crypto_kdf` is an empty stub),
+/// and again with it if any module that is not a built-in writes `pbkdf2`, `scrypt` or `hkdf`.
 pub fn link(
     alloc: &Allocator,
     entry: &str,
@@ -140,6 +144,26 @@ pub fn link(
     options: &Options,
     host: &mut dyn Host,
 ) -> Result<Linked, Diagnostics> {
+    let (linked, wants_helper) = link_pass(alloc, entry, source, options, host, false)?;
+    if wants_helper {
+        return link_pass(alloc, entry, source, options, host, true).map(|(l, _)| l);
+    }
+    Ok(linked)
+}
+
+/// Does this module's text name a function of the crypto helper?
+fn names_crypto_helper(text: &str) -> bool {
+    ["pbkdf2", "scrypt", "hkdf"].iter().any(|n| text.contains(n))
+}
+
+fn link_pass(
+    alloc: &Allocator,
+    entry: &str,
+    source: &str,
+    options: &Options,
+    host: &mut dyn Host,
+    crypto_helper: bool,
+) -> Result<(Linked, bool), Diagnostics> {
     let command = options.command;
     let mut g = Graph {
         alloc,
@@ -155,6 +179,7 @@ pub fn link(
         poisoned: Vec::new(),
         bare_failed: Vec::new(),
         cjs_known: Vec::new(),
+        crypto_helper,
     };
     g.load(entry.to_string(), source)?;
     // Then what only `import()` loads (its errors reject at run time).
@@ -167,15 +192,23 @@ pub fn link(
     if !g.diags.is_empty() {
         return Err(sorted(g.diags));
     }
+    let wants_helper = !crypto_helper
+        && g.modules.iter().any(|m| !node::is_module(&m.p.path) && names_crypto_helper(m.p.source));
+    if wants_helper {
+        return Ok((Linked { source: String::new(), map: None }, true));
+    }
     if g.modules.iter().all(|m| {
         m.requests.is_empty() && m.meta.is_empty() && m.dynamic.is_empty() && m.p.evals.is_none() && !m.cjs
     })
         && !(command && !g.modules[0].p.exports.is_empty())
     {
-        return Ok(Linked {
-            source: source.to_string(),
-            map: None,
-        });
+        return Ok((
+            Linked {
+                source: source.to_string(),
+                map: None,
+            },
+            false,
+        ));
     }
     g.cjs_exports();
     if g.modules.iter().any(|m| m.cjs) {
@@ -186,7 +219,7 @@ pub fn link(
             }
         }
     }
-    g.join()
+    g.join().map(|l| (l, false))
 }
 
 /// A JSON module's source (slice 3): `export default <the JSON>;` (JSON is JS syntax), with each
@@ -833,6 +866,8 @@ struct Graph<'a, 'r> {
     bare_failed: Vec<(String, Failed)>,
     /// What a computed `require` can load (T54 slice 4): absolute path → module.
     cjs_known: Vec<(String, usize)>,
+    /// Is `node:internal/crypto_kdf` the real module (else an empty stub)? See [`link`].
+    crypto_helper: bool,
 }
 
 /// A module that fails to load for `import()`: the error's class, message and node's `code`.
@@ -1110,7 +1145,11 @@ impl<'a> Graph<'a, '_> {
                 let joined = if spec.starts_with('/') { spec.clone() } else { format!("{dir}{spec}") };
                 packages::load_as_file_or_directory(self.host, &normalize(&joined), spec.ends_with('/') || dot).ok_or(None)
             } else if let Some(path) = node::path(&spec) {
-                Ok(path)
+                Ok(if !self.crypto_helper && path == "node:internal/crypto_kdf" {
+                    "node:internal/crypto_kdf_off".to_string()
+                } else {
+                    path
+                })
             } else if packages::is_builtin(spec.strip_prefix("node:").unwrap_or(&spec)) || spec.starts_with("node:") {
                 // A build error where it always runs; elsewhere (`try { require("util") } catch`,
                 // optional features) thrown when it runs, as `import()` of one does.

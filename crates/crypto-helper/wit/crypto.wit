@@ -1,0 +1,14 @@
+package js2wasi3:crypto@0.1.0;
+
+interface primitives {
+    /// PBKDF2-HMAC (RFC 8018). `digest`: `sha1`, `sha224`, `sha256`, `sha384`, `sha512`.
+    pbkdf2: func(password: list<u8>, salt: list<u8>, iterations: u32, keylen: u32, digest: string) -> result<list<u8>, string>;
+    /// scrypt (RFC 7914): `cost` N, `block-size` r, `parallelization` p; `maxmem` bytes.
+    scrypt: func(password: list<u8>, salt: list<u8>, keylen: u32, cost: u32, block-size: u32, parallelization: u32, maxmem: u64) -> result<list<u8>, string>;
+    /// HKDF (RFC 5869): extract then expand.
+    hkdf: func(digest: string, ikm: list<u8>, salt: list<u8>, info: list<u8>, keylen: u32) -> result<list<u8>, string>;
+}
+
+world helper {
+    export primitives;
+}

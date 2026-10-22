@@ -5,3 +5,5 @@
 /test262
 /temp/
 /.claude/
+/crates/crypto-helper/target
+!/crates/js2wasi3/assets/crypto-helper.wasm

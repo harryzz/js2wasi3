@@ -656,6 +656,10 @@ fn main() -> anyhow::Result<()> {
                 let module = js2wasi3_backend::emit(&ir)?;
                 component::package(&module, &world)?
             };
+            // T149: `pbkdf2`, `scrypt` and `hkdf` are computed by a helper component.
+            if bytes.windows(28).any(|w| w == b"js2wasi3:crypto/primitives@0") {
+                eprintln!("note: {out} imports js2wasi3:crypto/primitives (crypto.pbkdf2, scrypt, hkdf); compose it with the helper: scripts/link-crypto.sh {out}");
+            }
             std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
         }
     }

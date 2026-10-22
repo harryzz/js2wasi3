@@ -109,6 +109,12 @@ one() {
     cat "$d/build.err" >"$diff"
     return
   fi
+  # A program using pbkdf2/scrypt/hkdf imports the crypto helper (T149): compose it in.
+  "$ROOT/scripts/link-crypto.sh" "$d/x.wasm" >>"$d/build.err" 2>&1 || {
+    echo "FAIL $(($(now_ms) - t0)) link-crypto failed" >"$res"
+    cat "$d/build.err" >"$diff"
+    return
+  }
   # Sockets (T66): TCP and name lookup on the host network, like node.
   timeout "$TIMEOUT" wasmtime run -Sp3 -S inherit-network -S allow-ip-name-lookup -S http "${wenv[@]}" "${wdir[@]}" "$d/x.wasm" "${args[@]}" >"$d/wasm.out" 2>"$d/wasm.err"
   echo $? >"$d/wasm.status"
