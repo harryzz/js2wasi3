@@ -15,6 +15,8 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 | wac | 0.11.0 | composing components in tests (later) |
 | binaryen (wasm-opt) | 133 | optional optimisation experiments only |
 | rustc/cargo | 1.98.1 | pinned in `rust-toolchain.toml`; targets `wasm32-unknown-unknown` (the crypto helper, T149; `wasm32-wasip2` is also installed but its std imports WASI 0.2) |
+| zlib helper crates | wit-bindgen 0.62.0, libz-rs-sys 0.6.8 (zlib-rs) | `crates/zlib-helper` (T150), `scripts/build-zlib-helper.sh`; brotli 9.0.0 and zstd (C 1.5.7 via clang) planned |
+| wac-graph / wac-types | 0.12.0 | the compiler composes the helpers into the program (T150, `crates/js2wasi3/src/compose.rs`; they use wasm crates 0.258) |
 | crypto helper crates | wit-bindgen 0.62.0, pbkdf2 0.13.0, scrypt 0.12.0, hkdf 0.13.0, hmac 0.13.0, md-5 0.11.0, sha1 0.11.0, sha2 0.11.1 | `crates/crypto-helper` (T149), versions in its `Cargo.lock`; `scripts/build-crypto-helper.sh` |
 | node | 24.21.0 | differential oracle for JS behaviour (latest LTS; was 20.19.2 until 2026-09-26) |
 | cldr-json | 48.2.0 | `Intl` locale data (`scripts/gen-intl.mjs`, T77): node 24.21.0's ICU 78.3 carries CLDR 48.2 (48.0.0 differs, e.g. en `Hv`); zone data is probed from node itself (tzdata 2026c) |

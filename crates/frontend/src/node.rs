@@ -34,6 +34,12 @@ const MODULES: &[(&str, &str)] = &[
     ("internal/crypto_helper", include_str!("../node/crypto_helper.mjs")),
     ("internal/crypto_kdf", include_str!("../node/crypto_kdf.js")),
     ("internal/crypto_kdf_off", "module.exports = {};\n"),
+    // `zlib` (T150): node's lib/zlib.js ported (`tasks/T150-files/port-zlib.py`) over a JS binding to the Rust helper
+    // component; linked only when a program names `zlib` (`link::link`), else `zlib_impl_off` is empty.
+    ("internal/zlib_helper", include_str!("../node/zlib_helper.mjs")),
+    ("internal/zlib_binding", include_str!("../node/zlib_binding.js")),
+    ("internal/zlib_impl", include_str!("../node/zlib_impl.js")),
+    ("internal/zlib_impl_off", "module.exports = {};\n"),
     // `net` (T66): TCP over `wasi:sockets`, non-blocking on the event loop; `dns.lookup` uses its
     // name lookup.
     ("net", include_str!("../node/net.js")),
@@ -289,6 +295,7 @@ pub(crate) fn is_esm(path: &str) -> bool {
     path == "node:internal/wasi_fs"
         || path == "node:internal/wasi_random"
         || path == "node:internal/crypto_helper"
+        || path == "node:internal/zlib_helper"
         || path == "node:internal/wasi_sockets"
         || path == "node:internal/wasi_udp"
         || path == "node:internal/wasi_http"

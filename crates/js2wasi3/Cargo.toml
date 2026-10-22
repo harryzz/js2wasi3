@@ -15,3 +15,6 @@ js2wasi3-lower.workspace = true
 js2wasi3-backend.workspace = true
 js2wasi3-component.workspace = true
 js2wasi3-types.workspace = true
+wac-graph.workspace = true
+wac-types.workspace = true
+wasmparser.workspace = true

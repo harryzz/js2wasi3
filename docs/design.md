@@ -535,14 +535,27 @@ the setters are the basic parser with a state override. IDNA is reduced (ASCII l
 `internal/querystring` are node 24.21.0's lib ported by `tasks/T64-files/port-url.py` (primordials become local
 functions, node's errors local ones). A `[util.inspect.custom]` method's string result is re-indented when nested,
 as node does (`inspect.rs` `Reindent`).)
+(T150: **`zlib`** is node 24.21.0's own `lib/zlib.js` (`node:internal/zlib_impl`, made by `tasks/T150-files/port-zlib.py`: primordials, internal
+requires and the native binding replaced) over `node:internal/zlib_binding`, a JS stand-in for `internalBinding('zlib')`
+(handles with `init`/`write`/`writeSync`/`params`/`reset`/`close`, `writeState`, `onerror`) on the WIT resource `codec` of
+`js2wasi3:zlib/codecs@0.1.0` (`crates/component/wit/js2wasi3-zlib-0.1.0.wit`). The Rust crate `crates/zlib-helper` ports node's
+`ZlibContext` (`node_zlib.cc`: the mode switch, `UNZIP` header peeking, multi-member `gunzip` and trailing zeros, the dictionary
+retry, `CheckError`'s texts and codes) on `libz-rs-sys` (zlib's C API in Rust, `strm.msg` are zlib's messages): 110 KB, no
+imports. Each native `write` is one `process(flush, input, out-capacity)` call; the asynchronous `write` computes at once and
+reports on a `setImmediate` turn (node's thread pool). `link::link` generalises T149's trigger to a table (`EXT_LIBS`: name,
+module, words): a program links a library's module when a module that is not a built-in contains one of its words (`zlib` for
+zlib: Express's `body-parser` does, so Express apps carry the helper, +4%), else the module is an empty stand-in and `zlib.js`
+keeps loading with constants, codes and `crc32`. `build` composes the helpers (`crates/js2wasi3/src/compose.rs`). The bytes
+`deflate` produces differ from node's (Chromium's zlib vs zlib-rs choose other matches): tests compare round trips and
+node-made streams decoded here.)
 (T149: **`pbkdf2`, `scrypt`, `hkdf`** (and their `Sync` forms) are not JavaScript: they call the WIT interface
 `js2wasi3:crypto/primitives@0.1.0` (`crates/component/wit/js2wasi3-crypto-0.1.0.wit`), implemented by the Rust crate
 `crates/crypto-helper` (RustCrypto: `pbkdf2`, `scrypt`, `hkdf`, `hmac`, `md-5`, `sha1`, `sha2`; outside the Cargo workspace,
 built for `wasm32-unknown-unknown` and made a component by `wasm-tools component new`: 87 KB, no imports;
 `scripts/build-crypto-helper.sh`, the result is checked in at `crates/js2wasi3/assets/crypto-helper.wasm`). WASI has no
 crypto interface (`wasi-crypto` is not part of 0.3 and wasmtime removed it), and a stock wasmtime cannot link two components
-at run time, so the program's component is **composed** with the helper at build time: `scripts/link-crypto.sh app.wasm`
-(`wac plug`; a component without the import is left as is; `scripts/diff.sh` does it after each build). `crypto.js` spreads
+at run time, so `build` **composes** the helper into the program's component (`crates/js2wasi3/src/compose.rs`: the `wac-graph` crate's `plug`, the
+helper `.wasm` files embedded with `include_bytes!`; a component without a helper import is left as is; T150 moved this from a script into `build`). `crypto.js` spreads
 `node:internal/crypto_kdf`, which `link::link` replaces by an empty stub unless a module that is not a built-in writes
 `pbkdf2`, `scrypt` or `hkdf` (the graph is linked a second time with the real module): only then does the component
 import the helper (`build --ext-lib crypto` forces it; the option is the place for future helper components), so every other program is byte-identical (a `crypto` user grows 1.5 KB). Arguments are checked in

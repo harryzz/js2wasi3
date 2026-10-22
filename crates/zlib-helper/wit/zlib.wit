@@ -1,0 +1,33 @@
+package js2wasi3:zlib@0.1.0;
+
+interface codecs {
+    /// What node's native binding reports through `onerror(message, errno, code)`.
+    record failure {
+        message: string,
+        errno: s32,
+        code: string,
+    }
+
+    /// One call of `process`: how many input bytes were used and what was produced.
+    record step {
+        consumed: u32,
+        output: list<u8>,
+    }
+
+    /// A compression or decompression stream: node's `zlib` handles (`Zlib`, `BrotliEncoder`/`BrotliDecoder`,
+    /// `ZstdCompress`/`ZstdDecompress`).
+    resource codec {
+        /// `mode`: node's mode constant (DEFLATE 1, INFLATE 2, GZIP 3, GUNZIP 4, DEFLATERAW 5, INFLATERAW 6,
+        /// UNZIP 7, BROTLI_DECODE 8, BROTLI_ENCODE 9, ZSTD_DECOMPRESS 11, ZSTD_COMPRESS 10).
+        /// `params`: zlib: windowBits, level, memLevel, strategy; Brotli/zstd: the (key, value) pairs flattened.
+        create: static func(mode: u32, params: list<s32>, dictionary: option<list<u8>>, reject-garbage: bool) -> result<codec, failure>;
+        /// One `write` of node's binding: `flush` as zlib's flush value (Brotli operation, zstd end directive).
+        process: func(flush: u32, input: list<u8>, out-capacity: u32) -> result<step, failure>;
+        params: func(level: s32, strategy: s32) -> result<_, failure>;
+        reset: func() -> result<_, failure>;
+    }
+}
+
+world helper {
+    export codecs;
+}

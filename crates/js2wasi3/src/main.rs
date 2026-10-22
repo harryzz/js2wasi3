@@ -1,3 +1,5 @@
+mod compose;
+
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::path::Path;
@@ -56,9 +58,9 @@ enum Cmd {
         #[arg(long, value_name = "GLOB")]
         include: Vec<String>,
         /// Link an external library's component import even where the program doesn't name its
-        /// functions (`crypto`: `pbkdf2`, `scrypt`, `hkdf`; compose it with scripts/link-crypto.sh).
+        /// functions (`crypto`: `pbkdf2`, `scrypt`, `hkdf`; `zlib`: compression); `build` composes the helper in.
         /// Repeatable.
-        #[arg(long, value_name = "LIB", value_parser = ["crypto"])]
+        #[arg(long, value_name = "LIB", value_parser = ["crypto", "zlib"])]
         ext_lib: Vec<String>,
         /// What an unhandled promise rejection does, as node's flag: `throw` (the default: the
         /// program fails with the reason) or `none` (ignored; test262 hosts don't fail on them).
@@ -613,6 +615,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     })?
                 };
+                let bytes = compose::helpers(bytes)?;
                 std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
                 return Ok(());
             }
@@ -662,10 +665,8 @@ fn main() -> anyhow::Result<()> {
                 let module = js2wasi3_backend::emit(&ir)?;
                 component::package(&module, &world)?
             };
-            // T149: `pbkdf2`, `scrypt` and `hkdf` are computed by a helper component.
-            if bytes.windows(28).any(|w| w == b"js2wasi3:crypto/primitives@0") {
-                eprintln!("note: {out} imports js2wasi3:crypto/primitives (crypto.pbkdf2, scrypt, hkdf); compose it with the helper: scripts/link-crypto.sh {out}");
-            }
+            // T149/T150: a program importing a helper component (crypto, zlib) gets it composed in.
+            let bytes = compose::helpers(bytes)?;
             std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
         }
     }

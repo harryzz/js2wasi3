@@ -9,7 +9,6 @@ for f in "$ROOT"/tests/bench/crypto/*.js; do
   n=$(basename "$f" .js)
   node "$f" >"$OUT/$n.node.txt"
   "$ROOT/target/release/js2wasi3" build "$f" -o "$OUT/$n.wasm" 2>/dev/null
-  "$ROOT/scripts/link-crypto.sh" "$OUT/$n.wasm"
   wasmtime run -Sp3 "$OUT/$n.wasm" >"$OUT/$n.wasm.txt"
   paste -d'|' <(cut -d: -f1 "$OUT/$n.node.txt") <(cut -d: -f2 "$OUT/$n.node.txt") <(cut -d: -f2 "$OUT/$n.wasm.txt") |
     awk -F'|' -v n="$n" '{split($1,c," "); k=c[1]; split($2,a," "); split($3,b," "); N[k]+=a[1]; W[k]+=b[1]; C[k]++}

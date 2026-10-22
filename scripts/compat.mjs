@@ -288,9 +288,6 @@ function probe() {
     }
     if (drop.size === before) throw new Error(`probe build failed:\n${b.stderr}`);
   }
-  // The probe names `crypto.pbkdf2` & co.: the program imports the crypto helper (T149), composed in here.
-  const linked = spawnSync(path.join(ROOT, "scripts/link-crypto.sh"), [path.join(tmp, "wasm.wasm")], { encoding: "utf8" });
-  if (linked.status !== 0) throw new Error(`probe link failed: ${linked.stderr}`);
   const run = spawnSync("wasmtime", ["run", "-Sp3", path.join(tmp, "wasm.wasm")], { encoding: "utf8", maxBuffer: 1 << 26 });
   if (run.status !== 0) throw new Error(`probe run failed: ${run.stderr}`);
   const wasm = JSON.parse(run.stdout);
@@ -353,6 +350,9 @@ function refusals() {
       if (/^[A-Za-z_]\w*$/.test(last)) put(last);
     }
   }
+  // zlib.js keeps its stubs for programs that do not link the helper (T150), but a program naming `zlib` gets the real thing:
+  // only Brotli and zstd (T150 slices 2 and 3) still throw.
+  for (const k of [...out.keys()]) if (k.startsWith("zlib:") && !/brotli|zstd/i.test(k)) out.delete(k);
   return out;
 }
 

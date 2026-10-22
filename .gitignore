@@ -7,3 +7,5 @@
 /.claude/
 /crates/crypto-helper/target
 !/crates/js2wasi3/assets/crypto-helper.wasm
+/crates/zlib-helper/target
+!/crates/js2wasi3/assets/zlib-helper.wasm

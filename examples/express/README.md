@@ -121,8 +121,8 @@ Found by running Express's own example apps (2026-10-21):
 
 - **`morgan`** (the request logger) and **`ejs`** (templates) build code with `new Function` at run time; js2wasi3
   cannot compile that, so apps using them fail on the first request. This app logs with a one-line middleware.
-- **`crypto.pbkdf2`** (`pbkdf2-password`, used by Express's `auth` example) is computed by a Rust helper component (T149): after
-  `build`, run `../../scripts/link-crypto.sh server.wasm` (it composes `crates/js2wasi3/assets/crypto-helper.wasm` into the program).
+- **`crypto.pbkdf2`** (`pbkdf2-password`, used by Express's `auth` example) is computed by a Rust helper component (T149): `build`
+  composes `crates/js2wasi3/assets/crypto-helper.wasm` into `server.wasm` (T150: no extra step).
   The npm package `pbkdf2-password` 1.2.1 gives node's results.
 - A computed `require(name)` finds only modules known at build time; list others with `js2wasi3 build --include '<glob>'`.
 - Error pages in development mode show an `err.stack` with one frame, not node's list.

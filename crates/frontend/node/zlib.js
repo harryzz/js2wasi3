@@ -7,6 +7,14 @@ const { Buffer } = require("buffer");
 const data = require("node:internal/builtin_data");
 const { unavailableError, fns } = require("node:internal/unavailable");
 
+// A program that names `zlib` links node's ported lib (T150, `node:internal/zlib_impl`); otherwise it is an empty stand-in
+// and this file keeps loading with the constants, codes and `crc32`, its compression throwing.
+const impl = require("node:internal/zlib_impl");
+if (impl.Deflate !== undefined) {
+  module.exports = impl;
+  return;
+}
+
 const WHY = "no compression in js2wasi3 yet";
 const NAMES = ["Deflate", "Inflate", "Gzip", "Gunzip", "DeflateRaw", "InflateRaw", "Unzip", "BrotliCompress",
   "BrotliDecompress", "ZstdCompress", "ZstdDecompress"];

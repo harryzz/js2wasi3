@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["crates/crypto-helper"]
+exclude = ["crates/crypto-helper", "crates/zlib-helper"]
 
 [workspace.package]
 version = "0.0.1"
@@ -26,6 +26,9 @@ wasm-encoder = "0.259.0"
 wasmparser = "0.259.0"
 wit-parser = "0.259.0"
 wit-component = "0.259.0"
+# Composes the helper components into the program (T150; wac-graph 0.12 uses wasm crates 0.258).
+wac-graph = "0.12.0"
+wac-types = "0.12.0"
 
 js2wasi3-frontend = { path = "crates/frontend" }
 js2wasi3-ir = { path = "crates/ir" }

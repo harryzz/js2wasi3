@@ -1,0 +1,21 @@
+[package]
+name = "js2wasi3-zlib-helper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+libz-rs-sys = { version = "0.6.8", default-features = false, features = ["rust-allocator"] }
+wit-bindgen = "0.62.0"
