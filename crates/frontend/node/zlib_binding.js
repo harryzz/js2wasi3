@@ -3,7 +3,7 @@
 // `close`, results in the shared `writeState` (`[availOutAfter, availInAfter]`), failures through `onerror(message, errno, code)`.
 'use strict';
 
-const helper = require('node:internal/zlib_helper');
+const zlibHelper = require('node:internal/zlib_helper');
 const { Buffer } = require('buffer');
 
 function bytes(view) {
@@ -24,21 +24,28 @@ function failureOf(e) {
 }
 
 class Handle {
-  constructor(mode) {
+  constructor(mode, helper) {
     this.mode = mode;
+    this.helper = helper;
     this.h = undefined;
     this.writeState = undefined;
     this.processCallback = undefined;
   }
 
-  _init(params, writeState, processCallback, dictionary, rejectGarbage) {
+  // `create`: the call to the helper's `create` (its arguments differ by helper).
+  _init(writeState, processCallback, create) {
     this.writeState = writeState;
     this.processCallback = processCallback;
     try {
-      this.h = helper.create(this.mode, params, dictionary === undefined ? undefined : bytes(dictionary), rejectGarbage);
+      this.h = create();
     } catch (e) {
       throw initFailed();
     }
+  }
+
+  // The helper's failure as `onerror` takes it (Brotli adds the decoder's error name).
+  _failure(e) {
+    return failureOf(e);
   }
 
   // One native write; null when it failed.
@@ -46,9 +53,9 @@ class Handle {
     const inBytes = inLen > 0 ? bytes(input).subarray(inOff, inOff + inLen) : new Uint8Array(0);
     let step;
     try {
-      step = helper.process(this.h, flush, inBytes, outLen);
+      step = this.helper.process(this.h, flush, inBytes, outLen);
     } catch (e) {
-      return failureOf(e);
+      return this._failure(e);
     }
     out.set(step.output, outOff);
     this.writeState[0] = outLen - step.output.length;
@@ -71,34 +78,40 @@ class Handle {
   }
 
   params(level, strategy) {
+    if (this.helper.params === undefined) return;
     try {
-      helper.params(this.h, level, strategy);
+      this.helper.params(this.h, level, strategy);
     } catch (e) {
-      const f = failureOf(e);
+      const f = this._failure(e);
       this.onerror(f.message, f.errno, f.code);
     }
   }
 
   reset() {
     try {
-      helper.reset(this.h);
+      this.helper.reset(this.h);
     } catch (e) {
-      const f = failureOf(e);
+      const f = this._failure(e);
       this.onerror(f.message, f.errno, f.code);
     }
   }
 
   close() {
     if (this.h !== undefined) {
-      helper.drop(this.h);
+      this.helper.drop(this.h);
       this.h = undefined;
     }
   }
 }
 
 class Zlib extends Handle {
+  constructor(mode) {
+    super(mode, zlibHelper);
+  }
+
   init(windowBits, level, memLevel, strategy, writeState, processCallback, dictionary, rejectGarbage) {
-    this._init([windowBits, level, memLevel, strategy], writeState, processCallback, dictionary, rejectGarbage);
+    this._init(writeState, processCallback, () => zlibHelper.create(
+      this.mode, [windowBits, level, memLevel, strategy], dictionary === undefined ? undefined : bytes(dictionary), rejectGarbage));
   }
 }
 
@@ -120,20 +133,23 @@ function crc32(input, value) {
   return ~c >>> 0;
 }
 
-// Brotli and zstd are not there yet (T150 slices 2 and 3).
-function unavailable(name) {
+// Brotli is a second helper (`node:internal/brotli_impl`, linked when a program names `brotli`); zstd is not there yet (slice 3).
+function unavailable(name, why) {
   return class {
     constructor() {
-      throw require('node:internal/unavailable').unavailableError(name, 'not implemented yet');
+      throw require('node:internal/unavailable').unavailableError(name, why);
     }
   };
 }
 
+const brotli = require('node:internal/brotli_impl');
+const noBrotli = (name) => unavailable(name, 'the Brotli helper is linked only into programs that name `brotli`');
+
 module.exports = {
   Zlib,
   crc32,
-  BrotliEncoder: unavailable('zlib.BrotliCompress'),
-  BrotliDecoder: unavailable('zlib.BrotliDecompress'),
-  ZstdCompress: unavailable('zlib.ZstdCompress'),
-  ZstdDecompress: unavailable('zlib.ZstdDecompress'),
+  BrotliEncoder: brotli.makeEncoder === undefined ? noBrotli('zlib.BrotliCompress') : brotli.makeEncoder(Handle, bytes, failureOf),
+  BrotliDecoder: brotli.makeDecoder === undefined ? noBrotli('zlib.BrotliDecompress') : brotli.makeDecoder(Handle, bytes, failureOf),
+  ZstdCompress: unavailable('zlib.ZstdCompress', 'not implemented yet'),
+  ZstdDecompress: unavailable('zlib.ZstdDecompress', 'not implemented yet'),
 };

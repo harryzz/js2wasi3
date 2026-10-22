@@ -58,9 +58,9 @@ enum Cmd {
         #[arg(long, value_name = "GLOB")]
         include: Vec<String>,
         /// Link an external library's component import even where the program doesn't name its
-        /// functions (`crypto`: `pbkdf2`, `scrypt`, `hkdf`; `zlib`: compression); `build` composes the helper in.
+        /// functions (`crypto`: `pbkdf2`, `scrypt`, `hkdf`; `zlib`: the deflate family; `brotli`); `build` composes the helper in.
         /// Repeatable.
-        #[arg(long, value_name = "LIB", value_parser = ["crypto", "zlib"])]
+        #[arg(long, value_name = "LIB", value_parser = ["crypto", "zlib", "brotli"])]
         ext_lib: Vec<String>,
         /// What an unhandled promise rejection does, as node's flag: `throw` (the default: the
         /// program fails with the reason) or `none` (ignored; test262 hosts don't fail on them).

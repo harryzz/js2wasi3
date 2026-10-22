@@ -7,7 +7,7 @@ use wac_graph::{CompositionGraph, EncodeOptions, plug};
 use wac_types::Package;
 
 /// (an interface the helper exports, the helper component)
-const HELPERS: [(&[u8], &[u8], &str); 2] = [
+const HELPERS: [(&[u8], &[u8], &str); 3] = [
     (
         b"js2wasi3:crypto/primitives@0",
         include_bytes!("../assets/crypto-helper.wasm"),
@@ -17,6 +17,11 @@ const HELPERS: [(&[u8], &[u8], &str); 2] = [
         b"js2wasi3:zlib/codecs@0",
         include_bytes!("../assets/zlib-helper.wasm"),
         "zlib-helper",
+    ),
+    (
+        b"js2wasi3:brotli/codecs@0",
+        include_bytes!("../assets/brotli-helper.wasm"),
+        "brotli-helper",
     ),
 ];
 

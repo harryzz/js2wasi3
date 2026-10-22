@@ -547,7 +547,12 @@ module, words): a program links a library's module when a module that is not a b
 zlib: Express's `body-parser` does, so Express apps carry the helper, +4%), else the module is an empty stand-in and `zlib.js`
 keeps loading with constants, codes and `crc32`. `build` composes the helpers (`crates/js2wasi3/src/compose.rs`). The bytes
 `deflate` produces differ from node's (Chromium's zlib vs zlib-rs choose other matches): tests compare round trips and
-node-made streams decoded here.)
+node-made streams decoded here. **Brotli** (slice 2) is a second helper component, `crates/brotli-helper` (`js2wasi3:brotli/codecs@0.1.0`, the
+`brotli` crate 9.0.0: node's `BrotliEncoderContext`/`BrotliDecoderContext` semantics, 1 MB because of its dictionary and tables), behind
+`node:internal/brotli_impl` (the binding's `BrotliEncoder`/`BrotliDecoder` classes, built on `zlib_binding.js`'s `Handle`); its `EXT_LIBS`
+word is `rotli`, so Express's `compression` middleware carries it and plain `zlib` users do not. Its output is byte-identical to
+node's for the same quality, window and mode (12 qualities, windows and modes checked); decoder error codes come from the
+constants' names (`ERR__ERROR_FORMAT_PADDING_1`), and the crate may report another error than libbrotli for the same garbage.)
 (T149: **`pbkdf2`, `scrypt`, `hkdf`** (and their `Sync` forms) are not JavaScript: they call the WIT interface
 `js2wasi3:crypto/primitives@0.1.0` (`crates/component/wit/js2wasi3-crypto-0.1.0.wit`), implemented by the Rust crate
 `crates/crypto-helper` (RustCrypto: `pbkdf2`, `scrypt`, `hkdf`, `hmac`, `md-5`, `sha1`, `sha2`; outside the Cargo workspace,

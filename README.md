@@ -156,7 +156,8 @@ Other subcommands: `js2wasi3 parse <file>` (check a module) and `js2wasi3 ir <fi
   streams, `flush`/`params`/`reset`/`close`, dictionaries, `info`, `maxOutputLength`, `rejectGarbageAfterEnd`) with node's
   own `lib/zlib.js` over a Rust helper component (`libz-rs`, zlib in Rust) that `build` composes into any program that names
   `zlib` (`--ext-lib zlib` forces it). Errors and codes are zlib's (`Z_DATA_ERROR -3 incorrect header check`); the compressed
-  bytes differ from node's (other match choices), so compare round trips, not bytes. Brotli and zstd: next. Express's
+  bytes differ from node's (other match choices), so compare round trips, not bytes. Brotli (`brotliCompress*`, `createBrotli*`, params) is a second helper (`brotli` crate, 1 MB, linked only into programs that name
+  `brotli`) and gives node's bytes at the same quality/window/mode; zstd: next. Express's
   `compression` middleware answers like node.
 - Express 5.3 (T148): a notes + todo web app runs as one component, answering like node (one shim, for `depd`'s call-site
   API): [examples/express](examples/express/README.md), with the steps to install, build and run it. `morgan` and `ejs` are not there yet;
