@@ -160,11 +160,24 @@ pub fn link(
 /// External libraries: components that `build` composes into the program (`crates/js2wasi3/src/compose.rs`). Name (`--ext-lib`),
 /// the built-in module that holds the library's code (`<module>_off` is an empty stand-in while the library is not linked), and
 /// the words that make a program use it.
-const EXT_LIBS: [(&str, &str, &[&str]); 4] = [
-    ("crypto", "node:internal/crypto_kdf", &["pbkdf2", "scrypt", "hkdf"]),
-    ("zlib", "node:internal/zlib_impl", &["zlib"]),
-    ("brotli", "node:internal/brotli_impl", &["rotli"]),
-    ("zstd", "node:internal/zstd_impl", &["zstd", "Zstd"]),
+const EXT_LIBS: [(&str, &str, &[&str], &[&str]); 5] = [
+    // T153: the stream side of `crypto`'s Hash/Hmac/Cipheriv (not a component): linked when `node:stream` is in the graph for another
+    // reason, since only then can a program pipe into or out of a hash (the module is ~900 KB).
+    ("crypto-streams", "node:internal/crypto_streams", &[], &["node:stream"]),
+    (
+        "crypto",
+        "node:internal/crypto_kdf",
+        &[
+            "pbkdf2", "scrypt", "hkdf", // T149
+            // T151: what only the helper has (the digests sha3, shake, sha512-t, md5-sha1 and the ciphers AES-GCM and ChaCha20 are native, T152):
+            // ripemd160, blake2, sm3; upper and lower case
+            "ripemd", "RIPEMD", "rmd160", "blake2", "BLAKE2", "sm3", "SM3",
+        ],
+        &[],
+    ),
+    ("zlib", "node:internal/zlib_impl", &["zlib"], &[]),
+    ("brotli", "node:internal/brotli_impl", &["rotli"], &[]),
+    ("zstd", "node:internal/zstd_impl", &["zstd", "Zstd"], &[]),
 ];
 
 fn link_pass(
@@ -205,11 +218,12 @@ fn link_pass(
     }
     let wanted: Vec<String> = EXT_LIBS
         .iter()
-        .filter(|(name, _, words)| {
+        .filter(|(name, _, words, present)| {
             !enabled.iter().any(|e| e == name)
-                && g.modules.iter().any(|m| !node::is_module(&m.p.path) && words.iter().any(|w| m.p.source.contains(w)))
+                && (g.modules.iter().any(|m| !node::is_module(&m.p.path) && words.iter().any(|w| m.p.source.contains(w)))
+                    || g.modules.iter().any(|m| present.iter().any(|p| *p == m.p.path)))
         })
-        .map(|(name, _, _)| name.to_string())
+        .map(|(name, _, _, _)| name.to_string())
         .collect();
     if !wanted.is_empty() {
         return Ok((Linked { source: String::new(), map: None }, wanted));
@@ -1162,7 +1176,7 @@ impl<'a> Graph<'a, '_> {
                 let joined = if spec.starts_with('/') { spec.clone() } else { format!("{dir}{spec}") };
                 packages::load_as_file_or_directory(self.host, &normalize(&joined), spec.ends_with('/') || dot).ok_or(None)
             } else if let Some(path) = node::path(&spec) {
-                Ok(match EXT_LIBS.iter().find(|(name, module, _)| *module == path && !self.ext_libs.iter().any(|e| e == name)) {
+                Ok(match EXT_LIBS.iter().find(|(name, module, _, _)| *module == path && !self.ext_libs.iter().any(|e| e == name)) {
                     Some(_) => format!("{path}_off"),
                     None => path,
                 })

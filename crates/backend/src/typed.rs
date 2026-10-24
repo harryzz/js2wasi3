@@ -856,6 +856,16 @@ fn op_body(cx: &mut dyn Cx, op: TypedOp) -> Function {
             s.end();
             f
         }
+        TypedOp::Sha256Blocks => crate::crypto::sha256_blocks(),
+        TypedOp::Sha1Blocks => crate::crypto::sha1_blocks(),
+        TypedOp::Md5Blocks => crate::crypto::md5_blocks(),
+        TypedOp::Sha512Blocks => crate::crypto::sha512_blocks(),
+        TypedOp::KeccakBlocks => crate::crypto::keccak_blocks(),
+        TypedOp::AesCtr => crate::crypto::aes_ctr(),
+        TypedOp::GhashInit => crate::crypto::ghash_init(),
+        TypedOp::GhashBlocks => crate::crypto::ghash_blocks(),
+        TypedOp::Chacha20Xor => crate::crypto::chacha20_xor(),
+        TypedOp::Poly1305Blocks => crate::crypto::poly1305_blocks(),
         TypedOp::Utf8Write => {
             // (t, s, offset, limit): whole characters while they fit.
             const LIMIT: u32 = 3;

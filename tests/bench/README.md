@@ -38,6 +38,10 @@ composed with the crypto helper). node 24.21.0 has no `pbkdf2` or `scrypt` bench
 Laptop, 2026-10-22, 72 configs each (hkdf, mean ns/op): sync node 20,375 vs js2wasi3 28,224 (1.39×); async node 13,147
 vs 37,275 (2.84×: each callback waits a `setImmediate` turn, node's thread pool does not).
 
+T151 adds node's `create-hash.js`, `create-hmac.js` and `aes-gcm-throughput.js` (unchanged; `oneshot-hash.js` needs node's `test/fixtures/snapshot/typescript.js`, the stream ones need
+`Hash` as a stream). Laptop, 2026-10-24, ns per operation, node vs js2wasi3: createHash 3,322 vs 38,557; createHmac 49–167 µs vs 22–131 µs (1 KB keys: 3–7.6 ms in js2wasi3 with the JavaScript hashes of T151; the native hashes of T152 are ~100× faster);
+`aes-gcm-throughput` takes many minutes in js2wasi3 at node's sizes (T152: a 64 KB GCM ~1.7 ms, 37 MB/s, node ~1 GB/s), and is part of `scripts/bench-node.sh`'s default run.
+
 ## zlib/
 
 Node's `benchmark/zlib/deflate.js` and `inflate.js` (v24.21.0, unchanged, through `common.js`); `creation.js` is left out (it makes 500,000

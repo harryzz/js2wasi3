@@ -1,6 +1,6 @@
-// node's `crypto.pbkdf2`, `scrypt` and `hkdf` with their `Sync` forms (T149), computed by the Rust helper
-// component (`node:internal/crypto_helper`). Linked into a program only when it names one of them
-// (`link::link`); `crypto.js` spreads this module's exports. Checks and errors are node's.
+// node's `crypto.pbkdf2`, `scrypt` and `hkdf` with their `Sync` forms (T149) and the digests and ciphers that JavaScript does
+// not implement (T151: ripemd160, blake2, sm3, as `_ext` for `crypto.js`), computed by the Rust helper component (`node:internal/crypto_helper`). Linked into a program
+// only when it names one of them (`link::link`); `crypto.js` spreads this module's exports. Checks and errors are node's.
 'use strict';
 
 const { Buffer } = require('buffer');
@@ -19,7 +19,7 @@ function bytesOf(data, name, expected) {
   throw $$errInvalidArgType(name, expected, data);
 }
 
-const ALIASES = { 'sha-1': 'sha1', 'sha-224': 'sha224', 'sha-256': 'sha256', 'sha-384': 'sha384', 'sha-512': 'sha512' };
+const { HASH_INFO, canonicalHash } = require('node:internal/crypto_hashes');
 
 
 const kdf = require('node:internal/crypto_helper');
@@ -36,14 +36,13 @@ function validateCallback(callback) {
 
 const KDF_BYTES = 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView';
 const HKDF_BYTES = 'of type string or an instance of ArrayBuffer, TypedArray, DataView, or Buffer';
-const HASH_BYTES = { md5: 16, sha1: 20, sha224: 28, sha256: 32, sha384: 48, sha512: 64 };
 
 function kdfDigest(digest) {
-  let name = digest.toLowerCase();
-  if (ALIASES[name] !== undefined) name = ALIASES[name];
-  if (!Object.prototype.hasOwnProperty.call(HASH_BYTES, name)) {
+  const name = canonicalHash(digest);
+  if (name === undefined) {
     throw codeError(TypeError, 'ERR_CRYPTO_INVALID_DIGEST', `Invalid digest: ${digest}`);
   }
+  if (HASH_INFO[name][2] === true) throw new Error('error:1C8000B7:Provider routines::xof digests not allowed');
   return name;
 }
 
@@ -174,7 +173,7 @@ function hkdfParams(digest, ikm, salt, info, length) {
 }
 
 function hkdfRun(name, k, s, i, length) {
-  if (length > 255 * HASH_BYTES[name]) throw codeError(RangeError, 'ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
+  if (length > 255 * HASH_INFO[name][0]) throw codeError(RangeError, 'ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
   return () => {
     if (length === 0) throw new Error('Deriving bits failed');
     const out = derive(() => kdf.hkdf(name, k, s, i, length));
@@ -192,4 +191,12 @@ function hkdf(digest, ikm, salt, info, length, callback) {
   later(callback, hkdfRun(...params));
 }
 
-module.exports = { pbkdf2, pbkdf2Sync, scrypt, scryptSync, hkdf, hkdfSync };
+// --- digests and ciphers for crypto.js ---
+
+const _ext = {
+  digest(name, bytes, length) {
+    return kdf.digest(name, bytes, length);
+  },
+};
+
+module.exports = { pbkdf2, pbkdf2Sync, scrypt, scryptSync, hkdf, hkdfSync, _ext };

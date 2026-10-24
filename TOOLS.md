@@ -19,7 +19,7 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 | zstd helper crates | wit-bindgen 0.62.0, zstd-sys 2.1.2 (libzstd 1.5.7) | `crates/zstd-helper` (T150 slice 3), `scripts/build-zstd-helper.sh` (needs `clang` with the wasm32 target: `CC_wasm32_unknown_unknown=clang`) |
 | brotli helper crates | wit-bindgen 0.62.0, brotli 9.0.0 (brotli-decompressor 6.0.1) | `crates/brotli-helper` (T150 slice 2), `scripts/build-brotli-helper.sh` |
 | wac-graph / wac-types | 0.12.0 | the compiler composes the helpers into the program (T150, `crates/js2wasi3/src/compose.rs`; they use wasm crates 0.258) |
-| crypto helper crates | wit-bindgen 0.62.0, pbkdf2 0.13.0, scrypt 0.12.0, hkdf 0.13.0, hmac 0.13.0, md-5 0.11.0, sha1 0.11.0, sha2 0.11.1 | `crates/crypto-helper` (T149), versions in its `Cargo.lock`; `scripts/build-crypto-helper.sh` |
+| crypto helper crates | wit-bindgen 0.62.0, pbkdf2 0.13.0, scrypt 0.12.0, hkdf 0.13.0, hmac 0.13.0, md-5 0.11.0, sha1 0.11.0, sha2 0.11.1; T151: sha3 0.12.0, shake 0.1.0, ripemd 0.2.0, blake2 0.11.0, sm3 0.5.0 | `crates/crypto-helper` (T149), versions in its `Cargo.lock`; `scripts/build-crypto-helper.sh` |
 | node | 24.21.0 | differential oracle for JS behaviour (latest LTS; was 20.19.2 until 2026-09-26) |
 | cldr-json | 48.2.0 | `Intl` locale data (`scripts/gen-intl.mjs`, T77): node 24.21.0's ICU 78.3 carries CLDR 48.2 (48.0.0 differs, e.g. en `Hv`); zone data is probed from node itself (tzdata 2026c) |
 | test262 | `7ab7fafa0003f73fc85c1b95d88094d33f7eb8bd` | conformance subset (`scripts/fetch-test262.sh`, `scripts/test262.mjs`; `main` on 2026-09-27) |

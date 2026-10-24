@@ -1440,6 +1440,24 @@ pub enum TypedOp {
     /// T121: `(c) -> i32`: the kind of typed-array constructor value `c`, or of the first one on its
     /// [[Prototype]] chain (a subclass), else -1 (`%TypedArray%.from`/`of` with `c` as `this`).
     CtorKind,
+    /// T152: `(state, data, offset, blocks)`: SHA-256's compression over whole blocks of `data` (`state`: the eight words, big-endian, in a `Uint8Array`).
+    Sha256Blocks,
+    /// T152: `(state, data, offset, blocks)`: as `Sha256Blocks` for SHA-1 (five words), MD5 (four, little-endian) and SHA-512 (eight 64-bit words; 128-byte blocks).
+    Sha1Blocks,
+    Md5Blocks,
+    Sha512Blocks,
+    /// T152: `(state, data, offset, blocks, rate)`: Keccak-f[1600] (state: 200 bytes), `blocks` blocks of `rate` bytes absorbed; `rate` 0 permutes once.
+    KeccakBlocks,
+    /// T152: `(rk, rounds, st, data, data_offset, out, out_offset, len)`: AES-CTR keystream xor with a 32-bit counter (see `backend/src/crypto.rs`).
+    AesCtr,
+    /// T152: `(h, tab)`: the GHASH multiplication table for `h`.
+    GhashInit,
+    /// T152: `(tab, st, data, offset, blocks)`: GHASH over whole blocks.
+    GhashBlocks,
+    /// T152: `(st, data, data_offset, out, out_offset, len)`: ChaCha20 keystream xor.
+    Chacha20Xor,
+    /// T152: `(st, data, offset, blocks)`: Poly1305 over whole blocks.
+    Poly1305Blocks,
 }
 
 pub const MAP_KIND_MAP: u8 = 0;
@@ -1686,6 +1704,13 @@ impl Intrinsic {
                 TypedOp::Utf8Length => (&[JsVal], Some(I32)),
                 TypedOp::Utf8Write => (&[JsVal, JsVal, I32, I32], Some(I32)),
                 TypedOp::Utf8Slice => (&[JsVal, I32, I32], Some(JsVal)),
+                TypedOp::Sha256Blocks | TypedOp::Sha1Blocks | TypedOp::Md5Blocks | TypedOp::Sha512Blocks => (&[JsVal, JsVal, I32, I32], None),
+                TypedOp::KeccakBlocks => (&[JsVal, JsVal, I32, I32, I32], None),
+                TypedOp::AesCtr => (&[JsVal, I32, JsVal, JsVal, I32, JsVal, I32, I32], None),
+                TypedOp::GhashInit => (&[JsVal, JsVal], None),
+                TypedOp::GhashBlocks => (&[JsVal, JsVal, JsVal, I32, I32], None),
+                TypedOp::Chacha20Xor => (&[JsVal, JsVal, I32, JsVal, I32, I32], None),
+                TypedOp::Poly1305Blocks => (&[JsVal, JsVal, I32, I32], None),
             },
         }
     }
@@ -1935,6 +1960,16 @@ impl Intrinsic {
                 TypedOp::Utf8Length => "typed_utf8_length",
                 TypedOp::Utf8Write => "typed_utf8_write",
                 TypedOp::Utf8Slice => "typed_utf8_slice",
+                TypedOp::Sha256Blocks => "sha256_blocks",
+                TypedOp::Sha1Blocks => "sha1_blocks",
+                TypedOp::Md5Blocks => "md5_blocks",
+                TypedOp::Sha512Blocks => "sha512_blocks",
+                TypedOp::KeccakBlocks => "keccak_blocks",
+                TypedOp::AesCtr => "aes_ctr",
+                TypedOp::GhashInit => "ghash_init",
+                TypedOp::GhashBlocks => "ghash_blocks",
+                TypedOp::Chacha20Xor => "chacha20_xor",
+                TypedOp::Poly1305Blocks => "poly1305_blocks",
             },
         }
     }

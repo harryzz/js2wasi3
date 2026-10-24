@@ -9582,6 +9582,16 @@ fn typed_op(name: &str) -> Option<ir::TypedOp> {
         "typed_utf8_length" => T::Utf8Length,
         "typed_utf8_write" => T::Utf8Write,
         "typed_utf8_slice" => T::Utf8Slice,
+        "sha256_blocks" => T::Sha256Blocks,
+        "sha1_blocks" => T::Sha1Blocks,
+        "md5_blocks" => T::Md5Blocks,
+        "sha512_blocks" => T::Sha512Blocks,
+        "keccak_blocks" => T::KeccakBlocks,
+        "aes_ctr" => T::AesCtr,
+        "ghash_init" => T::GhashInit,
+        "ghash_blocks" => T::GhashBlocks,
+        "chacha20_xor" => T::Chacha20Xor,
+        "poly1305_blocks" => T::Poly1305Blocks,
         _ => return None,
     })
 }

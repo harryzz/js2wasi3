@@ -41,6 +41,7 @@ mod array;
 mod asyncfn;
 mod asyncgen;
 mod bigint;
+mod crypto;
 mod func;
 mod generator;
 mod host;

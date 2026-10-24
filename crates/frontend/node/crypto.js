@@ -7,6 +7,12 @@
 
 const { Buffer } = require('buffer');
 const wasi = require('node:internal/wasi_random');
+// `pbkdf2`, `scrypt`, `hkdf` and `_ext` (more digests, AES-GCM and ChaCha20 over the Rust helper) when the helper is linked
+// (T149/T151: `link::link`); an empty module otherwise.
+const { _ext: ext, ...kdfExports } = require('node:internal/crypto_kdf');
+const { HASH_INFO, canonicalHash } = require('node:internal/crypto_hashes');
+// `LazyTransform`, when `node:stream` is linked for another reason (T153): then Hash, Hmac and the ciphers are streams; else an empty module.
+const streams = require('node:internal/crypto_streams');
 
 function codeError(Base, code, message) {
   const e = new Base(message);
@@ -35,6 +41,13 @@ const DATA_TYPES = 'of type string or an instance of Buffer, TypedArray, or Data
 function output(bytes, encoding) {
   const b = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return encoding === undefined || encoding === 'buffer' ? b : b.toString(encoding);
+}
+
+// A copy of `bytes` as a plain `Uint8Array` (`Buffer#slice` is a view; `new Uint8Array(view)` and `Uint8Array.from` copy element by element).
+function copyBytes(bytes) {
+  const out = new Uint8Array(bytes.length);
+  out.set(bytes);
+  return out;
 }
 
 function concat(chunks) {
@@ -156,6 +169,23 @@ function randomUUID(options) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// UUID version 7 (RFC 9562): a 48-bit millisecond timestamp, 74 random bits.
+function randomUUIDv7(options) {
+  if (options !== undefined && (options === null || typeof options !== 'object')) {
+    throw $$errInvalidArgType('options', 'of type object', options);
+  }
+  const b = wasi.getRandomBytes(16);
+  const ms = Date.now();
+  const hi = Math.floor(ms / 4294967296);
+  const lo = ms >>> 0;
+  b[0] = (hi >>> 8) & 0xff; b[1] = hi & 0xff;
+  b[2] = (lo >>> 24) & 0xff; b[3] = (lo >>> 16) & 0xff; b[4] = (lo >>> 8) & 0xff; b[5] = lo & 0xff;
+  b[6] = (b[6] & 0x0f) | 0x70;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const hex = Buffer.from(b).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function getRandomValues(data) {
   const kind = __intrinsic_typed_kind(data);
   // Integer typed arrays only (not Float32/Float64Array).
@@ -211,13 +241,13 @@ function rotr(x, n) {
 
 // The message padded to a multiple of 64 bytes (`block` 64) or 128, with its bit length at the
 // end, big- or little-endian.
-function pad(bytes, block, littleEndian) {
+function pad(bytes, block, littleEndian, total = bytes.length) {
   const lenBytes = block === 128 ? 16 : 8;
   const n = Math.ceil((bytes.length + 1 + lenBytes) / block) * block;
   const out = new Uint8Array(n);
   out.set(bytes);
   out[bytes.length] = 0x80;
-  const bits = bytes.length * 8;
+  const bits = total * 8;
   const hi = Math.floor(bits / 4294967296);
   const lo = bits >>> 0;
   if (littleEndian) {
@@ -249,123 +279,38 @@ function wordsOut(words, count, littleEndian) {
   return out;
 }
 
-const MD5_S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
-const MD5_K = [];
-for (let i = 0; i < 64; i++) MD5_K.push(Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0);
-
+// The hashes run their compression functions natively (`*_blocks`, T152): the state is the digest's words as bytes (SHA-2: big-endian,
+// MD5: little-endian), whole blocks go straight from the input, the padded tail through a second call.
 function md5(bytes) {
-  const m = pad(bytes, 64, true);
-  let a0 = 0x67452301, b0 = 0xefcdab89 | 0, c0 = 0x98badcfe | 0, d0 = 0x10325476;
-  const x = new Int32Array(16);
-  for (let off = 0; off < m.length; off += 64) {
-    for (let i = 0; i < 16; i++) {
-      const j = off + i * 4;
-      x[i] = m[j] | (m[j + 1] << 8) | (m[j + 2] << 16) | (m[j + 3] << 24);
-    }
-    let a = a0, b = b0, c = c0, d = d0;
-    for (let i = 0; i < 64; i++) {
-      let f, g;
-      if (i < 16) { f = (b & c) | (~b & d); g = i; }
-      else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) & 15; }
-      else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) & 15; }
-      else { f = c ^ (b | ~d); g = (7 * i) & 15; }
-      const t = d;
-      d = c;
-      c = b;
-      b = (b + rotl((a + f + MD5_K[i] + x[g]) | 0, MD5_S[(i >> 4) * 4 + (i & 3)])) | 0;
-      a = t;
-    }
-    a0 = (a0 + a) | 0; b0 = (b0 + b) | 0; c0 = (c0 + c) | 0; d0 = (d0 + d) | 0;
-  }
-  return wordsOut([a0, b0, c0, d0], 4, true);
+  const state = wordsOut([0x67452301, 0xefcdab89 | 0, 0x98badcfe | 0, 0x10325476], 4, true);
+  const full = bytes.length - (bytes.length % 64);
+  if (full > 0) __intrinsic_md5_blocks(state, bytes, 0, full / 64);
+  const tail = pad(bytes.subarray(full), 64, true, bytes.length);
+  __intrinsic_md5_blocks(state, tail, 0, tail.length / 64);
+  return state;
 }
 
 function sha1(bytes) {
-  const m = pad(bytes, 64, false);
-  const h = [0x67452301, 0xefcdab89 | 0, 0x98badcfe | 0, 0x10325476, 0xc3d2e1f0 | 0];
-  const w = new Int32Array(80);
-  for (let off = 0; off < m.length; off += 64) {
-    for (let i = 0; i < 16; i++) w[i] = be32(m, off + i * 4);
-    for (let i = 16; i < 80; i++) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
-    let [a, b, c, d, e] = h;
-    for (let i = 0; i < 80; i++) {
-      let f, k;
-      if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999; }
-      else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
-      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc | 0; }
-      else { f = b ^ c ^ d; k = 0xca62c1d6 | 0; }
-      const t = (rotl(a, 5) + f + e + k + w[i]) | 0;
-      e = d; d = c; c = rotl(b, 30); b = a; a = t;
-    }
-    h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0; h[4] = (h[4] + e) | 0;
-  }
-  return wordsOut(h, 5, false);
+  const state = wordsOut([0x67452301, 0xefcdab89 | 0, 0x98badcfe | 0, 0x10325476, 0xc3d2e1f0 | 0], 5, false);
+  const full = bytes.length - (bytes.length % 64);
+  if (full > 0) __intrinsic_sha1_blocks(state, bytes, 0, full / 64);
+  const tail = pad(bytes.subarray(full), 64, false, bytes.length);
+  __intrinsic_sha1_blocks(state, tail, 0, tail.length / 64);
+  return state;
 }
 
-const K256 = [
-  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
+// SHA-256 and SHA-224: the compression function is native (`sha256_blocks`, T152); the state is the big-endian words as bytes.
 function sha256(bytes, is224) {
-  const m = pad(bytes, 64, false);
-  const h = is224
+  const state = wordsOut(is224
     ? [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4]
-    : [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-  for (let i = 0; i < 8; i++) h[i] |= 0;
-  const w = new Int32Array(64);
-  for (let off = 0; off < m.length; off += 64) {
-    for (let i = 0; i < 16; i++) w[i] = be32(m, off + i * 4);
-    for (let i = 16; i < 64; i++) {
-      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
-    }
-    let [a, b, c, d, e, f, g, hh] = h;
-    for (let i = 0; i < 64; i++) {
-      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const t1 = (hh + S1 + ch + K256[i] + w[i]) | 0;
-      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const t2 = (S0 + maj) | 0;
-      hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
-    }
-    h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0;
-    h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + hh) | 0;
-  }
-  return wordsOut(h, is224 ? 7 : 8, false);
+    : [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], 8, false);
+  const full = bytes.length - (bytes.length % 64);
+  if (full > 0) __intrinsic_sha256_blocks(state, bytes, 0, full / 64);
+  const tail = pad(bytes.subarray(full), 64, false, bytes.length);
+  __intrinsic_sha256_blocks(state, tail, 0, tail.length / 64);
+  return state.slice(0, is224 ? 28 : 32);
 }
 
-// SHA-512's constants as (high, low) 32-bit pairs.
-const K512 = [
-  0x428a2f98, 0xd728ae22, 0x71374491, 0x23ef65cd, 0xb5c0fbcf, 0xec4d3b2f, 0xe9b5dba5, 0x8189dbbc,
-  0x3956c25b, 0xf348b538, 0x59f111f1, 0xb605d019, 0x923f82a4, 0xaf194f9b, 0xab1c5ed5, 0xda6d8118,
-  0xd807aa98, 0xa3030242, 0x12835b01, 0x45706fbe, 0x243185be, 0x4ee4b28c, 0x550c7dc3, 0xd5ffb4e2,
-  0x72be5d74, 0xf27b896f, 0x80deb1fe, 0x3b1696b1, 0x9bdc06a7, 0x25c71235, 0xc19bf174, 0xcf692694,
-  0xe49b69c1, 0x9ef14ad2, 0xefbe4786, 0x384f25e3, 0x0fc19dc6, 0x8b8cd5b5, 0x240ca1cc, 0x77ac9c65,
-  0x2de92c6f, 0x592b0275, 0x4a7484aa, 0x6ea6e483, 0x5cb0a9dc, 0xbd41fbd4, 0x76f988da, 0x831153b5,
-  0x983e5152, 0xee66dfab, 0xa831c66d, 0x2db43210, 0xb00327c8, 0x98fb213f, 0xbf597fc7, 0xbeef0ee4,
-  0xc6e00bf3, 0x3da88fc2, 0xd5a79147, 0x930aa725, 0x06ca6351, 0xe003826f, 0x14292967, 0x0a0e6e70,
-  0x27b70a85, 0x46d22ffc, 0x2e1b2138, 0x5c26c926, 0x4d2c6dfc, 0x5ac42aed, 0x53380d13, 0x9d95b3df,
-  0x650a7354, 0x8baf63de, 0x766a0abb, 0x3c77b2a8, 0x81c2c92e, 0x47edaee6, 0x92722c85, 0x1482353b,
-  0xa2bfe8a1, 0x4cf10364, 0xa81a664b, 0xbc423001, 0xc24b8b70, 0xd0f89791, 0xc76c51a3, 0x0654be30,
-  0xd192e819, 0xd6ef5218, 0xd6990624, 0x5565a910, 0xf40e3585, 0x5771202a, 0x106aa070, 0x32bbd1b8,
-  0x19a4c116, 0xb8d2d0c8, 0x1e376c08, 0x5141ab53, 0x2748774c, 0xdf8eeb99, 0x34b0bcb5, 0xe19b48a8,
-  0x391c0cb3, 0xc5c95a63, 0x4ed8aa4a, 0xe3418acb, 0x5b9cca4f, 0x7763e373, 0x682e6ff3, 0xd6b2b8a3,
-  0x748f82ee, 0x5defb2fc, 0x78a5636f, 0x43172f60, 0x84c87814, 0xa1f0ab72, 0x8cc70208, 0x1a6439ec,
-  0x90befffa, 0x23631e28, 0xa4506ceb, 0xde82bde9, 0xbef9a3f7, 0xb2c67915, 0xc67178f2, 0xe372532b,
-  0xca273ece, 0xea26619c, 0xd186b8c7, 0x21c0c207, 0xeada7dd6, 0xcde0eb1e, 0xf57d4f7f, 0xee6ed178,
-  0x06f067aa, 0x72176fba, 0x0a637dc5, 0xa2c898a6, 0x113f9804, 0xbef90dae, 0x1b710b35, 0x131c471b,
-  0x28db77f5, 0x23047d84, 0x32caab7b, 0x40c72493, 0x3c9ebe0a, 0x15c9bebc, 0x431d67c4, 0x9c100d4c,
-  0x4cc5d4be, 0xcb3e42b6, 0x597f299c, 0xfc657e2a, 0x5fcb6fab, 0x3ad6faec, 0x6c44198c, 0x4a475817,
-];
 
 const IV512 = [
   0x6a09e667, 0xf3bcc908, 0xbb67ae85, 0x84caa73b, 0x3c6ef372, 0xfe94f82b, 0xa54ff53a, 0x5f1d36f1,
@@ -376,127 +321,158 @@ const IV384 = [
   0x67332667, 0xffc00b31, 0x8eb44a87, 0x68581511, 0xdb0c2e0d, 0x64f98fa7, 0x47b5481d, 0xbefa4fa4,
 ];
 
-function sha512(bytes, is384) {
-  const m = pad(bytes, 128, false);
-  const h = new Int32Array(is384 ? IV384 : IV512);
-  const w = new Int32Array(160);
-  // (hi, lo) of x rotated right by n, for 0 < n < 32 and 32 <= n < 64.
-  let rh = 0, rl = 0;
-  const rotr64 = (hi, lo, n) => {
-    if (n < 32) {
-      rh = (hi >>> n) | (lo << (32 - n));
-      rl = (lo >>> n) | (hi << (32 - n));
-    } else {
-      n -= 32;
-      rh = n === 0 ? lo : (lo >>> n) | (hi << (32 - n));
-      rl = n === 0 ? hi : (hi >>> n) | (lo << (32 - n));
-    }
-  };
-  // Sums of (hi, lo) pairs.
-  let sh = 0, sl = 0;
-  const add = (hi, lo) => {
-    const l = (sl >>> 0) + (lo >>> 0);
-    sh = (sh + hi + Math.floor(l / 4294967296)) | 0;
-    sl = l | 0;
-  };
-  for (let off = 0; off < m.length; off += 128) {
-    for (let i = 0; i < 32; i++) w[i] = be32(m, off + i * 4);
-    for (let i = 16; i < 80; i++) {
-      const xh = w[(i - 15) * 2], xl = w[(i - 15) * 2 + 1];
-      rotr64(xh, xl, 1); let s0h = rh, s0l = rl;
-      rotr64(xh, xl, 8); s0h ^= rh; s0l ^= rl;
-      s0h ^= xh >>> 7; s0l ^= (xl >>> 7) | (xh << 25);
-      const yh = w[(i - 2) * 2], yl = w[(i - 2) * 2 + 1];
-      rotr64(yh, yl, 19); let s1h = rh, s1l = rl;
-      rotr64(yh, yl, 61); s1h ^= rh; s1l ^= rl;
-      s1h ^= yh >>> 6; s1l ^= (yl >>> 6) | (yh << 26);
-      sh = w[(i - 16) * 2]; sl = w[(i - 16) * 2 + 1];
-      add(s0h, s0l);
-      add(w[(i - 7) * 2], w[(i - 7) * 2 + 1]);
-      add(s1h, s1l);
-      w[i * 2] = sh; w[i * 2 + 1] = sl;
-    }
-    let ah = h[0], al = h[1], bh = h[2], bl = h[3], ch = h[4], cl = h[5], dh = h[6], dl = h[7];
-    let eh = h[8], el = h[9], fh = h[10], fl = h[11], gh = h[12], gl = h[13], hh = h[14], hl = h[15];
-    for (let i = 0; i < 80; i++) {
-      rotr64(eh, el, 14); let S1h = rh, S1l = rl;
-      rotr64(eh, el, 18); S1h ^= rh; S1l ^= rl;
-      rotr64(eh, el, 41); S1h ^= rh; S1l ^= rl;
-      const chh = (eh & fh) ^ (~eh & gh), chl = (el & fl) ^ (~el & gl);
-      sh = hh; sl = hl;
-      add(S1h, S1l);
-      add(chh, chl);
-      add(K512[i * 2] | 0, K512[i * 2 + 1] | 0);
-      add(w[i * 2], w[i * 2 + 1]);
-      const t1h = sh, t1l = sl;
-      rotr64(ah, al, 28); let S0h = rh, S0l = rl;
-      rotr64(ah, al, 34); S0h ^= rh; S0l ^= rl;
-      rotr64(ah, al, 39); S0h ^= rh; S0l ^= rl;
-      const majh = (ah & bh) ^ (ah & ch) ^ (bh & ch), majl = (al & bl) ^ (al & cl) ^ (bl & cl);
-      hh = gh; hl = gl; gh = fh; gl = fl; fh = eh; fl = el;
-      sh = dh; sl = dl; add(t1h, t1l); eh = sh; el = sl;
-      dh = ch; dl = cl; ch = bh; cl = bl; bh = ah; bl = al;
-      sh = t1h; sl = t1l; add(S0h, S0l); add(majh, majl); ah = sh; al = sl;
-    }
-    const vals = [ah, al, bh, bl, ch, cl, dh, dl, eh, el, fh, fl, gh, gl, hh, hl];
-    for (let i = 0; i < 16; i += 2) {
-      sh = h[i]; sl = h[i + 1];
-      add(vals[i], vals[i + 1]);
-      h[i] = sh; h[i + 1] = sl;
-    }
-  }
-  return wordsOut(h, is384 ? 12 : 16, false);
+function sha512State(state, bytes) {
+  const full = bytes.length - (bytes.length % 128);
+  if (full > 0) __intrinsic_sha512_blocks(state, bytes, 0, full / 128);
+  const tail = pad(bytes.subarray(full), 128, false, bytes.length);
+  __intrinsic_sha512_blocks(state, tail, 0, tail.length / 128);
+  return state;
 }
 
-// name → [digest(bytes), block size]
+function sha512(bytes, is384) {
+  return sha512State(wordsOut(is384 ? IV384 : IV512, 16, false), bytes).slice(0, is384 ? 48 : 64);
+}
+
+// SHA-512/224 and SHA-512/256 (FIPS 180-4 5.3.6): SHA-512 from the initial state with every byte xored with 0xa5 hashes "SHA-512/t"; the result is the
+// initial state.
+const SHA512T_IV = {};
+function sha512t(bytes, t) {
+  if (SHA512T_IV[t] === undefined) {
+    const seed = wordsOut(IV512, 16, false);
+    for (let i = 0; i < 64; i++) seed[i] ^= 0xa5;
+    SHA512T_IV[t] = sha512State(seed, Buffer.from(`SHA-512/${t}`));
+  }
+  return sha512State(SHA512T_IV[t].slice(), bytes).slice(0, t / 8);
+}
+
+// Keccak (FIPS 202): `rate` bytes per block, the domain bits `suffix` (0x06 SHA-3, 0x1f SHAKE) and the 0x80 end bit go in the last block.
+function keccak(bytes, rate, suffix, length) {
+  const state = new Uint8Array(200);
+  const full = bytes.length - (bytes.length % rate);
+  if (full > 0) __intrinsic_keccak_blocks(state, bytes, 0, full / rate, rate);
+  const tail = new Uint8Array(rate);
+  tail.set(bytes.subarray(full));
+  tail[bytes.length - full] ^= suffix;
+  tail[rate - 1] ^= 0x80;
+  __intrinsic_keccak_blocks(state, tail, 0, 1, rate);
+  const out = new Uint8Array(length);
+  for (let at = 0; ;) {
+    const n = Math.min(rate, length - at);
+    out.set(state.subarray(0, n), at);
+    at += n;
+    if (at >= length) break;
+    __intrinsic_keccak_blocks(state, tail, 0, 0, 0);
+  }
+  return out;
+}
+
+// name → [digest(bytes, length), block size, output size, extendable output]; the digests the helper adds are in `HELPER_HASHES`.
 const HASHES = {
-  md5: [md5, 64],
-  sha1: [sha1, 64],
-  sha224: [(b) => sha256(b, true), 64],
-  sha256: [(b) => sha256(b, false), 64],
-  sha384: [(b) => sha512(b, true), 128],
-  sha512: [(b) => sha512(b, false), 128],
+  md5: [md5, 64, 16],
+  sha1: [sha1, 64, 20],
+  sha224: [(b) => sha256(b, true), 64, 28],
+  sha256: [(b) => sha256(b, false), 64, 32],
+  sha384: [(b) => sha512(b, true), 128, 48],
+  sha512: [(b) => sha512(b, false), 128, 64],
+  'sha512-224': [(b) => sha512t(b, 224), 128, 28],
+  'sha512-256': [(b) => sha512t(b, 256), 128, 32],
+  'sha3-224': [(b) => keccak(b, 144, 0x06, 28), 144, 28],
+  'sha3-256': [(b) => keccak(b, 136, 0x06, 32), 136, 32],
+  'sha3-384': [(b) => keccak(b, 104, 0x06, 48), 104, 48],
+  'sha3-512': [(b) => keccak(b, 72, 0x06, 64), 72, 64],
+  shake128: [(b, length) => keccak(b, 168, 0x1f, length === undefined ? 16 : length), 168, 16, true],
+  shake256: [(b, length) => keccak(b, 136, 0x1f, length === undefined ? 32 : length), 136, 32, true],
+  'md5-sha1': [(b) => concat([md5(b), sha1(b)]), 64, 36],
 };
-const ALIASES = { 'sha-1': 'sha1', 'sha-224': 'sha224', 'sha-256': 'sha256', 'sha-384': 'sha384', 'sha-512': 'sha512' };
+const HELPER_HASHES = ['ripemd160', 'blake2b512', 'blake2s256', 'sm3'];
 
 function hashFunction(algorithm) {
   if (typeof algorithm !== 'string') throw $$errInvalidArgType('algorithm', 'of type string', algorithm);
-  let name = algorithm.toLowerCase();
-  if (ALIASES[name] !== undefined) name = ALIASES[name];
-  const entry = Object.prototype.hasOwnProperty.call(HASHES, name) ? HASHES[name] : undefined;
-  if (entry === undefined) throw new Error('Digest method not supported');
-  return entry;
+  const name = canonicalHash(algorithm);
+  if (name !== undefined) {
+    if (Object.prototype.hasOwnProperty.call(HASHES, name)) return HASHES[name];
+    if (ext !== undefined) {
+      const [size, block] = HASH_INFO[name];
+      return [(bytes) => ext.digest(name, bytes, size), block, size, false];
+    }
+  }
+  throw new Error('Digest method not supported');
 }
 
 function finalized() {
   return codeError(Error, 'ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
 }
 
+// The output length of a hash: `outputLength` is for extendable-output functions only (node: same size is fine).
+function hashLength(entry, options, current) {
+  const length = options !== null && typeof options === 'object' ? options.outputLength : undefined;
+  if (length === undefined) return current;
+  if (typeof length !== 'number') throw $$errInvalidArgType('options.outputLength', 'of type number', length);
+  if (!Number.isInteger(length)) throw $$errOutOfRange('options.outputLength', 'an integer', length);
+  if (length < 0 || length > 4294967295) throw $$errOutOfRange('options.outputLength', '>= 0 && <= 4294967295', length);
+  if (entry[3] !== true && length !== entry[2]) {
+    const e = new Error('error:030000B2:digital envelope routines::not XOF or invalid length');
+    e.code = 'ERR_OSSL_EVP_NOT_XOF_OR_INVALID_LENGTH';
+    e.library = 'digital envelope routines';
+    e.reason = 'not XOF or invalid length';
+    throw e;
+  }
+  return length;
+}
+
 class Hash {
-  #fn;
+  #entry;
+  #length;
   #chunks = [];
   #done = false;
+  #result;
 
   constructor(algorithm, options) {
-    this.#fn = hashFunction(algorithm)[0];
+    if (streams.LazyTransform !== undefined) this._options = options;
+    this.#entry = hashFunction(algorithm);
+    this.#length = hashLength(this.#entry, options, this.#entry[2]);
+  }
+
+  // The stream side (T153): the digest of everything written, also when `digest()` was called before the end.
+  _transform(chunk, encoding, callback) {
+    try {
+      this.update(chunk, encoding);
+    } catch (e) {
+      callback(codeError(Error, 'ERR_CRYPTO_HASH_UPDATE_FAILED', 'Hash update failed'));
+      return;
+    }
+    callback();
+  }
+
+  _flush(callback) {
+    this.push(output(this.#compute()));
+    callback();
   }
 
   update(data, encoding) {
     if (this.#done) throw finalized();
-    this.#chunks.push(Uint8Array.from(bytesOf(data, encoding, 'data', DATA_TYPES)));
+    // after the stream ended (`_flush`): OpenSSL's context is finished
+    if (this.#result !== undefined) throw codeError(Error, 'ERR_CRYPTO_HASH_UPDATE_FAILED', 'Hash update failed');
+    this.#chunks.push(copyBytes(bytesOf(data, encoding, 'data', DATA_TYPES)));
     return this;
+  }
+
+  #compute() {
+    if (this.#result === undefined) this.#result = this.#entry[0](concat(this.#chunks), this.#length);
+    return this.#result;
   }
 
   digest(encoding) {
     if (this.#done) throw finalized();
     this.#done = true;
-    return output(this.#fn(concat(this.#chunks)), encoding);
+    return output(this.#compute(), encoding);
   }
 
-  copy() {
+  copy(options) {
     if (this.#done) throw finalized();
     const h = new Hash('md5');
-    h.#fn = this.#fn;
+    h.#entry = this.#entry;
+    h.#length = hashLength(this.#entry, options, this.#entry[2]);
     h.#chunks = this.#chunks.slice();
     return h;
   }
@@ -504,18 +480,29 @@ class Hash {
 
 class Hmac {
   #fn;
+  #size;
   #inner;
   #outer;
   #chunks = [];
   #done = false;
+  #result;
 
   constructor(algorithm, key, options) {
-    const [fn, block] = hashFunction(algorithm);
+    if (streams.LazyTransform !== undefined) this._options = options;
+    let spec;
+    try {
+      spec = hashFunction(algorithm);
+    } catch (e) {
+      if (typeof algorithm === 'string') throw codeError(TypeError, 'ERR_CRYPTO_INVALID_DIGEST', `Invalid digest: ${algorithm}`);
+      throw e;
+    }
+    const [fn, block, size, xof] = spec;
+    if (xof) throw new Error('error:00000000:lib(0)::reason(0)');
     if (key === undefined || key === null || (typeof key !== 'string' && !ArrayBuffer.isView(key) && !(key instanceof ArrayBuffer))) {
       throw $$errInvalidArgType('key', 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey', key);
     }
     let k = bytesOf(key, undefined, 'key', 'ArrayBuffer,');
-    if (k.length > block) k = fn(k);
+    if (k.length > block) k = fn(k, size);
     const ipad = new Uint8Array(block), opad = new Uint8Array(block);
     for (let i = 0; i < block; i++) {
       const b = i < k.length ? k[i] : 0;
@@ -523,21 +510,43 @@ class Hmac {
       opad[i] = b ^ 0x5c;
     }
     this.#fn = fn;
+    this.#size = size;
     this.#inner = ipad;
     this.#outer = opad;
   }
 
   update(data, encoding) {
     if (this.#done) throw codeError(Error, 'ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
-    this.#chunks.push(Uint8Array.from(bytesOf(data, encoding, 'data', DATA_TYPES)));
+    this.#chunks.push(copyBytes(bytesOf(data, encoding, 'data', DATA_TYPES)));
     return this;
   }
 
   digest(encoding) {
     if (this.#done) return output(new Uint8Array(0), encoding);
+    return output(this.#finish(), encoding);
+  }
+
+  #finish() {
     this.#done = true;
-    const inner = this.#fn(concat([this.#inner, ...this.#chunks]));
-    return output(this.#fn(concat([this.#outer, inner])), encoding);
+    const inner = this.#fn(concat([this.#inner, ...this.#chunks]), this.#size);
+    this.#result = this.#fn(concat([this.#outer, inner]), this.#size);
+    return this.#result;
+  }
+
+  // The stream side (T153).
+  _transform(chunk, encoding, callback) {
+    try {
+      this.update(chunk, encoding);
+    } catch (e) {
+      callback(codeError(Error, 'ERR_CRYPTO_HASH_UPDATE_FAILED', 'Hash update failed'));
+      return;
+    }
+    callback();
+  }
+
+  _flush(callback) {
+    this.push(output(this.#done ? this.#result : this.#finish()));
+    callback();
   }
 }
 
@@ -549,15 +558,17 @@ function createHmac(algorithm, key, options) {
   return new Hmac(algorithm, key, options);
 }
 
-function hash(algorithm, data, outputEncoding = 'hex') {
+function hash(algorithm, data, options = 'hex') {
   if (typeof data !== 'string' && !ArrayBuffer.isView(data)) {
     throw $$errInvalidArgType('data', 'of type string or an instance of Buffer, TypedArray, or DataView', data);
   }
-  return new Hash(algorithm).update(data).digest(outputEncoding);
+  const object = options !== null && typeof options === 'object';
+  const outputEncoding = object ? (options.outputEncoding === undefined ? 'hex' : options.outputEncoding) : options;
+  return new Hash(algorithm, object ? options : undefined).update(data).digest(outputEncoding);
 }
 
 function getHashes() {
-  return ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'];
+  return Object.keys(HASHES).concat(ext === undefined ? [] : HELPER_HASHES);
 }
 
 // --- AES ---
@@ -594,7 +605,7 @@ const D0 = new Int32Array(256), D1 = new Int32Array(256), D2 = new Int32Array(25
 }
 
 // The encryption and decryption round keys of `key` (16, 24 or 32 bytes).
-function expandKey(key) {
+function expandKey(key, decrypt = true) {
   const nk = key.length / 4;
   const rounds = nk + 6;
   const total = 4 * (rounds + 1);
@@ -612,6 +623,7 @@ function expandKey(key) {
     }
     ek[i] = ek[i - nk] ^ t;
   }
+  if (!decrypt) return { rounds, ek, dk: undefined };
   // Decryption keys: reversed rounds, InvMixColumns on the middle ones.
   const dk = new Int32Array(total);
   for (let r = 0; r <= rounds; r++) {
@@ -663,6 +675,354 @@ function cryptBlock(k, input, inOff, out, outOff, decrypt) {
   }
 }
 
+// --- ChaCha20 and Poly1305, natively (T152) ---
+
+// The sixteen words of ChaCha20's state (little-endian bytes: the constants "expand 32-byte k", the key, the block counter, the nonce), then room for
+// the keystream block and its used count (64 = none left).
+const CHACHA_SIGMA = Uint8Array.of(0x65, 0x78, 0x70, 0x61, 0x6e, 0x64, 0x20, 0x33, 0x32, 0x2d, 0x62, 0x79, 0x74, 0x65, 0x20, 0x6b);
+function chachaState(key, counter, nonce) {
+  const st = new Uint8Array(129);
+  st.set(CHACHA_SIGMA);
+  st.set(key, 16);
+  st[48] = counter & 0xff;
+  st[49] = (counter >>> 8) & 0xff;
+  st[50] = (counter >>> 16) & 0xff;
+  st[51] = (counter >>> 24) & 0xff;
+  st.set(nonce, 52);
+  st[128] = 64;
+  return st;
+}
+
+// Feeds a 16-byte-block authenticator (GHASH or Poly1305) byte by byte.
+class BlockMac {
+  #poly;
+  #state;
+  #aux;
+  #block = new Uint8Array(16);
+  #filled = 0;
+
+  // GHASH: `state` the 16-byte accumulator, `aux` the table; Poly1305: `state` the `i32s`.
+  constructor(poly, state, aux) {
+    this.#poly = poly;
+    this.#state = state;
+    this.#aux = aux;
+  }
+
+  #run(bytes, offset, blocks) {
+    if (this.#poly) __intrinsic_poly1305_blocks(this.#state, bytes, offset, blocks);
+    else __intrinsic_ghash_blocks(this.#aux, this.#state, bytes, offset, blocks);
+  }
+
+  feed(bytes) {
+    const n = bytes.length;
+    let i = 0;
+    if (this.#filled > 0) {
+      const take = Math.min(16 - this.#filled, n);
+      this.#block.set(bytes.subarray(0, take), this.#filled);
+      this.#filled += take;
+      i = take;
+      if (this.#filled < 16) return;
+      this.#run(this.#block, 0, 1);
+      this.#filled = 0;
+    }
+    const whole = (n - i) - ((n - i) % 16);
+    if (whole > 0) {
+      this.#run(bytes, i, whole / 16);
+      i += whole;
+    }
+    if (i < n) {
+      this.#block.set(bytes.subarray(i), 0);
+      this.#filled = n - i;
+    }
+  }
+
+  // Zero-pad the open block.
+  pad() {
+    if (this.#filled > 0) {
+      this.#block.fill(0, this.#filled);
+      this.#run(this.#block, 0, 1);
+      this.#filled = 0;
+    }
+  }
+
+  get state() {
+    return this.#state;
+  }
+}
+
+class Poly1305 extends BlockMac {
+  #s;
+
+  // `key`: 32 bytes, r (clamped below) and s.
+  constructor(key) {
+    const t0 = key[0] | (key[1] << 8) | (key[2] << 16) | (key[3] << 24);
+    const t1 = key[4] | (key[5] << 8) | (key[6] << 16) | (key[7] << 24);
+    const t2 = key[8] | (key[9] << 8) | (key[10] << 16) | (key[11] << 24);
+    const t3 = key[12] | (key[13] << 8) | (key[14] << 16) | (key[15] << 24);
+    const st = __intrinsic_i32_new(14);
+    const r1 = ((t0 >>> 26) | (t1 << 6)) & 0x3ffff03;
+    const r2 = ((t1 >>> 20) | (t2 << 12)) & 0x3ffc0ff;
+    const r3 = ((t2 >>> 14) | (t3 << 18)) & 0x3f03fff;
+    const r4 = (t3 >>> 8) & 0x00fffff;
+    __intrinsic_i32_set(st, 0, t0 & 0x3ffffff);
+    __intrinsic_i32_set(st, 1, r1);
+    __intrinsic_i32_set(st, 2, r2);
+    __intrinsic_i32_set(st, 3, r3);
+    __intrinsic_i32_set(st, 4, r4);
+    __intrinsic_i32_set(st, 5, r1 * 5);
+    __intrinsic_i32_set(st, 6, r2 * 5);
+    __intrinsic_i32_set(st, 7, r3 * 5);
+    __intrinsic_i32_set(st, 8, r4 * 5);
+    super(true, st, undefined);
+    this.#s = key.slice(16, 32);
+  }
+
+  // The 16-byte tag: (h mod 2^130 - 5) + s mod 2^128, little-endian (poly1305-donna's finish).
+  tag() {
+    const st = this.state;
+    const mask = 0x3ffffff;
+    let h0 = __intrinsic_i32_get(st, 9);
+    let h1 = __intrinsic_i32_get(st, 10);
+    let h2 = __intrinsic_i32_get(st, 11);
+    let h3 = __intrinsic_i32_get(st, 12);
+    let h4 = __intrinsic_i32_get(st, 13);
+    let c = h1 >>> 26; h1 &= mask;
+    h2 += c; c = h2 >>> 26; h2 &= mask;
+    h3 += c; c = h3 >>> 26; h3 &= mask;
+    h4 += c; c = h4 >>> 26; h4 &= mask;
+    h0 += c * 5; c = h0 >>> 26; h0 &= mask;
+    h1 += c;
+    // g = h + 5 - 2^130; h is kept if that is negative
+    let g0 = h0 + 5; c = g0 >>> 26; g0 &= mask;
+    let g1 = h1 + c; c = g1 >>> 26; g1 &= mask;
+    let g2 = h2 + c; c = g2 >>> 26; g2 &= mask;
+    let g3 = h3 + c; c = g3 >>> 26; g3 &= mask;
+    const g4 = (h4 + c - (1 << 26)) | 0;
+    const choose = (g4 >>> 31) - 1; // all ones when g4 >= 0
+    const keep = ~choose;
+    h0 = (h0 & keep) | (g0 & choose);
+    h1 = (h1 & keep) | (g1 & choose);
+    h2 = (h2 & keep) | (g2 & choose);
+    h3 = (h3 & keep) | (g3 & choose);
+    h4 = (h4 & keep) | (g4 & mask & choose);
+    // h mod 2^128 as four 32-bit words, plus s
+    const w = [
+      (h0 | (h1 << 26)) >>> 0,
+      ((h1 >>> 6) | (h2 << 20)) >>> 0,
+      ((h2 >>> 12) | (h3 << 14)) >>> 0,
+      ((h3 >>> 18) | (h4 << 8)) >>> 0,
+    ];
+    const out = new Uint8Array(16);
+    let carry = 0;
+    for (let i = 0; i < 4; i++) {
+      const sw = (this.#s[4 * i] | (this.#s[4 * i + 1] << 8) | (this.#s[4 * i + 2] << 16) | (this.#s[4 * i + 3] << 24)) >>> 0;
+      const f = w[i] + sw + carry;
+      carry = f >= 4294967296 ? 1 : 0;
+      const v = f >>> 0;
+      out[4 * i] = v & 0xff;
+      out[4 * i + 1] = (v >>> 8) & 0xff;
+      out[4 * i + 2] = (v >>> 16) & 0xff;
+      out[4 * i + 3] = (v >>> 24) & 0xff;
+    }
+    return out;
+  }
+}
+
+// The cipher interface (`aad`, `update`, `setTag`, `finish`) for `chacha20-poly1305` (RFC 8439).
+class ChaChaPoly {
+  #st;
+  #mac;
+  #encrypt;
+  #tagLength;
+  #tag;
+  #aadLength = 0;
+  #dataLength = 0;
+  #inAad = true;
+
+  constructor(key, nonce, encrypt, tagLength) {
+    this.#encrypt = encrypt;
+    this.#tagLength = tagLength;
+    const polyKey = new Uint8Array(32);
+    __intrinsic_chacha20_xor(chachaState(key, 0, nonce), new Uint8Array(32), 0, polyKey, 0, 32);
+    this.#mac = new Poly1305(polyKey);
+    this.#st = chachaState(key, 1, nonce);
+  }
+
+  aad(data) {
+    this.#aadLength += data.length;
+    this.#mac.feed(data);
+  }
+
+  update(data) {
+    if (this.#inAad) {
+      this.#inAad = false;
+      this.#mac.pad();
+    }
+    const out = new Uint8Array(data.length);
+    __intrinsic_chacha20_xor(this.#st, data, 0, out, 0, data.length);
+    this.#mac.feed(this.#encrypt ? out : data);
+    this.#dataLength += data.length;
+    return out;
+  }
+
+  setTag(tag) {
+    this.#tag = tag;
+  }
+
+  finish() {
+    this.#mac.pad();
+    const lengths = new Uint8Array(16);
+    for (const [at, n] of [[0, this.#aadLength], [8, this.#dataLength]]) {
+      const lo = n >>> 0;
+      const hi = Math.floor(n / 4294967296);
+      for (let i = 0; i < 4; i++) {
+        lengths[at + i] = (lo >>> (8 * i)) & 0xff;
+        lengths[at + 4 + i] = (hi >>> (8 * i)) & 0xff;
+      }
+    }
+    this.#mac.feed(lengths);
+    const full = this.#mac.tag();
+    if (this.#encrypt) return full.slice(0, this.#tagLength);
+    const tag = this.#tag;
+    let diff = tag === undefined || tag.length === 0 ? 1 : 0;
+    for (let i = 0; i < 16 && tag !== undefined && i < tag.length; i++) diff |= full[i] ^ tag[i];
+    if (diff !== 0) throw new Error('unable to authenticate data');
+    return new Uint8Array(0);
+  }
+}
+
+// `chacha20`: the stream alone; the 16-byte IV is the block counter (little-endian) and the 12-byte nonce.
+class ChaCha20Stream {
+  #st;
+
+  constructor(key, iv) {
+    this.#st = chachaState(key, iv[0] | (iv[1] << 8) | (iv[2] << 16) | (iv[3] << 24), iv.subarray(4));
+  }
+
+  update(data) {
+    const out = new Uint8Array(data.length);
+    __intrinsic_chacha20_xor(this.#st, data, 0, out, 0, data.length);
+    return out;
+  }
+
+  finish() {
+    return new Uint8Array(0);
+  }
+}
+
+// --- AES-GCM, natively (T152): `aes_ctr` makes the keystream, `ghash_blocks` the authenticator ---
+
+function i32sOf(words) {
+  const a = __intrinsic_i32_new(words.length);
+  for (let i = 0; i < words.length; i++) __intrinsic_i32_set(a, i, words[i]);
+  return a;
+}
+
+class Ghash extends BlockMac {
+  constructor(table) {
+    super(false, new Uint8Array(16), table);
+  }
+}
+
+// The cipher of the helper's interface (`aad`, `update`, `setTag`, `finish`) for `aes-<bits>-gcm`.
+class Gcm {
+  #rk;
+  #rounds;
+  #counter = new Uint8Array(33);
+  #mask = new Uint8Array(16);
+  #ghash;
+  #encrypt;
+  #tag;
+  #aadLength = 0;
+  #dataLength = 0;
+  #inAad = true;
+
+  #tagLength;
+
+  constructor(key, iv, encrypt, tagLength) {
+    this.#tagLength = tagLength;
+    const k = expandKey(key, false);
+    this.#rk = i32sOf(k.ek);
+    this.#rounds = k.rounds;
+    this.#encrypt = encrypt;
+    const zero = new Uint8Array(16);
+    // H = E_K(0)
+    const first = new Uint8Array(33);
+    first[32] = 16;
+    const h = new Uint8Array(16);
+    __intrinsic_aes_ctr(this.#rk, this.#rounds, first, zero, 0, h, 0, 16);
+    const table = __intrinsic_i32_new(64);
+    __intrinsic_ghash_init(h, table);
+    this.#ghash = new Ghash(table);
+    // J0: the IV and 0^31 1, or GHASH of the IV.
+    const j0 = new Uint8Array(33);
+    if (iv.length === 12) {
+      j0.set(iv);
+      j0[15] = 1;
+    } else {
+      const g = new Ghash(table);
+      g.feed(iv);
+      g.pad();
+      const lengths = new Uint8Array(16);
+      const bits = iv.length * 8;
+      for (let i = 0; i < 4; i++) lengths[15 - i] = (bits >>> (8 * i)) & 0xff;
+      lengths[11] = Math.floor(bits / 4294967296) & 0xff;
+      g.feed(lengths);
+      j0.set(g.state);
+    }
+    j0[32] = 16;
+    // The tag mask E_K(J0), then the counter continues at inc32(J0).
+    __intrinsic_aes_ctr(this.#rk, this.#rounds, j0, zero, 0, this.#mask, 0, 16);
+    // `j0` advanced by one block (inc32); its keystream byte count is 16 again after a full block.
+    this.#counter.set(j0);
+    this.#counter[32] = 16;
+  }
+
+  aad(data) {
+    this.#aadLength += data.length;
+    this.#ghash.feed(data);
+  }
+
+  update(data) {
+    if (this.#inAad) {
+      this.#inAad = false;
+      this.#ghash.pad();
+    }
+    const out = new Uint8Array(data.length);
+    __intrinsic_aes_ctr(this.#rk, this.#rounds, this.#counter, data, 0, out, 0, data.length);
+    this.#ghash.feed(this.#encrypt ? out : data);
+    this.#dataLength += data.length;
+    return out;
+  }
+
+  setTag(tag) {
+    this.#tag = tag;
+  }
+
+  finish() {
+    if (this.#inAad) this.#ghash.pad();
+    this.#ghash.pad();
+    const lengths = new Uint8Array(16);
+    for (const [at, n] of [[0, this.#aadLength * 8], [8, this.#dataLength * 8]]) {
+      const hi = Math.floor(n / 4294967296);
+      const lo = n >>> 0;
+      for (let i = 0; i < 4; i++) {
+        lengths[at + 3 - i] = (hi >>> (8 * i)) & 0xff;
+        lengths[at + 7 - i] = (lo >>> (8 * i)) & 0xff;
+      }
+    }
+    this.#ghash.feed(lengths);
+    const full = this.#ghash.state.slice();
+    for (let i = 0; i < 16; i++) full[i] ^= this.#mask[i];
+    if (this.#encrypt) return full.slice(0, this.#tagLength);
+    const tag = this.#tag;
+    let diff = tag === undefined || tag.length === 0 ? 1 : 0;
+    for (let i = 0; i < 16 && tag !== undefined && i < tag.length; i++) diff |= full[i] ^ tag[i];
+    if (diff !== 0) throw new Error('unable to authenticate data');
+    return new Uint8Array(0);
+  }
+}
+
 // `aes-<bits>-<mode>` → [key length, mode]
 function cipherInfo(name) {
   const m = /^(?:id-)?aes-?(128|192|256)-(ecb|cbc|ctr|ccm)$/.exec(name.toLowerCase());
@@ -674,9 +1034,26 @@ function cipherInfo(name) {
   return [Number(m[1]) / 8, m[2]];
 }
 
+// The ciphers of the helper (T151): `aes-<bits>-gcm`, `chacha20-poly1305`, `chacha20` → [key length, mode, helper name].
+function helperCipherInfo(name) {
+  const l = name.toLowerCase();
+  const m = /^(?:id-aes(128|192|256)|aes-(128|192|256))-gcm$/.exec(l);
+  if (m !== null) {
+    const bits = m[1] === undefined ? m[2] : m[1];
+    return [Number(bits) / 8, 'gcm', `aes-${bits}-gcm`];
+  }
+  if (l === 'chacha20-poly1305') return [32, 'chacha', l];
+  if (l === 'chacha20') return [32, 'chacha20', l];
+  return undefined;
+}
+
 function getCiphers() {
   const out = [];
-  for (const bits of [128, 192, 256]) for (const mode of ['cbc', 'ccm', 'ctr', 'ecb']) out.push(`aes-${bits}-${mode}`);
+  for (const bits of [128, 192, 256]) {
+    for (const mode of ['cbc', 'ccm', 'ctr', 'ecb']) out.push(`aes-${bits}-${mode}`);
+    out.push(`aes-${bits}-gcm`);
+  }
+  out.push('chacha20', 'chacha20-poly1305');
   return out;
 }
 
@@ -715,16 +1092,25 @@ class CipherBase {
   #plaintextLength;
   #tag;
   #ccmOk = true;
+  // GCM and ChaCha20 (T151): the helper's cipher and what the state machine needs.
+  #h;
+  #tagOption;
+  #started = false;
 
   constructor(decrypt, cipher, key, iv, options) {
+    if (streams.LazyTransform !== undefined) this._options = options;
     this.#decrypt = decrypt;
     if (typeof cipher !== 'string') throw $$errInvalidArgType('cipher', 'of type string', cipher);
-    const info = cipherInfo(cipher);
+    const helper = cipherInfo(cipher) === undefined ? helperCipherInfo(cipher) : undefined;
+    const info = helper === undefined ? cipherInfo(cipher) : helper;
     if (info === undefined) throw codeError(Error, 'ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
     const [keyLength, mode] = info;
     const keyBytes = bytesOf(key, undefined, 'key', 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey');
     const ivBytes = iv === null ? null : bytesOf(iv, undefined, 'iv', 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView');
     const ivOk = mode === 'ecb' ? ivBytes === null || ivBytes.length === 0
+      : mode === 'gcm' ? ivBytes !== null && ivBytes.length > 0
+        : mode === 'chacha' ? ivBytes !== null && ivBytes.length === 12
+          : mode === 'chacha20' ? ivBytes !== null && ivBytes.length === 16
       : mode === 'ccm' ? ivBytes !== null && ivBytes.length >= 7 && ivBytes.length <= 13
         : ivBytes !== null && ivBytes.length === 16;
     if (!ivOk) throw codeError(TypeError, 'ERR_CRYPTO_INVALID_IV', 'Invalid initialization vector');
@@ -740,6 +1126,22 @@ class CipherBase {
       this.#tagLength = t;
     }
     this.#mode = mode;
+    if (helper !== undefined) {
+      if (mode !== 'chacha20' && options !== null && typeof options === 'object' && options.authTagLength !== undefined) {
+        const t = options.authTagLength;
+        if (!this.#tagLengthOk(t, true)) {
+          throw codeError(TypeError, 'ERR_CRYPTO_INVALID_AUTH_TAG', `Invalid authentication tag length: ${t}`);
+        }
+        this.#tagOption = t;
+      }
+      const k = copyBytes(keyBytes);
+      const v = copyBytes(ivBytes);
+      const tagLength = this.#tagOption === undefined ? 16 : this.#tagOption;
+      this.#h = mode === 'gcm' ? new Gcm(k, v, !decrypt, tagLength)
+        : mode === 'chacha' ? new ChaChaPoly(k, v, !decrypt, tagLength)
+          : new ChaCha20Stream(k, v);
+      return;
+    }
     this.#key = expandKey(Uint8Array.from(keyBytes));
     this.#iv = ivBytes === null ? null : Uint8Array.from(ivBytes);
     if (mode === 'ctr') this.#counter = Uint8Array.from(ivBytes);
@@ -756,9 +1158,23 @@ class CipherBase {
     return output(bytes, encoding);
   }
 
+  // Is `t` a tag length of this cipher? `option`: as `authTagLength`; else as the tag given to `setAuthTag`.
+  #tagLengthOk(t, option) {
+    if (typeof t !== 'number') return false;
+    const gcm = this.#mode === 'gcm';
+    const gcmLength = t === 4 || t === 8 || (t >= 12 && t <= 16);
+    if (option) return gcm ? gcmLength : t >= 1 && t <= 16;
+    if (this.#tagOption !== undefined) return t === this.#tagOption;
+    return gcm ? gcmLength : t === 16;
+  }
+
   update(data, inputEncoding, outputEncoding) {
-    if (this.#done) throw codeError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation update');
+    if (this.#done) throw new Error('Trying to add data in unsupported state');
     const input = bytesOf(data, inputEncoding, 'data', DATA_TYPES);
+    if (this.#h !== undefined) {
+      this.#started = true;
+      return this.#output(this.#h.update(input), outputEncoding);
+    }
     let out;
     switch (this.#mode) {
       case 'ctr': out = this.#ctr(input); break;
@@ -769,8 +1185,19 @@ class CipherBase {
   }
 
   final(outputEncoding) {
-    if (this.#done) throw codeError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation final');
+    if (this.#done) throw codeError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state');
     this.#done = true;
+    if (this.#h !== undefined) {
+      let tag;
+      try {
+        tag = this.#h.finish();
+      } catch (e) {
+        // OpenSSL's ChaCha20-Poly1305 finishes a decryption that was given no tag.
+        if (this.#mode !== 'chacha' || this.#tag !== undefined) throw new Error('Unsupported state or unable to authenticate data');
+      }
+      if (!this.#decrypt && this.#mode !== 'chacha20') this.#tag = tag;
+      return this.#output(new Uint8Array(0), outputEncoding);
+    }
     let out = new Uint8Array(0);
     if (this.#mode === 'ccm') {
       if (this.#decrypt && !this.#ccmOk) throw new Error('Unsupported state or unable to authenticate data');
@@ -781,12 +1208,30 @@ class CipherBase {
     return this.#output(out, outputEncoding);
   }
 
+  // The stream side (T153).
+  _transform(chunk, encoding, callback) {
+    this.push(this.update(chunk, encoding));
+    callback();
+  }
+
+  _flush(callback) {
+    this.push(this.final());
+    callback();
+  }
+
   setAutoPadding(autoPadding = true) {
     this.#autoPadding = !!autoPadding;
     return this;
   }
 
   setAAD(buffer, options) {
+    if (this.#h !== undefined) {
+      if (this.#started || this.#done || this.#mode === 'chacha20') {
+        throw codeError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAAD');
+      }
+      this.#h.aad(bytesOf(buffer, undefined, 'buffer', 'an instance of ArrayBuffer, Buffer, TypedArray, or DataView'));
+      return this;
+    }
     this.#aad = Uint8Array.from(bytesOf(buffer, undefined, 'buffer', 'an instance of ArrayBuffer, Buffer, TypedArray, or DataView'));
     if (options !== null && typeof options === 'object' && options.plaintextLength !== undefined) {
       this.#plaintextLength = options.plaintextLength;
@@ -806,6 +1251,17 @@ class CipherBase {
       throw codeError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAuthTag');
     }
     const t = bytesOf(tag, undefined, 'buffer', 'an instance of Buffer, TypedArray, or DataView');
+    if (this.#h !== undefined) {
+      if (this.#tag !== undefined || this.#mode === 'chacha20') {
+        throw codeError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAuthTag');
+      }
+      if (!this.#tagLengthOk(t.length, false)) {
+        throw codeError(TypeError, 'ERR_CRYPTO_INVALID_AUTH_TAG', `Invalid authentication tag length: ${t.length}`);
+      }
+      this.#tag = Uint8Array.from(t);
+      this.#h.setTag(this.#tag);
+      return this;
+    }
     if (this.#mode === 'ccm' && t.length !== this.#tagLength) {
       throw codeError(TypeError, 'ERR_CRYPTO_INVALID_AUTH_TAG', `Invalid authentication tag length: ${t.length}`);
     }
@@ -971,6 +1427,87 @@ function createDecipheriv(cipher, key, iv, options) {
   return new Decipheriv(cipher, key, iv, options);
 }
 
+// --- Information (T153) ---
+
+// [name, OpenSSL's name, nid, mode, block size, iv length, key length] of the ciphers `createCipheriv` knows.
+const CIPHER_INFO = [];
+for (const [bits, ecb, cbc, ctr, ccm, gcm] of [[128, 418, 419, 904, 896, 895], [192, 422, 423, 905, 899, 898], [256, 426, 427, 906, 902, 901]]) {
+  const key = bits / 8;
+  CIPHER_INFO.push(
+    [`aes-${bits}-ecb`, `aes-${bits}-ecb`, ecb, 'ecb', 16, 0, key],
+    [`aes-${bits}-cbc`, `aes-${bits}-cbc`, cbc, 'cbc', 16, 16, key],
+    [`aes-${bits}-ctr`, `aes-${bits}-ctr`, ctr, 'ctr', 1, 16, key],
+    [`aes-${bits}-ccm`, `id-aes${bits}-ccm`, ccm, 'ccm', 1, 12, key],
+    [`aes-${bits}-gcm`, `id-aes${bits}-gcm`, gcm, 'gcm', 1, 12, key],
+  );
+}
+CIPHER_INFO.push(['chacha20-poly1305', 'chacha20-poly1305', 1018, 'stream', 0, 12, 32], ['chacha20', 'chacha20', 1019, 'stream', 0, 16, 32]);
+
+function validateInt32Option(options, name) {
+  const v = options[name];
+  if (v === undefined) return undefined;
+  if (typeof v !== 'number') throw $$errInvalidArgType(`options.${name}`, 'of type number', v);
+  if (!Number.isInteger(v)) throw $$errOutOfRange(`options.${name}`, 'an integer', v);
+  if (v < -2147483648 || v > 2147483647) throw $$errOutOfRange(`options.${name}`, '>= -2147483648 && <= 2147483647', v);
+  return v;
+}
+
+function getCipherInfo(nameOrNid, options) {
+  if (typeof nameOrNid !== 'string' && typeof nameOrNid !== 'number') {
+    throw $$errInvalidArgType('nameOrNid', 'one of type string or number', nameOrNid);
+  }
+  if (typeof nameOrNid === 'number' && !Number.isInteger(nameOrNid)) throw $$errOutOfRange('nameOrNid', 'an integer', nameOrNid);
+  let keyLength, ivLength;
+  if (options !== undefined) {
+    if (options === null || typeof options !== 'object') throw $$errInvalidArgType('options', 'of type object', options);
+    keyLength = validateInt32Option(options, 'keyLength');
+    ivLength = validateInt32Option(options, 'ivLength');
+  }
+  let entry;
+  if (typeof nameOrNid === 'number') {
+    entry = CIPHER_INFO.find((e) => e[2] === nameOrNid);
+  } else {
+    const n = nameOrNid.toLowerCase();
+    const short = /^aes(128|192|256)$/.exec(n);
+    const lookup = short === null ? n : `aes-${short[1]}-cbc`;
+    entry = CIPHER_INFO.find((e) => e[0] === lookup || e[1] === lookup);
+  }
+  if (entry === undefined) return undefined;
+  const [, name, nid, mode, blockSize, defaultIv, defaultKey] = entry;
+  if (keyLength !== undefined && keyLength !== defaultKey) return undefined;
+  let iv = defaultIv;
+  if (ivLength !== undefined) {
+    if (mode === 'gcm') iv = ivLength;
+    else if (mode === 'ccm') {
+      if (ivLength < 7 || ivLength > 13) return undefined;
+      iv = ivLength;
+    } else if (ivLength !== defaultIv) return undefined;
+  }
+  const info = { mode, name, nid };
+  if (blockSize !== 0) info.blockSize = blockSize;
+  if (iv > 0) info.ivLength = iv;
+  info.keyLength = defaultKey;
+  return info;
+}
+
+// No curves yet: `createECDH`, signing and key pairs are missing (F493), so none is claimed.
+function getCurves() {
+  return [];
+}
+
+// FIPS mode doesn't exist here (node's own default is 0 too).
+function getFips() {
+  return 0;
+}
+
+function setFips(enable) {
+  if (enable) throw new Error('error:12800067:DSO support routines::could not load the shared library');
+}
+
+function secureHeapUsed() {
+  return { total: 0, used: 0, utilization: NaN, min: 2 };
+}
+
 function timingSafeEqual(a, b) {
   const x = viewBytes(a, 'buf1');
   const y = viewBytes(b, 'buf2');
@@ -982,13 +1519,20 @@ function timingSafeEqual(a, b) {
   return d === 0;
 }
 
+if (streams.LazyTransform !== undefined) {
+  for (const C of [Hash, Hmac, CipherBase]) Object.setPrototypeOf(C.prototype, streams.LazyTransform.prototype);
+}
+
 module.exports = {
   Hash, Hmac, Cipheriv, Decipheriv,
   createHash, createHmac, hash, getHashes,
   createCipheriv, createDecipheriv, getCiphers,
   randomBytes, pseudoRandomBytes: randomBytes, prng: randomBytes, rng: randomBytes,
-  randomFill, randomFillSync, randomInt, randomUUID, getRandomValues,
+  randomFill, randomFillSync, randomInt, randomUUID, randomUUIDv7, getRandomValues,
+  getCipherInfo, getCurves, getFips, setFips, secureHeapUsed,
   timingSafeEqual, webcrypto, Crypto,
-  ...require('node:internal/crypto_kdf'),
+  ...kdfExports,
   constants: {},
 };
+
+Object.defineProperty(module.exports, 'fips', { get: getFips, set: setFips, enumerable: true, configurable: true });

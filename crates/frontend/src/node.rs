@@ -31,6 +31,10 @@ const MODULES: &[(&str, &str)] = &[
     ("internal/wasi_random", include_str!("../node/wasi_random.mjs")),
     // `pbkdf2`, `scrypt`, `hkdf` (T149): the Rust helper component's interface and the functions over
     // it, linked only when a program names them (`link::link`; else `crypto_kdf_off` is empty).
+    ("internal/crypto_hashes", include_str!("../node/crypto_hashes.js")),
+    // T153: Hash/Hmac/Cipheriv as streams, linked only where `node:stream` is in the program for another reason (`link::link`).
+    ("internal/crypto_streams", include_str!("../node/crypto_streams.js")),
+    ("internal/crypto_streams_off", "module.exports = {};\n"),
     ("internal/crypto_helper", include_str!("../node/crypto_helper.mjs")),
     ("internal/crypto_kdf", include_str!("../node/crypto_kdf.js")),
     ("internal/crypto_kdf_off", "module.exports = {};\n"),

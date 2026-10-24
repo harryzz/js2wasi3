@@ -572,7 +572,21 @@ helper `.wasm` files embedded with `include_bytes!`; a component without a helpe
 `pbkdf2`, `scrypt` or `hkdf` (the graph is linked a second time with the real module): only then does the component
 import the helper (`build --ext-lib crypto` forces it; the option is the place for future helper components), so every other program is byte-identical (a `crypto` user grows 1.5 KB). Arguments are checked in
 JavaScript with node's errors and messages; the helper only computes. 10^5 iterations of PBKDF2-HMAC-SHA256: ~90 ms in
-the helper, node 69 ms, JavaScript over `createHmac` ~70 s.)
+the helper, node 69 ms, JavaScript over `createHmac` ~70 s.
+T152 then moved the throughput-bound primitives out of the helper (it copied every `list<u8>` byte by byte into linear memory and back: AES-GCM of 64 KB 3 ms, 21 MB/s)
+into Wasm the backend generates (`crates/backend/src/crypto.rs`, one `TypedOp` each, dispatched from `typed.rs` like `Utf8Write`): they take the `$bytes` of typed arrays directly,
+are linked by reachability like any runtime function, and the JavaScript in `crypto.js` keeps padding, buffering, HMAC, node's state machines and errors.
+`md5/sha1/sha256/sha512/keccak_blocks` (compression over whole blocks; state = the digest's words as bytes; rounds unrolled with the message schedule in locals and the constants
+as immediates: a GC array access costs ~11 instructions on wasmtime and spills, so inner loops avoid them; 35–170 MB/s, JS was 0.3), `aes_ctr` (AES by SIMD:
+SubBytes = sixteen `i8x16.swizzle`s over the S-box rows, an index ≥ 16 reading 0; round keys in `v128` locals) with `ghash_init`/`ghash_blocks` (a constant-time 64-bit carry-less multiply
+from integer multiplications, Karatsuba, the reduction by x^128+x^7+x^2+x+1) for AES-GCM (35–42 MB/s), `chacha20_xor` and `poly1305_blocks` (26-bit limbs) for ChaCha20-Poly1305 (100 MB/s).
+Names, aliases and sizes of the digests are in `node:internal/crypto_hashes`. The helper (170 KB, no cipher any more) keeps `pbkdf2`, `scrypt`, `hkdf` and the digests
+`ripemd160`, `blake2b512`, `blake2s256`, `sm3`; `EXT_LIBS` (`link.rs`) links it only for programs that name `pbkdf2|scrypt|hkdf|ripemd|rmd160|blake2|sm3`, so `createHash(name)` with a computed
+name gets `Digest method not supported` for those four unless `--ext-lib crypto` is given.)
+(T153: **`crypto` streams**: node's `Hash`/`Hmac`/`Cipheriv`/`Decipheriv` are `LazyTransform`s. `node:internal/crypto_streams` is a port of `lazy_transform.js` over `node:stream`; the stream module is ~900 KB, so it is a module
+that `link::link` enables only when `node:stream` is in the graph for another reason (`EXT_LIBS` entries now also have a "module present" trigger; `crypto-streams` has no component), else `crypto_streams_off` is empty and
+the classes keep only `update`/`digest`/`final`. `crypto.js` then sets their prototypes to `LazyTransform`'s and has `_transform`/`_flush` as node's (the Hash digest is cached so `digest()` after `end()` works).
+A program that pipes a file into a hash has `stream` through `fs`; one that only calls `update`/`digest` pays nothing.)
 (T65: `crypto` is a global too, `node:crypto`'s `webcrypto`. **`node:crypto`** is JS: random bytes from
 `wasi:random/random` `get-random-bytes` through the ES module `node:internal/wasi_random` (as T59's `wasi_fs`),
 the hashes and AES over typed arrays (32-bit word pairs for SHA-512; AES T-tables built at load), CCM per

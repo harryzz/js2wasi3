@@ -1,6 +1,6 @@
 # T151: `crypto` slice 2: AES-GCM and more ciphers, more digests, in the Rust helper (F492)
 
-Status: not started (handoff, 2026-10-24) | Depends on: T149, T150 | Local; ask before long runs (test262, a-03) and before every push
+Status: done (2026-10-24; ciphers and digests, `crypto.subtle` left) | Depends on: T149, T150 | Local; ask before long runs (test262, a-03) and before every push
 
 ## Goal
 T149 gave `pbkdf2`/`scrypt`/`hkdf` through a Rust helper component that `build` composes into programs naming them. The rest of node's `crypto`
@@ -62,7 +62,32 @@ under parallel load with the debug compiler). Do not `pkill -f` a pattern that a
 `clang` (wasm32 target) is on the PATH for C code in helpers (`CC_wasm32_unknown_unknown=clang`).
 
 ## Notes / Result
+Done: ciphers and digests (user: start with these; `crypto.subtle` deferred). The crypto helper (200 KB, was 87 KB) now has `digest(name, data, out-len)` and a
+streaming `cipher` resource; `crypto.js` uses it for every hash when linked, and for `aes-*-gcm`, `chacha20-poly1305`, `chacha20`. Details in `docs/design.md` (T151 paragraph).
+- Tests: `tests/fixtures/node/crypto-hash-more.js` and `crypto-gcm.js` (node is the oracle, byte-identical output incl. errors); older crypto fixtures and `tests/fixtures/commonjs` still pass
+  (`ws` times out on HEAD too). Not run: test262 (no crypto in it), the a-03 gate (none of the 18 programs imports `crypto` or contains a trigger word, so their output cannot change).
+- Benchmarks (node's own files, `tests/bench/crypto`, laptop, release compiler): `create-hash` node 3,322 vs js2wasi3 38,557 ns/op; `create-hmac` (no helper: JS hashes) node 49–167 µs vs
+  22–131 µs per call except 1 KB keys, where the JS hash takes 3.0–7.6 ms; `aes-gcm-throughput` node 7.5 ms/Mbit (1 KB) … 0.12 ms (256 KB), js2wasi3 0.31–0.47 s per Mbit (first five configs
+  of aes-128, before the copy fix); after the fix a 64 KB GCM or sha3 takes ~3 ms (21 MB/s, node ~1 GB/s): the byte-loop copy across the component boundary (F504).
+- Found: `Uint8Array.from(view)` is a per-element iterator in our runtime (very slow for big buffers); `Hash.update` now copies with `.slice()`.
+- Unsupported / next: AES-CBC/CTR over the helper (F503), copy cost (F504), raw chacha20 counter wrap, `subtle`, DEP0182 warning (F505), computed digest names (F506).
+- Afterwards (T152, same day): the copy cost (F504) was removed by generating the hashes and ciphers as Wasm in the compiler (`tasks/T152-native-crypto.md`); the helper no longer has the ciphers, the counter wrap is done.
 
 ## Progress
 - 2026-10-24: written as a handoff (user: "handoff crypto slice 2 (AES, more digests) for new session"). State: `main` at 92a4dbb plus the docs commit that adds this file;
   T149 and T150 pushed and done.
+- 2026-10-24: user said yes: start with ciphers and digests (AES-GCM, ChaCha20-Poly1305, more digests; `crypto.subtle` deferred) and yes to the RustCrypto crates. Status in progress.
+- 2026-10-24: probed node 24.21.0 (scratch p1–p3): digests sha3-*, shake128/256 (default length 16/32, `outputLength`; non-XOF with a different length → `ERR_OSSL_EVP_NOT_XOF_OR_INVALID_LENGTH`),
+  ripemd160, blake2b512, blake2s256, sha512-224/256, md5-sha1, sm3, plus many aliases (RSA-*, *WithRSAEncryption, ssl3-*, rmd160, ripemd, `sha-N`); HMAC works over all except shake
+  (`error:00000000:lib(0)::reason(0)`); pbkdf2/hkdf over all except shake (`xof digests not allowed`). Ciphers: GCM IV any length ≥1 (0 → ERR_CRYPTO_INVALID_IV), tag lengths 4, 8, 12–16
+  (decrypt: `setAuthTag` shorter than 16 allowed, with a deprecation warning, unless `authTagLength` given and equal); chacha20-poly1305 IV 12, tag 1–16 on encrypt, only 16 (or the option) on decrypt;
+  `setAAD` appends; update before final returns data; failure text `Unsupported state or unable to authenticate data`.
+- 2026-10-24: Rust side builds: `crates/crypto-helper/src/aead.rs` (streaming AES-GCM over `aes`+`ctr`+`ghash`, ChaCha20-Poly1305 over `chacha20`+`poly1305`, raw ChaCha20; `cipher` WIT resource) and `digest(name, data, out-len)` in `lib.rs`
+  (md5, sha1, sha2 incl. sha512-224/256, sha3 0.12 (no shake: the separate `shake` 0.1 crate), ripemd160, blake2b512/s256, sm3, md5-sha1); pbkdf2/hkdf over sha3/blake2 use an own HMAC
+  (the `hmac` crate needs a block-level core; sha3 0.12/blake2 have none). HMAC for `createHmac` is done in JS over `digest`. Decision: Hash/Hmac stay buffered (chunks, one-shot digest), so `copy()` is trivial and no resource leaks.
+- 2026-10-24: JS side done: `crypto_kdf.js` exports `_ext` (name table + aliases generated from node, `digest`, `cipher`), `crypto.js` uses it (`hashFunction` goes through the helper for every hash when linked, `outputLength`/`copy({outputLength})`, `hash(alg, data, {outputEncoding})`, Hmac errors as node's, `getHashes`/`getCiphers`, GCM/ChaCha20-Poly1305/ChaCha20 in `CipherBase` with node's state machine). Trigger words in `EXT_LIBS`.
+  `tests/fixtures/node/crypto-hash-more.js` (19 digests × inputs, HMAC, pbkdf2/hkdf, aliases, shake lengths, copy): identical to node (22 s: slow, to look at).
+- 2026-10-24: `tests/fixtures/node/crypto-gcm.js` (AES-128/192/256-GCM, ChaCha20-Poly1305, raw ChaCha20: lengths, AAD, chunking, tag lengths, every misuse, IV lengths, names, RFC 8439 and NIST GCM vectors): identical to node.
+  Quirks matched: ChaCha20-Poly1305 decrypt `final` with no tag succeeds; `copy()` without options resets a shake length to the default; HMAC over shake: `error:00000000:lib(0)::reason(0)`; unknown HMAC digest = `Invalid digest`.
+  Known gap: raw `chacha20` with a block counter that wraps past 2^32 (node wraps; the crate panics) — left out of the fixture. Old crypto fixtures (`crypto.js`, `crypto-kdf*.js`, `crypto-global.js`) and `tests/fixtures/commonjs` pass except `ws`, which
+  times out at the 10 s run limit on HEAD too (wasmtime compile of a 3.8 MB module takes 11 s here; +0.4% size from `crypto.js`). The debug compiler needs 16–29 s to build the crypto fixtures (the release one ~5 s), so `diff.sh` flags them slow.
