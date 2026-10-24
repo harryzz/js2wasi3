@@ -33,10 +33,17 @@ the sloppy scripts assign without a declaration. `scripts/bench.sh` runs `prelud
 ## crypto/
 
 Node's own `benchmark/crypto/hkdf.js` (v24.21.0, unchanged; its harness `require('../common.js')` is our stand-in
-`common.js`: every config in turn, ns per operation). Run both sides with `scripts/bench-crypto.sh` (the program is
+`common.js`: every config in turn, ns per operation). Run both sides with `scripts/bench-node.sh` (the program is
 composed with the crypto helper). node 24.21.0 has no `pbkdf2` or `scrypt` benchmark in `benchmark/crypto`.
 Laptop, 2026-10-22, 72 configs each (hkdf, mean ns/op): sync node 20,375 vs js2wasi3 28,224 (1.39×); async node 13,147
 vs 37,275 (2.84×: each callback waits a `setImmediate` turn, node's thread pool does not).
+
+## zlib/
+
+Node's `benchmark/zlib/deflate.js` and `inflate.js` (v24.21.0, unchanged, through `common.js`); `creation.js` is left out (it makes 500,000
+unclosed streams and js2wasi3's helper handles are freed only by `close()`, F501) and `pipe.js` (reports Gbit/s). Run with
+`scripts/bench-node.sh` (also runs `crypto/`). Laptop, 2026-10-24, ns per operation, node vs js2wasi3: createDeflate 81,732 vs 29,904,
+deflate 198,226 vs 170,811, deflateSync 14,971 vs 72,358, inflate 181,872 vs 136,682, inflateSync 4,656 vs 52,076.
 
 ## patched/
 

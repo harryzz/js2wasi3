@@ -160,10 +160,11 @@ pub fn link(
 /// External libraries: components that `build` composes into the program (`crates/js2wasi3/src/compose.rs`). Name (`--ext-lib`),
 /// the built-in module that holds the library's code (`<module>_off` is an empty stand-in while the library is not linked), and
 /// the words that make a program use it.
-const EXT_LIBS: [(&str, &str, &[&str]); 3] = [
+const EXT_LIBS: [(&str, &str, &[&str]); 4] = [
     ("crypto", "node:internal/crypto_kdf", &["pbkdf2", "scrypt", "hkdf"]),
     ("zlib", "node:internal/zlib_impl", &["zlib"]),
     ("brotli", "node:internal/brotli_impl", &["rotli"]),
+    ("zstd", "node:internal/zstd_impl", &["zstd", "Zstd"]),
 ];
 
 fn link_pass(

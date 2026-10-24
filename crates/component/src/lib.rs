@@ -388,6 +388,7 @@ pub const COMMAND_WASI_IMPORTS: &[&str] = &[
     "js2wasi3:crypto/primitives@0.1.0",
     "js2wasi3:zlib/codecs@0.1.0",
     "js2wasi3:brotli/codecs@0.1.0",
+    "js2wasi3:zstd/codecs@0.1.0",
 ];
 
 /// A world importing [`COMMAND_WASI_IMPORTS`] (T59): what a command's JS may import.
@@ -675,7 +676,7 @@ fn type_name(resolve: &Resolve, t: &Type) -> String {
 }
 
 /// The vendored WASI 0.3.1 packages, dependencies first (`wit/README.md`).
-const WASI: [(&str, &str); 9] = [
+const WASI: [(&str, &str); 10] = [
     (
         "wasi-clocks-0.3.1.wit",
         include_str!("../wit/wasi-clocks-0.3.1.wit"),
@@ -712,6 +713,10 @@ const WASI: [(&str, &str); 9] = [
     (
         "js2wasi3-brotli-0.1.0.wit",
         include_str!("../wit/js2wasi3-brotli-0.1.0.wit"),
+    ),
+    (
+        "js2wasi3-zstd-0.1.0.wit",
+        include_str!("../wit/js2wasi3-zstd-0.1.0.wit"),
     ),
 ];
 

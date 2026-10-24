@@ -44,6 +44,10 @@ const MODULES: &[(&str, &str)] = &[
     ("internal/brotli_helper", include_str!("../node/brotli_helper.mjs")),
     ("internal/brotli_impl", include_str!("../node/brotli_impl.js")),
     ("internal/brotli_impl_off", "module.exports = {};\n"),
+    // zstd (T150 slice 3) is a third helper component, linked when a program names `zstd`.
+    ("internal/zstd_helper", include_str!("../node/zstd_helper.mjs")),
+    ("internal/zstd_impl", include_str!("../node/zstd_impl.js")),
+    ("internal/zstd_impl_off", "module.exports = {};\n"),
     // `net` (T66): TCP over `wasi:sockets`, non-blocking on the event loop; `dns.lookup` uses its
     // name lookup.
     ("net", include_str!("../node/net.js")),
@@ -301,6 +305,7 @@ pub(crate) fn is_esm(path: &str) -> bool {
         || path == "node:internal/crypto_helper"
         || path == "node:internal/zlib_helper"
         || path == "node:internal/brotli_helper"
+        || path == "node:internal/zstd_helper"
         || path == "node:internal/wasi_sockets"
         || path == "node:internal/wasi_udp"
         || path == "node:internal/wasi_http"

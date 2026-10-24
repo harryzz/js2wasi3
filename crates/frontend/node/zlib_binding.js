@@ -6,6 +6,9 @@
 const zlibHelper = require('node:internal/zlib_helper');
 const { Buffer } = require('buffer');
 
+const WINDOW = 65536;
+const EMPTY = new Uint8Array(0);
+
 function bytes(view) {
   return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
 }
@@ -28,6 +31,7 @@ class Handle {
     this.mode = mode;
     this.helper = helper;
     this.h = undefined;
+    this.window = 16384;
     this.writeState = undefined;
     this.processCallback = undefined;
   }
@@ -48,18 +52,33 @@ class Handle {
     return failureOf(e);
   }
 
-  // One native write; null when it failed.
+  // One native write; null when it failed. The helper gets the input in windows (sized from what the last call used): a native `write` only
+  // consumes as much input as fits the output chunk, so passing all of the rest each time would copy the input again for every 16 KB of output. Earlier windows
+  // run without a flush; only the last carries `flush`.
   _run(flush, input, inOff, inLen, out, outOff, outLen) {
-    const inBytes = inLen > 0 ? bytes(input).subarray(inOff, inOff + inLen) : new Uint8Array(0);
-    let step;
-    try {
-      step = this.helper.process(this.h, flush, inBytes, outLen);
-    } catch (e) {
-      return this._failure(e);
+    const src = inLen > 0 ? bytes(input) : EMPTY;
+    let used = 0;
+    let produced = 0;
+    for (;;) {
+      const rest = inLen - used;
+      const size = rest < this.window ? rest : this.window;
+      const last = size === rest;
+      let step;
+      try {
+        step = this.helper.process(this.h, last ? flush : 0, size > 0 ? src.subarray(inOff + used, inOff + used + size) : EMPTY, outLen - produced);
+      } catch (e) {
+        return this._failure(e);
+      }
+      out.set(step.output, outOff + produced);
+      produced += step.output.length;
+      used += step.consumed;
+      // Next window: what the codec could use, doubled (an inflater uses a fraction of it per 16 KB of output).
+      this.window = step.consumed === size ? (this.window * 2 < WINDOW ? this.window * 2 : WINDOW) : Math.max(4096, step.consumed * 2 + 1024);
+      if (!last && step.consumed === size && produced < outLen) continue;
+      break;
     }
-    out.set(step.output, outOff);
-    this.writeState[0] = outLen - step.output.length;
-    this.writeState[1] = inLen - step.consumed;
+    this.writeState[0] = outLen - produced;
+    this.writeState[1] = inLen - used;
     return null;
   }
 
@@ -133,7 +152,8 @@ function crc32(input, value) {
   return ~c >>> 0;
 }
 
-// Brotli is a second helper (`node:internal/brotli_impl`, linked when a program names `brotli`); zstd is not there yet (slice 3).
+// Brotli and zstd are helpers of their own (`node:internal/brotli_impl`, `node:internal/zstd_impl`), linked when a program names
+// `brotli` / `zstd`; `Handle` is their base class.
 function unavailable(name, why) {
   return class {
     constructor() {
@@ -143,6 +163,8 @@ function unavailable(name, why) {
 }
 
 const brotli = require('node:internal/brotli_impl');
+const zstd = require('node:internal/zstd_impl');
+const noZstd = (name) => unavailable(name, 'the zstd helper is linked only into programs that name `zstd`');
 const noBrotli = (name) => unavailable(name, 'the Brotli helper is linked only into programs that name `brotli`');
 
 module.exports = {
@@ -150,6 +172,6 @@ module.exports = {
   crc32,
   BrotliEncoder: brotli.makeEncoder === undefined ? noBrotli('zlib.BrotliCompress') : brotli.makeEncoder(Handle, bytes, failureOf),
   BrotliDecoder: brotli.makeDecoder === undefined ? noBrotli('zlib.BrotliDecompress') : brotli.makeDecoder(Handle, bytes, failureOf),
-  ZstdCompress: unavailable('zlib.ZstdCompress', 'not implemented yet'),
-  ZstdDecompress: unavailable('zlib.ZstdDecompress', 'not implemented yet'),
+  ZstdCompress: zstd.makeCompress === undefined ? noZstd('zlib.ZstdCompress') : zstd.makeCompress(Handle, bytes, failureOf),
+  ZstdDecompress: zstd.makeDecompress === undefined ? noZstd('zlib.ZstdDecompress') : zstd.makeDecompress(Handle, bytes, failureOf),
 };

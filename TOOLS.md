@@ -15,7 +15,8 @@ version of every tool. Verify with `scripts/check-tools.sh`.
 | wac | 0.11.0 | composing components in tests (later) |
 | binaryen (wasm-opt) | 133 | optional optimisation experiments only |
 | rustc/cargo | 1.98.1 | pinned in `rust-toolchain.toml`; targets `wasm32-unknown-unknown` (the crypto helper, T149; `wasm32-wasip2` is also installed but its std imports WASI 0.2) |
-| zlib helper crates | wit-bindgen 0.62.0, libz-rs-sys 0.6.8 (zlib-rs) | `crates/zlib-helper` (T150), `scripts/build-zlib-helper.sh`; zstd (C 1.5.7 via clang) planned |
+| zlib helper crates | wit-bindgen 0.62.0, libz-rs-sys 0.6.8 (zlib-rs) | `crates/zlib-helper` (T150), `scripts/build-zlib-helper.sh` |
+| zstd helper crates | wit-bindgen 0.62.0, zstd-sys 2.1.2 (libzstd 1.5.7) | `crates/zstd-helper` (T150 slice 3), `scripts/build-zstd-helper.sh` (needs `clang` with the wasm32 target: `CC_wasm32_unknown_unknown=clang`) |
 | brotli helper crates | wit-bindgen 0.62.0, brotli 9.0.0 (brotli-decompressor 6.0.1) | `crates/brotli-helper` (T150 slice 2), `scripts/build-brotli-helper.sh` |
 | wac-graph / wac-types | 0.12.0 | the compiler composes the helpers into the program (T150, `crates/js2wasi3/src/compose.rs`; they use wasm crates 0.258) |
 | crypto helper crates | wit-bindgen 0.62.0, pbkdf2 0.13.0, scrypt 0.12.0, hkdf 0.13.0, hmac 0.13.0, md-5 0.11.0, sha1 0.11.0, sha2 0.11.1 | `crates/crypto-helper` (T149), versions in its `Cargo.lock`; `scripts/build-crypto-helper.sh` |

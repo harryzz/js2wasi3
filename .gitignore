@@ -11,3 +11,5 @@
 !/crates/js2wasi3/assets/zlib-helper.wasm
 /crates/brotli-helper/target
 !/crates/js2wasi3/assets/brotli-helper.wasm
+/crates/zstd-helper/target
+!/crates/js2wasi3/assets/zstd-helper.wasm

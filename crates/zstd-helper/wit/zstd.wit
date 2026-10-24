@@ -1,0 +1,29 @@
+package js2wasi3:zstd@0.1.0;
+
+interface codecs {
+    /// What node's native binding reports through `onerror(message, errno, code)`.
+    record failure {
+        message: string,
+        errno: s32,
+        code: string,
+    }
+
+    /// One call of `process`: how many input bytes were used and what was produced.
+    record step {
+        consumed: u32,
+        output: list<u8>,
+    }
+
+    /// A zstd stream: node's `ZstdCompress` / `ZstdDecompress` handles.
+    resource codec {
+        /// `mode`: node's ZSTD_COMPRESS (10) or ZSTD_DECOMPRESS (11). `params`: the (c or d) parameters by key (-1 = not given).
+        create: static func(mode: u32, params: list<s32>, pledged-src-size: option<u64>, dictionary: option<list<u8>>) -> result<codec, failure>;
+        /// One `write` of node's binding; `end-directive` is ZSTD_e_continue (0), ZSTD_e_flush (1) or ZSTD_e_end (2).
+        process: func(end-directive: u32, input: list<u8>, out-capacity: u32) -> result<step, failure>;
+        reset: func() -> result<_, failure>;
+    }
+}
+
+world helper {
+    export codecs;
+}

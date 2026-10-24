@@ -552,7 +552,14 @@ node-made streams decoded here. **Brotli** (slice 2) is a second helper componen
 `node:internal/brotli_impl` (the binding's `BrotliEncoder`/`BrotliDecoder` classes, built on `zlib_binding.js`'s `Handle`); its `EXT_LIBS`
 word is `rotli`, so Express's `compression` middleware carries it and plain `zlib` users do not. Its output is byte-identical to
 node's for the same quality, window and mode (12 qualities, windows and modes checked); decoder error codes come from the
-constants' names (`ERR__ERROR_FORMAT_PADDING_1`), and the crate may report another error than libbrotli for the same garbage.)
+constants' names (`ERR__ERROR_FORMAT_PADDING_1`), and the crate may report another error than libbrotli for the same garbage. **zstd** (slice 3) is a third helper, `crates/zstd-helper`
+(`js2wasi3:zstd/codecs@0.1.0`; libzstd 1.5.7 through `zstd-sys`, C compiled for wasm with clang by `scripts/build-zstd-helper.sh`, 585 KB), behind
+`node:internal/zstd_impl`, `EXT_LIBS` words `zstd`/`Zstd`: node's bytes at every level, parameter and dictionary. Two libzstd details node's
+behaviour needed: with a pledged size the data goes in with `ZSTD_e_continue` before the `ZSTD_e_end` call (libzstd takes the input size as the
+frame size when the first call has all input and `e_end`), and the decoder's final empty call after a complete frame is not an end-of-file error.
+**Throughput**: `zlib_binding.js` feeds the helper windows of input (sized from what the last call used, at most 64 KB) inside one emulated native
+write, flush only on the last window: node's lib passes all the remaining input to every 16 KB-of-output write, and copying it each time across
+the component boundary made gzip quadratic (4 MB: gzip 811 → 124 ms, gunzip 705 → 66 ms; node 123 / 18).)
 (T149: **`pbkdf2`, `scrypt`, `hkdf`** (and their `Sync` forms) are not JavaScript: they call the WIT interface
 `js2wasi3:crypto/primitives@0.1.0` (`crates/component/wit/js2wasi3-crypto-0.1.0.wit`), implemented by the Rust crate
 `crates/crypto-helper` (RustCrypto: `pbkdf2`, `scrypt`, `hkdf`, `hmac`, `md-5`, `sha1`, `sha2`; outside the Cargo workspace,

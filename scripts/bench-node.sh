@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Node's own crypto benchmarks (tests/bench/crypto, run through tests/bench/common.js) under node and under
-# js2wasi3 + wasmtime, ns per operation for every config (T149). Usage: scripts/bench-crypto.sh [out-dir]
+# Node's own crypto and zlib benchmarks (tests/bench/crypto, tests/bench/zlib, run through tests/bench/common.js) under node and
+# under js2wasi3 + wasmtime, ns per operation for every config (T149, T150). Usage: scripts/bench-node.sh [out-dir]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT=${1:-$ROOT/out/bench-crypto}
+OUT=${1:-$ROOT/out/bench-node}
 mkdir -p "$OUT"
-for f in "$ROOT"/tests/bench/crypto/*.js; do
-  n=$(basename "$f" .js)
+for f in ${BENCH_FILES:-"$ROOT"/tests/bench/crypto/*.js "$ROOT"/tests/bench/zlib/*.js}; do
+  n=$(basename "$(dirname "$f")")-$(basename "$f" .js)
   node "$f" >"$OUT/$n.node.txt"
   "$ROOT/target/release/js2wasi3" build "$f" -o "$OUT/$n.wasm" 2>/dev/null
   wasmtime run -Sp3 "$OUT/$n.wasm" >"$OUT/$n.wasm.txt"

@@ -351,8 +351,8 @@ function refusals() {
     }
   }
   // zlib.js keeps its stubs for programs that do not link the helper (T150), but a program naming `zlib` gets the real thing:
-  // only zstd (T150 slice 3) still throws.
-  for (const k of [...out.keys()]) if (k.startsWith("zlib:") && !/zstd/i.test(k)) out.delete(k);
+  // nothing in zlib still throws.
+  for (const k of [...out.keys()]) if (k.startsWith("zlib:")) out.delete(k);
   return out;
 }
 
