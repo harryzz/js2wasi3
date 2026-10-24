@@ -3,12 +3,13 @@
 One entry per full `subset` run (newest first). The per-test results of the latest run are in `baseline.json`.
 pass% = pass / tests run (skips excluded).
 
-## 2026-10-24: T149 `crypto` helper, T150 `zlib` helpers: no run
+## 2026-10-24: T149 `crypto` helper, T150 `zlib` helpers (full run)
 
-- Compiler (`main` at 92a4dbb): `link()` links in the helper components' modules only for programs that name their words (`EXT_LIBS`: `pbkdf2`/`scrypt`/`hkdf`,
-  `zlib`, `rotli`, `zstd`), `build` composes helper components into the component (`wac-graph`). No full test262 run: test262 programs name none of
-  those words and import no node modules, so their output is unchanged (22 benchmark and fixture programs built byte-identical to before,
-  checked at T150 slice 1). The next full run will confirm it.
+- Compiler (`main` at ddb67e3): `link()` links in the helper components' modules only for programs that name their words (`EXT_LIBS`: `pbkdf2`/`scrypt`/`hkdf`,
+  `zlib`, `rotli`, `zstd`), `build` composes helper components into the component (`wac-graph`). Host: wasmtime 50.0.0. Runner: unchanged.
+- Full run on `a-03` (`out/t262-t150.log`, 1,476 s, -j 36): **28,123 pass (unchanged), 0 regressions**. The same eight tests as in the T148 run are
+  `unsupported -> fail` against the baseline (they build since T148 and fail when run: `Function(computed)` `EvalError`, `%AsyncFunction%`); the baseline
+  file was not updated (they fail either way). So the helpers change nothing for test262.
 
 ## 2026-10-21: T148 gaps found by running Express (full run)
 
