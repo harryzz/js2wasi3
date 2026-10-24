@@ -21,7 +21,7 @@ stack-switching proposal.
 
 ## Quick start
 
-Requirements: Rust (pinned in `rust-toolchain.toml`), and [wasmtime](https://wasmtime.dev) 49 to run the output.
+Requirements: Rust (pinned in `rust-toolchain.toml`), and [wasmtime](https://wasmtime.dev) 50.0.0 to run the output.
 The other tools and versions are in [TOOLS.md](TOOLS.md).
 
 ```sh
